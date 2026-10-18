@@ -5,6 +5,14 @@ this repository and its docs (`docs/orig.md`, `docs/build.md`,
 `docs/filetypes.md`). See those files for how each piece maps onto the
 actual directories and files in `orig/mpm862sr/`.
 
+## DRI
+
+**D**igital **R**esearch, **I**ncorporated — the company (founded by
+Gary Kildall) that wrote CP/M, MP/M-86, DDT86, and every other piece of
+software in `orig/mpm862sr/`. "DRI's own ..." elsewhere in these docs
+just means "the original 1981 vendor's," as opposed to anything built
+by this repo's own tools.
+
 ## CP/M
 
 Digital Research's single-user, single-tasking operating system for
@@ -29,6 +37,30 @@ BDOS (`.BDO`), and the hardware-specific XIOS — combined by DRI's loader
 into a single bootable image, `MPM.SYS`. See `docs/orig.md` for the
 directory-by-directory breakdown and `docs/build.md` for the build
 pipeline that produces it.
+
+## RTM
+
+**R**eal-**T**ime **M**onitor — the process scheduler/dispatcher at the
+core of MP/M-86's multi-tasking (`src/kernel/RTM.A86`, the `.RTM`
+fragments — see `docs/filetypes.md`). It's the piece of the kernel that
+makes MP/M-86 multi-*programming* rather than just multi-*user*: it
+decides which ready process gets the CPU next, handles process
+priorities and time-slicing, and dispatches control between processes
+(including the background RSPs). Where the Supervisor (see CCP, above)
+decides *what* a typed command or a system call should do, the RTM
+decides *when* each process actually gets to run.
+
+## RSP
+
+**R**esident **S**ystem **P**rocess — an MP/M-86 background process,
+loaded into memory alongside the kernel at boot and scheduled by the
+RTM just like any interactive user's process, but with no console of
+its own (e.g. `CLOCK.RSP`, `ECHO.RSP`, `TMP.RSP` — see the `.RSP` entry
+in `docs/filetypes.md`). Source for one lives in `src/rsp/` as a
+`.A86` file; building it produces the loadable `.RSP` image. This is
+the main thing that makes MP/M-86 "multi-programming" rather than just
+"multi-user": several of these can be running continuously, unattended,
+at the same time as every logged-in user's own foreground process.
 
 ## BDOS
 

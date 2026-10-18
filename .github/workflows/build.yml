@@ -1,0 +1,34 @@
+name: build
+
+# Validates that the files this repo's own from-scratch toolchain
+# (tools/asm86/, tools/plmc.py) is currently known to compile/assemble
+# still do -- see the Makefile and docs/bugs.md for exactly which files
+# that covers and which are deliberately excluded.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: make (known-good sources)
+        run: make
+
+      - name: make partial (known-incomplete toolchain sources)
+        run: make partial
+
+      - name: upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: build/
+          if-no-files-found: error

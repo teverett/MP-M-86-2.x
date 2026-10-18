@@ -102,7 +102,7 @@ def _first_token(text):
 # first word of a label-less statement.
 DIRECTIVES = {
     'title', 'name', 'cseg', 'dseg', 'aseg', 'org', 'equ', 'db', 'byte',
-    'dw', 'word', 'rb', 'rw', 'end', 'include', 'if', 'endif', 'eject',
+    'dw', 'word', 'dd', 'rb', 'rw', 'rs', 'end', 'include', 'if', 'endif', 'eject',
     'page', 'public', 'extrn', 'global',
 }
 
@@ -176,7 +176,16 @@ def tokenize_expr(text):
                 i += 1
                 continue
             m = IDENT_RE.match(text, i)
-            toks.append(Tok('ID', m.group(0)))
+            word = m.group(0)
+            if word[0] == '.' and word[1:].isdigit():
+                # DRI ASM86 convention: a leading '.' is cosmetic even on
+                # a plain number, not just a symbol name (e.g. "mov .0,
+                # offset int_trap" in XIOS.A86, meaning absolute address/
+                # immediate 0). Emit it as a NUM, not an identifier to
+                # look up.
+                toks.append(Tok('NUM', word[1:]))
+            else:
+                toks.append(Tok('ID', word))
             i = m.end()
             continue
         if c in '+-*/()[]:':

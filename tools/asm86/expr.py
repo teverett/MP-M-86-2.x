@@ -61,9 +61,14 @@ class ExprCtx:
             # DRI ASM86 convention: a leading '.' on a reference to an
             # offset-style EQU constant is cosmetic, not part of the name
             # (e.g. "mov dx,.s_version" referencing "s_version equ ...").
-            sym = self.symtab.get(key[1:])
-            if sym is not None:
-                key = key[1:]
+            # Apply this fallback for the forward-reference (prekind/
+            # presize/pending) lookups below too, not just an
+            # already-fully-defined symtab entry -- otherwise a forward
+            # reference like ".xiosmod" (seen before "xiosmod equ ..." is
+            # reached) gets registered pending under the wrong (dotted)
+            # key and never resolves once the real definition appears.
+            key = key[1:]
+            sym = self.symtab.get(key)
         if sym is None:
             if self.tentative:
                 kind, size = self.prekind.get(key, ('label', self.presize.get(key)))
@@ -131,7 +136,12 @@ class _Parser:
             op = self.next().kind
             r = self.parse_mul()
             n = v.n + r.n if op == '+' else v.n - r.n
-            v = Value(n, v.size or r.size)
+            # Preserve a label/equ symbol through "SYMBOL + const" offset
+            # arithmetic (e.g. "MOV BYTE PTR ARECORD+2,AH", FILE1.BDO) --
+            # otherwise parse_operand can no longer tell this bare
+            # expression came from a label, and misclassifies it as a
+            # plain immediate instead of a memory operand.
+            v = Value(n, v.size or r.size, v.symbol or r.symbol)
         return v
 
     def parse_mul(self):
@@ -207,6 +217,17 @@ class _Parser:
             self.expect(')')
             return v
         if t.kind == 'ID':
+            low = t.val.lower()
+            # DRI ASM86 idiom: outside a "byte/word/dword ptr" cast, bare
+            # BYTE/WORD/DWORD are literal size constants (1/2/4) used in
+            # field-offset arithmetic, e.g. "p_thread equ word ptr
+            # p_link + word" (MDB.FMT) or "mod_init equ mod_entry + dword"
+            # (MODTAB.DEF, sizing a far-pointer module-table entry as
+            # segment+offset = 4 bytes) -- not a reference to a declared
+            # symbol of that name (none exists in this tree).
+            if low in ('byte', 'word', 'dword') and self.ctx.symtab.get(low) is None:
+                size = {'byte': 1, 'word': 2, 'dword': 4}[low]
+                return Value(size, size)
             sym = self.ctx.lookup(t.val)
             return Value(sym.value, sym.size, symbol=sym)
         self.ctx.err(f"unexpected token {t.kind} ({t.val!r}) in expression")
@@ -220,7 +241,26 @@ def eval_tokens(toks, ctx):
     return v
 
 
+_CAST_SIZE = {'byte': 1, 'word': 2, 'dword': 4}
+
+
 def eval_text(text, ctx):
+    # A constant-expression context (EQU, DB/DW initializers, etc.) may
+    # carry a leading "byte/word/dword ptr" cast. Sometimes this is pure
+    # documentation on the numeric value (SYSDAT.FMT's "module_table equ
+    # dword ptr (offset $)"); sometimes it's the only place an EQU'd
+    # offset constant's size is ever declared, and that size matters
+    # later when the EQU'd name is used as a sized memory operand (e.g.
+    # BDOSIF.BDO's "btab_flag equ byte ptr (btab_addr + word)", later used
+    # as "TEST cs:btab_flag[si],..."). Either way: strip the cast to
+    # evaluate the inner expression, then stamp its declared size onto
+    # the result so a later EQU of this name can still carry it forward.
+    m = _CAST_RE.match(text)
+    if m:
+        size = _CAST_SIZE[m.group(1).lower()]
+        text = m.group(2).strip()
+        v = eval_tokens(tokenize_expr(text), ctx)
+        return Value(v.n, size, v.symbol, v.is_offset)
     return eval_tokens(tokenize_expr(text), ctx)
 
 
@@ -246,7 +286,7 @@ _BRACKET_RE = re.compile(r'^(.*)\[(.*)\]$')
 _BRACKET_INNER_RE = re.compile(r'^\s*([A-Za-z]+)\s*(.*)$')
 _REGS8086 = frozenset(['bx', 'bp', 'si', 'di'])
 _SEGOVR_RE = re.compile(r'^\s*(cs|ds|es|ss)\s*:\s*(.*)$', re.IGNORECASE)
-_CAST_RE = re.compile(r'^\s*(byte|word)\s+ptr\s*(.*)$', re.IGNORECASE)
+_CAST_RE = re.compile(r'^\s*(byte|word|dword)\s+ptr\s*(.*)$', re.IGNORECASE)
 
 
 def _parse_bracket_inside(inside, ctx):
@@ -294,8 +334,23 @@ def parse_operand(text, ctx, branch_context=False):
     explicit_size = None
     m = _CAST_RE.match(text)
     if m:
-        explicit_size = 1 if m.group(1).lower() == 'byte' else 2
+        cast = m.group(1).lower()
+        explicit_size = {'byte': 1, 'word': 2, 'dword': 4}[cast]
         text = m.group(2).strip()
+
+    # DRI ASM86 convention: a leading '.' on a bare *number* denotes
+    # direct (absolute) memory addressing, not an immediate -- seen
+    # setting up the interrupt-vector table in XIOS.A86 ("mov .0,offset
+    # int_trap" / "mov .2,cs", storing through absolute addresses 0/2)
+    # and the same idiom in src/kernel/MAU.MEM/ML.MEM/SHARE.MEM. This is
+    # unambiguous wherever the operand position requires memory/register
+    # (MUL has no immediate form at all -- "mul byte ptr .0" only makes
+    # sense as a memory operand), and is applied uniformly here rather
+    # than only for the no-other-reading-possible cases.
+    m = re.match(r'^\.([0-9][0-9A-Za-z]*)$', text)
+    if m:
+        return Operand('mem', size=explicit_size,
+                        mem={'base': None, 'disp': parse_number(m.group(1)), 'seg': seg_override})
 
     low = text.lower()
     if seg_override is None and explicit_size is None:

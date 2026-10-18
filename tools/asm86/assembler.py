@@ -9,7 +9,7 @@ from . import isa
 
 DIRECTIVE_NAMES = {
     'title', 'name', 'cseg', 'dseg', 'aseg', 'org', 'equ', 'db', 'byte',
-    'dw', 'word', 'rb', 'rw', 'end', 'include', 'if', 'endif', 'eject',
+    'dw', 'word', 'dd', 'rb', 'rw', 'rs', 'end', 'include', 'if', 'endif', 'eject',
     'page', 'public', 'extrn', 'global',
 }
 ALL_MNEMONICS = DIRECTIVE_NAMES | isa.ALL_MNEMONICS
@@ -62,18 +62,40 @@ def flatten(path, search_dirs, _stack=None):
     lines = content.splitlines()
     for lineno, raw in enumerate(lines, 1):
         text = strip_comment(raw)
-        stripped = text.strip()
-        low = stripped.lower()
-        if low.startswith('include'):
-            rest = stripped[len('include'):].strip()
-            if rest and (stripped.split()[0].lower() == 'include'):
-                fname = rest.split()[0]
-                inc_path = _find_include(fname, dirs)
-                if inc_path is None:
-                    raise AsmError(f"INCLUDE file not found: {fname}", os.path.basename(path), lineno)
-                out.extend(flatten(inc_path, search_dirs, _stack + [path]))
-                continue
-        out.append((os.path.basename(path), lineno, text))
+        kept = []
+        for stmt_text in split_statements(text):
+            stripped = stmt_text.strip()
+            low = stripped.lower()
+            if low == 'end':
+                # DRI ASM86: END is scoped to the file it appears in, not
+                # the whole assembly -- an INCLUDEd fragment commonly ends
+                # with its own "END" (e.g. FILE1.BDO's "end bdos
+                # filesystem part 1" / END, with FILE2-4.BDO still to
+                # come after it in BDOS.A86's own include list). Stop
+                # flattening *this* file here and return to whichever
+                # file included it (or, for the top-level file, this is
+                # simply its own real end).
+                if kept:
+                    out.append((os.path.basename(path), lineno, ' ! '.join(kept)))
+                return out
+            if low.startswith('include'):
+                rest = stripped[len('include'):].strip()
+                if rest and (stripped.split()[0].lower() == 'include'):
+                    fname = rest.split()[0]
+                    inc_path = _find_include(fname, dirs)
+                    if inc_path is None:
+                        raise AsmError(f"INCLUDE file not found: {fname}", os.path.basename(path), lineno)
+                    # Flush any statements seen so far on this line first,
+                    # so their relative order (e.g. "eject ! include x")
+                    # is preserved, then splice the include's own lines in.
+                    if kept:
+                        out.append((os.path.basename(path), lineno, ' ! '.join(kept)))
+                        kept = []
+                    out.extend(flatten(inc_path, search_dirs, _stack + [path]))
+                    continue
+            kept.append(stmt_text)
+        if kept:
+            out.append((os.path.basename(path), lineno, ' ! '.join(kept)))
     return out
 
 
@@ -173,12 +195,15 @@ class Assembler:
                 if label is None or mnem is None:
                     continue
                 low = mnem.lower()
-                if low in ('db', 'byte', 'rb'):
+                if low in ('db', 'byte', 'rb', 'rs'):
                     self.presize[label.lower()] = 1
                     self.prekind[label.lower()] = ('label', 1)
                 elif low in ('dw', 'word', 'rw'):
                     self.presize[label.lower()] = 2
                     self.prekind[label.lower()] = ('label', 2)
+                elif low == 'dd':
+                    self.presize[label.lower()] = 4
+                    self.prekind[label.lower()] = ('label', 4)
                 elif low == 'equ':
                     m = self._CAST_PREFIX_RE.match(operand_text)
                     size = (1 if m.group(1).lower() == 'byte' else 2) if m else None
@@ -215,10 +240,12 @@ class Assembler:
             return
 
         size_hint = None
-        if low in ('db', 'byte', 'rb'):
+        if low in ('db', 'byte', 'rb', 'rs'):
             size_hint = 1
         elif low in ('dw', 'word', 'rw'):
             size_hint = 2
+        elif low == 'dd':
+            size_hint = 4
 
         if label is not None and low != 'equ':
             self.define_symbol(label, 'label', self.cur_addr(), size_hint, filename, lineno,
@@ -259,7 +286,13 @@ class Assembler:
         if low in ('dw', 'word'):
             self._do_dw(operand_text, filename, lineno)
             return
-        if low == 'rb':
+        if low == 'dd':
+            self._do_dd(operand_text, filename, lineno)
+            return
+        if low in ('rb', 'rs'):
+            # DRI ASM86: 'rs' reserves N raw bytes, the same as 'rb' --
+            # e.g. DATA.BDO's "endlist rs 0" is a zero-size marker label,
+            # exactly the 'rb 0' idiom used elsewhere in this tree.
             ctx = self._ectx(filename, lineno)
             n = eval_text(operand_text, ctx).n
             self.emit(bytes(n))
@@ -290,6 +323,22 @@ class Assembler:
             part = part.strip()
             v = eval_text(part, self._ectx(filename, lineno, self.cur_addr() + len(out)))
             out += struct.pack('<H', v.n & 0xFFFF)
+        self.emit(bytes(out))
+
+    def _do_dd(self, operand_text, filename, lineno):
+        # DD (used once in this tree, LDMPM.A86's "mpm dd abs_zero", a
+        # placeholder immediately overlaid by two DWs via "org offset
+        # mpm") emits a 4-byte far pointer: offset word, then segment
+        # word. Like JMPF/CALLF elsewhere in this assembler, the segment
+        # half is always written as 0000 -- this tree never resolves a
+        # real segment value at single-file assembly time (see
+        # "Design choices that trade size for simplicity" in
+        # tools/README.md).
+        out = bytearray()
+        for part in split_top_commas(operand_text):
+            part = part.strip()
+            v = eval_text(part, self._ectx(filename, lineno, self.cur_addr() + len(out)))
+            out += struct.pack('<HH', v.n & 0xFFFF, 0)
         self.emit(bytes(out))
 
     def _do_instruction(self, mnem, operand_text, filename, lineno, is_final):

@@ -100,6 +100,75 @@ file's own directory, then in any `-I` directories given.
   `tools/plm/README.md`'s "`pl_mon1`–`pl_mon4` now have a real
   implementation" section.
 
+The following were all found validating the kernel sources
+(`src/kernel/`) — see `docs/bugs.md` for which kernel modules now
+assemble end-to-end and which remain blocked by genuine 1981 source
+defects rather than any of this:
+
+- `INCLUDE` combined with `!` on the same line (DRI's own
+  `eject ! include foo.def` convention, used throughout the kernel) was
+  never recognized as an include at all — `flatten()` only checked
+  whether a *whole raw line* started with `include`, before any `!`
+  splitting happened. Fixed by splitting each line into its `!`-joined
+  statements first and checking each one.
+- `byte/word ptr` casts didn't recognize `dword ptr` (used for far
+  pointers, e.g. `callf cs:dword ptr .supervisor`), raising a spurious
+  "trailing tokens in expression: 'ptr'".
+- Constant-expression evaluation (`EQU`, etc.) didn't understand a
+  leading `byte/word/dword ptr` cast at all (`eval_text`, a separate
+  code path from instruction-operand parsing) — needed both to just
+  evaluate the result (`SYSDAT.FMT`'s `module_table equ dword ptr
+  (offset $)`) and, now, to carry the cast's size onto the resulting
+  value so a later `EQU`'d name still carries its declared size forward
+  (`BDOSIF.BDO`'s `btab_flag equ byte ptr (btab_addr + word)`, later used
+  as a sized `TEST cs:btab_flag[si],...`).
+- Bare `BYTE`/`WORD`/`DWORD` (no `PTR`) are a real DRI idiom for literal
+  size constants 1/2/4 inside field-offset arithmetic — e.g. `p_thread
+  equ word ptr p_link + word` (`MDB.FMT`) or `mod_init equ mod_entry +
+  dword` (`MODTAB.DEF`, sizing a far-pointer table entry). Previously
+  treated as undefined-symbol references.
+- A leading `.` is cosmetic on a bare *number* too, not just a symbol
+  name — `mov .0,offset int_trap` / `mov .2,cs` (`XIOS.A86`, setting up
+  interrupt vector 0 at absolute addresses 0/2) and the same idiom in
+  `MAU.MEM`/`ML.MEM`/`SHARE.MEM`. Implemented as direct (absolute)
+  memory addressing — the only reading consistent with `mul byte ptr
+  .0` (`MAU.MEM`), since `MUL` has no immediate operand form on the
+  8086 at all.
+- The dot-is-cosmetic fallback itself had a bug: if the dotted name
+  wasn't already a fully-defined symbol, the *tentative forward-
+  reference* placeholder was still registered under the dotted key
+  (`.xiosmod`) instead of the stripped one (`xiosmod`), so it could
+  never resolve once the real, undotted definition was reached later in
+  the same file.
+- `SYMBOL + constant` (no brackets, e.g. `MOV BYTE PTR ARECORD+2,AH`,
+  `FILE1.BDO`) lost track of which symbol it came from after the
+  addition — `parse_add` built a fresh `Value` without carrying the
+  `.symbol` field forward, so `parse_operand` could no longer tell the
+  expression was label-derived and misclassified it as a plain
+  immediate (illegal as a `MOV` destination) instead of a memory
+  operand.
+- `RS` (DRI's third "reserve" directive, alongside `RB`/`RW` — `DATA.BDO`'s
+  `endlist rs 0` zero-size marker, `header rs 128`) wasn't recognized at
+  all. Implemented identically to `RB` (reserves N raw bytes).
+- `END` terminated the *entire* assembly the moment it was seen,
+  including one reached via `INCLUDE` — but DRI's own fragment files
+  routinely end with their own `END` (`FILE1.BDO`'s last line is `;...end
+  bdos filesystem part 1` / `END`) while the including file
+  (`BDOS.A86`) still has more `INCLUDE`s queued up after it. `END` is now
+  scoped to the file it appears in: it stops that file's own
+  contribution and returns to whichever file (or the top level) included
+  it, rather than aborting the whole assembly.
+- `DD` (define doubleword, alongside `DB`/`DW`) wasn't recognized at
+  all — found validating `src/loader/LDMPM.A86`'s `mpm dd abs_zero`
+  (a placeholder immediately overlaid by two `DW`s via `org offset
+  mpm`). Implemented like `JMPF`/`CALLF`'s direct-label form elsewhere
+  in this assembler: offset word from the operand's value, then a
+  segment word always written as `0000` (see the existing "No real
+  segmentation" design choice above). While adding it, found `RS`
+  (added earlier for the kernel) was missing from the *real* label-size
+  classification used when a label is actually defined, not just from
+  the forward-reference prescan — fixed alongside it.
+
 ## Known limitations
 
 - Not every ASM86 directive is implemented (no `MACRO`, `STRUC`, `DUP`,
@@ -130,3 +199,24 @@ level `README.md` ("hand written labels... probably work disks") —
 these RSPs likely never finished debugging on the original hardware
 either. They have **not** been patched here; `src/` remains an unmodified
 copy of `orig/`.
+
+### Kernel sources (`src/kernel/`)
+
+`src/kernel/CIO.A86` and `src/kernel/SYSDAT.A86` compile cleanly
+end-to-end as-is. `BDOS.A86`, `MEM.A86`, `RTM.A86`, `SUP.A86`, and
+`XIOS.A86` are each blocked by genuine 1981 source defects (the same
+undeclared/mismatched-name pattern as the RSPs above, just far more
+widespread in `BDOS.A86`'s case) plus, in a few spots, the accepted
+short-jump-range trade-off described above — not by missing includes or
+remaining assembler gaps. `XIOS.A86` additionally has one genuinely
+unresolved symbol (`dp_base`) with no fix available from evidence in
+this tree. See `docs/bugs.md` for the specifics (bugs #4 through #7).
+
+### Loader sources (`src/loader/`)
+
+`src/loader/LDBDOS.A86` compiles cleanly end-to-end as-is. `LDBIOS.A86`
+is blocked only by four more instances of the same mismatched-name
+pattern (bug #8) plus the short-jump-range trade-off; `LDMPM.A86` and
+`ROM.A86` each have one genuinely unresolved symbol (bugs #9, #10),
+the same situation as `XIOS.A86`'s `dp_base` above. See `docs/bugs.md`
+bugs #8 through #10.

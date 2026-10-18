@@ -233,14 +233,14 @@ init:
 
 	;	--- console: initialize the UART for 9600 8N1 ---
 
-	mov	al,80h ! out uart_lcr,al	;set DLAB
+	mov	al,80h ! mov dx,uart_lcr ! out dx,al	;set DLAB
 	mov	ax,uart_divisor
-	out	uart_rxtx,al			;divisor low byte
+	mov	dx,uart_rxtx ! out dx,al	;divisor low byte
 	mov	al,ah
-	out	uart_ier,al			;divisor high byte
-	mov	al,03h ! out uart_lcr,al	;8N1, DLAB off
-	mov	al,0 ! out uart_ier,al		;no UART interrupts
-	mov	al,03h ! out uart_mcr,al	;assert DTR/RTS
+	mov	dx,uart_ier ! out dx,al		;divisor high byte
+	mov	al,03h ! mov dx,uart_lcr ! out dx,al	;8N1, DLAB off
+	mov	al,0 ! mov dx,uart_ier ! out dx,al	;no UART interrupts
+	mov	al,03h ! mov dx,uart_mcr ! out dx,al	;assert DTR/RTS
 
 	;	--- timer: program the PIT for 60Hz on channel 0 ---
 
@@ -272,7 +272,7 @@ init:
 
 	;	--- disk: reset and arm the floppy controller ---
 
-	mov	al,dor_ndreset+dor_drvsel_a ! out fdc_dor,al
+	mov	al,dor_ndreset+dor_drvsel_a ! mov dx,fdc_dor ! out dx,al
 						;motor+DMA still off,
 						;released from reset
 	call	fdc_sense_int			;clear any stale status
@@ -363,7 +363,7 @@ conin:	    ; Function 1: Console Input
 
 	mov	bh,0 ! mov bl,c0indev
 	call	rtm_poll
-	in	al,uart_rxtx
+	mov	dx,uart_rxtx ! in al,dx
 	ret
 
 ;======
@@ -376,7 +376,7 @@ conout:	    ; Function 2: Console Output
 	mov	bh,0 ! mov bl,c0outdev
 	call	rtm_poll
 	pop	ax
-	out	uart_rxtx,al
+	mov	dx,uart_rxtx ! out dx,al
 	ret
 
 ;=====
@@ -581,13 +581,13 @@ polldev:    ; Function 17: Poll Device
 ;	output:	AL = 0ffh if ready, 0 if not
 
 	cmp	cl,c0indev ! jne polldev_1
-	    in	al,uart_lsr
+	    mov	dx,uart_lsr ! in al,dx
 	    and	al,uart_lsr_rxrdy
 	    mov	ah,0 ! jnz polldev_rdy
 	    ret
 polldev_1:
 	cmp	cl,c0outdev ! jne polldev_2
-	    in	al,uart_lsr
+	    mov	dx,uart_lsr ! in al,dx
 	    and	al,uart_lsr_txrdy
 	    jnz	polldev_rdy
 	    ret
@@ -612,7 +612,7 @@ polldev_rdy:
 rw_setup:   ; turn the drive motor on and give it a moment to spin up
 ;----------
 	mov	al,dor_ndreset+dor_mota+dor_dmaen+dor_drvsel_a
-	out	fdc_dor,al
+	mov	dx,fdc_dor ! out dx,al
 	call	motor_delay
 	ret
 
@@ -620,8 +620,9 @@ rw_setup:   ; turn the drive motor on and give it a moment to spin up
 motor_delay:
 ;----------
 	mov	cx,0
+	mov	dx,fdc_msr
 md_loop:
-	    in	al,fdc_msr
+	    in	al,dx
 	    loop	md_loop
 	ret
 
@@ -741,8 +742,9 @@ fdc_seek_to:    ; seek to cur_cyl/cur_head
 fdc_wait_seek:
 ;----------
 	mov	cx,0
+	mov	dx,fdc_msr
 fws_loop:
-	    in	al,fdc_msr
+	    in	al,dx
 	    test	al,msr_busy
 	    loopnz	fws_loop
 	call	fdc_sense_int
@@ -780,25 +782,31 @@ fdc_out_byte:   ; write AL to the FDC data FIFO once it's ready for a
 		; CX-counted loop below, so it keeps the byte to send
 		; in a memory scratch cell instead of a register.
 	mov	cs:outbyte_tmp,al
+	push	dx		;contract above says AL/flags only
+	mov	dx,fdc_msr
 fob_wait:
-	in	al,fdc_msr
+	in	al,dx
 	and	al,msr_rqm+msr_dio
 	cmp	al,msr_rqm
 	jne	fob_wait
 	mov	al,cs:outbyte_tmp
-	out	fdc_data,al
+	mov	dx,fdc_data ! out dx,al
+	pop	dx
 	ret
 
 ;----------
 fdc_in_byte:    ; read one byte from the FDC data FIFO once it's
 ;----------	; ready for an FDC->CPU byte (RQM=1, DIO=1); returned
 		; in AL
+	push	dx
+	mov	dx,fdc_msr
 fib_wait:
-	in	al,fdc_msr
+	in	al,dx
 	and	al,msr_rqm+msr_dio
 	cmp	al,msr_rqm+msr_dio
 	jne	fib_wait
-	in	al,fdc_data
+	mov	dx,fdc_data ! in al,dx
+	pop	dx
 	ret
 
 ;----------

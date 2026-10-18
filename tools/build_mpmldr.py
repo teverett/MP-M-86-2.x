@@ -28,6 +28,22 @@ pieces actually land -- rewriting that one source file in place if the
 sizes have drifted since it was last correct (e.g. after a future
 tools/asm86 change), then re-assembling it, before concatenating.
 
+LDBDOS.A86 turned out to need the exact same treatment, for a related
+but distinct reason: unlike LDMPM.A86, it used to compute its *own*
+absolute position via an internal `org bdosoffset` (DRI's original
+fixed value, 400h) -- harmless under DRI's own Intel-hex-based build,
+but under tools/asm86's raw-binary output this padded LDBDOS.cseg.bin
+with literal zero bytes from file offset 0 up to bdosoffset, which this
+script's sequential placement then stacked *on top of*, landing the
+real entry code 0x400 bytes past where LDMPM's own patched
+ldbdos_offset actually pointed (confirmed by inspecting the combined
+MPMLDR.bin -- see docs/bugs.md's LDBDOS entry). LDBDOS.A86's own
+bdosoffset is now permanently 0 (no more internal self-positioning,
+sequencing is this script's job alone); its biosoffset (an absolute
+CALL/JMP target into LDBIOS86Q.A86's jump table) and bdoscodesize (used
+to place LDBDOS's own DSEG data right after its real CSEG) are
+self-corrected here the same way LDMPM.A86's constants are.
+
 Usage: python3 tools/build_mpmldr.py [-o OUTPUT]
 """
 import argparse
@@ -48,6 +64,14 @@ MLDBIOS_RE = re.compile(
     r'^(mldbios_offset\s+equ\s+)([0-9a-fA-F]+h)(\s*;.*)?$',
     re.MULTILINE,
 )
+BIOSOFFSET_RE = re.compile(
+    r'^(biosoffset\s+equ\s+)([0-9a-fA-F]+[hH])(\s*;.*)?$',
+    re.MULTILINE,
+)
+BDOSCODESIZE_RE = re.compile(
+    r'^(bdoscodesize\s+equ\s+)([0-9a-fA-F]+[hH])(\s*;.*)?$',
+    re.MULTILINE,
+)
 
 
 def assemble(name, out_dir):
@@ -65,36 +89,40 @@ def assemble(name, out_dir):
     return cseg_path, size
 
 
-def patch_ldmpm_offsets(ldbdos_offset, mldbios_offset):
-    """Rewrite LDMPM.A86's ldbdos_offset/mldbios_offset EQUs in place if
-    they don't already match the real, current sizes. Returns True if a
-    change was made (meaning LDMPM needs re-assembling)."""
+def hexlit(value):
+    """Format `value` as an ASM86 hex literal, with the leading '0' a
+    value whose first hex digit is a letter (e.g. 0xe8f) needs so the
+    assembler doesn't try to parse it as an identifier starting with
+    'e8fh' instead of a number."""
+    digits = f'{value:x}'
+    if digits[0] in 'abcdef':
+        digits = '0' + digits
+    return digits + 'h'
+
+
+def patch_offsets(filename, patches):
+    """Rewrite the named loader source's EQU constants in place if they
+    don't already match the real, current values. `patches` is a list
+    of (pattern, new_value_int, label) triples. Returns True if a
+    change was made (meaning the file needs re-assembling)."""
     # newline='' disables universal-newline translation on both read and
     # write -- these files are CRLF (CP/M-era convention) and a plain
     # text-mode round-trip would otherwise silently rewrite every line
-    # ending to LF, turning a 2-constant change into a whole-file diff.
-    path = os.path.join(LOADER_DIR, 'LDMPM.A86')
+    # ending to LF, turning a tiny constant change into a whole-file diff.
+    path = os.path.join(LOADER_DIR, filename)
     with open(path, encoding='latin-1', newline='') as f:
         text = f.read()
 
-    new_ldbdos = f'{ldbdos_offset:x}h'
-    new_mldbios = f'{mldbios_offset:x}h'
-
     changed = False
-
-    def sub_offset(pattern, new_val, label, text):
-        nonlocal changed
+    for pattern, new_value, label in patches:
+        new_val = hexlit(new_value)
         m = pattern.search(text)
         if not m:
-            raise SystemExit(f"could not find {label} in LDMPM.A86")
+            raise SystemExit(f"could not find {label} in {filename}")
         if m.group(2).lower() != new_val.lower():
             changed = True
             text = pattern.sub(lambda mm: mm.group(1) + new_val + (mm.group(3) or ''),
                                 text, count=1)
-        return text
-
-    text = sub_offset(OFFSET_RE, new_ldbdos, 'ldbdos_offset', text)
-    text = sub_offset(MLDBIOS_RE, new_mldbios, 'mldbios_offset', text)
 
     if changed:
         with open(path, 'w', encoding='latin-1', newline='') as f:
@@ -129,11 +157,32 @@ def main():
     ldbdos_offset = ldmpm_size
     mldbios_offset = ldmpm_size + ldbdos_size
 
-    if patch_ldmpm_offsets(ldbdos_offset, mldbios_offset):
+    if patch_offsets('LDMPM.A86', [
+        (OFFSET_RE, ldbdos_offset, 'ldbdos_offset'),
+        (MLDBIOS_RE, mldbios_offset, 'mldbios_offset'),
+    ]):
         print(f"build_mpmldr: patched LDMPM.A86's ldbdos_offset="
               f"{ldbdos_offset:#x}, mldbios_offset={mldbios_offset:#x} "
               "to match the current assembled sizes")
         ldmpm_path, ldmpm_size = assemble('LDMPM', out_dir)
+
+    # LDBDOS.A86's own biosoffset (an absolute CALL/JMP target into
+    # LDBIOS86Q's jump table) and bdoscodesize (where its own DSEG data
+    # starts, right after its real CSEG) don't affect its assembled
+    # CSEG size -- they're baked in as fixed-width immediate operands
+    # regardless of value -- so ldbdos_size above is already final; one
+    # patch-and-reassemble pass is enough, same as LDMPM.A86 above.
+    if patch_offsets('LDBDOS.A86', [
+        (BIOSOFFSET_RE, mldbios_offset, 'biosoffset'),
+        (BDOSCODESIZE_RE, ldbdos_size, 'bdoscodesize'),
+    ]):
+        print(f"build_mpmldr: patched LDBDOS.A86's biosoffset="
+              f"{mldbios_offset:#x}, bdoscodesize={ldbdos_size:#x} "
+              "to match the current assembled sizes")
+        ldbdos_path, ldbdos_size_new = assemble('LDBDOS', out_dir)
+        assert ldbdos_size_new == ldbdos_size, (
+            "LDBDOS.A86's assembled size changed after patching "
+            "biosoffset/bdoscodesize -- it shouldn't (see comment above)")
 
     out_path = args.output or os.path.join(out_dir, 'MPMLDR.bin')
     with open(out_path, 'wb') as out:

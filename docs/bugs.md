@@ -13,16 +13,22 @@ hardware.
 
 **Patch status, by section below:** #1–#3 (the RSPs) are left
 **unpatched** — `src/rsp/` remains an unmodified copy of `orig/` for
-those files. #4, #5, #7 (partially), and #8 (the kernel/loader name
-typos) **have been patched** directly in `src/kernel/` and
-`src/loader/` — once a fix is this confidently evidence-backed (an
-exact squashed-name match to a real declaration, used incorrectly
-nowhere else), leaving it broken forever didn't serve the "get this
-booting" goal, and each patched spot is called out explicitly below so
-the change is traceable back to its evidence. #6, #7 (the `dp_base`
-part), #9, and #10 remain unpatched: either no confident fix exists
-(an undeclared symbol with no same-file candidate), or fixing it isn't
-a source-level change at all (the short-jump-range tooling trade-off).
+those files. #4, #5, #7 (partially), #8, #9, #10, #11, #12, and #13
+(the kernel/loader name typos, the `LDBDOS.A86` fixed-offset
+interaction with `tools/asm86`'s raw-binary output, the `tools/asm86`
+port-truncation bug, and `ROM86Q.A86`'s own two real runtime bugs)
+**have been patched** directly in `src/kernel/`/`src/loader/`,
+`tools/asm86/`, or `tools/build_mpmldr.py` — once a fix is this
+confidently evidence-backed (an exact squashed-name match to a real
+declaration used incorrectly nowhere else, a byte-level confirmation of
+the wrong address landing in the combined image, or — for #12/#13 —
+confirmed by actually running the code in QEMU),
+leaving it broken forever didn't serve the "get this booting" goal,
+and each patched spot is called out explicitly below so the change is
+traceable back to its evidence. #6 and #7 (the `dp_base` part) remain
+unpatched: either no confident fix exists (an undeclared symbol with no
+same-file candidate), or fixing it isn't a source-level change at all
+(the short-jump-range tooling trade-off).
 
 ## 1. `src/rsp/CLOCK.A86` — jump to a label that doesn't exist
 
@@ -248,6 +254,126 @@ genuine DRI ASM86 operator — evaluating to the total byte length of a
 ??',0` is 16 bytes, matching this line's own `;16` comment exactly) —
 that this assembler didn't implement at all. Fixed in `tools/asm86`
 (see `tools/README.md`).
+
+## 11. `src/loader/LDBDOS.A86` — its own fixed-offset EQUs silently broke at runtime under `tools/asm86` — FIXED
+
+Not a dropped/added underscore like the rest of this page, and not
+caught by assembly failing (it assembles cleanly either way) — found
+by manually inspecting the combined `MPMLDR.bin`'s actual bytes while
+reconciling `LDBDOS.A86`'s own `bdosoffset`/`biosoffset`/`bdoscodesize`
+EQUs (DRI's original fixed values, `400h`/`1200h`/`0B00h`) against
+`LDMPM.A86`'s already-patched `ldbdos_offset`/`mldbios_offset` (see #9
+and `tools/build_mpmldr.py`'s own docstring).
+
+DRI's own build placed every loader module via Intel-hex `pip`, which
+merges sparse, absolute-address records — a module's `org` to some
+fixed address costs nothing, since the hex format simply has no
+records at all for addresses below it. `tools/asm86` emits raw binary
+instead, where the same `org bdosoffset` (used at the very top of
+`LBDOSENT.A86`, right where `LDBDOS.A86`'s real entry point is) means
+literal zero-byte padding in `LDBDOS.cseg.bin` from file offset 0 up to
+`400h`. `tools/build_mpmldr.py` then placed that *whole* blob — padding
+included — starting at `LDMPM.A86`'s own patched `ldbdos_offset`
+(`3efh`), so the interrupt vector `LDMPM.A86` patches to reach `LDBDOS`
+actually pointed at zero padding, not the real entry code, 0x400 bytes
+short of where it needed to land. Confirmed directly: byte `0x3ef` of
+the combined image was `00`, not the `JMP bdose` instruction
+`LBDOSENT.A86` places right at its own `org bdosoffset`. The same
+problem applied to `biosoffset` (`1200h`), used as the absolute base
+for every `CALL`/`JMP` `LDBDOS.A86` makes into the loader BIOS's jump
+table (`constf`/`coninf`/`conouf`/`readf`/`writef`/`wbootf` in
+`LBDOSEQU.A86`/`LBDOSENT.A86`/`LBDOSIO.A86`/`LBDOSF1.A86`) — it never
+matched wherever `LDBIOS86Q.A86` actually ended up (`e8fh` once the
+fix below is applied, nowhere near DRI's fixed `1200h`), so those calls
+would have jumped into whatever code happened to be sitting at the
+wrong address instead of the real BIOS functions.
+
+**Fixed**, in two parts:
+- `src/loader/LDBDOS.A86`'s own `bdosoffset` is now permanently `0` —
+  this module no longer self-positions via its own `org`; its place in
+  the final image is purely `tools/build_mpmldr.py`'s sequential
+  concatenation, the same as `LDMPM.A86`/`LDBIOS86Q.A86`.
+- `tools/build_mpmldr.py` now also self-corrects `LDBDOS.A86`'s
+  `biosoffset` (set to the real `mldbios_offset`) and `bdoscodesize`
+  (set to `LDBDOS.A86`'s own real assembled CSEG size, so its DSEG data
+  lands right after its real code instead of DRI's original, now again
+  too-small, `0B00h` budget) — the same self-correcting-patch mechanism
+  already used for `LDMPM.A86`'s constants, extended to this file.
+
+Verified by re-inspecting the rebuilt `MPMLDR.bin` directly: the byte
+at the patched `ldbdos_offset` is now the real `JMP bdose` opcode, and
+the bytes at the patched `mldbios_offset` are `LDBIOS86Q.A86`'s real
+jump-vector table, with `biosoffset`'s derived function addresses
+(`constf`, `coninf`, etc.) landing on the correct individual jump-table
+entries within it.
+
+## 12. `tools/asm86` — immediate IN/OUT silently truncated ports >= 256 to 8 bits — FIXED
+
+Found by actually running `src/loader/ROM86Q.A86` in QEMU for the first
+time (see docs/build.md's "What's actually needed to boot under QEMU"
+item 3) — the first and only code in this whole project to have
+actually executed, rather than just assembled and been reviewed by
+hand. The boot sector's own UART/FDC port access (`out uart_lcr,al`
+etc., ports in the `03F8h`-`03FDh`/`03F0h`-`03F7h` range) silently did
+nothing useful: `tools/asm86`'s `IN`/`OUT` encoder packed the port
+number into the immediate 8-bit field the `0xE4`-`0xE7` opcodes
+actually have, with no range check, so `out 3FBh,al` quietly became
+`out 0FBh,al` — a real port, just the wrong one, so nothing failed to
+assemble and nothing crashed, it just silently talked to garbage
+hardware instead of the UART. Confirmed by manually decoding the assembled bytes: `out uart_lcr,al`
+(port `03FBh`) produced `E6 FB` — the 2-byte immediate-port `OUT`
+opcode with its port truncated to `0FBh`, not the 3-byte `mov dx,03FBh
+! out dx,al` sequence the port actually needed.
+
+**Fixed** in two parts:
+- `tools/asm86/isa.py`'s `_encode_in`/`_encode_out` now reject any
+  immediate port `>= 0x100` at assembly time (the 8086's only way to
+  address such a port is through `DX`), instead of silently truncating
+  it.
+- Every real occurrence this caught — `src/kernel/XIOS86Q.A86`,
+  `src/loader/LDBIOS86Q.A86`, `src/loader/ROM86Q.A86` (all three new,
+  QEMU-target files using the 8250 UART and/or NEC765 FDC, the only
+  ports in this tree above 0xFF) — was changed to `mov dx,port ! in/out
+  al,dx`, preserving `DX` across `fdc_out_byte`/`fdc_in_byte` with an
+  explicit `push dx`/`pop dx` where their own header comments already
+  promised not to disturb any register but `AL`/flags.
+
+## 13. `src/loader/ROM86Q.A86` — a 512-byte sector read into a 9-byte buffer — FIXED
+
+Also found by the same first real QEMU boot. `INT 13h` always
+transfers one full 512-byte physical sector regardless of how much of
+it the caller actually cares about; this file's header read used to
+target a 9-byte buffer (`hdrbuf rb 9`) declared inside its own data
+area, so the other ~500 bytes DMA'd in overwrote every variable and
+string declared after it in memory — `msg_boot`, `msg_fail`, and the
+jump-progress message, replaced with zeros (the unused tail of that
+disk sector) the instant the header was read. Confirmed directly: a
+test build that read `msg_boot`'s own first byte back out right after
+the header read got `0x00`, not the `0x0D` (CR) it's declared with.
+
+**Fixed** by pointing the header read at `hdr_scratch` (`0500h`), a
+fixed low-memory address outside this file's own 512 bytes entirely —
+not a label in this module's own data, which is exactly what made the
+original buffer vulnerable. That surfaced a second, smaller bug while
+fixing the first: `word ptr hdr_scratch+1`-style addressing silently
+resolved to the *immediate* value `0x501`, not a memory dereference —
+`hdr_scratch` is a bare `EQU` constant, not a label backed by reserved
+storage, so there's no way for the assembler to tell "the number 0x500
+used as an address" apart from "the number 0x500 used as a value" from
+that syntax alone (unlike `src/kernel/XIOS86Q.A86`'s own `read_parms+2`
+style, which works because `read_parms` *is* a real label). **Fixed**
+by using register-indexed addressing instead (`word ptr 1[bx]`, with
+`BX` already holding `hdr_scratch` from the disk read) — the same
+displacement-before-bracket idiom the real `04/ROM.A86` already uses
+(`mov AL,1[BX]`), confirmed working by testing it for real.
+
+Verified end to end in QEMU after both fixes: the boot sector prints
+its own boot message, reads the 9-byte loader header correctly, prints
+one progress dot per body sector read (9 of them, matching `MPMLDR.bin`'s
+real size), prints its "about to jump" message, and actually jumps
+into `MPMLDR` — the first piece of this entire project confirmed
+running correctly on real (emulated) hardware, not just assembled and
+reviewed by hand.
 
 ## Status of the kernel/loader sources
 

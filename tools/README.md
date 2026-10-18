@@ -281,8 +281,40 @@ needed the new `LENGTH` operator support described above.
 replacement for `LDBIOS.A86` (standard PC UART + NEC765 floppy
 controller instead of the iSBC 86/12's i8251/i8271 hardware), reusing
 `src/kernel/XIOS86Q.A86`'s own NEC765/UART driver code behind
-`LDBIOS.A86`'s own classic CP/M BIOS jump-vector calling convention so
-`LDBDOS.A86` needs no changes. See its own header comment for the
-rationale and limitations, and `docs/build.md`'s "What's actually
+`LDBIOS.A86`'s own classic CP/M BIOS jump-vector calling convention, so
+`LDBDOS.A86`'s own *calling* logic needs no changes. Wiring it in did
+surface a real bug in `LDBDOS.A86`'s own fixed-offset EQUs, though --
+see `docs/bugs.md` #11. See `LDBIOS86Q.A86`'s own header comment for
+the rationale and limitations, and `docs/build.md`'s "What's actually
 needed to boot under QEMU" item 1 for how it's wired into
 `tools/build_mpmldr.py`.
+
+`src/loader/ROM86Q.A86` is also a new file, not DRI source: a 512-byte
+PC boot sector replacing `04/ROM.A86`'s EPROM bootstrap, since QEMU's
+SeaBIOS plays the role the real EPROM played and hands off to exactly
+this kind of boot sector instead. It uses BIOS INT 13h for disk I/O
+rather than a from-scratch driver (a deliberate choice -- see its own
+header comment). Assembling it with `org 7c00h` (its real runtime
+load address, needed for its absolute memory references to encode
+correctly) means `tools/asm86`'s own raw-binary output pads the file
+with 0x7c00 bytes of leading zeros before the real 512-byte sector --
+the same `org`-padding behavior as the `LDBDOS.A86` bug (`docs/bugs.md`
+#11), just deliberate here instead of a bug. `tools/build_bootsect.py`
+slices the real sector back out and verifies its `55h`/`AAh` boot
+signature survived; see that script's own docstring.
+
+`tools/build_disk.py` is the final assembly step: it combines
+`ROM86Q.bin`/`MPMLDR.bin`/`MPM.bin.{cseg,dseg}` into one bootable
+floppy image, including hand-building the real on-disk `MPM.SYS` file
+(CP/M directory entries and all) that none of those three scripts
+produce on their own — `tools/build_mpmsys.py`'s own "KNOWN
+LIMITATIONS" flagged this as a gap, and this is where it gets closed.
+See that script's own docstring for the exact disk layout (also
+documented in full in `docs/diskformat.md`), and `docs/build.md`'s
+"What's actually needed to boot under QEMU" item 4.
+
+Actually booting the resulting image in QEMU (`make run`) caught two
+real bugs in this ASM86 dialect's own `IN`/`OUT` handling and in
+`ROM86Q.A86` itself — see `docs/bugs.md` #12 and #13 — the first real
+execution of any code in this project, not just assembly and manual
+review.

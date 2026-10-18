@@ -439,6 +439,20 @@ def _encode_shift(name, ops, ctx):
     return bytes([opcode]) + encode_rm(dst, SHIFT_GROUP[name], ctx)
 
 
+def _check_port_imm(value, ctx):
+    # The immediate IN/OUT forms (0xE4-0xE7) only have an 8-bit port
+    # field -- silently truncating a larger value (e.g. 0x3F8 -> 0xF8)
+    # was a real, previously-undiscovered bug here: it assembled
+    # clean and produced working-looking code that silently talked to
+    # the wrong I/O port at runtime. A port >= 256 must go through DX
+    # (`mov dx,port ! in/out dx,al`), the only 8086 encoding that can
+    # actually address it.
+    if value > 0xFF:
+        ctx.err(f"IN/OUT port {value:#x} is >= 256 and needs DX "
+                 "(the immediate IN/OUT form only has an 8-bit port "
+                 "field, e.g. `mov dx,{:#x} ! in al,dx`)".format(value))
+
+
 def _encode_in(ops, ctx):
     dst, src = ops
     if dst.kind != 'reg' or dst.reg != 0:
@@ -447,6 +461,7 @@ def _encode_in(ops, ctx):
     if src.kind == 'reg' and src.size == 2 and src.reg == REG16['dx']:
         return bytes([0xEC if not wide else 0xED])
     if src.kind == 'imm':
+        _check_port_imm(src.mem['value'], ctx)
         return bytes([0xE4 if not wide else 0xE5]) + u8(src.mem['value'])
     ctx.err("IN source must be DX or an immediate port number")
 
@@ -459,6 +474,7 @@ def _encode_out(ops, ctx):
     if dst.kind == 'reg' and dst.size == 2 and dst.reg == REG16['dx']:
         return bytes([0xEE if not wide else 0xEF])
     if dst.kind == 'imm':
+        _check_port_imm(dst.mem['value'], ctx)
         return bytes([0xE6 if not wide else 0xE7]) + u8(dst.mem['value'])
     ctx.err("OUT destination must be DX or an immediate port number")
 

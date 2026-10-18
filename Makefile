@@ -10,6 +10,8 @@
 #   make            # build everything in ALL_GOOD below
 #   make partial    # also compile (but not assemble) the two known-
 #                   # incomplete toolchain files
+#   make disk       # build build/disk/mpm86q.img, a bootable floppy image
+#   make run        # boot that image in QEMU (builds it first if needed)
 #   make clean
 
 # Windows' python.org/GitHub Actions installs often expose only
@@ -21,6 +23,7 @@ PLMC    := $(PYTHON) tools/plmc.py
 ASM86   := $(PYTHON) tools/asm86.py
 STUB    := tools/plm/runtime_stub.A86
 BUILD   := build
+QEMU    := qemu-system-i386
 
 # --- .PLM utilities: compile with plmc, then concatenate the real
 # mon1-4 interface stub and assemble the result (see
@@ -91,6 +94,29 @@ MPMLDR_BIN := $(BUILD)/loader/MPMLDR.bin
 MPMSYS_STAMP := $(BUILD)/kernel/.mpmsys.stamp
 MPMSYS_BIN := $(BUILD)/kernel/MPM.bin.cseg $(BUILD)/kernel/MPM.bin.dseg
 
+# --- ROM86Q.bin: a new, from-scratch 512-byte PC boot sector replacing
+# 04/ROM.A86's EPROM bootstrap -- QEMU's SeaBIOS plays the role the
+# real iSBC 86/12's EPROM played, handing off to this file instead.
+# Uses BIOS INT 13h for disk I/O (confirmed via AskUserQuestion), not
+# the from-scratch NEC765 driver XIOS86Q.A86/LDBIOS86Q.A86 carry --
+# see ROM86Q.A86's own header comment. Built by
+# tools/build_bootsect.py, which also has to slice the real 512-byte
+# sector out of asm86's own padded output -- see that script's own
+# docstring for why (the same `org`-padding behavior as docs/bugs.md
+# #11).
+BOOTSECT_BIN := $(BUILD)/loader/ROM86Q.bin
+
+# --- mpm86q.img: the final bootable QEMU floppy image, combining
+# BOOTSECT_BIN + MPMLDR_BIN + MPMSYS_BIN -- the three pieces above --
+# plus a real on-disk `MPM.SYS` file (built by hand to the CP/M
+# directory format `tools/build_disk.py` itself documents; none of the
+# three scripts above produce one). See that script's own docstring
+# for the exact disk layout. Not added to ALL_GOOD: it re-invokes the
+# three build scripts above itself (so it's never stale), making it
+# redundant with `make all`'s own dependency graph; build it directly
+# with `make disk` instead.
+DISK_IMG := $(BUILD)/disk/mpm86q.img
+
 PLM_UTILS_BIN      := $(addprefix $(BUILD)/utils/,$(addsuffix .cseg.bin,$(PLM_UTILS)))
 PLM_TOOLCHAIN_BIN   := $(addprefix $(BUILD)/toolchain/,$(addsuffix .cseg.bin,$(PLM_TOOLCHAIN_OK)))
 PLM_PARTIAL_GEN     := $(addprefix $(BUILD)/toolchain/,$(addsuffix .gen.A86,$(PLM_TOOLCHAIN_PARTIAL)))
@@ -100,14 +126,24 @@ KERNEL_NEW_BIN      := $(addprefix $(BUILD)/kernel/,$(addsuffix .cseg.bin,$(KERN
 LOADER_BIN          := $(addprefix $(BUILD)/loader/,$(addsuffix .cseg.bin,$(LOADER_OK)))
 LOADER_NEW_BIN      := $(addprefix $(BUILD)/loader/,$(addsuffix .cseg.bin,$(LOADER_NEW)))
 
-ALL_GOOD := $(PLM_UTILS_BIN) $(PLM_TOOLCHAIN_BIN) $(RSP_BIN) $(KERNEL_BIN) $(KERNEL_NEW_BIN) $(LOADER_BIN) $(LOADER_NEW_BIN) $(MPMLDR_BIN) $(MPMSYS_BIN)
+ALL_GOOD := $(PLM_UTILS_BIN) $(PLM_TOOLCHAIN_BIN) $(RSP_BIN) $(KERNEL_BIN) $(KERNEL_NEW_BIN) $(LOADER_BIN) $(LOADER_NEW_BIN) $(MPMLDR_BIN) $(MPMSYS_BIN) $(BOOTSECT_BIN)
 
-.PHONY: all partial clean
+.PHONY: all partial disk run clean
 all: $(ALL_GOOD)
 	@echo "Built $(words $(ALL_GOOD)) file(s) successfully."
 
 partial: all $(PLM_PARTIAL_GEN)
 	@echo "Compiled (but did not assemble) $(words $(PLM_PARTIAL_GEN)) partial file(s)."
+
+disk: $(DISK_IMG)
+
+# -- Boot mpm86q.img in QEMU. ROM86Q.A86's own boot-sector messages go
+# through BIOS INT 10h (the default graphical display QEMU opens), but
+# everything from MPMLDR/MPM.SYS onward talks to the 8250 UART
+# XIOS86Q.A86/LDBIOS86Q.A86 drive directly (COM1) -- `-serial mon:stdio`
+# sends that to this terminal instead of needing a second window.
+run: $(DISK_IMG)
+	$(QEMU) -fda $(DISK_IMG) -serial mon:stdio
 
 # -- .PLM utilities: compile -> concatenate real stub (dropping the
 # compiler's own trailing END so the stub's END is the one that counts,
@@ -156,9 +192,20 @@ $(MPMSYS_STAMP): src/kernel/SYSDAT.A86 src/kernel/SUP.A86 src/kernel/RTM.A86 src
 	$(PYTHON) tools/build_mpmsys.py -o $(BUILD)/kernel/MPM.bin
 	touch $@
 
+# -- ROM86Q.bin: one source file, one build script, no multi-module
+# combining needed.
+$(BOOTSECT_BIN): src/loader/ROM86Q.A86 tools/build_bootsect.py | $(BUILD)/loader
+	$(PYTHON) tools/build_bootsect.py -o $@
+
+# -- mpm86q.img: tools/build_disk.py re-invokes build_bootsect.py/
+# build_mpmldr.py/build_mpmsys.py itself, so its own real dependencies
+# are those three scripts' own sources, not their outputs.
+$(DISK_IMG): src/loader/ROM86Q.A86 tools/build_bootsect.py src/loader/LDMPM.A86 src/loader/LDBDOS.A86 src/loader/LDBIOS86Q.A86 tools/build_mpmldr.py src/kernel/SYSDAT.A86 src/kernel/SUP.A86 src/kernel/RTM.A86 src/kernel/MEM.A86 src/kernel/CIO.A86 src/kernel/BDOS.A86 src/kernel/XIOS86Q.A86 tools/build_mpmsys.py tools/build_disk.py | $(BUILD)/disk
+	$(PYTHON) tools/build_disk.py -o $@
+
 $(BUILD)/kernel/MPM.bin.cseg $(BUILD)/kernel/MPM.bin.dseg: $(MPMSYS_STAMP)
 
-$(BUILD)/utils $(BUILD)/toolchain $(BUILD)/rsp $(BUILD)/kernel $(BUILD)/loader:
+$(BUILD)/utils $(BUILD)/toolchain $(BUILD)/rsp $(BUILD)/kernel $(BUILD)/loader $(BUILD)/disk:
 	mkdir -p $@
 
 clean:

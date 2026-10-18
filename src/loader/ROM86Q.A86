@@ -1,0 +1,298 @@
+;*****************************************************
+;*
+;*	R O M 8 6 Q  -  a QEMU PC boot sector, replacing
+;*	04/ROM.A86's EPROM bootstrap
+;*	=========================================================
+;*
+;*	Not DRI source. QEMU's standard PC machine has no EPROM at a
+;*	fixed physical address running from CPU reset the way the real
+;*	iSBC 86/12's EPROM (04/ROM.A86) did -- SeaBIOS plays that role
+;*	instead, and *it* hands off to a single 512-byte boot sector
+;*	loaded from the boot floppy's very first physical sector, at
+;*	CS:IP = 0000:7C00h, with DL = the boot drive number. This file
+;*	*is* that boot sector -- the direct functional replacement for
+;*	ROM.A86, even though almost nothing about its own code resembles
+;*	ROM.A86's (different hardware, different calling convention,
+;*	and a hard 512-byte size ceiling ROM.A86 never had to work
+;*	under).
+;*
+;*	Design choice (confirmed via AskUserQuestion before writing
+;*	this): disk I/O here uses BIOS INT 13h, not a from-scratch
+;*	NEC765 driver. At this exact point in the boot process SeaBIOS's
+;*	own floppy service is present and already working, so there is
+;*	no reason to pay for -- and no room, in 512 bytes, for -- a
+;*	second copy of the driver XIOS86Q.A86/LDBIOS86Q.A86 already
+;*	carry. Once MPMLDR/MP/M-86 itself is running, THEY drive the
+;*	floppy directly instead; this file's job ends the moment it
+;*	jumps into MPMLDR.
+;*
+;*	Console output here is the direct 8250 UART poll XIOS86Q.A86/
+;*	LDBIOS86Q.A86 also use (not BIOS INT 10h) -- found, while first
+;*	testing this file for real in QEMU, to be simpler AND more
+;*	reliable to observe than mixing BIOS video teletype output into
+;*	the same -nographic console as this program's own serial output;
+;*	also one less BIOS service to depend on.
+;*
+;*	Assumes CS=0000h/IP=7C00h on entry (true of every PC BIOS this
+;*	project has reason to care about, including QEMU's SeaBIOS) --
+;*	no CS-normalizing far jump, unlike some boot sectors that
+;*	defend against the rarer CS=07C0h/IP=0000h convention too.
+;*
+;*	Disk layout this file expects (a new convention -- there is no
+;*	DRI original to match, since the real hardware had no boot
+;*	sector at all):
+;*	  physical sector 1 (cyl 0, head 0, sector 1): this file itself.
+;*	  physical sector 2: a 9-byte header -- the same TY/LEN/ABS/MIN/
+;*	    MAX fields ROM.A86 itself reads (see that file's own `Ty`/
+;*	    `Len`/`Abs`/`Min`/`Max` declarations) -- LEN = MPMLDR.bin's
+;*	    size in bytes, ABS = the real-mode segment to load it at.
+;*	    The rest of this 512-byte sector is unused padding.
+;*	  physical sector 3 onward: MPMLDR.bin's own bytes, loaded
+;*	    starting at ABS:0000, continuing across tracks/heads for
+;*	    LEN bytes.
+;*	  (geometry: 80 cylinders * 2 heads * 18 sectors/track, 512
+;*	  bytes each -- the same floppy geometry src/kernel/XIOS86Q.A86
+;*	  and src/loader/LDBIOS86Q.A86 already target.)
+;*	Nothing writes this layout to an actual disk image yet -- see
+;*	docs/build.md's "What's actually needed to boot under QEMU"
+;*	item 4 for that remaining step.
+;*
+;*	KNOWN LIMITATIONS:
+;*	  - Minimal error handling: a few retries per sector (with a
+;*	    disk-system reset between attempts, standard BIOS floppy
+;*	    practice), then one short message and a halt loop -- no room
+;*	    in 512 bytes for ROM.A86's own detailed per-error-code
+;*	    message table.
+;*	  - Reads one physical sector per INT 13h call, even within the
+;*	    same track, to keep the CHS-advance logic simple; slower
+;*	    than it needs to be, which doesn't matter for a one-time
+;*	    boot read.
+;*
+;*	This file DID actually run under QEMU while being developed --
+;*	unlike everything else built in this project, which has only
+;*	ever been assembled and reviewed by hand. That testing caught a
+;*	real bug worth recording here: the header read (see "hdr_scratch"
+;*	below) originally landed in a 9-byte buffer declared inside this
+;*	module's own data area, but INT 13h always transfers a full
+;*	512-byte sector regardless of how much of it is meaningful --
+;*	the extra ~500 bytes silently overwrote every other variable and
+;*	string declared after that buffer (confirmed by watching `msg_boot`
+;*	itself read back as zero bytes after the header read). Fixed by
+;*	pointing the header read at a fixed scratch address outside this
+;*	module's own 512 bytes entirely, instead of a label inside it --
+;*	see "hdr_scratch" below. The body read (into `load_seg:0000`, a
+;*	separate segment devoted to MPMLDR) was never at risk the same
+;*	way, since nothing else lives there.
+;*
+;*****************************************************
+
+cr	equ	13
+lf	equ	10
+spt	equ	18		;physical sectors/track
+
+uart_rxtx	equ	03f8h
+uart_ier	equ	03f9h
+uart_lcr	equ	03fbh
+uart_mcr	equ	03fch
+uart_lsr	equ	03fdh
+uart_lsr_txrdy	equ	20h
+uart_divisor	equ	000ch	;9600 baud: 115200/9600
+
+;	Scratch address for the one-sector header read -- deliberately
+;	NOT a label inside this module's own data (see "KNOWN
+;	LIMITATIONS" above for why): 0500h is well clear of the IVT/BIOS
+;	data area (0000h-04FFh) and of this boot sector itself
+;	(7C00h-7DFFh), with nothing else of ours anywhere near it.
+hdr_scratch	equ	0500h
+
+	cseg
+	org	7c00h
+
+start:
+	cli
+	xor	ax,ax
+	mov	ds,ax
+	mov	ss,ax
+	mov	sp,7c00h	;stack grows down from our own code
+	sti
+	cld
+	mov	bootdrv,dl	;BIOS passes the boot drive number in DL
+
+	mov	al,80h ! mov dx,uart_lcr ! out dx,al	;set DLAB
+	mov	ax,uart_divisor
+	mov	dx,uart_rxtx ! out dx,al
+	mov	al,ah ! mov dx,uart_ier ! out dx,al
+	mov	al,03h ! mov dx,uart_lcr ! out dx,al	;8N1, DLAB off
+	mov	al,0 ! mov dx,uart_ier ! out dx,al
+	mov	al,03h ! mov dx,uart_mcr ! out dx,al	;assert DTR/RTS
+
+	mov	si,offset msg_boot
+	call	pmsg
+
+;	read the 9-byte header from physical sector 2 into hdr_scratch
+;	(NOT a label in this module's own data -- see "KNOWN
+;	LIMITATIONS" at the top of this file)
+
+	mov	cur_cyl,0
+	mov	cur_head,0
+	mov	cur_sector,2
+	xor	ax,ax
+	mov	es,ax
+	mov	bx,hdr_scratch
+	call	read_sector
+	jc	fatal
+
+	mov	ax,word ptr 1[bx]	;Len -- bx still = hdr_scratch,
+				; untouched by read_sector; indexed
+				; addressing, not "word ptr equ+n",
+				; since hdr_scratch is a bare EQU
+				; constant, not a label -- "word ptr
+				; hdr_scratch+1" silently resolved to
+				; the immediate 0x501 instead of a
+				; memory dereference (confirmed by
+				; testing this for real: body_len came
+				; back as 0x0501, not the real length)
+	mov	body_len,ax
+	mov	ax,word ptr 3[bx]	;Abs
+	mov	load_seg,ax
+	mov	entry_seg,ax
+
+;	advance to physical sector 3 (right after the header) and
+;	compute how many more sectors the body needs
+
+	call	advance_chs
+
+	mov	ax,body_len
+	add	ax,511
+	mov	cl,9
+	shr	ax,cl			;ax = ceil(len/512)
+	mov	sector_count,ax
+
+;	read the body, one physical sector at a time, into
+;	load_seg:0000, load_seg advancing by 32 (512/16) each sector
+
+readloop:
+	mov	cx,sector_count
+	jcxz	jump_in
+	mov	ax,load_seg
+	mov	es,ax
+	xor	bx,bx
+	call	read_sector
+	jc	fatal
+	mov	al,'.' ! call putc	;one progress dot per sector read
+	mov	ax,load_seg
+	add	ax,32
+	mov	load_seg,ax
+	mov	ax,sector_count
+	dec	ax
+	mov	sector_count,ax
+	call	advance_chs
+	jmp	readloop
+
+jump_in:
+	mov	si,offset msg_jmp ! call pmsg
+	mov	ax,entry_seg
+	mov	leap_seg,ax
+	jmpf	dword ptr leap_off
+
+;	advance cur_cyl/cur_head/cur_sector by one physical sector
+
+advance_chs:
+	mov	al,cur_sector
+	inc	al
+	cmp	al,spt+1
+	jb	sameside
+	mov	al,1
+	mov	cur_sector,al
+	mov	al,cur_head
+	xor	al,1
+	mov	cur_head,al
+	jnz	advance_done
+	inc	cur_cyl
+	jmp	advance_done
+sameside:
+	mov	cur_sector,al
+advance_done:
+	ret
+
+;	read one physical sector (CHS in cur_cyl/cur_head/cur_sector,
+;	drive in bootdrv) into ES:BX, retrying a few times with a
+;	disk-system reset between attempts; returns carry set on final
+;	failure
+
+read_sector:
+	push	bp		;retry counter -- NOT cx: cx itself
+	mov	bp,4		; holds cyl/sector for the INT 13h call
+				; below, so cx can't also hold a retry
+				; count without one clobbering the other
+tryread:
+	mov	ah,2
+	mov	al,1
+	mov	ch,cur_cyl
+	mov	cl,cur_sector
+	mov	dh,cur_head
+	mov	dl,bootdrv
+	int	13h
+	jnc	readok
+	dec	bp
+	jz	readfail
+	xor	ah,ah
+	mov	dl,bootdrv
+	int	13h		;reset disk system before retrying
+	jmp	tryread
+readok:
+	pop	bp
+	clc
+	ret
+readfail:
+	pop	bp
+	stc
+	ret
+
+pmsg:
+	lodsb
+	or	al,al
+	jz	pmsg_done
+	call	putc
+	jmp	pmsg
+pmsg_done:
+	ret
+
+putc:
+	push	ax
+	mov	dx,uart_lsr
+putc_wait:
+	in	al,dx
+	and	al,uart_lsr_txrdy
+	jz	putc_wait
+	pop	ax
+	mov	dx,uart_rxtx ! out dx,al
+	ret
+
+fatal:
+	mov	si,offset msg_fail
+	call	pmsg
+hang:
+	hlt
+	jmp	hang
+
+leap_off	dw	0
+leap_seg	dw	0
+
+bootdrv		db	0
+cur_cyl		db	0
+cur_head	db	0
+cur_sector	db	0
+body_len	dw	0
+load_seg	dw	0
+entry_seg	dw	0
+sector_count	dw	0
+
+msg_boot	db	cr,lf,'MPMLDR boot',cr,lf,0
+msg_fail	db	cr,lf,'Boot failed',cr,lf,0
+msg_jmp		db	'[jmp]',0
+
+	org	7c00h+510
+	db	55h,0aah
+
+	end

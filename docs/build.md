@@ -186,16 +186,54 @@ Shared includes pulled in by the modules above:
    geometry and kept in sync with `LDBIOS86Q.A86`'s own (see item 1;
    also noted in the top-level `Makefile`'s own `KERNEL_NEW := XIOS86Q`
    comment).
-3. A **new boot loader** replacing `04/ROM.A86`, compatible with however
-   QEMU presents the boot device (e.g. a floppy/IDE image via `-drive`),
-   since there is no BIOS abstraction to lean on in this source tree.
-   Not started.
+3. A **new boot sector** replacing `04/ROM.A86` — **done and verified
+   working in QEMU**: `src/loader/ROM86Q.A86`, a 512-byte PC boot
+   sector (built by `tools/build_bootsect.py` into
+   `build/loader/ROM86Q.bin`), since QEMU's SeaBIOS plays the role the
+   real iSBC 86/12's EPROM played and hands off to exactly this kind of
+   boot sector. Unlike item 2's XIOS replacement, this one *does* lean
+   on a BIOS abstraction (BIOS INT 13h) for disk I/O rather than a
+   from-scratch NEC765 driver — a deliberate choice (confirmed via
+   `AskUserQuestion`): at this exact point in the boot process
+   SeaBIOS's own floppy service is present and already working, so
+   there's no reason to pay for, or room in 512 bytes for, a second
+   copy of the driver `XIOS86Q.A86`/`LDBIOS86Q.A86` already carry.
+   Console output, however, is the same direct 8250 UART poll those
+   two files use, not BIOS INT 10h — switched to that after first
+   testing this file for real turned out to make observing the boot
+   process far simpler (see the file's own header comment). It reads a
+   new 9-byte header (reusing `ROM.A86`'s own `Ty`/`Len`/`Abs`/`Min`/
+   `Max` field layout) from the disk's second physical sector to learn
+   where and how much of `MPMLDR.bin` to load, then reads the body in
+   and jumps to it. That actual QEMU testing — the first in this whole
+   project — caught two real bugs, now fixed: see `docs/bugs.md` #12
+   (a `tools/asm86` port-truncation bug affecting every port >= 256 in
+   this tree) and #13 (a 512-byte disk read overflowing a 9-byte
+   buffer). See the file's own header comment for the exact disk
+   layout it expects and its remaining limitations.
 4. The kernel modules (section 2) and loader glue (section 3) rebuilt
-   against the new XIOS/loader, then combined — **done**: `make`
-   builds both `MPMLDR.bin` and the combined kernel image (item 1)
-   from exactly these pieces. What's still missing is turning those
-   into an actual bootable disk image in `LDMPM.A86`'s expected
-   on-disk `MPM.SYS` format (see item 1's note on this) and item 3's
-   boot loader to read it.
+   against the new XIOS/loader, then combined into an actual bootable
+   disk image — **done**: `make disk` (a separate target from plain
+   `make`, since it re-invokes the three scripts below itself) runs
+   `tools/build_disk.py`, which combines `ROM86Q.bin`, `MPMLDR.bin`,
+   and `MPM.bin.{cseg,dseg}` into one 1.44MB floppy image
+   (`build/disk/mpm86q.img`): boot sector in physical sector 1, the
+   loader header `ROM86Q.A86` reads in sector 2, `MPMLDR.bin` starting
+   at sector 3, then a real on-disk `MPM.SYS` file — built by hand to
+   the exact header format `LDMPM.A86`'s own code checks for, in a
+   real CP/M directory this script also builds by hand from the DPB
+   both `XIOS86Q.A86` and `LDBIOS86Q.A86` already carry. See that
+   script's own docstring for the full layout and the segments it
+   loads things at. **Actually tested in QEMU** (`make run`), unlike
+   everything else in this list except item 3's own boot sector: boots
+   through SeaBIOS, the boot sector prints its own startup message,
+   reads the loader header and all of `MPMLDR.bin`'s body sectors
+   (confirmed by its own per-sector progress dots), and jumps into
+   `MPMLDR`. Two real bugs were found and fixed this way — see
+   `docs/bugs.md` #12 and #13. What hasn't been confirmed yet is
+   `MPMLDR`/`LDBDOS.A86`/`LDBIOS86Q.A86` actually running correctly
+   past that jump (no console output was observed from that point
+   before this testing session ended) — that's the next thing to
+   verify, not a new piece of work to build.
 5. At minimum `SUBMIT.CMD` and a console RSP (section 4) to have a usable
    command line once booted; the utilities in section 5 to do real work.

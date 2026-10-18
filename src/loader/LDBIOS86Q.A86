@@ -149,15 +149,15 @@ INIT:
 	mov	sp,offset stkbase
 	cld
 
-	mov	al,80h ! out uart_lcr,al
+	mov	al,80h ! mov dx,uart_lcr ! out dx,al
 	mov	ax,uart_divisor
-	out	uart_rxtx,al
-	mov	al,ah ! out uart_ier,al
-	mov	al,03h ! out uart_lcr,al
-	mov	al,0 ! out uart_ier,al
-	mov	al,03h ! out uart_mcr,al
+	mov	dx,uart_rxtx ! out dx,al
+	mov	al,ah ! mov dx,uart_ier ! out dx,al
+	mov	al,03h ! mov dx,uart_lcr ! out dx,al
+	mov	al,0 ! mov dx,uart_ier ! out dx,al
+	mov	al,03h ! mov dx,uart_mcr ! out dx,al
 
-	mov	al,dor_ndreset+dor_drvsel_a ! out fdc_dor,al
+	mov	al,dor_ndreset+dor_drvsel_a ! mov dx,fdc_dor ! out dx,al
 	call	motor_delay
 	call	fdc_sense_int
 	mov	bx,offset specify_parms
@@ -174,7 +174,7 @@ WBOOT:
 ;*********************************************
 
 CONST:
-	in	al,uart_lsr
+	mov	dx,uart_lsr ! in al,dx
 	and	al,uart_lsr_rxrdy
 	mov	ah,0 ! jz const_nrdy
 	mov	al,0ffh
@@ -184,16 +184,16 @@ const_nrdy:
 CONIN:
 cin_wait:
 	call	CONST ! jz cin_wait
-	in	al,uart_rxtx
+	mov	dx,uart_rxtx ! in al,dx
 	ret
 
 CONOUT:
 cout_wait:
-	in	al,uart_lsr
+	mov	dx,uart_lsr ! in al,dx
 	and	al,uart_lsr_txrdy
 	jz	cout_wait
 	mov	al,cl
-	out	uart_rxtx,al
+	mov	dx,uart_rxtx ! out dx,al
 	ret
 
 LISTOUT:
@@ -327,8 +327,9 @@ WRITE:
 
 motor_delay:
 	mov	cx,0
+	mov	dx,fdc_msr
 md_loop:
-	    in	al,fdc_msr
+	    in	al,dx
 	    loop	md_loop
 	ret
 
@@ -375,8 +376,9 @@ fdc_seek_to:
 
 fdc_wait_seek:
 	mov	cx,0
+	mov	dx,fdc_msr
 fws_loop:
-	    in	al,fdc_msr
+	    in	al,dx
 	    test	al,msr_busy
 	    loopnz	fws_loop
 	call	fdc_sense_int
@@ -402,22 +404,28 @@ fsc_done:
 
 fdc_out_byte:
 	mov	cs:outbyte_tmp,al
+	push	dx
+	mov	dx,fdc_msr
 fob_wait:
-	in	al,fdc_msr
+	in	al,dx
 	and	al,msr_rqm+msr_dio
 	cmp	al,msr_rqm
 	jne	fob_wait
 	mov	al,cs:outbyte_tmp
-	out	fdc_data,al
+	mov	dx,fdc_data ! out dx,al
+	pop	dx
 	ret
 
 fdc_in_byte:
+	push	dx
+	mov	dx,fdc_msr
 fib_wait:
-	in	al,fdc_msr
+	in	al,dx
 	and	al,msr_rqm+msr_dio
 	cmp	al,msr_rqm+msr_dio
 	jne	fib_wait
-	in	al,fdc_data
+	mov	dx,fdc_data ! in al,dx
+	pop	dx
 	ret
 
 fdc_pio_in:

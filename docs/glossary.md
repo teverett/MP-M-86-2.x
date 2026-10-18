@@ -111,6 +111,12 @@ README) shows DRI already using "XIOS" for the exact same role one CPU
 generation earlier, for MP/M II's own 8080/Z80 systems — see
 `docs/orig.md`'s "Related DRI source: MP/M II" section.
 
+A new, from-scratch replacement targeting QEMU (serial console + floppy
+disk) now exists at `src/kernel/XIOS86Q.A86` — it assembles cleanly and
+implements the real kernel's exact calling contract, but has never
+actually run anywhere; see `docs/build.md` for its current status and
+the file's own header comment for what it does and doesn't cover.
+
 ## DDT86
 
 **D**ynamic **D**ebugging **T**ool for the 8086 — Digital Research's

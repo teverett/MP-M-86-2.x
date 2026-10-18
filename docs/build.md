@@ -104,15 +104,98 @@ Shared includes pulled in by the modules above:
 ## What's actually needed to boot under QEMU
 
 1. A working ASM86 assembler + `GENCMD` (or equivalents) to produce `.CMD`
-   files from this source — none exist in runnable form today.
-2. A **new XIOS** replacing `04/XIOS.A86`, targeting whichever QEMU machine
-   type and disk interface you pick (e.g. a generic 8086 PC using BIOS/INT
-   13h-style disk access instead of the SBC 204 port protocol).
+   files from this source — **this part now exists**: `tools/asm86/`
+   assembles this dialect (see `tools/README.md`), and all of
+   `BDOS.A86`/`MEM.A86`/`RTM.A86`/`SUP.A86`/`CIO.A86`/`SYSDAT.A86` and
+   all four loader modules now assemble cleanly end-to-end (see
+   `docs/bugs.md`). The loader piece specifically is also now
+   **combined**: `tools/build_mpmldr.py` re-does DRI's own
+   `orig/mpm862sr/04/MKALL.SUB` build step (`pip
+   mpmldr.h86=ldmpm.h86,ldbdos.h86,ldbios.h86` then `gencmd mpmldr 8080
+   code[a0400]`) without a real GENCMD, laying `LDMPM.A86`+
+   `LDBDOS.A86`+`LDBIOS86Q.A86`'s assembled code back-to-back into one
+   `MPMLDR.bin` (`make` builds it, under `build/loader/`). It had to
+   lay them out *sequentially* rather than at DRI's own fixed offsets
+   (`LDBDOS` at `0406h`, `LDBIOS` at `1200h`, hard-coded in `LDMPM.A86`
+   to patch an interrupt-table entry and reach `LDBIOS`'s own init
+   code): `tools/asm86`'s larger code (always disp16, always near
+   `JMP`/`CALL` — see `tools/README.md`) makes `LDBDOS.A86` alone
+   bigger than DRI's entire 3578-byte budget for it. The script keeps
+   `LDMPM.A86`'s own `ldbdos_offset`/`mldbios_offset` constants in sync
+   with wherever the pieces actually land, re-patching and
+   re-assembling `LDMPM.A86` automatically if a future `tools/asm86`
+   change moves them.
+
+   The real `04/LDBIOS.A86` (iSBC 86/12 + iSBC 204 FDC + 8251 UART) has
+   no QEMU equivalent, so `MPMLDR.bin` is built from a new
+   `src/loader/LDBIOS86Q.A86` instead -- same classic CP/M BIOS
+   jump-vector calling convention as the real file (so `LDBDOS.A86` is
+   unchanged), but reusing `src/kernel/XIOS86Q.A86`'s own NEC765/8250
+   driver code for the actual hardware access, and a from-scratch Disk
+   Parameter Block computed for the 80-cylinder/2-head/18-sector(512B),
+   4:1-deblocked floppy geometry both files now target (`SPT=72`,
+   8192-byte blocks, `DSM=176`, 64 directory entries -- `XIOS86Q.A86`'s
+   own DPB was updated to match exactly, since both read the same
+   on-disk filesystem). See that file's own header comment for the
+   full rationale and limitations (it inherits `XIOS86Q.A86`'s own
+   "never actually run" caveat).
+
+   The **kernel** side of the same job is also now done:
+   `tools/build_mpmsys.py` combines `SUP.A86`/`RTM.A86`/`MEM.A86`/
+   `CIO.A86`/`BDOS.A86`/`XIOS86Q.A86` (the real `XIOS.A86` is swapped
+   for the new one described in item 2 below, since the real one still
+   can't assemble at all — see `docs/bugs.md` #7) into one combined
+   code blob and one combined data blob (`make` builds both under
+   `build/kernel/`), patching `SYSDAT.A86`'s own module table (the
+   `supmod`/`rtmmod`/`memmod`/`ciomod`/`bdosmod`/`xiosmod` far pointers
+   every module's own `xiosif`/`mpmif`/`supif`-style trampoline calls
+   through) with each module's real, individually-queried `init`/
+   `entry` label addresses — there's no `GENSYS-86` source anywhere in
+   this distribution to copy a real recipe from (see `docs/orig.md`'s
+   "Related DRI source: MP/M II" for why), so this is a from-scratch
+   replacement informed by `SYSDAT.FMT`'s own module-table layout and
+   `LDMPM.A86`'s documented `MPM.SYS` file-format expectations. See the
+   script's own docstring for exactly what it does and doesn't handle
+   (a few `SYSDAT` "answers to GENSYS questions" fields, the
+   `dispatcher` far pointer's exact target, and the real on-disk
+   `MPM.SYS` header format are all flagged there as open items).
+
+   Investigating this surfaced a real, previously-undiscovered
+   correctness bug in `tools/asm86` along the way: `BDOS.A86`,
+   `MEM.A86`, and `CIO.A86` — all three already in the Makefile's
+   known-good list — were silently having their own `CSEG` header
+   overwritten with zero bytes by `UDA.FMT`'s `ESEG`/`ORG 0` (an
+   unrecognized `ESEG` directive fell through to being parsed as a
+   harmless label). Fixed; see `tools/README.md`.
+2. A **new XIOS** replacing `04/XIOS.A86` — **a first version now
+   exists**: `src/kernel/XIOS86Q.A86`, targeting a standard PC UART
+   (8250, polled, COM1) for the console and the standard PC floppy
+   controller (NEC 765/8272, PIO, CP/M-style 128-byte sectors deblocked
+   4:1 over 512-byte physical sectors) for disk, plus the 8253/8254 PIT
+   + 8259 PIC for the scheduler's timer tick. It implements the real
+   kernel's exact XIOS calling contract (confirmed against
+   `CIOIF.CIO`/`RTMIF.RTM`/`SUPIF.SUP`/`MEMIF.MEM`'s own call sites and
+   `XIOSCB.DEF`/`SYSDAT.FMT`/`MODFUNC.DEF`/`PD.DEF`) and assembles
+   cleanly with `tools/asm86`, but **has never actually run** — nothing
+   in this repo can execute 8086 code or drive QEMU, so the NEC765/8250
+   programming sequences follow the chips' own datasheets, not anything
+   verified against a real or emulated machine. See the file's own
+   header comment for the full list of simplifications (one console,
+   one floppy drive). Its disk parameter block, initially a flagged
+   placeholder, has since been computed properly for the target
+   geometry and kept in sync with `LDBIOS86Q.A86`'s own (see item 1;
+   also noted in the top-level `Makefile`'s own `KERNEL_NEW := XIOS86Q`
+   comment).
 3. A **new boot loader** replacing `04/ROM.A86`, compatible with however
    QEMU presents the boot device (e.g. a floppy/IDE image via `-drive`),
    since there is no BIOS abstraction to lean on in this source tree.
+   Not started.
 4. The kernel modules (section 2) and loader glue (section 3) rebuilt
-   against the new XIOS/loader, then combined into `MPM.SYS` /
-   `MPMLDR.CMD` as above.
+   against the new XIOS/loader, then combined — **done**: `make`
+   builds both `MPMLDR.bin` and the combined kernel image (item 1)
+   from exactly these pieces. What's still missing is turning those
+   into an actual bootable disk image in `LDMPM.A86`'s expected
+   on-disk `MPM.SYS` format (see item 1's note on this) and item 3's
+   boot loader to read it.
 5. At minimum `SUBMIT.CMD` and a console RSP (section 4) to have a usable
    command line once booted; the utilities in section 5 to do real work.

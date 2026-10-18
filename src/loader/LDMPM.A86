@@ -42,8 +42,20 @@ true		equ	not false
 cr		equ	0dh
 lf		equ	0ah
 
-ldbdos_offset	equ	406H		;offset of LDBDOS
-mldbios_offset	equ	1200h		;offset of LDBIOS
+;	The real DRI build (orig/mpm862sr/04/MKALL.SUB) packed LDBDOS at a
+;	fixed 0406h and LDBIOS at a fixed 1200h, leaving LDBDOS a 3578-byte
+;	budget -- sized for DRI's own ASM86's more compact code. This
+;	repo's own tools/asm86 (always disp16, always near JMP/CALL --
+;	see tools/README.md's "Design choices that trade size for
+;	simplicity") assembles LDBDOS.A86 to 3744 bytes, which no longer
+;	fits. tools/build_mpmldr.py lays the three modules out back-to-back
+;	instead and keeps these two constants in sync with wherever they
+;	actually land; the values below are current as of the last time it
+;	was run (LDMPM=1007, LDBDOS=3744 bytes -- see docs/build.md).
+ldbdos_offset	equ	3efh		;offset of LDBDOS (= size of LDMPM's
+					; own code, not a fixed DRI constant)
+mldbios_offset	equ	128fh		;offset of LDBIOS (= ldbdos_offset
+					; + size of LDBDOS's own code)
 bdos_int	equ	224		;lbdos interrupt number
 
 bootdrv		equ	0		; boot drive always zero

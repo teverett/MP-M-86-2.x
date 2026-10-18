@@ -209,6 +209,15 @@ each used exactly once. All patched. `LDBIOS.A86` now assembles
 end-to-end cleanly (the short-jump-range trade-off that used to block
 it afterward, see #6, is now fixed too).
 
+Separately (not a bug in this file, noted here only for
+cross-reference): `LDBIOS.A86`'s iSBC 86/12/iSBC 204/8251-specific
+disk and console drivers, like `XIOS.A86`'s own (#7), have no QEMU
+equivalent, so `tools/build_mpmldr.py` builds `MPMLDR.bin` from a new
+`src/loader/LDBIOS86Q.A86` instead — not a fix to this file, a parallel
+replacement targeting different hardware. See `docs/build.md`'s "What's
+actually needed to boot under QEMU" item 1 and that new file's own
+header comment.
+
 ## 9. `src/loader/LDMPM.A86` — underscore typo — FIXED
 
 Line 57, `abs_zero rw 2*bdosint`, used `bdosint` where `bdos_int` is

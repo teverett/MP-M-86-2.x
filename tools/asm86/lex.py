@@ -101,7 +101,7 @@ def _first_token(text):
 # Everything the lexer must recognise as "not a label" when scanning the
 # first word of a label-less statement.
 DIRECTIVES = {
-    'title', 'name', 'cseg', 'dseg', 'aseg', 'org', 'equ', 'db', 'byte',
+    'title', 'name', 'cseg', 'dseg', 'aseg', 'eseg', 'org', 'equ', 'db', 'byte',
     'dw', 'word', 'dd', 'rb', 'rw', 'rs', 'end', 'include', 'if', 'endif', 'eject',
     'page', 'public', 'extrn', 'global',
 }

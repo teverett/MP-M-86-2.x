@@ -1,0 +1,526 @@
+;*****************************************************
+;*
+;*	L D B I O S 8 6 Q  -  a new LDBIOS for the MP/M-86 loader
+;*	under QEMU
+;*	=========================================================
+;*
+;*	Not DRI source. Written for this project, replacing the
+;*	real LDBIOS.A86's "LDBIOS for LDMPM Configured for iSBC
+;*	86/12 with the iSBC 204 Floppy Disk Controller" (its own
+;*	title line) the same way src/kernel/XIOS86Q.A86 replaces
+;*	XIOS.A86 -- same QEMU target (standard PC UART @ 03F8h for
+;*	the console, standard PC floppy controller, NEC 765/8272,
+;*	@ 03F0h for disk, PIO, no DMA), and in fact the exact same
+;*	NEC765/UART driver *code* (lightly adapted for this file's
+;*	own register conventions -- see below), not just the same
+;*	design: there was no reason to re-derive and re-review it
+;*	twice. See XIOS86Q.A86's own header comment for the design
+;*	rationale and limitations that carry over unchanged.
+;*
+;*	LDBIOS.A86's own calling convention is the classic CP/M
+;*	BIOS jump-vector table (INIT/WBOOT/CONST/CONIN/CONOUT/...
+;*	at fixed, sequential 3-byte-apart offsets from the start of
+;*	the file) confirmed against LDBDOS.A86's own include chain
+;*	and against the real LDBIOS.A86 itself -- a different
+;*	convention from XIOS's AL-dispatched function table, with
+;*	a few per-function register differences (SELDSK returns the
+;*	DPH address in BX here, not AX), kept identical to the real
+;*	LDBIOS.A86 for compatibility with LDBDOS.A86, which this file
+;*	does not change at all.
+;*
+;*	INIT/WBOOT's real LDBIOS.A86 behavior ("jmp ccp", a straight
+;*	CP/M cold/warm-boot jump) is dead code in the MP/M-86 loader
+;*	context per that file's own header comment ("The only
+;*	modifications of the CP/M-86 LDBIOS for this MP/M-86 LDBIOS
+;*	are the CCP offset and the signon message... printed by
+;*	LDMPM.A86 in place of the INIT routine") -- LDMPM.A86 never
+;*	calls LDBIOS's INIT this way, it reaches LDBIOS only through
+;*	LDBDOS's own specific function calls. INIT here is cut down
+;*	to just arming the hardware, no "ccp" jump target exists in
+;*	this context to jump to.
+;*
+;*	KNOWN LIMITATIONS (also see XIOS86Q.A86's own, which this
+;*	inherits in full for the shared disk/console driver code):
+;*	  - Only one drive (disk 0); the real LDBIOS.A86 supported
+;*	    two. SELDSK returns 0 (invalid) for any other drive.
+;*	  - The one DPB/DPE below is a complete, self-consistent
+;*	    geometry for the same 80-cylinder/2-head/18-sector(512B)/
+;*	    4:1-deblocked floppy XIOS86Q.A86 targets (SPT=72 128-byte
+;*	    records/track, 8192-byte blocks, DSM=176, 64 directory
+;*	    entries) -- but nothing has actually formatted a disk
+;*	    image to this geometry yet, and LDBDOS.A86's own
+;*	    directory-search logic that uses this DPB to find
+;*	    "MPM.SYS" has not been exercised at all (same "assembles,
+;*	    never executed" caveat as everything else built this way).
+;*
+;*****************************************************
+
+true		equ -1
+false		equ not true
+cr		equ	0dh
+lf		equ	0ah
+
+;*****************************************************
+;*	UART (8250/16450) EQUATES -- COM1, polled, 9600 8N1
+;*	(identical to XIOS86Q.A86's own -- see its comments)
+;*****************************************************
+
+uart_base	equ	03f8h
+uart_rxtx	equ	uart_base+0
+uart_ier	equ	uart_base+1
+uart_lcr	equ	uart_base+3
+uart_mcr	equ	uart_base+4
+uart_lsr	equ	uart_base+5
+uart_lsr_rxrdy	equ	01h
+uart_lsr_txrdy	equ	20h
+uart_divisor	equ	000ch
+
+;*****************************************************
+;*	FLOPPY (NEC 765/8272) EQUATES -- identical to
+;*	XIOS86Q.A86's own
+;*****************************************************
+
+fdc_base	equ	03f0h
+fdc_dor		equ	fdc_base+2
+fdc_msr		equ	fdc_base+4
+fdc_data	equ	fdc_base+5
+fdc_ccr		equ	fdc_base+7
+msr_rqm		equ	80h
+msr_dio		equ	40h
+msr_busy	equ	10h
+dor_mota	equ	10h
+dor_ndreset	equ	04h
+dor_dmaen	equ	08h
+dor_drvsel_a	equ	00h
+cmd_specify	equ	03h
+cmd_recal	equ	07h
+cmd_sense_int	equ	08h
+cmd_seek	equ	0fh
+cmd_read	equ	46h
+cmd_write	equ	45h
+fd_heads	equ	2
+fd_spt		equ	18
+fd_secsize_n	equ	2
+fd_secsize	equ	512
+fd_gap3		equ	01bh
+fd_dtl		equ	0ffh
+
+	cseg
+	org	0
+
+;*********************************************
+;*                                           *
+;* BIOS Jump Vector for Individual Routines  *
+;* -- same fixed order as the real LDBIOS.A86*
+;*                                           *
+;*********************************************
+
+	jmp	INIT
+	jmp	WBOOT
+	jmp	CONST
+	jmp	CONIN
+	jmp	CONOUT
+	jmp	LISTOUT
+	jmp	PUNCH
+	jmp	READER
+	jmp	HOME
+	jmp	SELDSK
+	jmp	SETTRK
+	jmp	SETSEC
+	jmp	SETDMA
+	jmp	READ
+	jmp	WRITE
+	jmp	LISTST
+	jmp	SECTRAN
+	jmp	SETDMAB
+	jmp	GETSEGT
+	jmp	GETIOBF
+	jmp	SETIOBF
+
+;*********************************************
+;*	INIT -- arm the hardware. No "ccp" jump
+;*	target exists in this context; see this
+;*	file's own header comment on why.
+;*********************************************
+
+INIT:
+	mov	ax,cs
+	mov	ss,ax ! mov ds,ax ! mov es,ax
+	mov	sp,offset stkbase
+	cld
+
+	mov	al,80h ! out uart_lcr,al
+	mov	ax,uart_divisor
+	out	uart_rxtx,al
+	mov	al,ah ! out uart_ier,al
+	mov	al,03h ! out uart_lcr,al
+	mov	al,0 ! out uart_ier,al
+	mov	al,03h ! out uart_mcr,al
+
+	mov	al,dor_ndreset+dor_drvsel_a ! out fdc_dor,al
+	call	motor_delay
+	call	fdc_sense_int
+	mov	bx,offset specify_parms
+	call	fdc_send_cmd
+
+	ret
+
+WBOOT:
+	ret
+
+;*********************************************
+;*	CONSOLE I/O -- same UART driver as
+;*	XIOS86Q.A86's const/conin/conout
+;*********************************************
+
+CONST:
+	in	al,uart_lsr
+	and	al,uart_lsr_rxrdy
+	mov	ah,0 ! jz const_nrdy
+	mov	al,0ffh
+const_nrdy:
+	ret
+
+CONIN:
+cin_wait:
+	call	CONST ! jz cin_wait
+	in	al,uart_rxtx
+	ret
+
+CONOUT:
+cout_wait:
+	in	al,uart_lsr
+	and	al,uart_lsr_txrdy
+	jz	cout_wait
+	mov	al,cl
+	out	uart_rxtx,al
+	ret
+
+LISTOUT:
+LISTST:
+	ret
+
+PUNCH:
+READER:
+	mov	al,1ah
+	ret
+
+GETIOBF:
+	xor	al,al
+	ret
+
+SETIOBF:
+	ret
+
+;	utility: print a null-terminated message at BX
+
+pmsg:
+	mov	al,[bx]
+	or	al,al ! jz pmsg_done
+	mov	cl,al
+	call	CONOUT
+	inc	bx
+	jmps	pmsg
+pmsg_done:
+	ret
+
+;*********************************************
+;*	DISK I/O -- SELDSK/HOME/SETTRK/SETSEC/
+;*	SETDMA/SETDMAB/SECTRAN/GETSEGT match the
+;*	real LDBIOS.A86's own register conventions
+;*	exactly (SELDSK returns the DPH address in
+;*	BX, not AX, unlike XIOS86Q's SELDSK); the
+;*	actual transfer mechanics (fdc_* below) are
+;*	XIOS86Q.A86's own floppy driver verbatim.
+;*********************************************
+
+SELDSK:
+	xor	bx,bx
+	cmp	cl,0 ! jne return
+	mov	disk,0
+	mov	bx,offset dpe0
+return:
+	ret
+
+HOME:
+	mov	trk,0
+	mov	bx,offset recal_parms
+	call	fdc_send_cmd
+	call	fdc_wait_seek
+	ret
+
+SETTRK:
+	mov	trk,cl
+	ret
+
+SETSEC:
+	mov	sect,cl
+	ret
+
+SECTRAN:
+	cmp	dx,0 ! jne sectran1
+	    mov	ax,cx ! ret
+sectran1:
+	mov	bx,cx ! add bx,dx
+	mov	bl,[bx] ! xor bh,bh
+	mov	ax,bx
+	ret
+
+SETDMA:
+	mov	dma_adr,cx
+	ret
+
+SETDMAB:
+	mov	dma_seg,cx
+	ret
+
+GETSEGT:
+	mov	bx,offset segtable
+	ret
+
+READ:
+	call	rw_physical
+	call	fdc_seek_to
+	call	fdc_fill_rw_parms
+	mov	bx,offset read_parms
+	call	fdc_send_cmd
+	call	fdc_pio_in
+	call	fdc_sense_int
+	push	si ! push di ! push ds ! push es
+	mov	si,offset secbuf ! add si,cur_bufoff
+	push	cs ! pop ds
+	mov	di,dma_adr ! mov es,dma_seg
+	mov	cx,128 ! rep movsb
+	pop	es ! pop ds ! pop di ! pop si
+	xor	al,al
+	ret
+
+WRITE:
+	call	rw_physical
+	call	fdc_seek_to
+	call	fdc_fill_rw_parms
+	mov	bx,offset read_parms
+	call	fdc_send_cmd
+	call	fdc_pio_in
+	call	fdc_sense_int
+	push	si ! push di ! push ds ! push es
+	mov	di,offset secbuf ! add di,cur_bufoff
+	mov	si,dma_adr ! push cs ! pop es
+	mov	ds,dma_seg
+	mov	cx,128 ! rep movsb
+	pop	es ! pop ds ! pop di ! pop si
+	call	fdc_fill_rw_parms
+	mov	bx,offset write_parms
+	call	fdc_send_cmd
+	call	fdc_pio_out
+	call	fdc_sense_int
+	xor	al,al
+	ret
+
+;*********************************************
+;*	FLOPPY CONTROLLER DRIVER -- verbatim from
+;*	XIOS86Q.A86 (see that file's own comments
+;*	on each routine); only HOME/READ/WRITE
+;*	above call into this differently, to match
+;*	LDBIOS.A86's own entry points.
+;*********************************************
+
+motor_delay:
+	mov	cx,0
+md_loop:
+	    in	al,fdc_msr
+	    loop	md_loop
+	ret
+
+rw_physical:
+	mov	al,sect ! dec al
+	mov	ah,0
+	mov	bl,4 ! div bl
+	mov	cur_psec,al
+	inc	cur_psec
+	mov	bl,ah ! mov bh,0
+	shl	bx,1 ! shl bx,1 ! shl bx,1 ! shl bx,1 ! shl bx,1 ! shl bx,1 ! shl bx,1
+	mov	cur_bufoff,bx
+	mov	al,trk
+	mov	ah,0
+	mov	cl,fd_heads ! div cl
+	mov	cur_cyl,al
+	mov	cur_head,ah
+	ret
+
+fdc_fill_rw_parms:
+	mov	al,cur_head ! mov cl,2 ! shl al,cl
+	mov	byte ptr read_parms+2,al
+	mov	byte ptr write_parms+2,al
+	mov	al,cur_cyl
+	mov	byte ptr read_parms+3,al
+	mov	byte ptr write_parms+3,al
+	mov	al,cur_head
+	mov	byte ptr read_parms+4,al
+	mov	byte ptr write_parms+4,al
+	mov	al,cur_psec
+	mov	byte ptr read_parms+5,al
+	mov	byte ptr write_parms+5,al
+	ret
+
+fdc_seek_to:
+	mov	al,cur_head ! mov cl,2 ! shl al,cl
+	mov	byte ptr seek_parms+2,al
+	mov	al,cur_cyl
+	mov	byte ptr seek_parms+3,al
+	mov	bx,offset seek_parms
+	call	fdc_send_cmd
+	call	fdc_wait_seek
+	ret
+
+fdc_wait_seek:
+	mov	cx,0
+fws_loop:
+	    in	al,fdc_msr
+	    test	al,msr_busy
+	    loopnz	fws_loop
+	call	fdc_sense_int
+	ret
+
+fdc_sense_int:
+	mov	al,cmd_sense_int
+	call	fdc_out_byte
+	call	fdc_in_byte
+	call	fdc_in_byte
+	ret
+
+fdc_send_cmd:
+	mov	cl,[bx]
+	or	cl,cl ! jz fsc_done
+fsc_loop:
+	inc	bx
+	mov	al,[bx]
+	call	fdc_out_byte
+	dec	cl ! jnz fsc_loop
+fsc_done:
+	ret
+
+fdc_out_byte:
+	mov	cs:outbyte_tmp,al
+fob_wait:
+	in	al,fdc_msr
+	and	al,msr_rqm+msr_dio
+	cmp	al,msr_rqm
+	jne	fob_wait
+	mov	al,cs:outbyte_tmp
+	out	fdc_data,al
+	ret
+
+fdc_in_byte:
+fib_wait:
+	in	al,fdc_msr
+	and	al,msr_rqm+msr_dio
+	cmp	al,msr_rqm+msr_dio
+	jne	fib_wait
+	in	al,fdc_data
+	ret
+
+fdc_pio_in:
+	mov	di,offset secbuf
+	mov	cx,fd_secsize
+pio_in_loop:
+	    call	fdc_in_byte
+	    mov	cs:[di],al
+	    inc	di
+	    loop	pio_in_loop
+	mov	cx,7
+pio_in_res:
+	    call	fdc_in_byte
+	    loop	pio_in_res
+	ret
+
+fdc_pio_out:
+	mov	si,offset secbuf
+	mov	cx,fd_secsize
+pio_out_loop:
+	    mov	al,cs:[si]
+	    call	fdc_out_byte
+	    inc	si
+	    loop	pio_out_loop
+	mov	cx,7
+pio_out_res:
+	    call	fdc_in_byte
+	    loop	pio_out_res
+	ret
+
+;*********************************************
+;*                                           *
+;*               Data Areas                  *
+;*                                           *
+;*********************************************
+
+	dseg
+
+signon	db	cr,lf,cr,lf,'MP/M-86 Loader -- LDBIOS86Q (QEMU)',cr,lf,0
+
+disk		db	0
+trk		db	0
+sect		db	0
+dma_adr		dw	0
+dma_seg		dw	0
+cur_cyl		db	0
+cur_head	db	0
+cur_psec	db	0
+cur_bufoff	dw	0
+outbyte_tmp	db	0
+
+specify_parms	db	3,cmd_specify,0dfh,03h
+recal_parms	db	2,cmd_recal,0
+seek_parms	db	3,cmd_seek,0,0
+read_parms	db	9,cmd_read,0,0,0,0,fd_secsize_n,fd_spt,fd_gap3,fd_dtl
+write_parms	db	9,cmd_write,0,0,0,0,fd_secsize_n,fd_spt,fd_gap3,fd_dtl
+
+secbuf		rb	fd_secsize
+
+;	System Memory Segment Table (GETSEGT)
+
+segtable	db	1
+		dw	tpa_seg
+		dw	tpa_len
+
+;	Disk Parameter Block/Header -- 80 cyl, 2 heads, 18
+;	physical (512-byte) sectors/track, 4:1 deblocked into
+;	128-byte logical records: 160 CP/M "tracks" (one per
+;	physical head) of 72 logical records each; 2 reserved
+;	tracks; 8192-byte (64-record) allocation blocks; 64
+;	directory entries (fits in block 0 alone, so AL0=80h,
+;	AL1=0); DSM computed as (160-2)*72/64 - 1 = 176.
+
+	org	((offset $)+0fh) and 0fff0h
+
+dpe0	dw	xlt0,0000h
+	dw	0000h,0000h
+	dw	dirbuf,dpb0
+	dw	csv0,alv0
+
+dpb0	equ	offset $
+	dw	72		;SPT
+	db	6		;BSH (8192-byte blocks)
+	db	63		;BLM
+	db	0		;EXM
+	dw	176		;DSM-1
+	dw	63		;DRM-1 (64 entries)
+	db	80h		;AL0
+	db	0		;AL1
+	dw	16		;CKS (removable disk)
+	dw	2		;OFF (reserved tracks)
+
+xlt0	equ	0		;no sector translation
+
+alv0	rb	(176/8)+1
+csv0	rb	16
+dirbuf	rb	128
+
+stkbase_area	rw	32
+stkbase	equ	offset $
+
+lastoff		equ	offset $
+tpa_seg		equ	(lastoff+0400h+15) / 16
+tpa_len		equ	2000h-tpa_seg
+
+	END

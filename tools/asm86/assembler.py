@@ -8,7 +8,7 @@ from .expr import ExprCtx, eval_tokens, eval_text, Symbol, parse_operand
 from . import isa
 
 DIRECTIVE_NAMES = {
-    'title', 'name', 'cseg', 'dseg', 'aseg', 'org', 'equ', 'db', 'byte',
+    'title', 'name', 'cseg', 'dseg', 'aseg', 'eseg', 'org', 'equ', 'db', 'byte',
     'dw', 'word', 'dd', 'rb', 'rw', 'rs', 'end', 'include', 'if', 'endif', 'eject',
     'page', 'public', 'extrn', 'global',
 }
@@ -334,6 +334,23 @@ class Assembler:
             return
         if low == 'aseg':
             self.switch_seg('aseg')
+            return
+        if low == 'eseg':
+            # ASM86's third real segment type (alongside CSEG/DSEG),
+            # used by UDA.FMT for the User Data Area, which lives at
+            # the ES-relative offset documented in its own header
+            # comment ("the Extra Segment register points to the
+            # beginning of the User Data Area") -- not a directive
+            # this assembler recognized at all before. Without this,
+            # "eseg" fell through to being parsed as a harmless bare
+            # label, and the "org 0" immediately following it (see
+            # UDA.FMT) then reset whatever segment was *actually*
+            # active at that point -- corrupting the start of CSEG in
+            # BDOS.A86/MEM.A86/CIO.A86 (all three include UDA.FMT),
+            # confirmed by their assembled output literally starting
+            # with the zero bytes UDA.FMT's own RB reservations wrote
+            # over the real "JMP init / JMP entry" header with.
+            self.switch_seg('eseg')
             return
 
         if low == 'org':

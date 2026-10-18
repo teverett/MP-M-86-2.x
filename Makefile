@@ -47,19 +47,60 @@ RSP_OK := ECHO
 # fix available and is deliberately not attempted here.
 KERNEL_OK := CIO SYSDAT BDOS MEM RTM SUP
 
-# --- Loader: all four loader modules now assemble cleanly (docs/bugs.md
+# --- XIOS86Q.A86: a new, from-scratch XIOS targeting QEMU (serial
+# console + floppy disk), replacing the real XIOS.A86's Intel SBC
+# 204/534-specific drivers that have no QEMU equivalent. Assembles
+# cleanly, but -- unlike everything else in this Makefile -- has never
+# actually run: there's no way to execute 8086 code or drive QEMU from
+# here. See the "KNOWN LIMITATIONS" comment at the top of the file
+# itself before relying on it. Its own disk parameter block (dpb0) was
+# originally a flagged placeholder with the wrong SPT; it's since been
+# recomputed for the real target geometry and kept identical to
+# src/loader/LDBIOS86Q.A86's own DPB, since both read the same on-disk
+# filesystem.
+KERNEL_NEW := XIOS86Q
+
+# --- Loader: all four real loader modules assemble cleanly (docs/bugs.md
 # #8/#9/#10, each turning out to be the same name-mismatch bug class
 # once looked at more closely, plus jump-size relaxation).
 LOADER_OK := LDBDOS LDBIOS LDMPM ROM
+
+# --- LDBIOS86Q.A86: a new, from-scratch LDBIOS targeting QEMU, replacing
+# the real LDBIOS.A86's iSBC 86/12-specific drivers for MPMLDR.bin's own
+# use the same way XIOS86Q.A86 replaces XIOS.A86 for MPM.bin -- see that
+# file's own header comment for the rationale and limitations.
+LOADER_NEW := LDBIOS86Q
+
+# --- MPMLDR.bin: LDMPM/LDBDOS/LDBIOS86Q combined into one loadable image
+# by tools/build_mpmldr.py, DRI's own "pip the three modules' hex
+# together, then GENCMD" build step (orig/mpm862sr/04/MKALL.SUB)
+# re-done without GENCMD -- see that script's own docstring and
+# docs/build.md for why it lays the pieces out differently than DRI did,
+# and LDBIOS86Q.A86's own header comment for why it replaces LDBIOS.A86
+# here.
+MPMLDR_BIN := $(BUILD)/loader/MPMLDR.bin
+
+# --- MPM.bin{.cseg,.dseg}: SUP/RTM/MEM/CIO/BDOS/XIOS86Q combined into
+# one kernel image by tools/build_mpmsys.py -- the kernel-side
+# counterpart of MPMLDR_BIN above, replacing GENSYS-86 (whose source
+# was never part of this distribution -- see that script's own
+# docstring and docs/build.md). Both output files come from one
+# invocation of that script; tracked via a stamp file (portable across
+# make versions -- GNU Make's own multiple-output "&:" grouped-target
+# syntax needs 4.3+, not guaranteed on every OS this builds on).
+MPMSYS_STAMP := $(BUILD)/kernel/.mpmsys.stamp
+MPMSYS_BIN := $(BUILD)/kernel/MPM.bin.cseg $(BUILD)/kernel/MPM.bin.dseg
 
 PLM_UTILS_BIN      := $(addprefix $(BUILD)/utils/,$(addsuffix .cseg.bin,$(PLM_UTILS)))
 PLM_TOOLCHAIN_BIN   := $(addprefix $(BUILD)/toolchain/,$(addsuffix .cseg.bin,$(PLM_TOOLCHAIN_OK)))
 PLM_PARTIAL_GEN     := $(addprefix $(BUILD)/toolchain/,$(addsuffix .gen.A86,$(PLM_TOOLCHAIN_PARTIAL)))
 RSP_BIN             := $(addprefix $(BUILD)/rsp/,$(addsuffix .cseg.bin,$(RSP_OK)))
 KERNEL_BIN          := $(addprefix $(BUILD)/kernel/,$(addsuffix .cseg.bin,$(KERNEL_OK)))
+KERNEL_NEW_BIN      := $(addprefix $(BUILD)/kernel/,$(addsuffix .cseg.bin,$(KERNEL_NEW)))
 LOADER_BIN          := $(addprefix $(BUILD)/loader/,$(addsuffix .cseg.bin,$(LOADER_OK)))
+LOADER_NEW_BIN      := $(addprefix $(BUILD)/loader/,$(addsuffix .cseg.bin,$(LOADER_NEW)))
 
-ALL_GOOD := $(PLM_UTILS_BIN) $(PLM_TOOLCHAIN_BIN) $(RSP_BIN) $(KERNEL_BIN) $(LOADER_BIN)
+ALL_GOOD := $(PLM_UTILS_BIN) $(PLM_TOOLCHAIN_BIN) $(RSP_BIN) $(KERNEL_BIN) $(KERNEL_NEW_BIN) $(LOADER_BIN) $(LOADER_NEW_BIN) $(MPMLDR_BIN) $(MPMSYS_BIN)
 
 .PHONY: all partial clean
 all: $(ALL_GOOD)
@@ -101,6 +142,21 @@ $(BUILD)/kernel/%.cseg.bin: src/kernel/%.A86 | $(BUILD)/kernel
 
 $(BUILD)/loader/%.cseg.bin: src/loader/%.A86 | $(BUILD)/loader
 	$(ASM86) $< -o $(BUILD)/loader/$*
+
+# -- MPMLDR.bin depends on all three loader modules' own sources (not
+# just their .cseg.bin -- the script re-assembles LDMPM itself if it
+# patches its offset constants) plus the build script.
+$(MPMLDR_BIN): src/loader/LDMPM.A86 src/loader/LDBDOS.A86 src/loader/LDBIOS86Q.A86 tools/build_mpmldr.py | $(BUILD)/loader
+	$(PYTHON) tools/build_mpmldr.py -o $@
+
+# -- Both MPM.bin{.cseg,.dseg} come from one invocation of
+# build_mpmsys.py; the stamp file is what actually carries the
+# dependency, so two output files never trigger two separate runs.
+$(MPMSYS_STAMP): src/kernel/SYSDAT.A86 src/kernel/SUP.A86 src/kernel/RTM.A86 src/kernel/MEM.A86 src/kernel/CIO.A86 src/kernel/BDOS.A86 src/kernel/XIOS86Q.A86 tools/build_mpmsys.py | $(BUILD)/kernel
+	$(PYTHON) tools/build_mpmsys.py -o $(BUILD)/kernel/MPM.bin
+	touch $@
+
+$(BUILD)/kernel/MPM.bin.cseg $(BUILD)/kernel/MPM.bin.dseg: $(MPMSYS_STAMP)
 
 $(BUILD)/utils $(BUILD)/toolchain $(BUILD)/rsp $(BUILD)/kernel $(BUILD)/loader:
 	mkdir -p $@

@@ -196,6 +196,26 @@ defects rather than any of this:
   total emitted byte length (`Assembler.lengths`, keyed by label) and
   adding a `LENGTH` unary operator to the expression parser, parallel
   to the existing `OFFSET` handling.
+- **`ESEG`** (ASM86's third real segment, alongside `CSEG`/`DSEG` —
+  used by `UDA.FMT` for the User Data Area, ES-relative per its own
+  header comment) wasn't recognized as a directive at all. This one
+  was a real, silent **correctness bug**, not just a missing feature:
+  an unrecognized `ESEG` fell through to being parsed as a harmless
+  bare label, so the `ORG 0` immediately following it in `UDA.FMT`
+  reset whatever segment was *actually* active at that point instead —
+  and since `UDA.FMT` is included partway through `BDOS.A86`/
+  `MEM.A86`/`CIO.A86` (after their own `CSEG`/`JMP init`/`JMP entry`
+  header had already been written), `UDA.FMT`'s own `RB` reservations
+  then overwrote that header with zero bytes. All three files were
+  already in the Makefile's known-good list, assembling without error
+  this whole time — "assembles cleanly" and "is correct" turned out not
+  to be the same claim here. Found while investigating the kernel-side
+  module combiner (see `docs/build.md`); confirmed by checking the
+  first bytes of the previously-"working" `.cseg.bin` output directly,
+  not just by the assembler's own success/failure. Fixed by giving
+  `ESEG` the same treatment as `ASEG`: its own real segment, with its
+  own location counter, written out as a separate `.eseg.bin`.
+  `LOAD.SUP`/`BASEP.FMT` also use `ESEG`, and are fixed the same way.
 
 ## Known limitations
 
@@ -256,3 +276,13 @@ bug class) were all patched; the short-jump-range issue that used to
 additionally block some of these is fixed the same way as the kernel
 files above (real relaxation, no source patch needed). `ROM.A86` also
 needed the new `LENGTH` operator support described above.
+
+`src/loader/LDBIOS86Q.A86` is a new file, not DRI source: a QEMU-target
+replacement for `LDBIOS.A86` (standard PC UART + NEC765 floppy
+controller instead of the iSBC 86/12's i8251/i8271 hardware), reusing
+`src/kernel/XIOS86Q.A86`'s own NEC765/UART driver code behind
+`LDBIOS.A86`'s own classic CP/M BIOS jump-vector calling convention so
+`LDBDOS.A86` needs no changes. See its own header comment for the
+rationale and limitations, and `docs/build.md`'s "What's actually
+needed to boot under QEMU" item 1 for how it's wired into
+`tools/build_mpmldr.py`.

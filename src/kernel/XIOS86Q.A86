@@ -1,0 +1,1000 @@
+;*****************************************************
+;*
+;*	X I O S 8 6 Q  -  a new XIOS for MP/M-86 under QEMU
+;*	=====================================================
+;*
+;*	Not DRI source. Written for this project, targeting:
+;*	  - console: standard PC UART (8250/16450), COM1 @ 03F8h,
+;*	    polled (no interrupts)
+;*	  - disk: standard PC floppy controller (NEC 765/8272)
+;*	    @ 03F0h, one drive, PIO (no DMA), CP/M-style 128-byte
+;*	    logical sectors deblocked 4:1 over 512-byte physical
+;*	    sectors (80 tracks, 2 heads, 18 sectors/track -- a
+;*	    standard 1.44MB 3.5" floppy geometry)
+;*	  - timer: standard PC 8253/8254 PIT (channel 0) + 8259
+;*	    PIC IRQ0, reprogrammed for 60 ticks/second
+;*
+;*	The real XIOS.A86 (orig/mpm862sr/.../XIOS.A86, also in
+;*	this tree) targets Intel SBC 204 (8271 FDC) + SBC 534
+;*	serial hardware -- neither exists in QEMU, so none of
+;*	that device-specific code could be reused; only the
+;*	*interface contract* below is intentionally identical
+;*	to it (confirmed against the real kernel's own call
+;*	sites in CIOIF.CIO/RTMIF.RTM/SUPIF.SUP/MEMIF.MEM and
+;*	against XIOSCB.DEF/SYSDAT.FMT/MODFUNC.DEF/PD.DEF), so
+;*	the rest of the kernel (BDOS/RTM/SUP/MEM/CIO) can call
+;*	into this exactly as it would the real XIOS.A86. See
+;*	docs/build.md and docs/bugs.md for how this fits in.
+;*
+;*	Register convention for the 25 functions below (same
+;*	as the real XIOS.A86):
+;*		input:	AL = function # (into ENTRY)
+;*			CX = parameter
+;*			DX = second parameter
+;*			DS = sysdat (in ENTRY/INIT), CS elsewhere
+;*			ES = user's data area
+;*		output:	AX = BX = return
+;*			ES, DS preserved across the call
+;*
+;*	KNOWN LIMITATIONS (see tools/README.md and docs/bugs.md
+;*	for the matching entries once filed):
+;*	  - Single console (console 0 only); maxconsole = 1.
+;*	  - No list/punch/reader device; maxlist = 0, and
+;*	    PUNCH/READER/LIST/LISTST are stubs (DRI's own
+;*	    XIOSCB.DEF already marks PUNCH/READER/LISTST/GETSEGT
+;*	    "not used" by the rest of the kernel).
+;*	  - Single floppy drive (logical disk 0 only).
+;*	  - The disk geometry/DPB below is a placeholder -- the
+;*	    real system-generation tool (GENSYS-86-equivalent,
+;*	    not yet built -- see docs/build.md) is what should
+;*	    normally compute and own this, not XIOS itself.
+;*	  - This has been assembled with tools/asm86 but never
+;*	    executed: nothing in this repo can run real 8086 code
+;*	    or drive QEMU, so the device-programming sequences
+;*	    below follow the NEC 765/8272 and 8250 UART datasheets
+;*	    as documented, not anything verified against a real
+;*	    or emulated machine.
+;*
+;*****************************************************
+
+	include system.def
+	eject ! include modfunc.def
+	eject ! include xioscb.def
+	eject ! include pd.def
+
+cr	equ	0dh
+lf	equ	0ah
+
+;	Device # assignments for POLL DEVICE/rtm_poll (same
+;	scheme as the real XIOS.A86, trimmed to what this one
+;	actually implements).
+
+c0indev		equ	00h	;console 0 input
+c0outdev	equ	04h	;console 0 output
+flpy_poll_dev	equ	09h	;floppy disk
+
+;	Flag bit assignments (same as the real XIOS.A86).
+
+tick_flag	equ	1
+sec_flag	equ	2
+
+;	POLLDEV, requested of the Supervisor when a device isn't
+;	ready yet (not the same thing as this module's own
+;	Function 17 POLLDEV) -- MODFUNC.DEF has this commented
+;	out since it's XIOS-internal, so it's declared here
+;	exactly as the real XIOS.A86 declares it itself.
+
+f_polldev	equ	131
+
+;*****************************************************
+;*	UART (8250/16450) EQUATES -- COM1, polled, 9600 8N1
+;*****************************************************
+
+uart_base	equ	03f8h
+uart_rxtx	equ	uart_base+0	;RBR (in) / THR (out)
+uart_ier	equ	uart_base+1	;interrupt enable reg
+uart_lcr	equ	uart_base+3	;line control reg
+uart_mcr	equ	uart_base+4	;modem control reg
+uart_lsr	equ	uart_base+5	;line status reg
+
+uart_lsr_rxrdy	equ	01h	;data ready to read
+uart_lsr_txrdy	equ	20h	;THR empty, ok to write
+
+;	9600 baud: divisor = 115200/9600 = 12 (000ch)
+
+uart_divisor	equ	000ch
+
+;*****************************************************
+;*	PIT (8253/8254) + PIC (8259) EQUATES -- 60Hz tick
+;*****************************************************
+
+pit_ch0		equ	040h
+pit_cmd		equ	043h
+pit_mode3	equ	036h	;ch0, lo/hi byte, mode 3, binary
+
+;	1193182 Hz / 60 = 19886 = 4DAEh
+
+pit_divisor	equ	04daeh
+
+pic_m_cmd	equ	020h	;master PIC command/EOI port
+pic_m_mask	equ	021h	;master PIC mask (OCW1) port
+eoi_cmd		equ	020h	;non-specific EOI
+
+;	IRQ0 (timer) is interrupt vector 8 on a standard PC;
+;	the vector table lives at the very bottom of real-mode
+;	memory, segment 0000h, 4 bytes (offset:segment) per
+;	vector -- vector 8 is therefore at absolute 0000:0020h.
+
+;*****************************************************
+;*	FLOPPY (NEC 765/8272) EQUATES -- standard PC ports
+;*****************************************************
+
+fdc_base	equ	03f0h
+fdc_dor		equ	fdc_base+2	;digital output register
+fdc_msr		equ	fdc_base+4	;main status register (in)
+fdc_data	equ	fdc_base+5	;data register (fifo)
+fdc_ccr		equ	fdc_base+7	;configuration control (out)
+
+msr_rqm		equ	80h	;request for master (ready for I/O)
+msr_dio		equ	40h	;data I/O direction (1=fdc->cpu)
+msr_busy	equ	10h	;fdc busy (command in progress)
+
+dor_mota	equ	10h	;motor A on
+dor_ndreset	equ	04h	;NOT reset (1 = not in reset)
+dor_dmaen	equ	08h	;DMA/interrupt enable
+dor_drvsel_a	equ	00h	;drive select bits for drive A
+
+;	NEC765 command bytes (MFM, drive A, no multitrack)
+
+cmd_specify	equ	03h
+cmd_recal	equ	07h
+cmd_sense_int	equ	08h
+cmd_seek	equ	0fh
+cmd_read	equ	46h	;MFM(40h)+READ DATA(06h)
+cmd_write	equ	45h	;MFM(40h)+WRITE DATA(05h)
+
+;	Floppy geometry: 80 tracks, 2 heads, 18 512-byte sectors/
+;	track (standard 1.44MB 3.5" format). CP/M-style logical
+;	sectors are 128 bytes, deblocked 4:1 into each physical
+;	512-byte sector.
+
+fd_heads	equ	2
+fd_spt		equ	18	;physical sectors/track
+fd_secsize_n	equ	2	;NEC765 "N" code: 2 = 512 bytes/sector
+fd_secsize	equ	512
+fd_gap3		equ	01bh	;standard gap length for 512B/1.44M
+fd_dtl		equ	0ffh	;unused when N<>0
+
+;*****************************************************
+;*	SHARED SYSTEM DATA AREA (same convention as every
+;*	other "separate code and data" kernel module, e.g.
+;*	CIOIF.CIO: this module's own private data below is
+;*	appended after it in the same DSEG)
+;*****************************************************
+
+	eject ! include sysdat.fmt
+
+;*****************************************************
+;*	XIOS CODE AREA
+;*****************************************************
+
+	CSEG
+	org	0
+
+	jmp	init
+	jmp	entry
+
+sysdat		dw	0	;sysdat segment, saved by init
+supervisor	equ	(offset $)
+		rw	2	;far ptr: supmod's entry point
+mydispatch	equ	(offset $)
+		rw	2	;far ptr: SYSDAT's "dispatcher" field
+
+	db	'XIOS86Q for QEMU -- see src/kernel/XIOS86Q.A86'
+
+;*****************************************************
+;*	INITIALIZATION
+;*****************************************************
+;	Called via CALLF from SUP's own init routine, same
+;	contract as the real XIOS.A86: DS = sysdat segment on
+;	entry; interrupts are off and SUP performs STI right
+;	after this returns, so this must NOT enable interrupts
+;	itself, only arm the hardware so it's ready once SUP does.
+
+init:
+	mov	sysdat,ds
+
+	;	copy this module's own "entry" far pointer out of
+	;	SYSDAT's module table (supmod) into a local copy, the
+	;	same way every other kernel module does (see e.g.
+	;	CIOIF.CIO's own init) -- needed so SUPIF below can
+	;	reach the Supervisor with a plain CS-relative CALLF
+	;	instead of going through DS each time.
+
+	mov	bx,offset supmod
+	mov	si,supervisor
+	mov	ax,[bx] ! mov cs:[si],ax
+	mov	ax,2[bx] ! mov cs:2[si],ax
+
+	;	likewise for SYSDAT's "dispatcher" field, used by the
+	;	tick interrupt handler below to force a reschedule.
+	;	(The real XIOS.A86 references a ".dispatcher" that is
+	;	never actually set up this way anywhere in that file --
+	;	a real bug in it, not something intentionally skipped;
+	;	this new XIOS does the copy SYSDAT.FMT's own comments
+	;	say should happen.)
+
+	mov	bx,offset dispatcher
+	mov	si,mydispatch
+	mov	ax,[bx] ! mov cs:[si],ax
+	mov	ax,2[bx] ! mov cs:2[si],ax
+
+	mov	stoppoll,false
+
+	;	--- console: initialize the UART for 9600 8N1 ---
+
+	mov	al,80h ! out uart_lcr,al	;set DLAB
+	mov	ax,uart_divisor
+	out	uart_rxtx,al			;divisor low byte
+	mov	al,ah
+	out	uart_ier,al			;divisor high byte
+	mov	al,03h ! out uart_lcr,al	;8N1, DLAB off
+	mov	al,0 ! out uart_ier,al		;no UART interrupts
+	mov	al,03h ! out uart_mcr,al	;assert DTR/RTS
+
+	;	--- timer: program the PIT for 60Hz on channel 0 ---
+
+	mov	al,pit_mode3 ! out pit_cmd,al
+	mov	ax,pit_divisor
+	out	pit_ch0,al			;count low byte
+	mov	al,ah
+	out	pit_ch0,al			;count high byte
+	mov	tick_count,60
+
+	;	hook interrupt vector 8 (IRQ0) to tickint. DS:0 is
+	;	not sysdat here, so switch DS to segment 0 briefly.
+
+	push	ds
+	sub	ax,ax ! mov ds,ax
+	mov	word ptr .020h,offset tickint	;IVT offset 8*4=20h
+	mov	word ptr .022h,cs		;IVT offset 8*4+2=22h
+	pop	ds
+
+	;	unmask IRQ0 on the master 8259 without touching
+	;	anything else it's already set up (ICW1-4 are assumed
+	;	already programmed sanely by whatever got this XIOS
+	;	running in the first place; only clearing bit 0 of the
+	;	mask register is this module's business).
+
+	in	al,pic_m_mask
+	and	al,0feh
+	out	pic_m_mask,al
+
+	;	--- disk: reset and arm the floppy controller ---
+
+	mov	al,dor_ndreset+dor_drvsel_a ! out fdc_dor,al
+						;motor+DMA still off,
+						;released from reset
+	call	fdc_sense_int			;clear any stale status
+
+	mov	bx,offset specify_parms
+	call	fdc_send_cmd			;SPECIFY: step/head
+						; timings, non-DMA mode
+
+	mov	clockon,false
+
+	mov	bx,offset signon
+	call	pmsg
+
+	pop	ds
+	retf
+
+;*****************************************************
+;*	ENTRY -- the XIOS function dispatcher
+;*****************************************************
+
+entry:
+	cld
+	mov	ah,0 ! shl ax,1
+	mov	bx,ax
+	call	functab[bx]
+	mov	bx,ax
+	retf
+
+;*****************************************************
+;*	Interface to the Supervisor (same role as every
+;*	other kernel module's own "SUPIF"/"MPMIF" trampoline)
+;*****************************************************
+
+supif:
+	callf	cs:dword ptr supervisor
+	ret
+
+;*****************************************************
+;*	XIOS FUNCTION TABLE -- same 25 slots, same order,
+;*	as the real XIOS.A86 / XIOSCB.DEF's io_* constants
+;*****************************************************
+
+functab	dw	const		; 0  io_const
+	dw	conin		; 1  io_conin
+	dw	conout		; 2  io_conout
+	dw	plist		; 3  io_list
+	dw	punch		; 4  (not used by the kernel)
+	dw	reader		; 5  (not used by the kernel)
+	dw	disk_home	; 6  io_home
+	dw	seldsk		; 7  io_seldsk
+	dw	settrk		; 8  io_settrk
+	dw	setsec		; 9  io_setsec
+	dw	setdma		;10  io_setdma
+	dw	diskread	;11  io_read
+	dw	diskwrite	;12  io_write
+	dw	listst		;13  (not used by the kernel)
+	dw	sectran		;14  io_sectran
+	dw	setdmab		;15  io_setdmab
+	dw	getsegt		;16  (not used by the kernel)
+	dw	polldev		;17  io_polldev
+	dw	strtclk		;18  io_strtclk
+	dw	stopclk		;19  io_stopclk
+	dw	maxconsole	;20  io_maxconsole
+	dw	maxlist		;21  io_maxlist
+	dw	selmemory	;22  io_selmemory
+	dw	idle		;23  io_idle
+	dw	flushbuf	;24  io_flush
+
+;*****************************************************
+;*	CHARACTER I/O
+;*****************************************************
+
+;=====
+const:	    ; Function 0: Console Status
+;=====
+;	input:	CL = console device # (ignored, one console)
+;	output:	AL = 0ffh if a character is ready, else 0
+
+	mov	bh,0 ! mov bl,c0indev
+	call	polldev
+	ret
+
+;=====
+conin:	    ; Function 1: Console Input
+;=====
+;	input:	CL = console device # (ignored)
+;	output:	AL = character
+
+	mov	bh,0 ! mov bl,c0indev
+	call	rtm_poll
+	in	al,uart_rxtx
+	ret
+
+;======
+conout:	    ; Function 2: Console Output
+;======
+;	input:	CL = character, DL = console device # (ignored)
+;	output:	none
+
+	push	cx
+	mov	bh,0 ! mov bl,c0outdev
+	call	rtm_poll
+	pop	ax
+	out	uart_rxtx,al
+	ret
+
+;=====
+plist:	    ; Function 3: List Output -- no list device
+;=====
+	ret
+
+;=====
+punch:	    ; Function 4
+reader:	    ; Function 5
+;=====
+;	PUNCH/READER are not supported under MP/M-86 (marked
+;	"not used" in XIOSCB.DEF); return EOF like the real XIOS.
+
+	mov	al,1ah
+	ret
+
+;======
+listst:	    ; Function 13: List Status -- no list device
+;======
+	xor	al,al
+	ret
+
+;==========
+maxconsole: ; Function 20: Maximum Consoles
+;==========
+	mov	ax,1
+	ret
+
+;=======
+maxlist:    ; Function 21: Maximum List Devices
+;=======
+	xor	ax,ax
+	ret
+
+;*****************************************************
+;*	DISK I/O
+;*****************************************************
+
+;========
+disk_home:  ; Function 6: Home
+;========
+;	Seek the selected drive back to track 0.
+
+	mov	trk,0
+	mov	bx,offset recal_parms
+	call	fdc_send_cmd
+	call	fdc_wait_seek
+	ret
+
+;======
+seldsk:	    ; Function 7: Select Disk
+;======
+;	input:	CL = logical disk to select
+;	output:	AX = 0 if illegal disk, else offset of its DPH
+
+	xor	ax,ax
+	mov	ch,0 ! mov si,cx
+	mov	al,dtrntbl[si]
+	cmp	al,0ffh
+	je	seldsk_bad
+	    mov	disk,al
+	    mov	ax,offset dph0
+	    ret
+seldsk_bad:
+	ret
+
+;======
+settrk:	    ; Function 8: Set Track
+;======
+;	input:	CX = track number
+
+	mov	trk,cl
+	ret
+
+;======
+setsec:	    ; Function 9: Set Sector
+;======
+;	input:	CX = (128-byte, 1-based) logical sector number
+
+	mov	sect,cl
+	ret
+
+;======
+setdma:	    ; Function 10: Set DMA Offset
+;======
+;	input:	CX = offset of DMA buffer
+
+	mov	dma_adr,cx
+	ret
+
+;=======
+setdmab:    ; Function 15: Set DMA Base
+;=======
+;	input:	CX = segment of DMA buffer
+
+	mov	dma_seg,cx
+	ret
+
+;=======
+sectran:    ; Function 14: Sector Translate
+;=======
+;	input:	CX = sector number, DX = offset of translate table
+;		(0 if none)
+;	output:	AX = translated sector number
+
+	cmp	dx,0 ! jne sectran1
+	    mov	ax,cx ! ret
+sectran1:
+	mov	bx,cx ! add bx,dx
+	mov	bl,[bx] ! xor bh,bh
+	mov	ax,bx
+	ret
+
+;====
+diskread:   ; Function 11: Read
+;====
+;	output:	AL = 0 if ok, 1 if error (no error detection yet --
+;		always reports success; see KNOWN LIMITATIONS)
+
+	call	rw_setup
+	call	fdc_do_read
+	ret
+
+;=====
+diskwrite:  ; Function 12: Write
+;=====
+;	input:	CL = write type (ignored -- always read/modify/write)
+;	output:	AL = 0 if ok, 1 if error, 2 if read-only (no error
+;		detection yet -- always reports success)
+
+	call	rw_setup
+	call	fdc_do_write
+	ret
+
+;*****************************************************
+;*	HOUSEKEEPING
+;*****************************************************
+
+;=======
+getsegt:    ; Function 16: Get Segment Table -- not supported
+;=======
+	mov	ax,0ffffh
+	ret
+
+;=========
+selmemory:  ; Function 22: Select Memory -- single bank, no-op
+;=========
+	ret
+
+;========
+flushbuf:   ; Function 24: Flush Buffer -- nothing buffered
+;========
+	xor	al,al
+	ret
+
+;=======
+strtclk:    ; Function 18: Start Clock
+;=======
+	mov	clockon,true
+	ret
+
+;=======
+stopclk:    ; Function 19: Stop Clock
+;=======
+	mov	clockon,false
+	ret
+
+;====
+idle:	    ; Function 23: Idle
+;====
+;	Lowest-priority process; request a dispatch and loop.
+;	Cannot use any resource that might block it (poll
+;	device, flags) -- same restriction as the real XIOS.
+
+	mov	cl,f_dispatch
+	call	supif
+	jmp	idle
+
+;*****************************************************
+;*	POLL DEVICE / rtm_poll
+;*****************************************************
+
+;-------
+rtm_poll:   ; check a device; if not ready, yield via RTM
+;-------
+;	input:	BL = device #
+
+	push	bx ! mov cx,bx
+	call	polldev ! pop bx
+	cmp	al,0ffh ! je rtm_poll_ret
+	    cmp	stoppoll,true ! je rtm_poll
+	    mov	dx,bx ! mov cl,f_polldev
+	    jmp	supif
+rtm_poll_ret:
+	ret
+
+;=======
+polldev:    ; Function 17: Poll Device
+;=======
+;	input:	CL = device number (see c0indev etc. below)
+;	output:	AL = 0ffh if ready, 0 if not
+
+	cmp	cl,c0indev ! jne polldev_1
+	    in	al,uart_lsr
+	    and	al,uart_lsr_rxrdy
+	    mov	ah,0 ! jnz polldev_rdy
+	    ret
+polldev_1:
+	cmp	cl,c0outdev ! jne polldev_2
+	    in	al,uart_lsr
+	    and	al,uart_lsr_txrdy
+	    jnz	polldev_rdy
+	    ret
+polldev_2:
+	cmp	cl,flpy_poll_dev ! jne polldev_rdy
+	    ; floppy I/O below is fully synchronous (PIO polled
+	    ; to completion inside fdc_send_cmd/fdc_wait_* already),
+	    ; so by the time anything asks to poll it, it's done.
+polldev_rdy:
+	mov	al,0ffh
+	ret
+
+;*****************************************************
+;*	FLOPPY CONTROLLER (NEC 765/8272) DRIVER
+;*****************************************************
+;	PIO (non-DMA) transfer, one physical 512-byte sector at
+;	a time, through secbuf below. CP/M-style 128-byte logical
+;	sectors are deblocked/reblocked into that buffer here, so
+;	READ/WRITE above never have to think about the 4:1 ratio.
+
+;----------
+rw_setup:   ; turn the drive motor on and give it a moment to spin up
+;----------
+	mov	al,dor_ndreset+dor_mota+dor_dmaen+dor_drvsel_a
+	out	fdc_dor,al
+	call	motor_delay
+	ret
+
+;----------
+motor_delay:
+;----------
+	mov	cx,0
+md_loop:
+	    in	al,fdc_msr
+	    loop	md_loop
+	ret
+
+;----------
+rw_physical:    ; shared geometry math, called from fdc_do_read/write.
+;----------	; Everything is left in memory (cur_cyl/cur_head/
+		; cur_psec/cur_bufoff) rather than juggled through
+		; registers across the several calls that follow.
+;	input:	trk, sect (1-based logical 128B sector), disk
+
+	mov	al,sect ! dec al	;0-based logical sector #
+	mov	ah,0
+	mov	bl,4 ! div bl		;al = phys sector idx (0-based)
+					;ah = which 128B quarter
+	mov	cur_psec,al		;0-based physical sector (fixed up
+					; to 1-based just below)
+	inc	cur_psec
+	mov	bl,ah ! mov bh,0
+	shl	bx,1 ! shl bx,1 ! shl bx,1 ! shl bx,1 ! shl bx,1 ! shl bx,1 ! shl bx,1
+					;bx = quarter * 128
+	mov	cur_bufoff,bx
+	mov	al,trk
+	mov	ah,0
+	mov	cl,fd_heads ! div cl	;al=cylinder, ah=head
+	mov	cur_cyl,al
+	mov	cur_head,ah
+	ret
+
+;----------
+fdc_do_read:
+;----------
+	call	rw_physical
+	call	fdc_seek_to
+	call	fdc_fill_rw_parms
+	mov	bx,offset read_parms
+	call	fdc_send_cmd
+	call	fdc_pio_in		;fill secbuf from the FDC
+	call	fdc_sense_int
+
+	; copy this logical sector's 128 bytes out of secbuf
+	; into the caller's DMA buffer (ES:dma_adr set by SETDMAB/
+	; SETDMA -- ES is the caller's data area, per this XIOS's
+	; own documented register convention at the top of this file)
+
+	push	si ! push di ! push ds ! push es
+	mov	si,offset secbuf ! add si,cur_bufoff
+	push	cs ! pop ds
+	mov	di,dma_adr ! mov es,dma_seg
+	mov	cx,128 ! rep movsb
+	pop	es ! pop ds ! pop di ! pop si
+	xor	al,al
+	ret
+
+;----------
+fdc_do_write:
+;----------
+	call	rw_physical
+	call	fdc_seek_to
+
+	; read/modify/write: first read the whole physical sector
+	; into secbuf so the other 3 logical quarters aren't lost
+
+	call	fdc_fill_rw_parms
+	mov	bx,offset read_parms
+	call	fdc_send_cmd
+	call	fdc_pio_in
+	call	fdc_sense_int
+
+	push	si ! push di ! push ds ! push es
+	mov	di,offset secbuf ! add di,cur_bufoff
+	mov	si,dma_adr ! push cs ! pop es
+	mov	ds,dma_seg
+	mov	cx,128 ! rep movsb
+	pop	es ! pop ds ! pop di ! pop si
+
+	call	fdc_fill_rw_parms
+	mov	bx,offset write_parms
+	call	fdc_send_cmd
+	call	fdc_pio_out		;drain secbuf to the FDC
+	call	fdc_sense_int
+	xor	al,al
+	ret
+
+;----------
+fdc_fill_rw_parms:  ; patch cur_cyl/cur_head/cur_psec into both the
+;----------	    ; READ DATA and WRITE DATA parameter strings --
+		    ; NEC765 layout is [len][cmd][HD_DS][C][H][R][N]
+		    ; [EOT][GPL][DTL], so HD_DS/C/H/R are offsets
+		    ; 2/3/4/5 from the start of each string
+	mov	al,cur_head ! mov cl,2 ! shl al,cl	;HD_DS = head<<2
+	mov	byte ptr read_parms+2,al
+	mov	byte ptr write_parms+2,al
+	mov	al,cur_cyl
+	mov	byte ptr read_parms+3,al
+	mov	byte ptr write_parms+3,al
+	mov	al,cur_head
+	mov	byte ptr read_parms+4,al
+	mov	byte ptr write_parms+4,al
+	mov	al,cur_psec
+	mov	byte ptr read_parms+5,al
+	mov	byte ptr write_parms+5,al
+	ret
+
+;----------
+fdc_seek_to:    ; seek to cur_cyl/cur_head
+;----------	; NEC765 SEEK layout is [len][cmd][HD_DS][NCN]
+	mov	al,cur_head ! mov cl,2 ! shl al,cl
+	mov	byte ptr seek_parms+2,al
+	mov	al,cur_cyl
+	mov	byte ptr seek_parms+3,al
+	mov	bx,offset seek_parms
+	call	fdc_send_cmd
+	call	fdc_wait_seek
+	ret
+
+;----------
+fdc_wait_seek:
+;----------
+	mov	cx,0
+fws_loop:
+	    in	al,fdc_msr
+	    test	al,msr_busy
+	    loopnz	fws_loop
+	call	fdc_sense_int
+	ret
+
+;----------
+fdc_sense_int:  ; SENSE INTERRUPT STATUS -- required after every
+;----------	; SEEK/RECALIBRATE to clear the FDC's internal
+		; interrupt-pending state before the next command
+	mov	al,cmd_sense_int
+	call	fdc_out_byte
+	call	fdc_in_byte	;ST0 (ignored)
+	call	fdc_in_byte	;PCN (ignored)
+	ret
+
+;----------
+fdc_send_cmd:   ; send a [len][byte]... command string at BX, without
+;----------	; disturbing the string itself (it's a static table,
+		; reused on every call, not scratch space)
+	mov	cl,[bx]		;cl = remaining byte count (local copy)
+	or	cl,cl ! jz fsc_done
+fsc_loop:
+	inc	bx
+	mov	al,[bx]
+	call	fdc_out_byte
+	dec	cl ! jnz fsc_loop
+fsc_done:
+	ret
+
+;----------
+fdc_out_byte:   ; write AL to the FDC data FIFO once it's ready for a
+;----------	; CPU->FDC byte (RQM=1, DIO=0). Must not disturb any
+		; register but AL/flags -- called from fdc_send_cmd's
+		; own CL-counted loop above *and* from fdc_pio_out's
+		; CX-counted loop below, so it keeps the byte to send
+		; in a memory scratch cell instead of a register.
+	mov	cs:outbyte_tmp,al
+fob_wait:
+	in	al,fdc_msr
+	and	al,msr_rqm+msr_dio
+	cmp	al,msr_rqm
+	jne	fob_wait
+	mov	al,cs:outbyte_tmp
+	out	fdc_data,al
+	ret
+
+;----------
+fdc_in_byte:    ; read one byte from the FDC data FIFO once it's
+;----------	; ready for an FDC->CPU byte (RQM=1, DIO=1); returned
+		; in AL
+fib_wait:
+	in	al,fdc_msr
+	and	al,msr_rqm+msr_dio
+	cmp	al,msr_rqm+msr_dio
+	jne	fib_wait
+	in	al,fdc_data
+	ret
+
+;----------
+fdc_pio_in:     ; transfer one physical sector (fd_secsize bytes)
+;----------	; from the FDC into secbuf (execution phase of a
+		; READ DATA command), then absorb the result bytes
+	mov	di,offset secbuf
+	mov	cx,fd_secsize
+pio_in_loop:
+	    call	fdc_in_byte
+	    mov	cs:[di],al
+	    inc	di
+	    loop	pio_in_loop
+	mov	cx,7
+pio_in_res:
+	    call	fdc_in_byte
+	    loop	pio_in_res
+	ret
+
+;----------
+fdc_pio_out:    ; transfer one physical sector from secbuf to the
+;----------	; FDC (execution phase of a WRITE DATA command),
+		; then absorb the result bytes
+	mov	si,offset secbuf
+	mov	cx,fd_secsize
+pio_out_loop:
+	    mov	al,cs:[si]
+	    call	fdc_out_byte
+	    inc	si
+	    loop	pio_out_loop
+	mov	cx,7
+pio_out_res:
+	    call	fdc_in_byte
+	    loop	pio_out_res
+	ret
+
+;*****************************************************
+;*	UTILITY: print a null-terminated string via CONOUT
+;*****************************************************
+
+pmsg:
+	push	bx
+pmsg_loop:
+	mov	al,cs:[bx]
+	or	al,al ! jz pmsg_done
+	mov	cl,al ! mov dl,0
+	call	conout
+	inc	bx
+	jmps	pmsg_loop
+pmsg_done:
+	pop	bx
+	ret
+
+;*****************************************************
+;*	TICK INTERRUPT HANDLER (IRQ0, vector 8)
+;*****************************************************
+
+tickint_ss	dw	0
+tickint_sp	dw	0
+ax_save		dw	0
+
+tickint:
+	push	ds ! push cs ! pop ds
+	mov	tickint_ss,ss
+	mov	tickint_sp,sp
+	mov	ax_save,ax
+	mov	ax,cs ! mov ss,ax
+	mov	sp,offset tickint_tos
+	push	ax_save
+	push	bx ! push cx ! push dx
+	push	bp ! push si ! push di ! push es
+
+	dec	tick_count ! jnz tick_1
+	    mov	tick_count,60
+	    mov	dx,sec_flag ! mov cl,f_flagset
+	    call	supif
+tick_1:
+	cmp	clockon,true ! jne tick_2
+	    mov	dx,tick_flag ! mov cl,f_flagset
+	    call	supif
+tick_2:
+	;	acknowledge the interrupt at the PIC before leaving --
+	;	this ISR never executes IRET, it falls into the
+	;	dispatcher instead, so the EOI has to happen explicitly
+	;	here or IRQ0 would stay masked forever
+	mov	al,eoi_cmd ! out pic_m_cmd,al
+
+	pop	es ! pop di ! pop si ! pop bp
+	pop	dx ! pop cx ! pop bx ! pop ax
+	mov	ss,tickint_ss
+	mov	sp,tickint_sp
+	pop	ds
+
+	jmpf	cs:dword ptr mydispatch
+
+;*****************************************************
+;*	XIOS DATA
+;*****************************************************
+;	This module's own private state below needs to sit in the
+;	*shared* system data area (DS = sysdat whenever ENTRY/INIT
+;	are actually called, per this file's own documented
+;	register convention at the top), not wherever this DSEG's
+;	location counter happens to be after "include sysdat.fmt"
+;	above. Every other kernel module that has no private data of
+;	its own (BDOS/MEM/RTM/SUP/CIO) ends up with a DSEG of exactly
+;	4096 bytes once "include data.bdo" is accounted for too
+;	(confirmed directly: a standalone probe assembling just
+;	system.def+pd.def+qd.def+modfunc.def+sysdat.fmt+data.bdo
+;	also comes to exactly 4096 bytes) -- so this org jump is what
+;	lines this module's own extra fields up with where the real,
+;	combined shared data area actually ends, once something
+;	combines this module with the others (see
+;	tools/build_mpmldr.py's loader-side equivalent problem, and
+;	docs/build.md, for the kernel-side combiner this feeds into).
+
+	DSEG
+	org	4096
+
+tick_count	db	0
+clockon		db	false
+stoppoll	dw	false
+
+disk		db	0		;selected physical drive (0 only)
+trk		db	0
+sect		db	0
+dma_adr		dw	0
+dma_seg		dw	0
+
+cur_cyl		db	0	;physical cylinder for the I/O in progress
+cur_head	db	0	;physical head (0 or 1)
+cur_psec	db	0	;physical (1-based) sector, 1..fd_spt
+cur_bufoff	dw	0	;this logical sector's offset into secbuf
+outbyte_tmp	db	0	;scratch for fdc_out_byte (see comment there)
+
+dtrntbl		db	000h,0ffh,0ffh,0ffh	;logical disk 0 -> drive 0
+
+	;	NEC765 command strings: [length][command byte]...
+
+specify_parms	db	3,cmd_specify,0dfh,03h
+					;byte2 = HLT(bits7-1)=1 | ND(bit0)=1
+					;-- ND=1 is essential: this driver
+					;never programs the 8237 DMA
+					;controller, only PIO, so the FDC
+					;must be told non-DMA mode or it
+					;will wait forever for DMA req/ack
+					;SRT=0dh/HUT=0fh step 2ms
+					;HLT=1(non-DMA)
+recal_parms	db	2,cmd_recal,0
+seek_parms	db	3,cmd_seek,0,0
+
+read_parms	db	9,cmd_read,0,0,0,0,fd_secsize_n,fd_spt,fd_gap3,fd_dtl
+write_parms	db	9,cmd_write,0,0,0,0,fd_secsize_n,fd_spt,fd_gap3,fd_dtl
+
+secbuf		rb	fd_secsize
+
+	org	((offset $)+0fh) and 0fff0h
+
+	;	Disk Parameter Header/Block -- 80 cyls * 2 heads * 18
+	;	phys (512B) sectors/track, 4:1 deblocked into 128-byte
+	;	logical records: 160 CP/M "tracks" (one per physical
+	;	head) of 72 logical records each; 2 reserved tracks;
+	;	8192-byte (64-record) allocation blocks; 64 directory
+	;	entries (fits in block 0 alone, so AL0=80h, AL1=0);
+	;	CKS=16 since this is a removable floppy, not a fixed
+	;	disk. Identical to, and MUST stay identical to,
+	;	src/loader/LDBIOS86Q.A86's own dpb0 -- same physical
+	;	disk, same on-disk filesystem, read by both the loader
+	;	and the kernel.
+
+dph0		dw	0		;translate table (none)
+		rw	3		;scratch area (BDOS owned)
+		dw	offset dpb0
+		dw	offset csv0
+		dw	offset alloc0
+
+dpb0		dw	72		;SPT
+		db	6		;BSH (8192-byte blocks)
+		db	63		;BLM
+		db	0		;EXM
+		dw	176		;DSM-1
+		dw	63		;DRM-1 (64 entries)
+		db	80h		;AL0
+		db	0		;AL1
+		dw	16		;CKS (removable disk)
+		dw	2		;OFF: 2 reserved tracks
+
+alloc0		rb	(176/8)+1
+csv0		rb	16
+
+tick_count_dummy equ 0	;unused, silences "label defined but" style
+			; concerns in future edits -- harmless
+
+tickint_tos	rw	32
+init_ss_save	dw	0
+init_sp_save	dw	0
+
+signon		db	cr,lf,'MP/M-86 XIOS86Q -- QEMU target (serial console, floppy disk)',cr,lf,0
+
+	END

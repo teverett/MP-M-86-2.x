@@ -29,7 +29,7 @@ are 80 × 2 = 160 CP/M tracks total — see "Disk Parameter Block" below).
 | `0x00200`–`0x003FF` | cyl 0, head 0, sector 2 | the loader header (9 bytes + padding) |
 | `0x00400`–`0x047FF` | cyl 0, head 0, sector 3 through cyl 0, head 1, sector 18 | `MPMLDR.bin` (within the 2 reserved CP/M tracks) |
 | `0x04800`–`0x067FF` | — | the CP/M directory (one 8192-byte allocation block) |
-| `0x06800`– | — | `MPM.SYS`'s own body (header + code + data) |
+| `0x06800`– | — | `MPM.SYS`'s own body (header + code + data), then each `src/utils/` utility's own body (as `<NAME>.CMD`) and `ECHO.RSP`, back to back, each with the same header+code+data shape as `MPM.SYS` |
 | everything else | — | zero-filled, unallocated |
 
 ### The boot sector (byte 0)
@@ -79,7 +79,9 @@ purpose, so the loader and the CP/M filesystem below never collide.
 One 8192-byte allocation block (block 0), holding up to 64 32-byte
 directory entries. Unused entries are filled with `E5h` (CP/M's
 standard "available" marker), not zero. `MPM.SYS` needs 2 entries here
-(see "Why `MPM.SYS` needs two directory entries" below).
+(see "Why some files need more than one directory entry" below); each
+`src/utils/` utility and `ECHO.RSP` gets its own entry (or more, by the
+same rule) after it — 23 entries in total.
 
 ### `MPM.SYS`'s body (byte 0x6800, allocation block 1 onward)
 
@@ -140,22 +142,48 @@ Block 0 (8192 bytes) holds the entire directory (64 × 32 = 2048 bytes
 of real entries; the remaining 6144 bytes of that block are allocated
 to the directory but otherwise unused, a normal consequence of
 allocating the directory in whole blocks). Blocks 1 through 176 are
-available for file data — `tools/build_disk.py` currently only ever
-places `MPM.SYS` there.
+available for file data — `MPM.SYS`, the utilities, and `ECHO.RSP`
+below share them, allocated back to back in the order
+`tools/build_disk.py` processes them.
 
-## Why `MPM.SYS` needs two directory entries
+### The utilities and `ECHO.RSP` (after `MPM.SYS`'s own blocks)
+
+Each of the 19 `src/utils/` `.PLM` utilities the Makefile's own
+`PLM_UTILS` list builds, plus `src/rsp/ECHO.A86` (the only RSP that
+assembles cleanly — see `RSP_OK` in the Makefile), gets written as its
+own file: `<NAME>.CMD` for the utilities, `ECHO.RSP` for `ECHO` — plain
+8.3 names matching the Makefile's own basenames (see
+`tools/build_disk.py`'s own docstring for why that's not the same as
+`docs/build.md` section 5's renamed `STSCMD`/`STSRSP` →
+`STAT.CMD`/`MPMSTAT.RSP` mapping).
+
+Each of these files assembles to *two* pieces — a `.cseg.bin` and a
+`.dseg.bin` (real initialized data: error-message strings, working
+storage, etc.) — so each one gets the same header+code+data shape as
+`MPM.SYS` above (`build_two_segment_body`, the same function, reused),
+at a shared placeholder code segment (`2000h`): there's no real
+loader anywhere in this tree yet that reads a `.CMD`/`.RSP` and runs
+it, so this is modeled on `MPM.SYS`'s own confirmed format rather than
+any confirmed `.CMD`/`.RSP` convention.
+
+Not yet present: `SUBMIT.CMD` or the other RSPs (`CLOCK`/`TMP`) — their
+sources have genuine, deliberately unpatched 1981 bugs and don't
+assemble (`docs/bugs.md` #1–#3) — see `tools/build_disk.py`'s own
+"KNOWN LIMITATIONS".
+
+## Why some files need more than one directory entry
 
 With `EXM = 0`, one directory entry ("extent") can describe at most
 128 128-byte records (16KB), no matter how many blocks its own
-allocation array could otherwise address. `MPM.SYS`'s body (currently
-around 29.8KB: a 128-byte header plus the combined kernel code and
-data) needs `ceil(body_len / 128)` records — comfortably past 128 — so
-`tools/build_disk.py`'s `directory_entries_for_file` helper splits it
-across as many directory entries as needed (extent 0 covering records
-0–127, extent 1 covering the rest), each with its own slice of the
-file's allocation blocks. See that function's own implementation for
-the general case; for the current `MPM.SYS` size specifically, this
-works out to exactly two entries.
+allocation array could otherwise address. A file bigger than that
+needs `ceil(body_len / 128)` records split across as many directory
+entries as it takes — `tools/build_disk.py`'s
+`directory_entries_for_file` helper handles this for every file it
+places (extent 0 covering records 0–127, extent 1 the next 128, and so
+on), each with its own slice of the file's allocation blocks.
+`MPM.SYS`'s own body (currently around 29.8KB: a 128-byte header plus
+the combined kernel code and data) needs exactly two entries this way;
+most of the utilities fit in one.
 
 ## A hard-won lesson: don't let a disk read overflow its own buffer
 
@@ -177,11 +205,17 @@ was never at risk the same way (it lands in its own dedicated segment,
 
 ## What this doesn't cover yet
 
-Nothing beyond `MPM.SYS` is placed on this disk — no `SUBMIT.CMD`, no
-RSPs, no utilities (`docs/build.md`'s own item 5). There would be
-nowhere obviously right to put them yet without first deciding what
-the CLI/console RSP setup should look like once MP/M-86 itself is
-running.
+No `SUBMIT.CMD` and no other RSPs (`CLOCK`/`TMP`) are placed on this
+disk — their sources have genuine, deliberately unpatched 1981 bugs
+and don't assemble — see `tools/build_disk.py`'s own "KNOWN
+LIMITATIONS". Nothing in this tree yet actually loads a `.CMD`/`.RSP`
+file from disk and runs it, either.
+
+More importantly: **this still does not boot**. The boot sector and
+`MPMLDR.bin`'s own loading are confirmed working in QEMU, but nothing
+has been observed from `LDMPM.A86` itself after it jumps into
+`MPMLDR` — see `docs/bugs.md` #14 and `docs/build.md`'s "What's
+actually needed to boot under QEMU" item 4 for the current status.
 
 ## Building and inspecting it
 

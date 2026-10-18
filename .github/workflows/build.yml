@@ -86,7 +86,7 @@ jobs:
           mkdir -p build/docs-pdf
           for f in docs/*.md; do
             name=$(basename "$f" .md)
-            pandoc "$f" -o "build/docs-pdf/$name.pdf"
+            pandoc "$f" --pdf-engine=xelatex -o "build/docs-pdf/$name.pdf"
           done
 
       - name: upload docs PDFs

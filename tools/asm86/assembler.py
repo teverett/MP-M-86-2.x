@@ -1,0 +1,329 @@
+"""Two-pass ASM86-dialect assembler driver."""
+import os
+import re
+import struct
+from .errors import AsmError
+from .lex import strip_comment, split_statements, split_top_commas, parse_statement, tokenize_expr
+from .expr import ExprCtx, eval_tokens, eval_text, Symbol, parse_operand
+from . import isa
+
+DIRECTIVE_NAMES = {
+    'title', 'name', 'cseg', 'dseg', 'aseg', 'org', 'equ', 'db', 'byte',
+    'dw', 'word', 'rb', 'rw', 'end', 'include', 'if', 'endif', 'eject',
+    'page', 'public', 'extrn', 'global',
+}
+ALL_MNEMONICS = DIRECTIVE_NAMES | isa.ALL_MNEMONICS
+
+
+class EncodeCtx:
+    """Adapter handed to isa.encode(); carries current address + error()."""
+
+    def __init__(self, addr, filename, lineno, tentative=False):
+        self.addr = addr
+        self.filename = filename
+        self.lineno = lineno
+        self.rest_mnemonic = None
+        self.rest_operands = None
+        # True during pass 1: forward-referenced symbols may still be
+        # placeholders, so value-dependent checks (e.g. "is this branch in
+        # rel8 range?") must not be enforced yet -- only instruction
+        # *length* (fixed per mnemonic, see isa.py) matters in pass 1.
+        self.tentative = tentative
+
+    def err(self, msg):
+        raise AsmError(msg, self.filename, self.lineno)
+
+
+def _find_include(name, search_dirs):
+    for d in search_dirs:
+        try:
+            entries = os.listdir(d)
+        except OSError:
+            continue
+        for e in entries:
+            if e.lower() == name.lower():
+                return os.path.join(d, e)
+    return None
+
+
+def flatten(path, search_dirs, _stack=None):
+    """Expand INCLUDE directives into a flat (filename, lineno, text) list."""
+    if _stack is None:
+        _stack = []
+    path = os.path.abspath(path)
+    if path in _stack:
+        raise AsmError(f"circular INCLUDE of {path}")
+    out = []
+    my_dir = os.path.dirname(path)
+    dirs = [my_dir] + [d for d in search_dirs if d != my_dir]
+    with open(path, encoding='latin-1') as f:
+        content = f.read()
+    content = content.split('\x1a', 1)[0]  # CP/M ^Z end-of-file padding
+    lines = content.splitlines()
+    for lineno, raw in enumerate(lines, 1):
+        text = strip_comment(raw)
+        stripped = text.strip()
+        low = stripped.lower()
+        if low.startswith('include'):
+            rest = stripped[len('include'):].strip()
+            if rest and (stripped.split()[0].lower() == 'include'):
+                fname = rest.split()[0]
+                inc_path = _find_include(fname, dirs)
+                if inc_path is None:
+                    raise AsmError(f"INCLUDE file not found: {fname}", os.path.basename(path), lineno)
+                out.extend(flatten(inc_path, search_dirs, _stack + [path]))
+                continue
+        out.append((os.path.basename(path), lineno, text))
+    return out
+
+
+class Assembler:
+    def __init__(self):
+        self.symtab = {}          # lower(name) -> Symbol
+        self.segs = {}            # seg name -> {offset: byte}
+        self.seg_order = []
+        self.cur_seg = None
+        self.loc = {}             # seg name -> int location counter
+        self.ended = False
+        self.if_stack = []        # list of bool (assembling?)
+        self.pending = set()      # tentative (unresolved-in-pass-1) symbol keys
+        self.tentative = False
+        self.presize = {}         # name(lower) -> 1/2, from _prescan_sizes()
+        self.prekind = {}         # name(lower) -> ('equ'|'label', size), from _prescan_sizes()
+
+    # -- segment / symbol helpers -----------------------------------
+    def switch_seg(self, name):
+        if name not in self.segs:
+            self.segs[name] = {}
+            self.loc[name] = 0
+            self.seg_order.append(name)
+        self.cur_seg = name
+
+    def cur_addr(self):
+        if self.cur_seg is None:
+            self.switch_seg('cseg')
+        return self.loc[self.cur_seg]
+
+    def emit(self, data):
+        if self.cur_seg is None:
+            self.switch_seg('cseg')
+        seg = self.segs[self.cur_seg]
+        addr = self.loc[self.cur_seg]
+        for i, b in enumerate(data):
+            seg[addr + i] = b & 0xFF
+        self.loc[self.cur_seg] = addr + len(data)
+
+    def define_symbol(self, name, kind, value, size, filename, lineno, allow_redefine=False):
+        key = name.lower()
+        existing = self.symtab.get(key)
+        if existing is not None and not allow_redefine:
+            if existing.kind != kind or existing.value != value:
+                raise AsmError(f"symbol '{name}' redefined (was {existing.kind}={existing.value}, "
+                                f"now {kind}={value})", filename, lineno)
+        self.symtab[key] = Symbol(name, kind, value, size)
+        self.pending.discard(key)
+
+    def active(self):
+        return all(self.if_stack) if self.if_stack else True
+
+    # -- main entry ---------------------------------------------------
+    def assemble(self, path, search_dirs):
+        lines = flatten(path, search_dirs)
+        self._prescan_sizes(lines)
+        self._run_pass(lines, is_final=False)
+        if self.pending:
+            names = ', '.join(sorted(self.symtab[k].name for k in self.pending))
+            raise AsmError(f"undefined symbol(s), never defined anywhere in the file: {names}")
+        # Pass 1 leaves self.symtab fully populated with every label's
+        # final address (lengths never depend on forward-referenced
+        # values -- see tools/README.md), so pass 2 reuses it verbatim and
+        # only resets the segment/location state before re-emitting bytes.
+        self.segs = {}
+        self.seg_order = []
+        self.loc = {}
+        self.cur_seg = None
+        self.if_stack = []
+        self.ended = False
+        self._run_pass(lines, is_final=True)
+
+    def _run_pass(self, lines, is_final):
+        self.tentative = not is_final
+        for filename, lineno, text in lines:
+            if self.ended:
+                break
+            for stmt_text in split_statements(text):
+                if self.ended:
+                    break
+                self._do_statement(stmt_text, filename, lineno, is_final)
+
+    def _ectx(self, filename, lineno, addr=None):
+        return ExprCtx(self.symtab, addr if addr is not None else self.cur_addr(),
+                        filename, lineno, tentative=self.tentative, pending=self.pending,
+                        presize=self.presize, prekind=self.prekind)
+
+    _CAST_PREFIX_RE = re.compile(r'^\s*(byte|word)\s+ptr\b', re.IGNORECASE)
+
+    def _prescan_sizes(self, lines):
+        """Learn every DB/DW/RB/RW/EQU symbol's kind+size before pass 1, so a
+        forward reference to it still classifies correctly (mem vs imm) and
+        gets the right size (see ExprCtx.presize/prekind)."""
+        for filename, lineno, text in lines:
+            for stmt_text in split_statements(text):
+                label, mnem, operand_text = parse_statement(stmt_text, ALL_MNEMONICS)
+                if label is None or mnem is None:
+                    continue
+                low = mnem.lower()
+                if low in ('db', 'byte', 'rb'):
+                    self.presize[label.lower()] = 1
+                    self.prekind[label.lower()] = ('label', 1)
+                elif low in ('dw', 'word', 'rw'):
+                    self.presize[label.lower()] = 2
+                    self.prekind[label.lower()] = ('label', 2)
+                elif low == 'equ':
+                    m = self._CAST_PREFIX_RE.match(operand_text)
+                    size = (1 if m.group(1).lower() == 'byte' else 2) if m else None
+                    self.prekind[label.lower()] = ('equ', size)
+
+    def _do_statement(self, stmt_text, filename, lineno, is_final):
+        label, mnem, operand_text = parse_statement(stmt_text, ALL_MNEMONICS)
+        low = mnem.lower() if mnem else None
+
+        # Conditional assembly is tracked even while "inactive" so ENDIF/IF
+        # nesting stays correct, but everything else is skipped.
+        if low == 'if':
+            ctx = self._ectx(filename, lineno)
+            cond = True
+            if self.active():
+                cond = bool(eval_text(operand_text, ctx).n)
+            self.if_stack.append(cond)
+            return
+        if low == 'endif':
+            if not self.if_stack:
+                raise AsmError("ENDIF without matching IF", filename, lineno)
+            self.if_stack.pop()
+            return
+        if not self.active():
+            return
+        if label is None and mnem is None:
+            return
+
+        if low in ('eject', 'page', 'title', 'name', 'public', 'extrn', 'global'):
+            return
+
+        if low == 'end':
+            self.ended = True
+            return
+
+        size_hint = None
+        if low in ('db', 'byte', 'rb'):
+            size_hint = 1
+        elif low in ('dw', 'word', 'rw'):
+            size_hint = 2
+
+        if label is not None and low != 'equ':
+            self.define_symbol(label, 'label', self.cur_addr(), size_hint, filename, lineno,
+                                allow_redefine=True)
+
+        if low is None:
+            return
+
+        if low == 'equ':
+            ctx = self._ectx(filename, lineno)
+            v = eval_text(operand_text, ctx)
+            self.define_symbol(label, 'equ', v.n, v.size, filename, lineno, allow_redefine=True)
+            return
+
+        if low == 'cseg':
+            self.switch_seg('cseg')
+            return
+        if low == 'dseg':
+            self.switch_seg('dseg')
+            return
+        if low == 'aseg':
+            self.switch_seg('aseg')
+            return
+
+        if low == 'org':
+            ctx = self._ectx(filename, lineno)
+            v = eval_text(operand_text, ctx)
+            if self.cur_seg is None:
+                self.switch_seg('cseg')
+            self.loc[self.cur_seg] = v.n
+            if label is not None:
+                self.define_symbol(label, 'label', v.n, size_hint, filename, lineno, allow_redefine=True)
+            return
+
+        if low in ('db', 'byte'):
+            self._do_db(operand_text, filename, lineno)
+            return
+        if low in ('dw', 'word'):
+            self._do_dw(operand_text, filename, lineno)
+            return
+        if low == 'rb':
+            ctx = self._ectx(filename, lineno)
+            n = eval_text(operand_text, ctx).n
+            self.emit(bytes(n))
+            return
+        if low == 'rw':
+            ctx = self._ectx(filename, lineno)
+            n = eval_text(operand_text, ctx).n
+            self.emit(bytes(n * 2))
+            return
+
+        # Otherwise: a CPU instruction.
+        self._do_instruction(mnem, operand_text, filename, lineno, is_final)
+
+    def _do_db(self, operand_text, filename, lineno):
+        out = bytearray()
+        for part in split_top_commas(operand_text):
+            part = part.strip()
+            if len(part) >= 2 and part.startswith("'") and part.endswith("'"):
+                out.extend(part[1:-1].encode('latin-1'))
+            else:
+                v = eval_text(part, self._ectx(filename, lineno, self.cur_addr() + len(out)))
+                out.append(v.n & 0xFF)
+        self.emit(bytes(out))
+
+    def _do_dw(self, operand_text, filename, lineno):
+        out = bytearray()
+        for part in split_top_commas(operand_text):
+            part = part.strip()
+            v = eval_text(part, self._ectx(filename, lineno, self.cur_addr() + len(out)))
+            out += struct.pack('<H', v.n & 0xFFFF)
+        self.emit(bytes(out))
+
+    def _do_instruction(self, mnem, operand_text, filename, lineno, is_final):
+        m = mnem.lower()
+        addr = self.cur_addr()
+        ectx = EncodeCtx(addr, filename, lineno, tentative=self.tentative)
+
+        if m in isa.REP_PREFIXES:
+            inner_label, inner_mnem, inner_rest = parse_statement(operand_text, ALL_MNEMONICS)
+            if inner_mnem is None:
+                raise AsmError(f"'{mnem}' requires a string-instruction operand", filename, lineno)
+            ectx.rest_mnemonic = inner_mnem
+            ectx.rest_operands = self._parse_operands(inner_mnem, inner_rest, ectx)
+            data = isa.encode(m, [], ectx)
+        else:
+            operands = self._parse_operands(mnem, operand_text, ectx)
+            data = isa.encode(m, operands, ectx)
+        self.emit(data)
+
+    def _parse_operands(self, mnem, operand_text, ectx):
+        branch = mnem.lower() in isa.BRANCH_MNEMONICS
+        ctx = self._ectx(ectx.filename, ectx.lineno, ectx.addr)
+        ops = []
+        for part in split_top_commas(operand_text):
+            ops.append(parse_operand(part, ctx, branch_context=branch))
+        return ops
+
+    # -- output ---------------------------------------------------------
+    def segment_bytes(self, name):
+        seg = self.segs.get(name, {})
+        if not seg:
+            return b''
+        size = max(seg) + 1
+        buf = bytearray(size)
+        for off, b in seg.items():
+            buf[off] = b
+        return bytes(buf)

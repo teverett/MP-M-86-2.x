@@ -20,6 +20,7 @@ in-source comments.
 - [Related DRI source: factory-labeled disk images (`orig/driorig/`)](#related-dri-source-factory-labeled-disk-images-origdriorig)
 - [Related DRI source: in-house disk images (`orig/lastdri/`)](#related-dri-source-in-house-disk-images-origlastdri)
 - [Related third-party source: CP/M TCP/IP (`orig/cpm-tcp/`)](#related-third-party-source-cpm-tcpip-origcpm-tcp)
+- [Reference manuals (`orig/manuals/`)](#reference-manuals-origmanuals)
 - [Notes for anyone working in this tree](#notes-for-anyone-working-in-this-tree)
 
 ## Provenance
@@ -963,6 +964,47 @@ Nothing in `orig/cpm-tcp/` has been built, assembled, or cross-checked
 against anything else in this repository — it targets a different CPU
 generation (Z80, not 8086) and a different problem domain (network
 protocols, not an operating-system kernel) from everything else here.
+
+## Reference manuals (`orig/manuals/`)
+
+Scanned PDF copies of DRI's own published manuals, not source — kept
+as the authoritative reference for behavior/usage questions the source
+alone doesn't answer (command syntax, option meanings, intended
+workflow):
+
+- **`MPM86_userGuide_Sep81.pdf`** — the **MP/M-86 User's Guide** (Sep
+  81), the direct end-user documentation counterpart to this
+  repository's own main subject and `docs/utilities.md`.
+- **`CPM-86_Users_Guide.pdf`**, **`CPM-86_System_Guide.pdf`**,
+  **`CPM-86_Programmers_Guide.pdf`**, **`CPM-86_Command_Summary.pdf`**
+  — the CP/M-86 manual set (CP/M-86 being MP/M-86's single-user sibling
+  OS, sharing much of the same command/utility surface — see the
+  `08`/`22` `CPM.SYS` dual-boot configurations noted under
+  `orig/lastdri/` above).
+- **`Intro_to_CPM_Feat_and_Facilities.pdf`** — a general CP/M-family
+  features/facilities overview, broader than the CP/M-86-specific
+  guides above.
+- **`ASM.pdf`**, **`MAC_CPM_Macro_Assembler.pdf`** — manuals for DRI's
+  8080 `ASM` and Z80 `MAC` assemblers, the direct documentation for the
+  tools `orig/mpm_II/Control_2/RMAC.COM` and `orig/asm80/`'s
+  disassembled `ASM.COM` implement.
+- **`DDT.pdf`**, **`SID_ZSID.pdf`** — manuals for DRI's debuggers:
+  `DDT` (ancestor of `DDT86`/`DDT86.CMD` built throughout
+  `orig/mpm862sr/06` and `orig/lastdri/`) and `SID`/`ZSID` (the 8080
+  and Z80 symbolic debuggers — `ZSID` itself is in `orig/driorig/ZSID/`
+  above).
+- **`ED.pdf`** — the `ED` line editor manual (`src/utils/ED.PLM`).
+- **`Despool_Print_Utility_UG.pdf`** — manual for `DESPOOL`, a
+  print-spool utility with no source copy currently in this
+  repository's `orig/` trees.
+- **`CBASIC_1982.pdf`** — the CBASIC language manual, covering both the
+  8080 `CB86` compiler (`orig/driorig/CB86-Master_Control/`) and
+  CBASIC-86 (`orig/driorig/CBASIC86-719/`, `-720/`).
+- **`Unconfirmed 414507.crdownload`** — a leftover browser-download
+  artifact (Chrome's placeholder name for an in-progress download),
+  not yet renamed/identified; despite the name, its content is a
+  complete 364-page PDF. Worth renaming/re-sorting into the list above
+  once identified, rather than leaving it under this name.
 
 ## Notes for anyone working in this tree
 

@@ -975,6 +975,10 @@ workflow):
 - **`MPM86_userGuide_Sep81.pdf`** — the **MP/M-86 User's Guide** (Sep
   81), the direct end-user documentation counterpart to this
   repository's own main subject and `docs/utilities.md`.
+- **`MPM86_pgmr_Sep81.pdf`** — the companion **MP/M-86 Programmer's
+  Guide** (Sep 81, 364 pages) — this is the file formerly listed here
+  as the unidentified `Unconfirmed 414507.crdownload` leftover; it's
+  since been identified and renamed.
 - **`CPM-86_Users_Guide.pdf`**, **`CPM-86_System_Guide.pdf`**,
   **`CPM-86_Programmers_Guide.pdf`**, **`CPM-86_Command_Summary.pdf`**
   — the CP/M-86 manual set (CP/M-86 being MP/M-86's single-user sibling
@@ -999,12 +1003,25 @@ workflow):
   repository's `orig/` trees.
 - **`CBASIC_1982.pdf`** — the CBASIC language manual, covering both the
   8080 `CB86` compiler (`orig/driorig/CB86-Master_Control/`) and
-  CBASIC-86 (`orig/driorig/CBASIC86-719/`, `-720/`).
-- **`Unconfirmed 414507.crdownload`** — a leftover browser-download
-  artifact (Chrome's placeholder name for an in-progress download),
-  not yet renamed/identified; despite the name, its content is a
-  complete 364-page PDF. Worth renaming/re-sorting into the list above
-  once identified, rather than leaving it under this name.
+  CBASIC-86 (`orig/driorig/CBASIC86-719/`, `-720/`). Also available as
+  **`CBASIC_1982.md`**, a `pdftotext -layout` extraction lightly
+  restructured into real Markdown headings (one per Section/Appendix,
+  numbered subsection, and — the bulk of it — one per statement/
+  function reference entry) with stray page numbers and the original
+  dot-leader Table of Contents stripped; this is the one manual here
+  with a genuine embedded text layer (confirmed via `pdffonts`/
+  `pdftotext`), so the extraction is lossless prose, not OCR guesswork
+  — see the note below on why the rest of `orig/manuals/` isn't
+  converted the same way.
+
+Every other PDF here is a **scanned image with no embedded text
+layer** (`pdftotext`/`pdffonts` return nothing for any of them, even
+on `MPM86_pgmr_Sep81.pdf`'s 364 pages) — `CBASIC_1982.pdf` is the one
+exception. Converting the rest to Markdown would mean actually OCR'ing
+1980s dot-matrix/typewriter-era scans, which risks silently wrong text
+on a reference document; they're left as PDFs (readable via a
+page-range read when needed) unless/until that's done deliberately,
+checked, and not just assumed correct.
 
 ## Notes for anyone working in this tree
 

@@ -83,3 +83,7 @@ Described there as:
 
 `orig/driorig/` and `orig/lastdri/` were downloaded from
 [cpm.retropc.se/cpm/randyfiles/DRI/index.html](https://cpm.retropc.se/cpm/randyfiles/DRI/index.html).
+
+The scanned DRI manuals in `orig/manuals/` have also been extracted to
+Markdown (`.md` alongside each `.pdf`) to make them faster and easier
+for LLMs to use as reference material.

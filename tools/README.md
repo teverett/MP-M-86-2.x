@@ -203,20 +203,24 @@ copy of `orig/`.
 ### Kernel sources (`src/kernel/`)
 
 `src/kernel/CIO.A86` and `src/kernel/SYSDAT.A86` compile cleanly
-end-to-end as-is. `BDOS.A86`, `MEM.A86`, `RTM.A86`, `SUP.A86`, and
-`XIOS.A86` are each blocked by genuine 1981 source defects (the same
-undeclared/mismatched-name pattern as the RSPs above, just far more
-widespread in `BDOS.A86`'s case) plus, in a few spots, the accepted
-short-jump-range trade-off described above — not by missing includes or
-remaining assembler gaps. `XIOS.A86` additionally has one genuinely
-unresolved symbol (`dp_base`) with no fix available from evidence in
-this tree. See `docs/bugs.md` for the specifics (bugs #4 through #7).
+end-to-end as-is. Every source-level name-mismatch bug in `BDOS.A86`,
+`RTM.A86` (45 + 6 names — see `docs/bugs.md` bugs #4/#5) has since been
+**patched directly in `src/`** (at the user's explicit request — this
+is the one place in this tree where `src/` is no longer an unmodified
+copy of `orig/`); `MEM.A86` and `SUP.A86` had no name-mismatch bugs of
+their own to begin with. All four of `BDOS.A86`/`MEM.A86`/`RTM.A86`/
+`SUP.A86` are now blocked *only* by the short-jump-range trade-off
+described above (bug #6) — confirmed by temporarily disabling that
+check and re-assembling each file, which produced no further errors.
+`XIOS.A86` had its one fixable typo patched too, but still has one
+genuinely unresolved symbol (`dp_base`) with no fix available from
+evidence in this tree (bug #7).
 
 ### Loader sources (`src/loader/`)
 
-`src/loader/LDBDOS.A86` compiles cleanly end-to-end as-is. `LDBIOS.A86`
-is blocked only by four more instances of the same mismatched-name
-pattern (bug #8) plus the short-jump-range trade-off; `LDMPM.A86` and
-`ROM.A86` each have one genuinely unresolved symbol (bugs #9, #10),
-the same situation as `XIOS.A86`'s `dp_base` above. See `docs/bugs.md`
-bugs #8 through #10.
+`src/loader/LDBDOS.A86` compiles cleanly end-to-end as-is.
+`LDBIOS.A86`'s four name-mismatch bugs (bug #8) have been patched; it's
+now blocked only by the short-jump-range trade-off, same as the kernel
+files above. `LDMPM.A86` and `ROM.A86` each still have one genuinely
+unresolved symbol (bugs #9, #10), the same situation as `XIOS.A86`'s
+`dp_base` above — not patched.

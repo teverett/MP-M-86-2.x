@@ -33,8 +33,8 @@ if	MPM
 	;TO MAKE SURE ANOTHER PROCESS HAS NOT ALLOCATED A BLOCK TO
 	;THE FCB SINCE THIS PROCESS OPENED THE FCB
 
-	CALL	TEST_DISK_FCB		;JUMP BACK TO DISKREAD0 IF DONT_CLOSE
-	JNZ	DISKREAD0		;TRUE, FILE OPENED IN UNLOCKED MODE,
+	CALL	TEST_DISK_FCB		;JUMP BACK TO DISK_READ0 IF DONT_CLOSE
+	JNZ	DISK_READ0		;TRUE, FILE OPENED IN UNLOCKED MODE,
 					;AND ACCESS OF DIR FCB SUCCESSFUL
 					;DONT_CLOSE SET TO FALSE
 	MOV	AL,VRECORD
@@ -62,8 +62,8 @@ recordok:
 if	MPM
 
 	JNZ	RECORDOK1
-	CALL	TEST_DISK_FCB		;JUMP BACK TO DISKREAD0 IF DONT_CLOSE
-	JNZ	DISKREAD0		;TRUE, FILE OPENED IN UNLOCKED MODE,
+	CALL	TEST_DISK_FCB		;JUMP BACK TO DISK_READ0 IF DONT_CLOSE
+	JNZ	DISK_READ0		;TRUE, FILE OPENED IN UNLOCKED MODE,
 					;AND ACCESS OF DIR FCB SUCCESSFUL
 endif
         jz      diskeof
@@ -95,7 +95,7 @@ TEST_DISK_FCB1:
 	CMP	B[BX],0FFH
 	MOV	AL,11
 	JNE	$+5
-	JMP	STA_RET			;ERROR - CLOSE OPERATION UNSUCCESSFUL
+	JMP	staret			;ERROR - CLOSE OPERATION UNSUCCESSFUL
 	MOV	B[BX],0			;LRET = 0
 	PUSH	SI
 	CALL	GET_RCNTA
@@ -154,7 +154,7 @@ JMP_SET_ARET:
                                         ;vrecord = 128, cannot open
                                         ;next extent
         jb      dskwr0
-	CALL	OPEN_REEL		;TRY TO OPEN NEXT EXTENT
+	CALL	openreel		;TRY TO OPEN NEXT EXTENT
 	TEST	LRET,TRUE
 	JNZ	RET14
 dskwr0:
@@ -171,7 +171,7 @@ endif
 
 if	MPM
 
-	JZ	DISKWRITE2
+	JZ	DISK_WRITE2
 
 	;IF FILE IS UNLOCKED, VERIFY RECORD IS NOT LOCKED
 	;RECORD HAS TO BE ALLOCATED TO BE LOCKED
@@ -633,7 +633,7 @@ TMP_SELECT:				;DL=DRIVE TO SELECT (0-F)
 	MOV	AL,[BX]
 	PUSH	AX
 	MOV	[BX],DL
-	CALL	CUR_SELECT
+	CALL	CURSELECT
 	POP	AX
 	MOV	SELDSK,AL
 	RET
@@ -707,7 +707,7 @@ endif
 TEST_FF_DISK:
 	INC	AL
 	JNZ	RET20A
-	JMP	SEL_ERROR
+	JMP	selerror
 
 ;
 SET_SELDSK:
@@ -741,7 +741,7 @@ reselect:
 RESELECT0:
 	MOV	HIGH_EXT,AL
 	CALL	CLR_EXT
-	CALL	GETRCNTA
+	CALL	GET_RCNTA
 	MOV	AL,[BX]			;IF FCB(RCOUNT) & 80H
 	AND	AL,CH			;THEN ACTUAL_RC = FCB(RCOUNT) & 7FH
 	JZ	RESELECT1		;     FCB(RCOUNT) = 80H
@@ -935,7 +935,7 @@ GET_XFCB01:				;XFCB NOT FOUND
 	JNZ	GET_XFCB1
 	RET				;XFCB NOT FOUND - AL = 0, ZFLAG SET
 GET_XFCB1:
-	CALL	GET_DPTRA
+	CALL	getdptra
 	MOV	DX,BX
 	ADD	BX,EXTNUM
 	MOV	AL,[BX]
@@ -1193,10 +1193,10 @@ chk_olist05:
 	jz retl1
 	call delete_item
 inc_pdcnt:
-	mov al,pdcnt
+	mov al,PD_CNT
 chk_olist1:
 	add al,16! jz chk_olist1
-	mov pdcnt,al
+	mov PD_CNT,al
 	ret
 
 PR_TERM:
@@ -1204,7 +1204,7 @@ PR_TERM:
 	mov dx,pdaddr
 	mov bx,offset open_root! mov cur_pos,bx
 pr_term1:
-	mov ch,0! push dx! call search_nlist! pop dx! jnz pr_term2
+	mov ch,0! push dx! call SEARCHN_LIST! pop dx! jnz pr_term2
 	mov cx,6! push bx! call tst_tbl_lmt! pop bx! jnz pr_term1
 	call remove_locks! call delete_item
 	jmp pr_term1
@@ -1223,7 +1223,7 @@ FLUSH_FILE0:
 	mov bx,offset open_root! mov cur_pos,bx
 flush_file1:
 	push ds! pop es
-	mov ch,1! call search_nlist! jnz retl2
+	mov ch,1! call SEARCHN_LIST! jnz retl2
 	push bx! call remove_locks! call delete_item! pop bx
 	mov bx,6[bx]! mov es,p_uda[bx]
 	test u_pd_cnt,1! jnz flush_file1
@@ -1237,7 +1237,7 @@ FREE_FILES:
 	mov dx,pdaddr! mov bx,offset open_root! mov cur_pos,bx
 free_files1:
 	mov ch,free_mode
-	push dx! call search_nlist! pop dx! jnz retl25
+	push dx! call SEARCHN_LIST! pop dx! jnz retl25
 	mov cx,6! push bx! call tst_tbl_lmt! pop bx! jnz free_files1
 	cmp word ptr 3[bx],0ffffh! jnz free_files2
 	cmp byte ptr 5[bx],0ffh! jz free_files3
@@ -1307,7 +1307,7 @@ check_free1:
 retl4:
 	ret
 check_free2:
-	pop bx! mov al,14! jmp sta_ret
+	pop bx! mov al,14! jmp staret
 
 LOCK:
 	mov cl,2! call copy_dma_in
@@ -1321,13 +1321,13 @@ LOCK:
 	mov al,lock_cnt! add al,mult_cnt! jb lock0
 	cmp lock_max,al! jae lock05
 lock0:
-	mov al,12! jmp sta_ret ; too many locks
+	mov al,12! jmp staret ; too many locks
 lock05:
 	call check_free
 lock1:
 	call save_rr! mov bx,offset lock9! push bx! mov ah,mult_cnt
 lock2:
-	push ax! call get_lock_add
+	push ax! call GET_LOCKADD
 	test lock_unlock,true! jz lock3 ; jump if unlock
 	call test_lock
 lock3:
@@ -1336,7 +1336,7 @@ lock3:
 lock4:
 	call reset_rr! mov ah,mult_cnt
 lock5:
-	push ax! call get_lock_add
+	push ax! call GET_LOCKADD
 	test lock_unlock,true! jz lock6 ; jump if unlock
 	call set_lock! jmp lock7
 lock6:
@@ -1345,7 +1345,7 @@ lock7:
 	pop ax! dec ah! jz retl5
 	call incr_rr! jmps lock5
 lock8:
-	mov al,13! jmp sta_ret
+	mov al,13! jmp staret
 lock9:
 	call reset_rr
 retl5:
@@ -1461,7 +1461,7 @@ dskrst3:
 	or bl,set_ro_flag! or bl,dl! pop dx! or bl,dl! mov check_disk,bl
 	mov bx,offset open_root! mov cur_pos,bx
 dskrst4:
-	mov ch,1! call search_nlist! jnz dskrst6
+	mov ch,1! call SEARCHN_LIST! jnz dskrst6
 	test check_disk,true! jz dskrst5
 	push bx! call compare_pds! jz dskrst45
 	pop dx! xor al,al! jmp dskrst6

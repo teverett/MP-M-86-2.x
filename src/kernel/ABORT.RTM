@@ -131,7 +131,7 @@ abt_notus:
 	mov si,(ulen-2)
 	mov u_sp,si
 	mov u_ss,es
-	mov u_inint,false
+	mov u_in_int,false
 	mov es:[si],offset terminate ; terminate code
 	mov u_dparam,dx		; put in terminate code
 	pop es			; restore calling PD's UDA
@@ -184,14 +184,14 @@ abtrun:
 	    jcxz abtr_drl
 	jmps snip_it
 abtr_drl:			; wasn't on rlr, try drl 
-	mov di,(offset drl) - plink
+	mov di,(offset drl) - p_link
 	jmps abt_common
 
 abtdq:
 ;------
 ; On a dq list
 
-	xor al,al		; arg to find_pdq: to look on DQ lists
+	xor al,al		; arg to findpdq: to look on DQ lists
 	jmps abtq_common
 
 abtnq:
@@ -201,7 +201,7 @@ abtnq:
 	mov al,0ffh		; to look on NQ lists
 
 abtq_common:
-	call find_pdq
+	call findpdq
 	    jcxz abt_tab_err
 	jmps snip_it		; BX,SI = PD;DI = last link
 				; BP = adr of nq or dq root
@@ -243,8 +243,8 @@ abtcns:
 	mov al,p_cns[bx]	; Assume legal cns #
 	call gccba
 	lea di,(c_queue-p_link)[si]	; offset of root - p_link
-	call findpd ! jcxz abtlst
-	    jmps snipit
+	call find_pd ! jcxz abtlst
+	    jmps snip_it
 abtlst:	mov al,p_lst[bx]
 	call gccba
 	lea di,(c_queue-p_link)[si]
@@ -341,7 +341,7 @@ fpdq_dq_lst:
 fpdq_nxt_pd:
 	push di			; Save QD adr
 	call find_pd
-	jcxz fpdq_nxt_q		; PD not in this QD, try next QD
+	jcxz fpdq_nxtq		; PD not in this QD, try next QD
 	pop dx			; Clean stack
 fpdq_no_pd:			; find_pd returns non-zero CX if found
 	ret

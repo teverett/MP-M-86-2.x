@@ -65,13 +65,13 @@ if	MPM
 
 TEST_DIR:
 	CALL	HOME
-	CALL	SET_END_DIR
+	CALL	setenddir
 TEST_DIR1:
 	MOV	CL,0FEH
-	CALL	RD_DIR
+	CALL	rddir
 	CMP	FLUSHED,FALSE
 	JNE	RET8A
-	CALL	END_OF_DIR
+	CALL	endofdir
 	JZ	RET8A
 	JMP	TEST_DIR1
 
@@ -155,7 +155,7 @@ INITIAL3:
 
 DRV_LBL:
 	MOV	AL,EXTNUM[BX]
-	MOV	BX,DRV_LBLA
+	MOV	BX,DRVLBLA
 	MOV	[BX],AL
 	JMPS	INITIAL3
 
@@ -306,12 +306,12 @@ srchnext:
 	MOV	AL,[BX]			;IS FCB AN XFCB ?
 	AND	AL,11101111B
 	CMP	AL,[BX]
-	JE	SRCH_LOOP		;NO
+	JE	srchloop		;NO
 	MOV	SI,DX
 	CMP	AL,[SI]			;DOES USER # MATCH ?
-	JNZ	SRCH_LOOP		;NO
+	JNZ	srchloop		;NO
 	TEST	FIND_XFCB,TRUE		;IS FIND_XFCB TRUE ?
-	JZ	SEARCH_N		;NO
+	JZ	SEARCHN		;NO
 	MOV	SAVE_XFCB,TRUE		;
 	JMPS	SRCHOK
 
@@ -523,7 +523,7 @@ if	MPM
 
 endif
 
-	CALL	CK_RODIR		;ONLY ONE PASS IS REQUIRED ON
+	CALL	ckrodir		;ONLY ONE PASS IS REQUIRED ON
 	JMPS	DELET0			;NORMAL NON-WILD DELETES
 
 DELETE01:
@@ -537,7 +537,7 @@ if	MPM
 
 endif
 
-	CALL	CK_RODIR		;VERIFY FCB IS NOT READ/ONLY
+	CALL	ckrodir		;VERIFY FCB IS NOT READ/ONLY
 	CALL	SEARCHN			
 	JMPS	DELETE01
 DELETE02:
@@ -573,7 +573,7 @@ endif
 DELETE2:
 	CALL	DOES_XFCB_EXIST		;IF XFCBS EXIST, DELETE THEM ON
 	JNZ	DELETE1			;ANOTHER PASS THROUGH THE DIRECTORY
-	JMP	CPY_DIR_LOC
+	JMP	cpydirloc
 ;
 getblock:
         ;given allocation vector position cx, find the zero bit
@@ -634,7 +634,7 @@ rblok0:
 ;                                        ;copy the entire fcb
 ;        mov     cl,0
 ;        mov     dl,fcblen               ;start at 0, to fcblen-1
-;                                        ;       jmp copydir
+;                                        ;       jmp copy_dir
 ;
 copy_dir:
         ;copy fcb information starting
@@ -646,7 +646,7 @@ COPY_DIR0:
 	INC	CL
 COPY_DIR1:
 	DEC	CL
-	JZ	SEEK_COPY		;COPY OPERATION COMPLETE
+	JZ	seekcopy		;COPY OPERATION COMPLETE
 	MOV	AH,[BX]			;PICK UP DIR FCB BYTE
 	AND	AH,CH			;MASK WITH ATTRIBUTE MASK (0 | 80H)
 	MOV	SI,DX
@@ -751,7 +751,7 @@ rename:
 
 	JNZ	$+3
 RET10:	RET
-	CALL	CK_RODIR		;CHECK FOR READ/ONLY FILE
+	CALL	ckrodir		;CHECK FOR READ/ONLY FILE
 
 if	MPM
 
@@ -764,7 +764,7 @@ renam0:
                                         ;rename next element
         mov     cl,dskmap
         mov     dl,extnum
-        call    copydir
+        call    copy_dir
                                         ;element renamed, move to next
         call    srchn
         JNZ    	RENAM0
@@ -772,7 +772,7 @@ renam0:
 RENAME1:
 	CALL	DOES_XFCB_EXIST		;RENAME XFCB IF PRESENT
 	JNZ	$+5
-	JMP	CPY_DIR_LOC
+	JMP	cpydirloc
 	CALL	COPY_USER_NO		;XFCB(16) = XFCB(0)
 	JMPS	RENAM0
 
@@ -799,10 +799,10 @@ indic0:
         mov     dl,extnum               ;copy name
 	CALL	COPY_DIR2
 	CALL	MOVE
-	CALL	SEEK_COPY
+	CALL	seekcopy
         call    srchn
         JNZ	INDIC0
-	JMP	CPY_DIR_LOC
+	JMP	cpydirloc
 ;
 open:
         ;search for the directory entry, copy to fcb
@@ -1189,7 +1189,7 @@ openreel:
 	MOV	AL,[BX]
 	MOV	CL,AL
 	INC	CL			;INCREMENT EXT #
-	CALL	COMP_EXT		;DID WE CROSS A DIR FCB BOUNDARY ?
+	CALL	compext		;DID WE CROSS A DIR FCB BOUNDARY ?
 	JZ	OPENR3			;NO
 	PUSH	BX
 	PUSH	CX

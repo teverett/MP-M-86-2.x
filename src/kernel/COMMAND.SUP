@@ -83,7 +83,7 @@ nodf:	mov bx,rlr
 	mov cli_dma_ofst,cx
 	mov cx,u_dma_seg
 	mov cli_dma_seg,cx
-	mov clierr,0
+	mov cli_err,0
 
 		; copy command into local area
 
@@ -115,7 +115,7 @@ cli_copy:
 		;parse the command
 cli_parse:
 	call pfn ! jcxz cli_goodparse
-	    mov clierr,cx
+	    mov cli_err,cx
 	    jmp cli_exit
 cli_goodparse:
 
@@ -137,7 +137,7 @@ cli_qful:
 cli_exit2:	    jmp cli_exit
 cli_ffload:
 	cmp cx,e_q_full ! jne cli_fload
-	    mov clierr,cx ! jmps cli_qful
+	    mov cli_err,cx ! jmps cli_qful
 
 cli_checkque:
 ;------------
@@ -197,7 +197,7 @@ cli_fload:
 
 	pushf ! cli ! mov bx,pul
 	cmp bx,0 ! jne cli_gpd
-	    popf ! mov clierr,e_no_pd
+	    popf ! mov cli_err,e_no_pd
 	    jmp cli_exit
 cli_gpd:
 	mov si,p_link[bx] ! mov pul,si
@@ -287,7 +287,7 @@ cli_gpd:
 			;could not find CMD file
 
 cli_bopen:	    cmp bh,0 ! jne cli_rmpd2
-cli_bopene:		mov clierr,e_bad_open
+cli_bopene:		mov cli_err,e_bad_open
 cli_rmpd2:	    jmp cli_rmpd
 cli_gopen:
 
@@ -332,7 +332,7 @@ cli_cl:	push bx ! push cx
 	jcxz cli_gload
 	    cmp cx,e_abort ! jne cli_lnab
 		jmp cli_rmpd
-cli_lnab:   mov clierr,cx
+cli_lnab:   mov cli_err,cx
 	    jmp cli_rmpd
 cli_gload:
 	mov cli_bpage,bx
@@ -437,7 +437,7 @@ nocrlf:	mov bx,offset cli_acb
 	mov ax,cli_pd ! mov acb_pd[bx],ax
 	mov acb_match[bx],true
 	call conasn
-	mov clierr,cx ! jmps cli_exit
+	mov cli_err,cx ! jmps cli_exit
 
 		; 12. All Done
 
@@ -476,7 +476,7 @@ clirls:
 
 		; setup error return if needed
 cli_nctl:
-	mov cx,clierr ! sub bx,bx
+	mov cx,cli_err ! sub bx,bx
 	jcxz cli_gexit
 	    mov bx,0ffffh
 cli_gexit:

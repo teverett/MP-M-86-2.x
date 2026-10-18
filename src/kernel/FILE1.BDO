@@ -65,7 +65,7 @@ REPORT_ERR:
 
 	MOV	AL,FX			;CONVERT FUNCTION TO CHARACTER
 	MOV	CH,30H
-	MOV	BX,OFFSET PRFX1
+	MOV	BX,OFFSET PR_FX1
 	CMP	AL,100
 	JC	RPT_ERR1
 	MOV	B[BX],31H
@@ -109,7 +109,7 @@ RPT_ERR3:
 						;   RETURN ERRORS?
 	JE	RPT_ERR4			;YES
 	MOV	SI,RLR
-	OR	PFLAG[SI],PF_CTLC		;SET PROCESS ^C FLAG
+	OR	p_flag[SI],PF_CTLC		;SET PROCESS ^C FLAG
 RPT_ERR4:
 	JMP	RTN_PHY_ERRS
 
@@ -430,7 +430,7 @@ CHKSUM_FCB:				;COMPUTE CHECKSUM FOR FCB
 
 if	MPM
 
-	MOV 	BX,OFFSET PDCNT
+	MOV 	BX,OFFSET PD_CNT
 	MOV 	CX,4
 
 endif
@@ -458,7 +458,7 @@ SET_CHKSUM_FCB:
 	CALL	CHKSUM_FCB		;COMPUTE FCB CHECKSUM
 	JZ	RET45			;RETURN IF VALID
 	MOV	AH,AL			;SAVE CURRENT CHECKSUM VALUE
-	CALL	GETS1			;GET S1 BYTE
+	CALL	GET_S1			;GET S1 BYTE
 	SUB	AH,AL			;SUBTRACT FROM CHECKSUM VALUE
 	NEG	AH			;NEGATE RESULT
 	MOV	[BX],AH			;RESTORE S1
@@ -468,7 +468,7 @@ RESET_CHECKSUM_FCB:
 	MOV	COMP_FCB_CKS,0
 	CALL	CHKSUM_FCB		;COMPUTE FCB CHECKSUM
 	JNZ	RET45			;RETURN IF INVALID
-	CALL	GETS1			;INVALIDATE S1
+	CALL	GET_S1			;INVALIDATE S1
 	INC	B[BX]
 	RET
 ;
@@ -495,7 +495,7 @@ if	MPM
 
 	AND	AL,0FH			;IS MOD(CHKSUM,16) = 0 ?
 	JNZ	CHECK_FCB3		;NO - INVALID CHECKSUM
-	CMP	PD_CNT,0		;IS PDCNT = 0 ?
+	CMP	PD_CNT,0		;IS PD_CNT = 0 ?
 	JZ	CHECK_FCB3		;YES - INVALID CHECKSUM
 	MOV	BYTE PTR SDCNT+1,0FFH
 	MOV	DONT_CLOSE,TRUE
@@ -523,7 +523,7 @@ CHECK_FCB4:
 endif
 
 	MOV	AL,10			;10 = CHECKSUM ERROR
-	JMP	STA_RET
+	JMP	staret
 
 setcdisk:
         ;set a "1" value in SELDSK position of cx
@@ -717,7 +717,7 @@ ret7:   ret
 ;
 wrdir:
         ;write the current directory entry, set checksum
-	CALL	CHECK_WRITE		;VERIFY DISK IS READ/WRITE
+	CALL	checkwrite		;VERIFY DISK IS READ/WRITE
         call    newchecksum             ;initialize entry
         call    setdir                  ;directory dma
         mov     cl,1                    ;indicates a write directory
@@ -775,7 +775,7 @@ MAKE_FCB_INV:
 CHK_INV_FCB:
 	;CHECK FOR INVALID FCB
 
-	CALL	GETDMA
+	CALL	GET_DMA
 	JMPS	TEST_FFFF
 
 TST_INV_FCB:
@@ -785,7 +785,7 @@ TST_INV_FCB:
 	JNZ	RET8
 	POP	BX
 	MOV	AL,9
-	JMP	STA_RET
+	JMP	staret
 
 endofdir:
         ;return zero flag if at end of director, non zero

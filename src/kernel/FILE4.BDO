@@ -32,7 +32,7 @@ endif
 	MOV	SELDSK,AL
 	DEC	AL
 	MOV	CURDSK,AL
-	JMP	FUNC_48		;FLUSH BUFFERS
+	JMP	FUNC48		;FLUSH BUFFERS
 
 func14:		;select disk info
 
@@ -64,7 +64,7 @@ if	MPM
 
 	MOV	MAKE_FLAG,FALSE		
 	MOV	BYTE PTR SDCNT+1,0FFH	;INITIALIZE SDCNT
-	MOV	BX,OFFSET OPENFILE	;CHECK_FCB1 RETURNS TO OPEN_FILE
+	MOV	BX,OFFSET OPEN_FILE	;CHECK_FCB1 RETURNS TO OPEN_FILE
 	PUSH	BX			;IF CHECKSUM INVALID
 	MOV	CHECK_FCB_RET,TRUE
 	CALL	CHECK_FCB1		;RETURNS NORMALLY IF FCB CHKSUM VALID
@@ -72,7 +72,7 @@ if	MPM
 	CMP	HIGH_EXT,60H		;IS FILE OPEN IN READ/ONLY-USER 0 MODE?
 	JNE	OPEN_FILE		;NO
 	CALL	HOME			;ATTEMPT OPEN UNDER USER ZERO
-	CALL	SET_END_DIR
+	CALL	setenddir
 	JMP	OPEN_USER_ZERO
 OPEN_FILE:
 	MOV	BX,INFO			;FCB(0) = USRCODE
@@ -155,7 +155,7 @@ OPEN_USER_ZERO:
 
 ;
 OPENX:
-	CALL	END_OF_DIR		;WAS OPEN SUCCESSFUL
+	CALL	endofdir		;WAS OPEN SUCCESSFUL
 	JZ	RET30			;NO
 	POP	BX			;DISCARD RETURN ADDRESS
 
@@ -169,7 +169,7 @@ if	MPM
 	MOV	BX,INFO
 	OR	AL,AL			;IS USER NUMBER ZERO?
 	JNZ	OPENX0 			;NO
-	CALL	ROTEST			;IS FILE READ/ONLY ATTRIBUTE SET?
+	CALL	RO_TEST			;IS FILE READ/ONLY ATTRIBUTE SET?
 	JNC	OPENX0			;NO
 	INC	BX			;IS FILE SYSTEM ATTRIBUTE SET?
 	MOV	AL,[BX]
@@ -259,7 +259,7 @@ openx04:
 	and al,80h! jnz openx07
 	;no - has this file been opened by this process?
 	mov bx,prv_pos! mov cur_pos,bx
-	mov ch,5! call search_nlist! jnz openx01
+	mov ch,5! call SEARCHN_LIST! jnz openx01
 openx05:
 	;yes - increment open file count
 	inc word ptr 8[bx]! jmps openx08
@@ -276,7 +276,7 @@ openx08:
 	;was file opened in unlocked mode?
 	test attributes,40h! jz openx09 ; no
 	;yes - return .olist_item in ranrec field of FCB
-	call getrra! mov dx,cur_pos! mov [bx],dx
+	call GET_RRA! mov dx,cur_pos! mov [bx],dx
 	mov parlg,35 ;copy 35 bytes back to user FCB
 openx09:
 	mov comp_fcb_cks,true
@@ -295,13 +295,13 @@ endif
 					;ACTIVATED BY DIR LBL
 	JNZ	$+3			;YES
 RET32:	RET
-	CALL	END_OF_DIR		;WAS XFCB FOUND?
+	CALL	endofdir		;WAS XFCB FOUND?
 	JZ	RET32			;NO
 	CALL	NOWRITE			;IS DISK READ/ONLY?
 	JNZ	RET32			;YES
 OPENX2:
 	CALL	STAMP1			;SET FILE ACCESS TIME STAMP
-	JMP	SEEK_COPY		;UPDATE XFCB
+	JMP	seekcopy		;UPDATE XFCB
                                         ;ret ;jmp goback
 
 func16:		;close file
@@ -318,7 +318,7 @@ if	MPM
 	CALL	CHECK_FCB1
 	POP	BX			;CHKSUM OK
 	MOV	BYTE PTR SDCNT+1,0FFH	;INITIALIZES SDCNT
-	CALL	GET_MODNUM		;PERFORM PARTIAL CLOSE IF
+	CALL	getmodnum		;PERFORM PARTIAL CLOSE IF
 	AND	AL,80H			;FCB(MODNUM) & 80H = 80H
 	JNZ	CLOSE01
 	CALL	CLOSE			;PERFORM FULL CLOSE
@@ -376,7 +376,7 @@ endif
 	CALL	GET_XFCB		;DOES FILE HAVE AN XFCB
 	JZ	RET34			;NO - RETURN
 	CALL	STAMP2			;PERFORM UPDATE TIME STAMP
-	JMP	SEEK_COPY		;UPDATE XFCB
+	JMP	seekcopy		;UPDATE XFCB
                                         ;ret ;jmp goback
 
 func17:		;search for first occurrence of a file
@@ -413,7 +413,7 @@ CSEARCH2:
 CSEARCH3:
 
 	POPF
-	MOV	BX,OFFSET DIR_TO_USER	;CALLED AFTER SEARCH | SEARCHN
+	MOV	BX,OFFSET dirtouser	;CALLED AFTER SEARCH | SEARCHN
 	PUSH	BX
 	JNZ	$+5
 	JMP	SEARCH
@@ -496,7 +496,7 @@ endif
 	CALL	OPEN			;ATTEMPT TO OPEN FCB
 	CALL	RESET_CHECKSUM_FCB	;INVALIDATE FCB CHKSUM IN CASE FILE
 					;ALREADY EXISTS
-	CALL	END_OF_DIR		;DOES FILE EXIST?
+	CALL	endofdir		;DOES FILE EXIST?
 	JZ	$+5
 	JMP	FILE_EXISTS		;YES - ERROR
 
@@ -508,15 +508,15 @@ makex00:
 	mov make_flag,al ; make_flag = open attribute
 	cmp byte ptr sdcnt+1,0ffh! jz makex01
 	call pack_sdcnt
-	mov ch,3! call search_olist! jz make_x02
+	mov ch,3! call search_olist! jz makex02
 makex01:
 	cmp free_root,0! jne $+5! jmp openx02
-	jmps makex03
+	jmps make_x03
 makex02:
-	mov al,makeflag! and al,2[bx]! jnz $+5
+	mov al,MAKE_FLAG! and al,2[bx]! jnz $+5
 makex025:
 	jmp openx06
-	call compare_pds! jz makex03
+	call compare_pds! jz make_x03
 	test make_flag,80h! jnz makex025
 make_x03:
 
@@ -535,7 +535,7 @@ MAKEX04:
 	CALL	MAKE			;MAKE FCB
 	CALL	RESET_CHECKSUM_FCB	;INVALIDATE FCB CHKSUM IN CASE
 					;MAKE FAILS
-	CALL	END_OF_DIR		;DID MAKE FAIL?
+	CALL	endofdir		;DID MAKE FAIL?
 	JNZ	$+3			;NO
 RET36:	RET				;YES - NO ROOM IN DIRECTORY
 	CALL	GET_DIR_MODE		;GET DIR LBL DATA BYTE
@@ -688,7 +688,7 @@ func28:			;write protect current disk
 	MOV	BX,1
 	SHL	BX,CL			;form drive vector from seldsk
 	CALL	INTRNL_DISK_RESET	;verify no other process has files open
-	JMP	SET_RO
+	JMP	setro
 
 endif
 if	CPM
@@ -840,7 +840,7 @@ acc_drv02:
 	call check_free0! pop bx
 	call count_opens! pop bx
 	add bl,open_cnt! jb acc_drv3
-	sub bl,openmax! jae acc_drv3
+	sub bl,open_max! jae acc_drv3
 	mov bx,info
 	mov al,curdsk! push ax! mov al,16
 acc_drv1:
@@ -934,7 +934,7 @@ FUNC45:					;SET BDOS ERROR MODE
 
 FUNC46:					;GET DISK FREE SPACE
 
-	CALL	TMPSELECT		;PERFORM TEMPORARY SELECT OF
+	CALL	TMP_SELECT		;PERFORM TEMPORARY SELECT OF
 					;SPECIFIED DRIVE
 
 	MOV	SI,ALLOCA		;SI = ALLOCATION VECTOR ADDR
@@ -992,7 +992,7 @@ func51:		; set dma base
 
 func52:		; get dma
 
-	MOV RETURN_SEG,DS
+	MOV returnseg,DS
 	mov bx,u_dma_seg
 	mov u_retseg,bx
 	mov bx,u_dma_ofst
@@ -1013,7 +1013,7 @@ FUNC100:
 	CALL	COPY_DMA_IN
 	CALL	PARSAVE33
 	CALL	RESELECTX
-	CALL	CHECK_WRITE
+	CALL	checkwrite
 	MOV	BX,INFO			;DOES DIR LBL EXIST ON DRIVE?
 	MOV	B[BX],20H
 	MOV	CL,1
@@ -1048,12 +1048,12 @@ SDL2:
 	MOV	[BX],CH			;SET PASSWORD CHECKSUM BYTE
 	SUB	XDMAAD,8
 SDL3:
-	JMP	SEEK_COPY		;WRITE DIR LBL OR XFCB TO DIRECTORY
+	JMP	seekcopy		;WRITE DIR LBL OR XFCB TO DIRECTORY
 
 FUNC101:				;RETURN DIRECTORY LABEL DATA
-	CALL	TMPSELECT
+	CALL	TMP_SELECT
 	CALL	GET_DIR_MODE
-	JMP	STA_RET
+	JMP	staret
 
 FUNC102:				;READ FILE XFCB
 	CALL	PARSAVE33
@@ -1062,7 +1062,7 @@ FUNC102:				;READ FILE XFCB
 	CALL	GET_XFCB		;DOES XFCB EXIST FOR FILE?
 	MOV	AL,0FFH
 	JNZ	$+5
-	JMP	STA_RET			;NO
+	JMP	staret			;NO
 	MOV	BX,INFO			;YES - COPY XFCB TO USER'S FCB
 	MOV	CL,NXTREC
 	JMP	MOVE
@@ -1080,7 +1080,7 @@ FUNC103:				;WRITE OR UPDATE FILE XFCB
 	OR	AL,AL
 	MOV	AL,0FFH
 	JNZ	$+5
-	JMP	STA_RET			;NO
+	JMP	staret			;NO
 	MOV	MAKE_XFCB,AL		;DOES FILE EXIST?
 	MOV	CL,EXTNUM
 	CALL	SEARCH
@@ -1100,7 +1100,7 @@ WXFCB1:
 	DEC	SI
 	AND	AL,1
 	JNZ	WXFCB2			;YES
-	JMP	SEEK_COPY		;NO - PASSWORD MODE REMAINS ZERO
+	JMP	seekcopy		;NO - PASSWORD MODE REMAINS ZERO
 WXFCB2:
 	LODS	AL			;ASSIGN NEW PASSWORD MODE TO XFCB
 	AND	AL,0E0H
@@ -1147,7 +1147,7 @@ FUNC107	EQU	FUNCRET
 if	MPM
 
 GOBACK:
-	MOV	SP,SAVESP
+	MOV	SP,SAVE_SP
 	JMP	BDOS_RETURN
 
 endif

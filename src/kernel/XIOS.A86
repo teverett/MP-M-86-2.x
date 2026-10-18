@@ -608,7 +608,7 @@ mdisk_end:
 			;set up tick interrupt vector
 			;tick causes interrupt 22
 	sub ax,ax ! push ds ! mov ds,ax
-	mov word ptr .088h,offset tick_int
+	mov word ptr .088h,offset tickint
 	mov word ptr .08ah,cs
 	pop ds
 			;setup ticks to occur every

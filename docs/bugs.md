@@ -1,16 +1,28 @@
 # Bugs Found in the Original MP/M-86 2.x Source
 
 While validating the assembler built in `tools/asm86/` against the files
-copied into `src/`, assembly failed on three of the four RSP sources with
-genuine defects in the original 1981 Digital Research source itself —
-not bugs in the assembler. These were confirmed by reading the
-surrounding code, not just by the assembler's error message, and have
-**not** been patched: `src/` remains an unmodified copy of `orig/`.
+copied into `src/`, assembly failed on several sources with genuine
+defects in the original 1981 Digital Research source itself — not bugs
+in the assembler. These were confirmed by reading the surrounding code,
+not just by the assembler's error message.
 
 This is consistent with the provenance already noted in the top-level
 `README.md` — these are hand-labeled "work disks," not a verified golden
-release, and these RSPs likely never finished debugging on the original
+release, and this code likely never finished debugging on the original
 hardware.
+
+**Patch status, by section below:** #1–#3 (the RSPs) are left
+**unpatched** — `src/rsp/` remains an unmodified copy of `orig/` for
+those files. #4, #5, #7 (partially), and #8 (the kernel/loader name
+typos) **have been patched** directly in `src/kernel/` and
+`src/loader/` — once a fix is this confidently evidence-backed (an
+exact squashed-name match to a real declaration, used incorrectly
+nowhere else), leaving it broken forever didn't serve the "get this
+booting" goal, and each patched spot is called out explicitly below so
+the change is traceable back to its evidence. #6, #7 (the `dp_base`
+part), #9, and #10 remain unpatched: either no confident fix exists
+(an undeclared symbol with no same-file candidate), or fixing it isn't
+a source-level change at all (the short-jump-range tooling trade-off).
 
 ## 1. `src/rsp/CLOCK.A86` — jump to a label that doesn't exist
 
@@ -101,82 +113,100 @@ evidence, even without a second call site to cross-reference against, to
 treat it as a genuine (if undocumented) PL/M-86 compiler builtin rather
 than a defect — see `tools/plm/README.md` for the implementation.
 
-## 4. `src/kernel/BDOS.A86` — pervasive dropped/added underscores (42+ names)
+## 4. `src/kernel/BDOS.A86` — pervasive dropped/added underscores (45 names) — FIXED
 
 Assembling `BDOS.A86` (after the tooling fixes in `tools/README.md` —
-this is genuinely the source, not the assembler) stops on a long list of
-undefined symbols, almost all of which are a declared name used with an
-underscore added, removed, or moved — e.g. `GETDMA` used where `GET_DMA`
-is declared, `STA_RET` used where `STARET`... no — concretely:
-`CHECK_WRITE`/`checkwrite`, `SET_DATA`/`setdata`, `MULTIO`/`MULT_IO`,
-`RETURN_SEG`/`returnseg`, `GETS1`/`GET_S1`, and so on for over 40 names
-across `FILE1.BDO`–`FILE4.BDO` and `BDOSIF.BDO`. This is the same defect
-class as `CLOCK.A86`/`TMP.A86`/`SUBMIT.A86` above, just far more
+this is genuinely the source, not the assembler) used to stop on a long
+list of undefined symbols, almost all of which were a declared name
+used with an underscore added, removed, or moved. This is the same
+defect class as `CLOCK.A86`/`TMP.A86`/`SUBMIT.A86` above, just far more
 widespread — consistent with this disk's provenance note ("work disks,"
 never finished debugging) applying to the BDOS module as a whole, not
-just the RSPs. Three representative, individually-confirmed instances
-(exactly one wrong spelling, cross-referenced against the real
-declaration and, where possible, a correctly-spelled sibling use):
+just the RSPs.
 
-- `PDCNT` (`BDOSIF.BDO`, `FILE1.BDO`, `FILE3.BDO`) vs. the declared
-  `PD_CNT` (`DATA.BDO`).
-- `PFLAG`/`pflag` (`FILE1.BDO`, `DSPTCH.RTM`) vs. the declared `p_flag`
-  (`PD.DEF`'s structure-offset chain).
-- `clierr` (`COMMAND.SUP`, 8 call sites) vs. the declared `cli_err`
-  (`SYSDAT.FMT`/`SYSTEM.DAT`) — `COMMAND.SUP` itself uses the correct
-  `cli_err` spelling once (line 475), so both spellings coexist in the
-  same file.
+**Patched** (the wrong spelling, as it appeared in `FILE1.BDO`–
+`FILE4.BDO`/`BDOSIF.BDO`, renamed to match the one real declaration —
+confirmed via a whole-tree squashed-name search, i.e. comparing with
+underscores stripped, before renaming):
 
-Not patched; `src/` remains an unmodified copy of `orig/`. Fixing
-`tools/asm86` to tolerate `INCLUDE`'d fragments ending in their own
-`END` (see `tools/README.md`) was necessary just to get *this far* into
-the file — real tooling gaps and real source bugs were interleaved.
+`PDCNT`→`PD_CNT`, `PFLAG`→`p_flag` (also in `DSPTCH.RTM`), `BTABFLAG`→
+`btab_flag`, `CHECK_WRITE`→`checkwrite`, `CK_RODIR`→`ckrodir`,
+`COMP_EXT`→`compext`, `CPY_DIR_LOC`→`cpydirloc`, `CUR_SELECT`→
+`CURSELECT`, `DIR_TO_USER`→`dirtouser`, `DISKREAD0`→`DISK_READ0`,
+`DISKWRITE2`→`DISK_WRITE2`, `DRV_LBLA`→`DRVLBLA`, `END_OF_DIR`→
+`endofdir`, `FUNC_48`→`FUNC48`, `GETDMA`→`GET_DMA`, `GETRCNTA`→
+`GET_RCNTA`, `GETS1`→`GET_S1`, `GET_DPTRA`→`getdptra`, `GET_MODNUM`→
+`getmodnum`, `HIGHEXT`→`HIGH_EXT`, `MULTIO`→`MULT_IO`, `OPENFILE`→
+`OPEN_FILE`, `OPEN_REEL`→`openreel`, `PRFX1`→`PR_FX1`, `RD_DIR`→
+`rddir`, `RETURN_SEG`→`returnseg`, `ROTEST`→`RO_TEST`, `SAVESP`→
+`SAVE_SP`, `SEARCH_N`→`SEARCHN`, `SEEK_COPY`→`seekcopy`, `SEL_ERROR`→
+`selerror`, `SET_DATA`→`setdata`, `SET_DIR`→`setdir`, `SET_END_DIR`→
+`setenddir`, `SET_RO`→`setro`, `SRCH_LOOP`→`srchloop`, `STA_RET`→
+`staret`, `TMPSELECT`→`TMP_SELECT`, `copydir`→`copy_dir`,
+`get_lock_add`→`GET_LOCKADD`, `getrra`→`GET_RRA`, `make_x02`→
+`makex02`, `makeflag`→`MAKE_FLAG`, `makex03`→`make_x03`, `openmax`→
+`open_max`, `search_nlist`→`SEARCHN_LIST`.
 
-## 5. `src/kernel/ABORT.RTM` — four more of the same, inside one file
+Separately, `clierr` (`COMMAND.SUP`, 8 call sites) → `cli_err` — the
+label actually declared (`SYSDAT.FMT`/`SYSTEM.DAT`), and already used
+correctly once in the same file (line 475) before this fix.
 
-Within a single file: `snipit` used where `snip_it` is declared (same
-file); `fpdq_nxt_q` used where the declared label is `fpdq_nxtq` (an
-*added* underscore this time, not dropped); `find_pdq` used where the
-declared label is `findpdq`; `findpd` used (once) where `find_pd` is
-declared and used correctly everywhere else in the same file; and
-`u_inint` used where `u_in_int` is declared (`UDA.FMT`). Not patched.
+After all of the above, `BDOS.A86` has exactly one blocker left: the
+short-jump-range tooling trade-off (see #6) — confirmed by temporarily
+disabling that check and re-running, which produced no further errors
+of any kind.
 
-## 6. `src/kernel/COMMAND.SUP` — out-of-range short jump after fixing `clierr`
+## 5. `src/kernel/ABORT.RTM` — five more of the same, inside one file — FIXED
 
-Past the `clierr`/`cli_err` bug above (see #4), `COMMAND.SUP:139` and
-`src/kernel/SHARE.MEM:35` and `src/kernel/DSPTCH.RTM:222` all hit
-`tools/asm86`'s own documented short-jump-range limitation (see "Design
-choices that trade size for simplicity" in `tools/README.md`) rather
-than a further source bug — the disp16-everywhere trade-off this
-assembler makes can push an originally-in-range conditional jump/`JMPS`
-out of 8-bit range in *this* assembler's encoding, even though DRI's own
-assembler (with disp8 optimization) kept it in range. Noted here for
-completeness, not fixed (fixing it means implementing real jump-size
-relaxation, a substantially bigger undertaking, not a one-line bug fix).
+Within a single file: `snipit`→`snip_it` (declared in the same file);
+`fpdq_nxt_q`→`fpdq_nxtq` (an *added* underscore this time, not dropped);
+`find_pdq`→`findpdq`; `findpd`→`find_pd` (declared and used correctly
+everywhere else in the same file); `plink`→`p_link` (`PD.DEF`); and
+`u_inint`→`u_in_int` (`UDA.FMT`). All patched. `RTM.A86` as a whole
+(which includes `ABORT.RTM`) has exactly one blocker left after these:
+the short-jump-range trade-off (see #6), confirmed the same way as #4.
 
-## 7. `src/kernel/XIOS.A86` — one more underscore typo, plus one genuinely unresolved symbol
+## 6. Short-jump-range tooling limitation — now the *only* blocker on `BDOS.A86`/`MEM.A86`/`RTM.A86`/`SUP.A86`/`LDBIOS.A86`
 
-Line 611, `mov word ptr .088h,offset tick_int`, uses `tick_int` where the
-label actually declared (line 349) is `tickint` (no underscore) — the
-same bug class as everywhere else on this page. Not patched.
+`COMMAND.SUP:139` (`SUP.A86`), `SHARE.MEM:35` (`MEM.A86`),
+`DSPTCH.RTM:222` (`RTM.A86`), `FILE2.BDO:1193` (`BDOS.A86`), and one
+spot in `LDBIOS.A86` all hit `tools/asm86`'s own documented
+short-jump-range limitation (see "Design choices that trade size for
+simplicity" in `tools/README.md`) rather than a source bug — the
+disp16-everywhere trade-off this assembler makes can push an
+originally-in-range conditional jump/`JMPS` out of 8-bit range in *this*
+assembler's encoding, even though DRI's own assembler (with disp8
+optimization) kept it in range. Confirmed, by temporarily disabling the
+range check and re-assembling each of these five files, that this is
+the *only* remaining blocker in each — no further source defects are
+hiding behind it. Not fixed here: fixing it means implementing real
+jump-size relaxation in `tools/asm86` itself, a substantially bigger
+undertaking than a source-level bug fix, and out of scope for this pass.
+
+## 7. `src/kernel/XIOS.A86` — one more underscore typo (FIXED), plus one genuinely unresolved symbol
+
+Line 611, `mov word ptr .088h,offset tick_int`, used `tick_int` where
+the label actually declared (line 349) is `tickint` (no underscore) —
+the same bug class as everywhere else on this page. **Patched.**
 
 Separately, line 897's `add ax,offset dp_base` references `dp_base`,
 which is **not** declared anywhere in `XIOS.A86` itself, nor anywhere
 else in the whole 11-disk tree under that spelling. Unlike every other
 finding on this page, no squashed-name match (`dpbase`, `dp_base`, etc.)
 exists in this file to point to as "the real" declaration, so this is
-left as a genuinely unresolved symbol rather than guessed at. Since
-`docs/build.md` already excludes `XIOS.A86`/`ROM.A86` from the
-QEMU-bootable target (they're written for the Intel iSBC 86/12 + SBC 204
-specifically), this wasn't investigated further.
+left as a genuinely unresolved symbol rather than guessed at — **not
+patched**. Since `docs/build.md` already excludes `XIOS.A86`/`ROM.A86`
+from the QEMU-bootable target (they're written for the Intel iSBC 86/12
++ SBC 204 specifically), this wasn't investigated further.
 
-## 8. `src/loader/LDBIOS.A86` — four more dropped/added underscores, one file
+## 8. `src/loader/LDBIOS.A86` — four more dropped/added underscores, one file — FIXED
 
-`ccpoffset`/`ccp_offset`, `dp_base`/`dpbase`, `seg_table`/`segtable`, and
-`z_ret`/`zret` — the same bug class, all four within this one file, each
-used exactly once. Not patched. After accounting for all four, the only
-remaining blocker is the short-jump-range tooling trade-off (see #6),
-confirming the file has no further defects of this kind.
+`ccpoffset`→`ccp_offset`, `dp_base`→`dpbase`, `seg_table`→`segtable`,
+and `z_ret`→`zret` — the same bug class, all four within this one file,
+each used exactly once. All patched. After accounting for all four, the
+only remaining blocker is the short-jump-range tooling trade-off (see
+#6), confirmed by temporarily disabling that check — no further defects
+of this kind.
 
 ## 9. `src/loader/LDMPM.A86` — one genuinely unresolved symbol
 
@@ -201,14 +231,16 @@ further.
 ## Status of the kernel/loader sources
 
 `src/kernel/CIO.A86`, `src/kernel/SYSDAT.A86`, and `src/loader/LDBDOS.A86`
-compile and assemble cleanly end-to-end as-is. `src/kernel/BDOS.A86`,
-`MEM.A86`, `RTM.A86`, `SUP.A86`, and `src/loader/LDBIOS.A86` are each
-blocked only by a combination of #4–#6/#8 above — real, undisturbed 1981
-source defects plus the one accepted tooling trade-off, not missing
-includes or remaining assembler gaps. `src/kernel/XIOS.A86`,
-`src/loader/LDMPM.A86`, and `src/loader/ROM.A86` are each additionally
-blocked on at least one genuinely unresolved symbol (#7, #9, #10) with
-no confident fix available from evidence in this tree.
+compile and assemble cleanly end-to-end as-is. Every *source-level*
+defect found in `src/kernel/BDOS.A86`, `MEM.A86`, `RTM.A86`, `SUP.A86`,
+and `src/loader/LDBIOS.A86` has now been fixed (#4, #5, #8); each of
+those five files is blocked *only* by the short-jump-range tooling
+trade-off (#6), which is not a source bug and needs a bigger change to
+`tools/asm86` itself (real jump-size relaxation) to clear. `src/kernel/
+XIOS.A86`, `src/loader/LDMPM.A86`, and `src/loader/ROM.A86` remain
+blocked on at least one genuinely unresolved symbol each (#7, #9, #10)
+with no confident fix available from evidence in this tree — `XIOS.A86`
+additionally had its one fixable typo (`tick_int`) corrected.
 
 The RSP sources (`CLOCK.A86`, `ECHO.A86`, `TMP.A86`, `SUBMIT.A86`) and
 all 22 `.PLM` utilities in `src/utils/`/`src/toolchain/` compile and

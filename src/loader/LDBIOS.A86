@@ -79,7 +79,7 @@ cr		equ 0dh		;carriage return
 lf		equ 0ah		;line feed
 
 	cseg
-	org	ccpoffset
+	org	ccp_offset
 ccp:
 	org	bios_code
 
@@ -241,7 +241,7 @@ sel1:	mov sel_mask,al	;save drive select mask
 	mov cl,4
 	shl bx,cl	;multiply drive code * 16
 	;create offset from Disk Parameter Base
-	add bx,offset dp_base
+	add bx,offset dpbase
 return:
 	ret
 
@@ -277,7 +277,7 @@ SETDMAB: ;set DMA segment given by CX
 	ret
 ;
 GETSEGT:  ;return address of physical memory table
-	mov bx,offset seg_table
+	mov bx,offset segtable
 	ret
 
 ;*********************************************
@@ -359,7 +359,7 @@ dr_rdy:	; then we just retry read or write
 	cmp al,'R'
 	je outer_retry	;retry 10 more times
 	cmp al,'I'
-	je z_ret	;ignore error
+	je zret	;ignore error
 	or al,255	;set code for permanent error
 exec_exit:
 	ret

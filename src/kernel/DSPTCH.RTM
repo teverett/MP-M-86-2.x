@@ -282,7 +282,7 @@ insert_process:
 ; input:	BX = list root
 ;		SI = pd number
 
-	 mov cx,pflag[si] ! and cx,pf_resource
+	 mov cx,p_flag[si] ! and cx,pf_resource
 ins_npd: mov di,p_link[bx]
 	 cmp di,0 ! jz ins_out
 	    mov al,p_prior[di]

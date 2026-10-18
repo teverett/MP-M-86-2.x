@@ -426,3 +426,29 @@ array mixing multi-character strings and plain numbers that OPTAB.DAT
 turned out to contain was already handled correctly by the local-array
 and `INITIAL`-rendering work done for earlier files, with no further
 changes needed.
+
+### `pl_mon1`–`pl_mon4` now have a real implementation
+
+`tools/plm/runtime_stub.A86` is the real MP/M-86 PL/M interface stub —
+adapted verbatim (just re-expressed in `tools/asm86`'s `CSEG`/`DSEG`
+dialect instead of the original's MASM-style `SEGMENT`/`GROUP`/`ASSUME`)
+from `orig/mpm862sr/07/MCD.A86` (byte-identical in `08/SCD.A86` and
+`09/SCD.A86`): `mon1`–`mon4` are four names for one eight-instruction
+`xdos` stub that loads its two arguments into `DX`/`CX` and fires
+`INT 224`. Concatenating it (after stripping the generated file's own
+trailing `end`) onto any `plmc`-compiled `.gen.A86` output and
+reassembling now produces a fully-resolved binary for 20 of the 22
+files — the same two `ASS86.PLM`/`DIS86.PLM` DDT86-entry-point gaps noted
+in Limitations above are unaffected, since the stub only ever claimed to
+cover `mon1`–`mon4`.
+
+Building and verifying this stub surfaced a real bug in `tools/asm86`,
+not in this compiler: `ret`/`retf` were listed in `isa.py`'s
+`NO_OPERAND` opcode table, which was checked *before* the operand-aware
+`ret`/`retf` encoding further down in `encode()` — so `ret 4` (the
+stub's own cleanup instruction, called-procedure-pops-its-args per this
+compiler's convention) silently assembled as plain `C3` (bare `RET`,
+1 byte) instead of the correct `C2 04 00` (`RET 4`, 3 bytes), dropping
+the stack cleanup entirely. Fixed by checking for an immediate operand
+before falling into the no-operand table; see `tools/README.md` for the
+asm86-side changelog entry.

@@ -126,6 +126,11 @@ def encode(mnemonic, ops, ctx):
     Returns the encoded instruction bytes."""
     m = mnemonic.lower()
 
+    if m == 'ret' and ops:
+        return bytes([0xC2]) + u16(ops[0].mem['value'])
+    if m == 'retf' and ops:
+        return bytes([0xCA]) + u16(ops[0].mem['value'])
+
     if m in NO_OPERAND:
         v = NO_OPERAND[m]
         if isinstance(v, tuple):
@@ -166,15 +171,6 @@ def encode(mnemonic, ops, ctx):
         return _encode_jcc(LOOP_OPS[m], ops, ctx)
     if m == 'jcxz':
         return _encode_jcc(0xE3, ops, ctx)
-    if m == 'ret':
-        if ops:
-            return bytes([0xC2]) + u16(ops[0].mem['value'])
-        return bytes([0xC3])
-    if m == 'retf':
-        if ops:
-            return bytes([0xCA]) + u16(ops[0].mem['value'])
-        return bytes([0xCB])
-
     if m == 'mov':
         return _encode_mov(ops, ctx)
     if m in ALU:

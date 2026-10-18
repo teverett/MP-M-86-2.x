@@ -87,6 +87,19 @@ file's own directory, then in any `-I` directories given.
   `INCLUDE`s) at a time, matching how the files in `src/` are mostly
   self-contained per RSP/module.
 
+## Bugs found and fixed in this assembler
+
+- `ret`/`retf` with an immediate operand (`ret 4`, used by callee-cleans-up
+  calling conventions) were silently assembled as plain `ret`/`retf`
+  (opcode `C3`/`CB`, no operand) instead of `C2 imm16`/`CA imm16` — `ret`
+  and `retf` were listed in `isa.py`'s no-operand opcode table, which was
+  checked before the operand-aware encoding further down in the same
+  `encode()` function, so the operand was silently dropped. Found while
+  assembling `tools/plm/runtime_stub.A86`'s `ret 4` (the real MP/M-86
+  `mon1`–`mon4` dispatch stub's own stack cleanup) — see
+  `tools/plm/README.md`'s "`pl_mon1`–`pl_mon4` now have a real
+  implementation" section.
+
 ## Known limitations
 
 - Not every ASM86 directive is implemented (no `MACRO`, `STRUC`, `DUP`,

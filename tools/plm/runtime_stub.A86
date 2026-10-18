@@ -1,0 +1,50 @@
+;
+; Real MP/M-86 PL/M interface stub -- NOT a guess or a fake.
+;
+; Verbatim source: orig/mpm862sr/07/MCD.A86 (identical in 08/SCD.A86 and
+; 09/SCD.A86 too), "Interface for PLM-86 with mixed code and data",
+; dated October 5, 1981. Every PL/M-86 command utility compiled by
+; tools/plm/ declares mon1/mon2/mon3/mon4 as "PROCEDURE ... EXTERNAL" and
+; calls them as plain BDOS/MP-M system calls; this is what those four
+; names actually resolve to on real MP/M-86 -- not four different
+; routines, but four aliases for ONE eight-instruction stub that loads
+; its two arguments into DX/CX and fires a single software interrupt
+; (INT 224), which the real, running MP/M-86 kernel services. See
+; tools/plm/README.md's "Calling convention" section: this also happens
+; to validate that convention, since the stub's own argument layout
+; ([bp+4]/[bp+6], RET 4 cleanup for a 2-argument call) is exactly what
+; this compiler already assumed independently.
+;
+; Adapted here only because tools/asm86 doesn't implement the MASM-style
+; SEGMENT/GROUP/ASSUME directives the original uses (it only has
+; CSEG/DSEG/ASEG) -- the instruction sequence itself is untouched, and
+; the labels are renamed to match this compiler's "pl_" symbol
+; sanitizing (see sanitize() in tools/plm/codegen.py) so this assembles
+; and links by plain concatenation with a plmc-compiled .A86 file.
+;
+; This does NOT replace a real MP/M-86 system to service INT 224 at
+; runtime -- it reproduces the real *dispatch* instructions, not a
+; running kernel. What it buys you over a "ret N" placeholder is an
+; assembled binary whose CALL sites and stack discipline are
+; historically accurate, not merely non-erroring.
+;
+; Does not cover ASS86.PLM's DDT86-specific externals (ddtset,
+; ddtgetline, goddt, printm, printword, conin, conout) -- those are a
+; different interface (DDT86 itself), not this one, and no real
+; implementation for them has been found in this tree yet.
+
+	cseg
+
+pl_mon1:			; no returned value
+pl_mon2:			; returns byte in AL
+pl_mon3:			; returns address or word in BX
+pl_mon4:			; returns pointer in BX and ES
+	push bp
+	mov bp,sp
+	mov dx,[bp+4]
+	mov cx,[bp+6]
+	int 224
+	pop bp
+	ret 4
+
+	end

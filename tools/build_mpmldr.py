@@ -44,6 +44,19 @@ CALL/JMP target into LDBIOS86Q.A86's jump table) and bdoscodesize (used
 to place LDBDOS's own DSEG data right after its real CSEG) are
 self-corrected here the same way LDMPM.A86's constants are.
 
+LDBIOS86Q.A86 needs the *opposite* of LDBDOS.A86's fix: every plain
+`offset <label>` reference to its own local data (`stkbase`, `secbuf`,
+the FDC command tables, ...) is only correct if this module's `cseg`
+really is `org`'d at its own real position (`mldbios_offset`) rather
+than 0 -- see that file's own header comment for how this was found
+(a stack pointer landing ~0xe8f bytes too low, corrupting LDMPM.A86's
+own code). So unlike LDBDOS.A86, this script keeps LDBIOS86Q.A86's own
+internal `org mldbios_offset` self-positioning and, after patching that
+constant to match, strips the resulting leading zero-padding (the same
+padding LDBDOS.A86's fix above avoided needing, not reused here since
+mldbios_offset is this module's one genuine absolute position) before
+concatenating its real content.
+
 Usage: python3 tools/build_mpmldr.py [-o OUTPUT]
 """
 import argparse
@@ -140,11 +153,10 @@ def main():
     out_dir = os.path.join(ROOT, 'build', 'loader')
     os.makedirs(out_dir, exist_ok=True)
 
-    # Pass 1: assemble LDBDOS/LDBIOS to learn their real current sizes
-    # (these don't depend on LDMPM's offsets at all, so this is safe to
-    # do before LDMPM is known to be correct).
+    # Pass 1: assemble LDBDOS to learn its real current size. Unlike
+    # LDBIOS86Q.A86 (below), this doesn't depend on LDMPM's offsets at
+    # all, so it's safe to do before LDMPM is known to be correct.
     ldbdos_path, ldbdos_size = assemble('LDBDOS', out_dir)
-    ldbios_path, ldbios_size = assemble('LDBIOS86Q', out_dir)
 
     # LDMPM's own assembled size doesn't depend on the *value* of
     # ldbdos_offset/mldbios_offset either (they're used as a stored
@@ -184,12 +196,33 @@ def main():
             "LDBDOS.A86's assembled size changed after patching "
             "biosoffset/bdoscodesize -- it shouldn't (see comment above)")
 
+    # LDBIOS86Q.A86's own mldbios_offset (see that file's header
+    # comment) is now known -- patch it to match and assemble. Its
+    # `org mldbios_offset` makes asm86 pad the raw .cseg.bin with
+    # `mldbios_offset` leading zero bytes (nothing is emitted before
+    # that `org`); strip them before concatenating, since this
+    # script's own sequential placement already accounts for that
+    # offset (same trade-off LDBDOS.A86's bdosoffset fix made the
+    # opposite way -- see this script's own docstring).
+    patch_offsets('LDBIOS86Q.A86', [
+        (MLDBIOS_RE, mldbios_offset, 'mldbios_offset'),
+    ])
+    ldbios_path, ldbios_padded_size = assemble('LDBIOS86Q', out_dir)
+    with open(ldbios_path, 'rb') as f:
+        ldbios_padded = f.read()
+    assert ldbios_padded_size > mldbios_offset, (
+        f"LDBIOS86Q.A86 assembled to {ldbios_padded_size} bytes, not "
+        f"even past its own org target ({mldbios_offset:#x})")
+    assert ldbios_padded[:mldbios_offset] == b'\0' * mldbios_offset, (
+        "LDBIOS86Q.A86's leading org-padding wasn't all zero -- "
+        "something is emitting bytes before its own org mldbios_offset")
+    ldbios_bytes = ldbios_padded[mldbios_offset:]
+
     out_path = args.output or os.path.join(out_dir, 'MPMLDR.bin')
     with open(out_path, 'wb') as out:
         for path, size, name in (
             (ldmpm_path, ldmpm_size, 'LDMPM'),
             (ldbdos_path, ldbdos_size, 'LDBDOS'),
-            (ldbios_path, ldbios_size, 'LDBIOS86Q'),
         ):
             with open(path, 'rb') as f:
                 data = f.read()
@@ -197,6 +230,9 @@ def main():
             out.write(data)
             print(f"build_mpmldr: {name:8s} {size:6d} bytes "
                   f"@ {out.tell() - size:#06x}")
+        out.write(ldbios_bytes)
+        print(f"build_mpmldr: LDBIOS86Q {len(ldbios_bytes):6d} bytes "
+              f"@ {out.tell() - len(ldbios_bytes):#06x}")
 
     total = os.path.getsize(out_path)
     print(f"build_mpmldr: wrote {out_path} ({total} bytes)")

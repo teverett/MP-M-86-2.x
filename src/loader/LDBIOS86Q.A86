@@ -28,16 +28,78 @@
 ;*	LDBIOS.A86 for compatibility with LDBDOS.A86, which this file
 ;*	does not change at all.
 ;*
-;*	INIT/WBOOT's real LDBIOS.A86 behavior ("jmp ccp", a straight
-;*	CP/M cold/warm-boot jump) is dead code in the MP/M-86 loader
-;*	context per that file's own header comment ("The only
-;*	modifications of the CP/M-86 LDBIOS for this MP/M-86 LDBIOS
-;*	are the CCP offset and the signon message... printed by
-;*	LDMPM.A86 in place of the INIT routine") -- LDMPM.A86 never
-;*	calls LDBIOS's INIT this way, it reaches LDBIOS only through
-;*	LDBDOS's own specific function calls. INIT here is cut down
-;*	to just arming the hardware, no "ccp" jump target exists in
-;*	this context to jump to.
+;*	INIT is reached via a plain near JMP, not a CALL (see
+;*	LDMPM.A86's own "jmp mldbios ... mldbios returns here: 103H"
+;*	comment, and the real LDBIOS.A86's own "jmp INIT ;Enter from
+;*	BOOT ROM or LOADER") -- so it must hand control back the same
+;*	way, with another JMP to a hardcoded address, not a RET (which
+;*	would pop whatever happens to be on the stack instead, since
+;*	nothing pushed a real return address). The real LDBIOS.A86 does
+;*	exactly this: `ccp_offset equ 0103h ;base of MPMLOADER` /
+;*	`jmp ccp` -- confirmed by testing this file for real in QEMU
+;*	before this fix: everything up through the loader's own
+;*	"jump into MPMLDR" message worked, then nothing, because INIT's
+;*	own "ret" was landing on garbage. WBOOT (real LDBIOS.A86:
+;*	`jmp ccp+6`, a different, warm-boot-specific LDMPM entry point)
+;*	is simplified here to the same target -- it isn't on this
+;*	loader's own cold-boot path, and pinning down LDMPM.A86's exact
+;*	byte offset for that second entry point isn't worth it yet.
+;*
+;*	That fix alone wasn't enough, though -- another real bug,
+;*	caught the same way: a plain `jmp ccp_offset` is a *relative*
+;*	near jump, encoded assuming this module assembles starting at
+;*	address 0. The real LDBIOS.A86 can get away with a relative
+;*	jump to its own "ccp" label because it's declared (via `org
+;*	ccp_offset`) within the SAME single-pass assembly as the jump
+;*	that targets it, so the assembler computes a correct
+;*	displacement no matter how far apart the two end up in the
+;*	final image. This file is assembled as a separate, independent
+;*	module and only concatenated into MPMLDR.bin afterwards
+;*	(tools/build_mpmldr.py) -- a relative jump computed against
+;*	address 0 is wrong once this module is relocated to wherever it
+;*	actually lands (`mldbios_offset`), landing at `mldbios_offset +
+;*	0x103` instead of the real, absolute `0x103`. Fixed with an
+;*	indirect jump through a register (`mov ax,ccp_offset ! jmp ax`)
+;*	-- absolute within `CS` regardless of where the instruction
+;*	itself physically sits.
+;*
+;*	That ccp_offset fix only covered the ONE jump back into LDMPM.
+;*	Everything else in this file that referenced its own local data
+;*	(`offset stkbase`, `offset secbuf`, `offset specify_parms`, the
+;*	DPB/DPE, the UART/FDC scratch cells...) was *also* wrong the same
+;*	way, for the same underlying reason -- every `offset <label>`
+;*	here bakes in an address relative to this module's own `org 0`,
+;*	not its real position (`mldbios_offset`) in the concatenated
+;*	MPMLDR.bin. Confirmed by testing in QEMU: boot got past the
+;*	loader's own "jump into MPMLDR" message and ran INIT's hardware
+;*	setup (I/O port writes don't care about addressing), but then
+;*	`mov sp,offset stkbase` pointed SP ~0xe8f bytes too low -- into
+;*	LDMPM's own code -- so INIT's own PUSHes (motor_delay's `push cx`,
+;*	fdc_out_byte's `push dx`, ...) overwrote LDMPM, corrupting the
+;*	very `ccp_offset` (0x103) landing site before the final jump back
+;*	there. That's also why this file used to declare its data in a
+;*	separate `dseg` (now removed, merged into `cseg` below): tools/
+;*	build_mpmldr.py only ever copied each module's `.cseg.bin`, so
+;*	that whole dseg -- the signon string, DPB, FDC command tables,
+;*	`secbuf`, the boot stack -- was silently dropped from MPMLDR.bin
+;*	entirely, on top of the addressing bug above.
+;*
+;*	Fixed the same way as ccp_offset, but structurally instead of
+;*	one jump at a time: this module's `cseg` now starts with `org
+;*	mldbios_offset` (a local copy of LDMPM.A86's own constant, kept
+;*	in sync by tools/build_mpmldr.py the same way) instead of `org 0`,
+;*	so every `offset <label>` the assembler computes is already the
+;*	real, absolute, CS-relative address -- no per-reference fixup
+;*	needed, and the existing `mov ax,cs ! mov ss,ax ! mov ds,ax ! mov
+;*	es,ax` / `cs:`-prefixed / `push cs ! pop ds`-style code (which all
+;*	assumes DS=SS=CS=the one shared MPMLDR segment) stays correct as
+;*	written. tools/build_mpmldr.py strips the resulting leading
+;*	`mldbios_offset` zero-padding bytes (asm86 pads a raw binary from
+;*	0 up to any `org` target) before concatenating this module's real
+;*	content, the same trick LDBDOS.A86's own bdosoffset fix avoided
+;*	needing by zeroing itself instead -- not an option here since
+;*	mldbios_offset is this file's one genuine absolute position, not
+;*	a vestigial DRI constant.
 ;*
 ;*	KNOWN LIMITATIONS (also see XIOS86Q.A86's own, which this
 ;*	inherits in full for the shared disk/console driver code):
@@ -57,6 +119,15 @@
 
 true		equ -1
 false		equ not true
+ccp_offset	equ 0103h	;base of MPMLDR -- see the real LDBIOS.A86's
+				; own identical EQU; INIT/WBOOT jump back
+				; here, they aren't CALLed
+mldbios_offset	equ 0e8fh	;this module's own real position in the
+				; concatenated MPMLDR.bin -- local copy of
+				; LDMPM.A86's own constant of the same name,
+				; self-corrected by tools/build_mpmldr.py;
+				; see this file's header comment on why its
+				; `cseg` is `org`'d here instead of at 0
 cr		equ	0dh
 lf		equ	0ah
 
@@ -106,7 +177,7 @@ fd_gap3		equ	01bh
 fd_dtl		equ	0ffh
 
 	cseg
-	org	0
+	org	mldbios_offset	;see header comment -- NOT org 0
 
 ;*********************************************
 ;*                                           *
@@ -138,9 +209,9 @@ fd_dtl		equ	0ffh
 	jmp	SETIOBF
 
 ;*********************************************
-;*	INIT -- arm the hardware. No "ccp" jump
-;*	target exists in this context; see this
-;*	file's own header comment on why.
+;*	INIT -- arm the hardware, then jump back into LDMPM.A86 at
+;*	ccp_offset (see this file's own header comment for why that's
+;*	an indirect jump, not a plain relative one).
 ;*********************************************
 
 INIT:
@@ -157,16 +228,58 @@ INIT:
 	mov	al,0 ! mov dx,uart_ier ! out dx,al
 	mov	al,03h ! mov dx,uart_mcr ! out dx,al
 
-	mov	al,dor_ndreset+dor_drvsel_a ! mov dx,fdc_dor ! out dx,al
+	mov	al,dor_drvsel_a ! mov dx,fdc_dor ! out dx,al
+				; NDRESET=0: force a real reset pulse --
+				; don't assume the controller starts
+				; "not in reset" already (a write of the
+				; same value produces no edge, and QEMU's
+				; emulated 8272 needs a real edge to raise
+				; its post-reset interrupts)
+	call	motor_delay	; hold reset briefly
+	mov	al,dor_ndreset+dor_mota+dor_dmaen+dor_drvsel_a
+	mov	dx,fdc_dor ! out dx,al
+				; NDRESET=1: release reset -- motor+DMAEN
+				; on too (matching rw_setup's own full
+				; operational DOR state), in case the
+				; controller won't respond to anything,
+				; even polled SENSE INTERRUPT STATUS,
+				; without them
+
+	mov	cx,200		; a MUCH longer settle delay than
+				; motor_delay's own single 65536-
+				; iteration loop -- at full emulation
+				; speed that's microseconds of real
+				; time, which may not be enough for
+				; QEMU's FDC model to actually finish
+				; processing the reset internally
+settle_loop:
+	push	cx
 	call	motor_delay
+	pop	cx
+	loop	settle_loop
+
+	mov	cx,4		; drain up to 4 pending SENSE INTERRUPT
+				; STATUS responses (one per possible
+				; drive) -- confirmed via GDB that the
+				; real hang (docs/bugs.md #15) was this
+				; file's very first SENSE INTERRUPT
+				; STATUS call, inside fdc_sense_int's own
+				; fdc_in_byte, polling forever for a
+				; result that was never coming because
+				; the controller was never actually reset
+drain_si:
 	call	fdc_sense_int
+	loop	drain_si
+
 	mov	bx,offset specify_parms
 	call	fdc_send_cmd
 
-	ret
+	mov	ax,ccp_offset ! jmp ax	;ABSOLUTE jump within CS, not a
+				; relative one -- see the comment on
+				; ccp_offset's own declaration above
 
 WBOOT:
-	ret
+	mov	ax,ccp_offset ! jmp ax
 
 ;*********************************************
 ;*	CONSOLE I/O -- same UART driver as
@@ -461,8 +574,9 @@ pio_out_res:
 ;*               Data Areas                  *
 ;*                                           *
 ;*********************************************
-
-	dseg
+;*	Stays in cseg (not a separate dseg) -- see this file's header
+;*	comment: code and data here share one segment (DS=SS=CS), and
+;*	tools/build_mpmldr.py only ever copies each module's .cseg.bin.
 
 signon	db	cr,lf,cr,lf,'MP/M-86 Loader -- LDBIOS86Q (QEMU)',cr,lf,0
 

@@ -80,3 +80,6 @@ Described there as:
 > compiled on "the VAX". All diskettes, though originally from DRI, have
 > hand written labels, i.e. they are probably work disks. If you're
 > curious, here's a scan of a disk label.
+
+`orig/driorig/` and `orig/lastdri/` were downloaded from
+[cpm.retropc.se/cpm/randyfiles/DRI/index.html](https://cpm.retropc.se/cpm/randyfiles/DRI/index.html).

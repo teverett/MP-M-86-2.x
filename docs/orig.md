@@ -8,6 +8,20 @@ matching the original distribution disk layout. There is no top-level
 README; the notes below are reconstructed from file names, extensions, and
 in-source comments.
 
+## Contents
+
+- [Provenance](#provenance)
+- [Toolchain and languages](#toolchain-and-languages)
+- [Directory map](#directory-map)
+- [Build process (per `07/MPM86GEN.TEX`)](#build-process-per-07mpm86gentex)
+- [Reference material (`orig/newplm/`, `orig/plm80s/`, `orig/asm80/`)](#reference-material-orignewplm-origplm80s-origasm80)
+- [Related DRI source: MP/M II (`orig/mpm_II/`)](#related-dri-source-mpm-ii-origmpm_ii)
+- [Related DRI source: CP/NET (`orig/cpn86src/`, `orig/cpnet80s/`)](#related-dri-source-cpnet-origcpn86src-origcpnet80s)
+- [Related DRI source: factory-labeled disk images (`orig/driorig/`)](#related-dri-source-factory-labeled-disk-images-origdriorig)
+- [Related DRI source: in-house disk images (`orig/lastdri/`)](#related-dri-source-in-house-disk-images-origlastdri)
+- [Related third-party source: CP/M TCP/IP (`orig/cpm-tcp/`)](#related-third-party-source-cpm-tcpip-origcpm-tcp)
+- [Notes for anyone working in this tree](#notes-for-anyone-working-in-this-tree)
+
 ## Provenance
 
 - Copyright strings found in-source: *"M P / M - 8 6 I I, Copyright (c) 1981,

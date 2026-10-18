@@ -54,13 +54,6 @@ jobs:
       - name: make disk (bootable QEMU floppy image)
         run: make disk
 
-      - name: upload build artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: build-output-${{ matrix.os }}
-          path: build/
-          if-no-files-found: error
-
       - name: upload bootable disk image
         uses: actions/upload-artifact@v7
         with:

@@ -12,19 +12,38 @@ from its own code, not just its header comment -- see the `perr:`/
 
     one 128-byte header record:
         ctype  db 1          ;codetype -- LDMPM checks this is exactly 1
-        clen   dw <code len>
+        clen   dw <code len, in PARAGRAPHS (16-byte units), not bytes>
         cldseg dw <code segment>
         cmin   dw 0          ;unused by LDMPM.A86's own logic
         cmax   dw 0          ;unused by LDMPM.A86's own logic
         dtype  db 2          ;datatype -- LDMPM checks this is exactly 2
-        dlen   dw <data len>
+        dlen   dw <data len, in PARAGRAPHS too>
         dldseg dw <data segment>
         dmin   dw 0
         dmax   dw 0
         (padded with zeros to 128 bytes)
     followed immediately (continuing the same sequential BDOS read
     LDMPM.A86 performs) by <code len> bytes of code, then <data len>
-    bytes of data.
+    bytes of data (the *real* byte lengths here, even though the
+    header's own clen/dlen fields are paragraph counts).
+
+    clen/dlen being paragraph counts, not byte counts, isn't just a
+    docstring detail: LDMPM.A86's own header-sanity check computes
+    `cldseg + clen` and expects that to equal `dldseg` exactly (i.e.
+    "the data segment starts immediately after the code segment, in
+    paragraph units") -- both sides of that comparison are segment
+    (paragraph) values, so clen has to be paragraphs too for the
+    arithmetic to mean anything. Confirmed the hard way: writing raw
+    byte lengths here (this script's own original approach) assembled
+    and built fine, with no error anywhere in this toolchain, but
+    LDMPM.A86 rejected the real on-disk MPM.SYS as a "Bad Header
+    Record" every time once booting in QEMU actually got far enough to
+    read it (docs/bugs.md #22's own continuation) -- `cldseg + clen`
+    (a segment plus a raw byte count) came out nowhere near `dldseg`.
+    LDMPM.A86's own later length check (`lenok:`) confirms the same
+    convention independently: it shifts the *actual* bytes-read count
+    right by 4 (i.e. converts it to paragraphs) before comparing
+    against `clen + dlen`.
 
 `MPM.SYS` has to exist as a real file in a real CP/M directory on the
 disk, found by `LDMPM.A86`'s own `openfnc`/FCB-based open -- there is
@@ -196,13 +215,33 @@ def block_to_offset(block_num):
 def build_two_segment_body(code, data, code_seg):
     """The 128-byte header record LDMPM.A86 itself checks for MPM.SYS,
     followed by the code then the data -- see this script's own
-    docstring. Reused as-is for every utility/RSP body too, as the
-    only two-segment-with-header convention this tree has."""
-    data_seg = code_seg + (len(code) + 15) // 16  # paragraph-align
+    docstring (including why clen/dlen are paragraph counts, not byte
+    counts). Reused as-is for every utility/RSP body too, as the only
+    two-segment-with-header convention this tree has.
+
+    The code (and data) bytes written here are padded out to a full
+    paragraph each, not left at their raw lengths: LDMPM.A86 loads the
+    whole body as one continuous sequential read (code immediately
+    followed by data, exactly as stored on disk -- see its own
+    `readit1`/`readit2` loop), so data only actually lands at the
+    `dldseg` this header promises if the code portion on disk is
+    exactly `clen` paragraphs long, padding included. Skipping the pad
+    (writing only the raw `len(code)` bytes) would also make LDMPM's
+    own later length check (`lenok:`) fail falsely whenever a segment
+    isn't already a whole number of paragraphs, since it compares
+    `clen + dlen` (now exact paragraph counts) against the real
+    bytes-read count shifted right 4 (i.e. floor-divided) -- the two
+    would quietly disagree by a paragraph or two.
+    """
+    code_paras = (len(code) + 15) // 16  # paragraph-align
+    code = code.ljust(code_paras * 16, b'\0')
+    data_seg = code_seg + code_paras
+    data_paras = (len(data) + 15) // 16
+    data = data.ljust(data_paras * 16, b'\0')
     header = struct.pack(
         '<BHHHH BHHHH',
-        MPM_HEADER_TYPE_CODE, len(code), code_seg, 0, 0,
-        MPM_HEADER_TYPE_DATA, len(data), data_seg, 0, 0,
+        MPM_HEADER_TYPE_CODE, code_paras, code_seg, 0, 0,
+        MPM_HEADER_TYPE_DATA, data_paras, data_seg, 0, 0,
     )
     header = header.ljust(128, b'\0')
     return header + code + data, data_seg

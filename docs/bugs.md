@@ -689,6 +689,86 @@ real file-content validation, reporting `Bad Header Record in MPM.SYS`
 (a data/filesystem-format mismatch, not a hang; see the status section
 below).
 
+## 23. `tools/build_disk.py` — `MPM.SYS`'s own header recorded its code
+and data segment lengths in bytes, where `LDMPM.A86` expects
+paragraphs — FIXED
+
+Found continuing from #22: with the floppy I/O layer finally working
+end to end, booting reached `LDMPM.A86`'s own header-sanity check on
+the real `MPM.SYS` it just read -- and failed it every time, printing
+`Bad Header Record in MPM.SYS`. Confirmed by reading back the header
+fields `LDMPM.A86` actually parsed (debug probes, not kept): `ctype`/
+`dtype` were correct, but `cldseg + clen` (code segment plus code
+length -- `LDMPM.A86`'s own check that this equals `dldseg`, i.e. "the
+data segment starts immediately after the code segment") came out
+nowhere close to `dldseg`.
+
+The cause: `tools/build_disk.py`'s `build_two_segment_body` wrote
+`len(code)`/`len(data)` -- raw byte counts -- into the header's
+`clen`/`dlen` fields. `LDMPM.A86`'s own arithmetic only makes sense if
+those are paragraph counts: `cldseg`/`dldseg` are segment (paragraph)
+values, and `LDMPM.A86`'s later length check (`lenok:`) independently
+confirms the convention by shifting the real bytes-read count right 4
+(converting it to paragraphs) before comparing it against
+`clen + dlen`.
+
+**Fixed**: `clen`/`dlen` are now paragraph counts
+(`ceil(len/16)`), and the code/data bytes written to disk are padded
+out to a whole paragraph each (not left at their raw lengths) --
+needed because `LDMPM.A86` loads the body as one continuous sequential
+read, so data only actually lands at the memory address `dldseg`
+promises if the code portion on disk really is `clen` paragraphs long,
+padding included; skipping the pad would also make the `lenok:` check
+fail falsely whenever a segment isn't already a whole number of
+paragraphs.
+
+## 24. `src/loader/LDBIOS86Q.A86`/`src/kernel/XIOS86Q.A86` --
+`rw_physical` decremented an already-0-based sector number, silently
+reading from one 128-byte logical record too early every time — FIXED
+
+Found immediately after #23: the header check now passed, but the
+*data* `LDMPM.A86` loaded for `MPM.SYS` was still wrong partway through
+diagnosing #23 -- before #23's own fix, the very first sector of real
+`MPM.SYS` *data* read back as all `E5`/`00` bytes (the CP/M "available
+directory entry" filler, confirmed via debug probes printing the
+actual bytes), i.e. empty disk space rather than file content, even
+though `LDBDOS.A86`'s own file-open had just correctly found the file
+and filled in real, sane block pointers (also confirmed by printing
+them). Tracing the exact CHS this computed for that read (another
+probe, not kept) against hand-computed arithmetic for exactly where
+`tools/build_disk.py` physically placed `MPM.SYS`'s first data block
+found it one 512-byte physical sector short -- landing in the *tail*
+of the reserved directory block instead (mostly unused entries, hence
+the `E5` bytes) each time, by exactly one 128-byte logical record.
+
+The cause: `rw_physical`'s very first instruction, `mov al,sect ! dec
+al`, assumed `sect` arrives 1-based and needs converting to 0-based --
+documented as such in `XIOS86Q.A86`'s own header comment for this
+routine. But `src/loader/LBDOSF1.A86`'s `seek` (real, unmodified DRI
+source -- the only caller, via `SETSEC`, that ever sets `sect`) passes
+the raw, already-0-based `DX` remainder from `div sectpt` straight
+through with no `+1` anywhere -- so the extra `dec al` silently
+wrapped `sect=0` to `0xFF` and quietly shifted every other value down
+by one logical record, confirmed by testing in QEMU: directory reads
+still mostly worked (the whole directory block is reserved space, so a
+one-record-off read often still landed on *some* real directory data),
+but `MPM.SYS`'s own first data sector did not.
+
+**Fixed** by removing the erroneous `dec al` in both files' identical
+`rw_physical` (`sect` really is 0-based, matching every real,
+unmodified caller) and correcting the header comment in
+`XIOS86Q.A86` that had documented the wrong convention.
+
+With #23 and #24 both fixed, `LDMPM.A86` loads the real `MPM.SYS` off
+disk completely correctly (confirmed: the real "Code Paragraph
+Address"/"Data Paragraph Address"/"Last Paragraph" memory-map lines it
+only prints after a fully successful load) and jumps into the actual
+MP/M-86 kernel for the first time this project has ever gotten that
+far -- which is also where it currently stops (silently, no further
+output): `src/kernel/SUP.A86`'s own kernel initialization has never
+been exercised in any form before this, a new frontier past everything
+#1-#24 covered.
+
 ## Status of the kernel/loader sources
 
 `src/kernel/CIO.A86`, `SYSDAT.A86`, `BDOS.A86`, `MEM.A86`, `RTM.A86`,
@@ -708,15 +788,16 @@ tree even after a second, closer look — its one fixable typo
 
 Booting under QEMU (`make run`) now gets past the boot sector, all of
 `MPMLDR.bin` loading, its internal `LDBIOS86Q.A86`→`LDMPM.A86` handoff,
-the "MP/M-86 V2.0 Loader" signon message, and the entire floppy I/O
-layer in `LDBDOS.A86` (disk select, home/recalibrate, DMA sector
-reads, directory scan, `MPM.SYS` file lookup — #15-#22 above) — no
-longer hanging anywhere. It now reaches real file-content validation
-and stops there, reporting `Bad Header Record in MPM.SYS`: the header
-record `LDMPM.A86` reads back from the start of `MPM.SYS` doesn't
-match what it expects (code segment then data segment, contiguous,
-matching `tools/build_mpmsys.py`'s own header format) — a
-filesystem-image/content mismatch to investigate next, not a hang.
+the "MP/M-86 V2.0 Loader" signon message, the entire floppy I/O layer
+in `LDBDOS.A86` (disk select, home/recalibrate, DMA sector reads,
+directory scan, `MPM.SYS` file lookup), and a complete, verified-
+correct load of the real on-disk `MPM.SYS` into memory (#15-#24 above)
+— no longer hanging or failing anywhere in the loader. It then jumps
+into the actual MP/M-86 kernel (`src/kernel/SUP.A86`'s own
+initialization) for the first time this project has ever reached that
+point, and currently stops there silently (no further output, not yet
+diagnosed) — a new frontier past the entire loader, not yet
+investigated at all.
 
 The RSP sources (`CLOCK.A86`, `ECHO.A86`, `TMP.A86`, `SUBMIT.A86`) and
 all 22 `.PLM` utilities in `src/utils/`/`src/toolchain/` compile and

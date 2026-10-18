@@ -631,9 +631,15 @@ rw_physical:    ; shared geometry math, called from fdc_do_read/write.
 ;----------	; Everything is left in memory (cur_cyl/cur_head/
 		; cur_psec/cur_bufoff) rather than juggled through
 		; registers across the several calls that follow.
-;	input:	trk, sect (1-based logical 128B sector), disk
+;	input:	trk, sect (0-based logical 128B sector), disk -- see
+;		LDBIOS86Q.A86's own identical `rw_physical` for why this
+;		is 0-based, not the 1-based this comment (and this
+;		routine's own now-removed `dec al`) used to claim: FILE1.BDO's
+;		own `seek` (real, unmodified DRI source) passes SETSEC
+;		the raw `DX` remainder from `div sectpt` (0..SPT-1), no
+;		+1 anywhere.
 
-	mov	al,sect ! dec al	;0-based logical sector #
+	mov	al,sect			;0-based logical sector #
 	mov	ah,0
 	mov	bl,4 ! div bl		;al = phys sector idx (0-based)
 					;ah = which 128B quarter

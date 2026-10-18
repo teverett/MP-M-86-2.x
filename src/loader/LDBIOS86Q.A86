@@ -495,7 +495,29 @@ md_loop:
 	ret
 
 rw_physical:
-	mov	al,sect ! dec al
+	mov	al,sect			;0-based logical sector within this
+					; CP/M track -- confirmed by reading
+					; LBDOSF1.A86's own `seek` (real,
+					; unmodified DRI source): it passes
+					; SETSEC the raw `DX` remainder from
+					; `div sectpt` (0..SPT-1), with no
+					; +1 anywhere. This file used to
+					; `dec al` here first, assuming the
+					; opposite (1-based) convention --
+					; wrong, confirmed by testing in
+					; QEMU: every physical sector number
+					; came out exactly one 128-byte
+					; logical record too low, so a
+					; directory-adjacent-but-still-valid-
+					; looking read silently succeeded
+					; while finding `MPM.SYS` (reading
+					; from one record into the directory
+					; area instead of the right one), but
+					; `MPM.SYS`'s own first data sector
+					; landed squarely in the *tail* of
+					; the reserved directory block
+					; instead -- all zero/E5 bytes, the
+					; exact "Bad Header Record" symptom.
 	mov	ah,0
 	mov	bl,4 ! div bl
 	mov	cur_psec,al

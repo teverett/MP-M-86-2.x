@@ -47,11 +47,10 @@ RSP_OK := ECHO
 # fix available and is deliberately not attempted here.
 KERNEL_OK := CIO SYSDAT BDOS MEM RTM SUP
 
-# --- Loader: LDBDOS.A86/LDBIOS.A86 both assemble cleanly now (docs/bugs.md
-# #8, plus jump-size relaxation). LDMPM.A86 and ROM.A86 are each still
-# blocked on a genuinely unresolved symbol (#9, #10) and are deliberately
-# not attempted here.
-LOADER_OK := LDBDOS LDBIOS
+# --- Loader: all four loader modules now assemble cleanly (docs/bugs.md
+# #8/#9/#10, each turning out to be the same name-mismatch bug class
+# once looked at more closely, plus jump-size relaxation).
+LOADER_OK := LDBDOS LDBIOS LDMPM ROM
 
 PLM_UTILS_BIN      := $(addprefix $(BUILD)/utils/,$(addsuffix .cseg.bin,$(PLM_UTILS)))
 PLM_TOOLCHAIN_BIN   := $(addprefix $(BUILD)/toolchain/,$(addsuffix .cseg.bin,$(PLM_TOOLCHAIN_OK)))

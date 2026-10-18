@@ -54,7 +54,7 @@ datatype	equ	2		; data type CMD header
 
 		dseg	0
 		org	0
-abs_zero	rw	2*bdosint
+abs_zero	rw	2*bdos_int
 bdos_offset	rw	1
 bdos_segment	rw	1
 

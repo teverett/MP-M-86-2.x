@@ -176,14 +176,14 @@ homer:	mov BX,offset home
 	mov bx,sector1	;offset for first sector DMA
 	mov ax,0
 	mov es,ax	;segment "    "     "     "
-	call setup_dma
+	call setupdma
 ;
 	mov bx,offset read0
 	call execute	;get T0 S1
 ;
 	mov es,ABS
 	mov bx,0	;get loader load address
-	call setup_dma	;setup DMA to read loader
+	call setupdma	;setup DMA to read loader
 ;
 	mov bx,offset read1
 	call execute	;read track 0
@@ -261,10 +261,10 @@ execpoll:	;poll for bit in b, toggled with c
 	mov bx,offset rdstat
 	call sendcom		;perform read status command
 rd_poll:
-	in al,fdc_stat
+	in al,fdcstat
 	test al,80h		;wait for command not busy
 	jnz rd_poll
-	mov bx,last_com		;recover last attempted command
+	mov bx,lastcom		;recover last attempted command
 	jmp retry		;and try it over again
 ;
 fatal:				; fatal error

@@ -186,6 +186,16 @@ defects rather than any of this:
   (added earlier for the kernel) was missing from the *real* label-size
   classification used when a label is actually defined, not just from
   the forward-reference prescan — fixed alongside it.
+- `LENGTH name`, a real DRI ASM86 operator evaluating to the total byte
+  length of a `DB`/`DW`/`DD`/`RB`/`RW`/`RS` declaration, wasn't
+  implemented at all — found validating `src/loader/ROM.A86`'s `er0 rb
+  length cer0` (and nine more like it), where `cer0` is a `DB` string
+  constant declared elsewhere in the same file; confirmed against the
+  file's own `;16`-style length comments next to each use. Implemented
+  by tracking each labeled `DB`/`DW`/`DD`/`RB`/`RW`/`RS` statement's
+  total emitted byte length (`Assembler.lengths`, keyed by label) and
+  adding a `LENGTH` unary operator to the expression parser, parallel
+  to the existing `OFFSET` handling.
 
 ## Known limitations
 
@@ -237,10 +247,12 @@ fix available from evidence in this tree (bug #7).
 
 ### Loader sources (`src/loader/`)
 
-`src/loader/LDBDOS.A86` and `LDBIOS.A86` both compile and assemble
-cleanly end-to-end now. `LDBIOS.A86`'s four name-mismatch bugs (bug #8)
-were patched; the short-jump-range issue that used to additionally
-block it is fixed the same way as the kernel files above (real
-relaxation, no source patch needed). `LDMPM.A86` and `ROM.A86` each
-still have one genuinely unresolved symbol (bugs #9, #10), the same
-situation as `XIOS.A86`'s `dp_base` above — not patched.
+All four of `src/loader/LDBDOS.A86`/`LDBIOS.A86`/`LDMPM.A86`/`ROM.A86`
+compile and assemble cleanly end-to-end now. `LDBIOS.A86`'s four
+name-mismatch bugs and `LDMPM.A86`/`ROM.A86`'s four more (bugs #8, #9,
+#10 — what first looked like genuinely unresolved symbols in the latter
+two turned out, on a closer second look, to be the same underscore-typo
+bug class) were all patched; the short-jump-range issue that used to
+additionally block some of these is fixed the same way as the kernel
+files above (real relaxation, no source patch needed). `ROM.A86` also
+needed the new `LENGTH` operator support described above.

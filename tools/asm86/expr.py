@@ -30,7 +30,7 @@ class Value:
 
 class ExprCtx:
     def __init__(self, symtab, cur_addr, filename, lineno, tentative=False, pending=None,
-                 presize=None, prekind=None):
+                 presize=None, prekind=None, lengths=None):
         self.symtab = symtab
         self.cur_addr = cur_addr
         self.filename = filename
@@ -50,6 +50,12 @@ class ExprCtx:
         # name(lower) -> ('equ'|'label', size) for every EQU in the file,
         # learned the same way (see _prescan_sizes in assembler.py).
         self.prekind = prekind or {}
+        # name(lower) -> total emitted byte length of a DB/DW/DD/RB/RW/RS
+        # declaration, for ASM86's "LENGTH name" operator (e.g. ROM.A86's
+        # "er0 rb length cer0", computing a string constant's own size).
+        # See Assembler._do_statement in assembler.py for how this is
+        # populated.
+        self.lengths = lengths or {}
 
     def err(self, msg):
         raise AsmError(msg, self.filename, self.lineno)
@@ -186,6 +192,23 @@ class _Parser:
             self.next()
             v = self.parse_unary()
             return Value(v.n, v.size, v.symbol, is_offset=True)
+        if t.kind == 'ID' and t.val.lower() == 'length':
+            # DRI ASM86: "LENGTH name" evaluates to the total byte
+            # length of a DB/DW/DD/RB/RW/RS declaration (e.g. ROM.A86's
+            # "er0 rb length cer0", sizing one slot to match a string
+            # constant declared elsewhere in the same file) -- not a
+            # PL/M-only concept, just one this tree's own tools/plm/
+            # happened to need first. See ExprCtx.lengths.
+            self.next()
+            nt = self.next()
+            if nt.kind != 'ID':
+                self.ctx.err("LENGTH requires an identifier operand")
+            key = nt.val.lower()
+            if key not in self.ctx.lengths:
+                if self.ctx.tentative:
+                    return Value(0, 2)
+                self.ctx.err(f"LENGTH: '{nt.val}' is not a known DB/DW/DD/RB/RW/RS declaration")
+            return Value(self.ctx.lengths[key], 2)
         if t.kind == 'ID' and t.val.lower() in ('byte', 'word'):
             size = 1 if t.val.lower() == 'byte' else 2
             save = self.i

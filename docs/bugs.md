@@ -209,39 +209,53 @@ each used exactly once. All patched. `LDBIOS.A86` now assembles
 end-to-end cleanly (the short-jump-range trade-off that used to block
 it afterward, see #6, is now fixed too).
 
-## 9. `src/loader/LDMPM.A86` — one genuinely unresolved symbol
+## 9. `src/loader/LDMPM.A86` — underscore typo — FIXED
 
-Line 57, `abs_zero rw 2*bdosint`, references `bdosint`, which is only
-ever declared in `DDT86.A86` (a completely different module, the
-debugger) — not in `LDMPM.A86` or anything it has access to. No
-same-file squashed-name candidate exists, so (as with XIOS.A86's
-`dp_base` in #7) this is left unresolved rather than guessed at. Not
-patched.
+Line 57, `abs_zero rw 2*bdosint`, used `bdosint` where `bdos_int` is
+declared earlier in the very same file (line 48, `bdos_int equ 224`,
+the MP/M BDOS interrupt number) — this was missed on the first pass
+because the whole-tree squashed-name search that caught every other
+instance of this bug class only turned up an unrelated same-spelled
+label in a completely different module (`DDT86.A86`'s debugger), not
+this file's own, underscore-only variant. The fix also makes sense
+dimensionally: `2 * 224` words reserves exactly enough space for an
+8086 interrupt-vector table (2 words per vector) covering vectors `0`
+through `224`. **Patched.**
 
-## 10. `src/loader/ROM.A86` — `fdc_stat` referenced but never declared here
+## 10. `src/loader/ROM.A86` — three more underscore typos — FIXED
 
-Line 264, `in al,fdc_stat`, is identical to four call sites in
-`src/kernel/XIOS.A86` and five in `src/loader/LDBIOS.A86` — but
-`fdc_stat` is only ever `EQU`'d in those *other* two files, never in
-`ROM.A86` itself, and `ROM.A86` has no `INCLUDE`s at all to pull it in
-from them. Consistent with `docs/build.md`'s existing note that
-`ROM.A86`/`XIOS.A86` target the Intel iSBC 86/12 + SBC 204 specifically
-and are out of scope for the QEMU-bootable build — not investigated
-further.
+Three separate instances of the same bug class, all within this one
+file: line 264's `in al,fdc_stat` used `fdc_stat` where `fdcstat` (no
+underscore) is declared at line 58 and used correctly at three other
+call sites in the same file; `setup_dma` (two call sites) used where
+`setupdma` is the label actually declared; `last_com` used where
+`lastcom` is the label actually declared (and used correctly at two
+other sites). All three **patched**.
+
+Separately, line 410's `er0 rb length cer0` (and nine more like it)
+surfaced a real `tools/asm86` gap, not a source bug: `LENGTH name` is a
+genuine DRI ASM86 operator — evaluating to the total byte length of a
+`DB`/`DW`/etc. declaration (confirmed here: `Cer0 db cr,lf,'Null Error
+??',0` is 16 bytes, matching this line's own `;16` comment exactly) —
+that this assembler didn't implement at all. Fixed in `tools/asm86`
+(see `tools/README.md`).
 
 ## Status of the kernel/loader sources
 
 `src/kernel/CIO.A86`, `SYSDAT.A86`, `BDOS.A86`, `MEM.A86`, `RTM.A86`,
-`SUP.A86`, and `src/loader/LDBDOS.A86`/`LDBIOS.A86` all now compile and
-assemble cleanly end-to-end. Every source-level defect found in
-`BDOS.A86`, `RTM.A86`, and `LDBIOS.A86` has been fixed (#4, #5, #8), and
-the short-jump-range tooling trade-off that used to additionally block
-`BDOS.A86`/`MEM.A86`/`RTM.A86`/`SUP.A86`/`LDBIOS.A86` is also fixed now
-that `tools/asm86` does real jump-size relaxation (#6). `src/kernel/
-XIOS.A86`, `src/loader/LDMPM.A86`, and `src/loader/ROM.A86` remain
-blocked on at least one genuinely unresolved symbol each (#7, #9, #10)
-with no confident fix available from evidence in this tree — `XIOS.A86`
-additionally had its one fixable typo (`tick_int`) corrected.
+`SUP.A86`, and all four of `src/loader/LDBDOS.A86`/`LDBIOS.A86`/
+`LDMPM.A86`/`ROM.A86` now compile and assemble cleanly end-to-end. Every
+source-level defect found in `BDOS.A86`, `RTM.A86`, `LDBIOS.A86`,
+`LDMPM.A86`, and `ROM.A86` has been fixed (#4, #5, #8, #9, #10) — what
+first looked like two genuinely unresolved symbols in #9/#10 turned out,
+on closer inspection, to be the same underscore-typo bug class as
+everywhere else — and the short-jump-range tooling trade-off that used
+to additionally block several of these is also fixed now that
+`tools/asm86` does real jump-size relaxation (#6). Only `src/kernel/
+XIOS.A86` remains blocked, on one genuinely unresolved symbol
+(`dp_base`, #7) with no confident fix available from evidence in this
+tree even after a second, closer look — its one fixable typo
+(`tick_int`) was corrected.
 
 The RSP sources (`CLOCK.A86`, `ECHO.A86`, `TMP.A86`, `SUBMIT.A86`) and
 all 22 `.PLM` utilities in `src/utils/`/`src/toolchain/` compile and

@@ -126,6 +126,10 @@ class Assembler:
         self.jump_long = {}
         self.jump_sites = []
         self._jump_idx = 0
+        # name(lower) -> total emitted byte length of that DB/DW/DD/
+        # RB/RW/RS declaration, for ASM86's LENGTH operator (see
+        # _do_statement and ExprCtx.lookup_length in expr.py).
+        self.lengths = {}
 
     # -- segment / symbol helpers -----------------------------------
     def switch_seg(self, name):
@@ -243,7 +247,7 @@ class Assembler:
     def _ectx(self, filename, lineno, addr=None):
         return ExprCtx(self.symtab, addr if addr is not None else self.cur_addr(),
                         filename, lineno, tentative=self.tentative, pending=self.pending,
-                        presize=self.presize, prekind=self.prekind)
+                        presize=self.presize, prekind=self.prekind, lengths=self.lengths)
 
     _CAST_PREFIX_RE = re.compile(r'^\s*(byte|word)\s+ptr\b', re.IGNORECASE)
 
@@ -342,27 +346,32 @@ class Assembler:
                 self.define_symbol(label, 'label', v.n, size_hint, filename, lineno, allow_redefine=True)
             return
 
-        if low in ('db', 'byte'):
-            self._do_db(operand_text, filename, lineno)
-            return
-        if low in ('dw', 'word'):
-            self._do_dw(operand_text, filename, lineno)
-            return
-        if low == 'dd':
-            self._do_dd(operand_text, filename, lineno)
-            return
-        if low in ('rb', 'rs'):
-            # DRI ASM86: 'rs' reserves N raw bytes, the same as 'rb' --
-            # e.g. DATA.BDO's "endlist rs 0" is a zero-size marker label,
-            # exactly the 'rb 0' idiom used elsewhere in this tree.
-            ctx = self._ectx(filename, lineno)
-            n = eval_text(operand_text, ctx).n
-            self.emit(bytes(n))
-            return
-        if low == 'rw':
-            ctx = self._ectx(filename, lineno)
-            n = eval_text(operand_text, ctx).n
-            self.emit(bytes(n * 2))
+        if low in ('db', 'byte', 'dw', 'word', 'dd', 'rb', 'rs', 'rw'):
+            # Track each declaration's total emitted byte length, keyed
+            # by its label, for ASM86's LENGTH operator (see
+            # expr.py/eval_text's leading-LENGTH handling) -- e.g.
+            # ROM.A86's "er0 rb length cer0", where cer0 is a DB string
+            # declared elsewhere in the same file.
+            addr_before = self.cur_addr()
+            if low in ('db', 'byte'):
+                self._do_db(operand_text, filename, lineno)
+            elif low in ('dw', 'word'):
+                self._do_dw(operand_text, filename, lineno)
+            elif low == 'dd':
+                self._do_dd(operand_text, filename, lineno)
+            elif low in ('rb', 'rs'):
+                # DRI ASM86: 'rs' reserves N raw bytes, the same as 'rb'
+                # -- e.g. DATA.BDO's "endlist rs 0" is a zero-size marker
+                # label, exactly the 'rb 0' idiom used elsewhere here.
+                ctx = self._ectx(filename, lineno)
+                n = eval_text(operand_text, ctx).n
+                self.emit(bytes(n))
+            else:  # rw
+                ctx = self._ectx(filename, lineno)
+                n = eval_text(operand_text, ctx).n
+                self.emit(bytes(n * 2))
+            if label is not None:
+                self.lengths[label.lower()] = self.cur_addr() - addr_before
             return
 
         # Otherwise: a CPU instruction.

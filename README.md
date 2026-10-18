@@ -87,3 +87,7 @@ Described there as:
 The scanned DRI manuals in `orig/manuals/` have also been extracted to
 Markdown (`.md` alongside each `.pdf`) to make them faster and easier
 for LLMs to use as reference material.
+
+[cpm.retropc.se/cpm/develop.html](https://cpm.retropc.se/cpm/develop.html)
+lists more CP/M-era applications/source that could be candidates for a
+similar porting effort.

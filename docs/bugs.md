@@ -69,10 +69,45 @@ Three separate defects in one file:
   point instead (see lines 91, 330, 770) — `showerr:` appears to be an
   unfinished or broken implementation of the same pattern.
 
+## Reclassified: `src/utils/ED.PLM`'s `TIME` is not a bug
+
+An earlier version of this document flagged `ED.PLM`'s
+`WAIT: PROCEDURE;` (line 1264, a half-second busy-wait delay loop
+ending its loop body with `CALL TIME(250);`, line 1274) as a likely
+bug: `TIME` is never declared anywhere in `ED.PLM`, and no other file
+in the entire 11-disk tree calls it either, so at the time there was no
+cross-reference to confirm it the way `MEMORY` had been. Once
+`orig/plm80s/PLMLANG.DOC` (Intel's own PL/M-80 language reference) was
+added to this tree, it settled the question: it documents
+`CALL TIME(expression)` verbatim — "the expression is evaluated as a
+BYTE value. The TIME procedure delays 100 microseconds times the
+value." `250 * 100us * 20` (the loop's iteration count) `= 500ms`,
+an exact match for the delay's own comment, "1/2 SECOND TIME OUT." A
+real, documented PL/M standard-library builtin, not a dropped
+declaration — see `tools/plm/README.md` for the implementation.
+
+## Reclassified: `src/utils/SET.PLM`'s `MOVW` is not a bug
+
+An earlier version of this document flagged `SET.PLM` line 929's
+`MOVW(@UDA.DF$PASSWORD,@UDA$PARENT.DF$PASSWORD,4)` as a likely bug, by
+analogy with `TIME` above: `MOVW` is never declared anywhere in the
+source tree either. Further checking found evidence it's deliberate: the
+field it copies, `DF$PASSWORD`, is declared in `UDA.LIT` as exactly
+`(8) BYTE`, and the call passes a count of `4` — 4 *words* = 8 bytes,
+exactly matching the field size if `MOVW` moves by words (with
+`(source, dest, count)` argument order, the reverse of the confirmed
+`MOVE(count, source, dest)` builtin). That's strong enough corroborating
+evidence, even without a second call site to cross-reference against, to
+treat it as a genuine (if undocumented) PL/M-86 compiler builtin rather
+than a defect — see `tools/plm/README.md` for the implementation.
+
 ## Not yet checked
 
-Only the four RSP sources (`CLOCK.A86`, `ECHO.A86`, `TMP.A86`,
-`SUBMIT.A86`) have been run through the assembler so far; `ECHO.A86`
-assembled cleanly. The kernel, loader, and utility sources in `src/`
-have not yet been assembled and may contain further defects of this
-kind — see `tools/README.md` for how to run the assembler yourself.
+The RSP sources (`CLOCK.A86`, `ECHO.A86`, `TMP.A86`, `SUBMIT.A86`) and
+all 22 `.PLM` utilities in `src/utils/`/`src/toolchain/` have been run
+through `tools/asm86`/`tools/plmc`; `ECHO.A86` and every `.PLM` file now
+compile and assemble cleanly end-to-end (see `tools/plm/README.md`).
+The kernel, loader, and remaining sources in `src/` have not yet been
+tried and may contain further defects of this kind — see
+`tools/README.md` and `tools/plm/README.md` for how to run the
+assembler/compiler yourself.

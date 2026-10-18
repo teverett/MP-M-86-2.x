@@ -41,6 +41,10 @@ class Scope:
     def __init__(self, parent=None):
         self.parent = parent
         self.vars = {}
+        # True for a procedure's own local scope (params+locals), False
+        # for the single global scope. Used to count static-link hops
+        # between nested procedures -- see CodeGen._frame_reg_for_scope.
+        self.is_proc_scope = False
 
     def define(self, name, sym):
         self.vars[name.lower()] = sym
@@ -76,6 +80,22 @@ class CodeGen:
     MAIN_PROC_NAME = 'plmstart'
 
     def compile_module(self, module):
+        # MEMORY is a PL/M-86 compiler-predeclared identifier, not
+        # something the programmer ever DECLAREs: an implicit BYTE array
+        # whose address is wherever this module's own static data ends,
+        # i.e. the start of whatever memory is still free at runtime.
+        # ATTACH.PLM never uses it, but PIP.PLM and ED.PLM both reference
+        # a never-declared "MEMORY" (and PIP.PLM even uses it as an
+        # AT(...) target) in exactly this way, confirming it's a real
+        # compiler builtin rather than a source bug. Implemented here as
+        # an ordinary global whose label is emitted as the very last
+        # thing in dseg (see to_asm_text), after every other global
+        # *and* every string/array constant interned while compiling
+        # procedure bodies, so its address really is "the end of
+        # everything this module statically allocated."
+        self.global_scope.define('memory', Sym('global', label='pl_memory', size=1, fields=None,
+                                                 is_array=True, elemsize=1, count=None,
+                                                 external=False))
         # PL/M modules are conventionally wrapped as "modname: DO; ... END
         # modname;" -- a labeled block, which is purely structural when it
         # holds only declarations/procedures. But PL/M also allows real
@@ -223,10 +243,8 @@ class CodeGen:
             # phase 3: emit the actual data now that every symbol exists.
             initial = getattr(decl, 'initial', None)
             if initial is not None:
-                if len(field_layout) != len(initial):
-                    self.err(f"structure '{name}' has {len(field_layout)} fields but "
-                              f"INITIAL supplies {len(initial)} values")
-                self._emit_initial_values(label, [f[1] for f in field_layout], initial)
+                sizes = self._match_struct_initial(name, field_layout, initial, count)
+                self._emit_initial_values(label, sizes, initial)
             else:
                 # EXTERNAL data still gets storage reserved *in this
                 # module*: there is no linker, so a real cross-module
@@ -288,6 +306,36 @@ class CodeGen:
                 total += elem_size
         return total
 
+    def _match_struct_initial(self, name, field_layout, initial, outer_count):
+        """Walk field_layout (repeated outer_count times, for an array of
+        structures) against the actual INITIAL list, consuming the right
+        number of entries per field: normally one entry per scalar
+        element, but a field that's an array may instead be covered by a
+        *single* string entry for the whole field at once (e.g.
+        ABORT.PLM's "pname (8) byte ... initial (...,'        ')" -- one
+        string, not 8 separate values -- versus ASS86.PLM's
+        "op$val (2) byte initial (72, 1, ...)" -- one value per byte).
+        Returns the per-consumed-entry size list _emit_initial_values
+        needs (same length as `initial` if everything lines up)."""
+        sizes = []
+        idx = 0
+        n = len(initial)
+        for _ in range(outer_count):
+            for fname, fsize, fcount, is_array in field_layout:
+                if is_array and idx < n and isinstance(initial[idx], ast.Str):
+                    sizes.append(fsize)
+                    idx += 1
+                else:
+                    for _ in range(fcount):
+                        if idx >= n:
+                            break
+                        sizes.append(fsize)
+                        idx += 1
+        if idx != n:
+            self.err(f"structure '{name}': INITIAL list doesn't match its fields "
+                      f"(consumed {idx} of {n} values)")
+        return sizes
+
     def _build_struct_fields(self, field_decls):
         """field_decls: decl.fields (list of (name, dims, type)) ->
         (fields dict for Sym, total size in bytes, ordered layout list
@@ -302,6 +350,14 @@ class CodeGen:
             layout.append((fname, fsize, count, fdims is not None))
             off += fsize * count
         return fields, off, layout
+
+    def _addrof_is_local(self, expr):
+        """True if expr is ".name"/"@name" and name resolves to something
+        other than a module-level global (i.e. its address is only known
+        at runtime, stack-relative) -- see gen_VarDecl."""
+        if not isinstance(expr, ast.AddrOf) or not isinstance(expr.expr, ast.Name):
+            return False
+        return self.resolve(expr.expr.name).kind != 'global'
 
     def _resolve_at_target(self, expr):
         """Resolve an AT(...) expression to (dseg_label, byte_offset)."""
@@ -337,6 +393,20 @@ class CodeGen:
                 self.err(f"AT(.{base.name}.{inner.field}): no such field")
             foff, _, _ = fields[inner.field.lower()]
             return sym.info['label'], sym.info.get('label_offset', 0) + foff
+        if isinstance(inner, ast.Index):
+            # "AT(.struct.field(index))": a subscript into a structure
+            # field that's itself an array, e.g. PIP.PLM's
+            # "AT(.DEST.FCB(33))" (DEST.FCB is a (34) BYTE field).
+            base = inner.base
+            if not isinstance(base, ast.Field) or not isinstance(base.base, ast.Name):
+                self.err("AT(...) chained-index target must be struct.field(index)")
+            sym = self.resolve(base.base.name)
+            fields = sym.info.get('fields')
+            if fields is None or base.field.lower() not in fields:
+                self.err(f"AT(...): no such field '{base.field}'")
+            foff, fsize, _ = fields[base.field.lower()]
+            idx = self.const_eval(inner.index)
+            return sym.info['label'], sym.info.get('label_offset', 0) + foff + idx * fsize
         self.err(f"unsupported AT(...) target expression: {type(inner).__name__}")
 
     def const_eval(self, expr):
@@ -364,24 +434,51 @@ class CodeGen:
         self.err(f"expected a compile-time constant expression, got {type(expr).__name__}")
 
     # -- procedures -------------------------------------------------------
+    # Offset of a nested procedure's static link (its enclosing
+    # procedure's BP, pushed as an extra hidden last argument) from its
+    # own BP. Real parameters start right after it, at [bp+6], instead of
+    # the usual [bp+4]. See _frame_reg_for_scope for how it's chased.
+    LINK_OFFSET = 4
+
     def gen_proc(self, proc):
         # PL/M allows a PROCEDURE declared inside another one ("nested
-        # procedures"). This compiler has no real lexical nesting --
-        # a nested proc is hoisted out and generated as its own ordinary
-        # routine (registered in the one global scope), *before* this
-        # procedure's own body/locals are set up, since generating it
-        # recursively reuses (and must finish with, before returning
-        # here) the same self.cur_scope/self.out/self.next_local_off
-        # instance state this procedure is about to set up for itself.
-        proc.body = self._hoist_procs(proc.body)
+        # procedures") whose body can reference the enclosing procedure's
+        # own parameters/locals -- a real closure, not just a namespacing
+        # convenience (see ERA.PLM's file$err/single$file). This compiler
+        # has no runtime support library, so that's implemented the
+        # classic way for a stack machine: a nested procedure takes one
+        # extra hidden argument, a "static link" pointing at its
+        # immediately enclosing procedure's stack frame, and a reference
+        # to an outer local is reached by following however many links
+        # are needed instead of indexing directly off BP (see
+        # _frame_reg_for_scope). Nested procedures still get only one
+        # flat (non-block-scoped) local scope per procedure, same as
+        # everything else in this compiler.
         label = sanitize(proc.name)
-        local_scope = Scope(self.global_scope)
+        nested = getattr(proc, 'nested', False)
+        parent_scope = proc.enclosing_scope if nested else self.global_scope
+        local_scope = Scope(parent_scope)
+        local_scope.is_proc_scope = True
+        base_off = self.LINK_OFFSET + 2 if nested else 4
         for idx, p in enumerate(proc.params):
-            off = 4 + 2 * idx
+            off = base_off + 2 * idx
             local_scope.define(p, Sym('param', offset=off))
         self.next_local_off = [0]
         self.cur_scope = local_scope
         self.cur_proc = proc
+
+        # A nested PROCEDURE's own body can reference this procedure's
+        # locals no matter where, textually, it's declared relative to
+        # them -- so every one of this procedure's own VarDecls must be
+        # registered (wherever nested in its body) *before* any nested
+        # PROCEDURE within it is hoisted out and generated.
+        proc.body = self._register_vardecls(proc.body)
+        proc.body = self._hoist_procs(proc.body, local_scope)
+        # A nested proc's own gen_proc call (just above) overwrote these;
+        # restore them to resume generating *this* procedure's own body.
+        self.cur_scope = local_scope
+        self.cur_proc = proc
+
         body_lines = []
         self.out = body_lines
         for stmt in proc.body:
@@ -399,42 +496,102 @@ class CodeGen:
             self.cseg.append("\tmov sp,bp")
         self.cseg.append("\tpop bp")
         popbytes = 2 * len(proc.params)
+        if nested:
+            popbytes += 2  # the static link this procedure itself took
         self.cseg.append(f"\tret {popbytes}" if popbytes else "\tret")
 
-    def _hoist_procs(self, stmts):
+    def _register_vardecls(self, stmts):
+        """Register every VarDecl's symbol/storage in a statement list
+        (and any nested block/if/while/case/for bodies within it -- but
+        *not* inside a nested ProcDecl, which registers its own when its
+        own gen_proc runs) into the current scope. A plain declaration
+        produces no code and is removed from the list entirely. One with
+        an INITIAL/DATA value, though, has to actually copy those bytes
+        onto the stack every time it's reached (a local doesn't get
+        "initial contents" any other way) -- so it's left in the list,
+        to run inline in its proper place in execution order (see
+        gen_VarDecl)."""
+        out = []
+        for s in stmts:
+            if isinstance(s, ast.VarDecl):
+                self._declare_var(s)
+                if getattr(s, 'initial', None) is not None:
+                    out.append(s)
+                continue
+            out.append(self._register_vardecls_in_stmt(s))
+        return out
+
+    def _register_vardecls_in_stmt(self, s):
+        if isinstance(s, (ast.Block, ast.WhileBlock, ast.ForBlock, ast.CaseBlock)):
+            s.body = self._register_vardecls(s.body)
+        elif isinstance(s, ast.If):
+            if s.then_stmt is not None:
+                s.then_stmt = self._register_vardecls_in_stmt(s.then_stmt)
+            if s.else_stmt is not None:
+                s.else_stmt = self._register_vardecls_in_stmt(s.else_stmt)
+        return s
+
+    def _hoist_procs(self, stmts, enclosing_scope):
         """Pull every ProcDecl out of a statement list (and any nested
         block/if/while/case/for bodies within it), generating each as an
-        ordinary routine. A nested PROCEDURE...END is purely a
+        ordinary routine (tagged as nested, taking enclosing_scope's
+        frame as its static link). A nested PROCEDURE...END is purely a
         definition -- it produces no inline code at its point of
         declaration, only at a CALL elsewhere -- so it's simply removed
         from the list it was found in."""
         out = []
         for s in stmts:
             if isinstance(s, ast.ProcDecl):
+                s.nested = True
+                s.enclosing_scope = enclosing_scope
                 self.global_scope.define(s.name, Sym('proc', rettype=s.rettype,
-                                                       nparams=len(s.params), external=s.external))
+                                                       nparams=len(s.params), external=s.external,
+                                                       nested=True, enclosing_scope=enclosing_scope))
                 if s.external:
                     self.extern_procs.add(s.name)
                 else:
                     self.gen_proc(s)
                 continue
-            out.append(self._hoist_procs_in_stmt(s))
+            out.append(self._hoist_procs_in_stmt(s, enclosing_scope))
         return out
 
-    def _hoist_procs_in_stmt(self, s):
+    def _hoist_procs_in_stmt(self, s, enclosing_scope):
         if isinstance(s, (ast.Block, ast.WhileBlock, ast.ForBlock, ast.CaseBlock)):
-            s.body = self._hoist_procs(s.body)
+            s.body = self._hoist_procs(s.body, enclosing_scope)
         elif isinstance(s, ast.If):
             if s.then_stmt is not None:
-                s.then_stmt = self._hoist_procs_in_stmt(s.then_stmt)
+                s.then_stmt = self._hoist_procs_in_stmt(s.then_stmt, enclosing_scope)
             if s.else_stmt is not None:
-                s.else_stmt = self._hoist_procs_in_stmt(s.else_stmt)
+                s.else_stmt = self._hoist_procs_in_stmt(s.else_stmt, enclosing_scope)
         return s
 
-    def alloc_local(self, name):
-        self.next_local_off[0] -= 2
+    def _frame_reg_for_scope(self, target):
+        """Returns the register ('bp', or 'bx' after emitting code to
+        load it) holding the frame pointer for the procedure that owns
+        `target` scope, chasing static links from the current
+        procedure's own frame as needed."""
+        if target is None or target is self.cur_scope:
+            return 'bp'
+        s = self.cur_scope
+        hops = 0
+        while s is not None and s is not target:
+            if s.is_proc_scope:
+                hops += 1
+            s = s.parent
+        if s is None:
+            self.err("internal: cannot resolve an enclosing procedure's frame")
+        self.emit(f"\tmov bx,[bp+{self.LINK_OFFSET}]")
+        for _ in range(hops - 1):
+            self.emit(f"\tmov bx,[bx+{self.LINK_OFFSET}]")
+        return 'bx'
+
+    def _frame_reg_for(self, sym):
+        return self._frame_reg_for_scope(sym.info.get('_scope'))
+
+    def alloc_local(self, name, words=1, **extra):
+        self.next_local_off[0] -= 2 * words
         off = self.next_local_off[0]
-        self.cur_scope.define(name, Sym('local', offset=off))
+        self.cur_scope.define(name, Sym('local', offset=off, **extra))
         return off
 
     # -- statements ---------------------------------------------------------
@@ -454,7 +611,13 @@ class CodeGen:
     def gen_LabelMarker(self, s):
         self.emit(f"{sanitize(s.name)}:")
 
-    def gen_VarDecl(self, s):
+    def _declare_var(self, s):
+        """Register a local's symbol/storage -- no code emitted. Called
+        early (see _register_vardecls) so a nested procedure's closure
+        references resolve correctly regardless of textual order, and
+        again (harmlessly -- it's pure registration) from gen_VarDecl
+        when a declaration with an INITIAL value is left inline (see
+        below) and actually executed."""
         if s.type == 'literally':
             try:
                 from .lexer import parse_number
@@ -472,6 +635,8 @@ class CodeGen:
                 self.cur_scope.define(s.name, Sym('based', based_on=s.based_on, type=s.type))
             return
         if s.type == 'structure':
+            if getattr(s, 'initial', None) is not None:
+                self.err(f"'{s.name}': INITIAL on a local STRUCTURE is not supported")
             fields = {}
             off = 0
             for fname, fdims, ftyp in s.fields:
@@ -487,7 +652,67 @@ class CodeGen:
             first_off = self.next_local_off[0]  # lowest address used
             self.cur_scope.define(s.name, Sym('local_struct', offset=first_off, fields=fields, size=off))
             return
-        off = self.alloc_local(s.name)
+        size = 1 if s.type == 'byte' else 2
+        initial = getattr(s, 'initial', None)
+        if s.dims == '*':
+            if initial is None:
+                self.err(f"'{s.name}': (*) array needs an INITIAL/DATA list to size it from")
+            count = self._initial_total_bytes(initial, size) // size
+            words = (size * count + 1) // 2
+            self.alloc_local(s.name, words, is_array=True, elemsize=size, count=count)
+        elif s.dims is not None:
+            count = self.const_eval(s.dims)
+            words = (size * count + 1) // 2
+            self.alloc_local(s.name, words, is_array=True, elemsize=size, count=count)
+        else:
+            self.alloc_local(s.name)
+
+    def gen_VarDecl(self, s):
+        """Dispatched inline (by gen_stmt) only for a declaration that has
+        an INITIAL/DATA value -- see _register_vardecls, which registers
+        every local's symbol/storage up front but leaves these ones in
+        the statement stream, since initializing a *local* (unlike a
+        global) is a real runtime action that has to happen in its
+        proper place in execution order, every time this point in the
+        procedure is reached."""
+        initial = getattr(s, 'initial', None)
+        if initial is None:
+            return
+        self._declare_var(s)  # idempotent: re-registers the same symbol
+        sym = self.cur_scope.vars[s.name.lower()]
+        size = sym.info.get('elemsize', 2)
+        off = sym.info['offset']
+
+        if any(self._addrof_is_local(e) for e in initial):
+            # At least one entry is the address of another LOCAL (e.g.
+            # PIP.PLM's "declare errmsg(*) address data(.er00,.er01,...)",
+            # where er00 etc. are locals of the same procedure): that
+            # address is only known at runtime (stack-relative), so it
+            # can't be baked into a static table and REP MOVSB'd like
+            # the all-constant case below -- store each element with its
+            # own instructions instead.
+            for i, expr in enumerate(initial):
+                if isinstance(expr, ast.Str):
+                    self.err(f"'{s.name}': INITIAL mixes a string constant with a local "
+                              "address reference -- not supported")
+                self.gen_expr(expr)
+                item_off = off + i * size
+                dst = f"[bp{item_off}]" if item_off < 0 else f"[bp+{item_off}]"
+                self.emit(f"\tmov {dst},ax" if size == 2 else f"\tmov {dst},al")
+            return
+
+        total = self._initial_total_bytes(initial, size)
+        label = self.new_label('linit')
+        self._emit_initial_values(label, [size] * len(initial), initial)
+        self.emit("\tmov di,bp")
+        self.emit(f"\tadd di,{off}" if off >= 0 else f"\tsub di,{-off}")
+        self.emit(f"\tmov si,offset {label}")
+        self.emit(f"\tmov cx,{total}")
+        self.emit("\tpush ds")
+        self.emit("\tpush ds")
+        self.emit("\tpop es")
+        self.emit("\trep movsb")
+        self.emit("\tpop ds")
 
     def gen_Block(self, s):
         for st in s.body:
@@ -580,7 +805,13 @@ class CodeGen:
     REL_JFALSE = {'=': 'jne', '<>': 'je', '<': 'jae', '<=': 'ja', '>': 'jbe', '>=': 'jb'}
     # Inverse of each Jcc above (used by emit_jcc_far's invert-and-JMP trick).
     JCC_INVERSE = {'je': 'jne', 'jne': 'je', 'jb': 'jae', 'jae': 'jb', 'ja': 'jbe', 'jbe': 'ja',
-                   'jc': 'jnc', 'jnc': 'jc'}
+                   'jc': 'jnc', 'jnc': 'jc', 'js': 'jns', 'jns': 'js', 'jp': 'jnp', 'jnp': 'jp'}
+
+    # PL/M's pre-defined flag pseudo-variables (confirmed real:
+    # orig/plm80s/PLMLANG.DOC -- "CARRY, ZERO, SIGN, PARITY ... reflect
+    # the current values of the cpu flags"), each mapped to the Jcc
+    # mnemonic that's true exactly when that flag is set.
+    FLAG_VARS = {'carry': 'jc', 'zero': 'je', 'sign': 'js', 'parity': 'jp'}
 
     def emit_jcc_far(self, jcc, target_label):
         """Emit a conditional jump to target_label with unlimited range.
@@ -595,13 +826,14 @@ class CodeGen:
         self.emit(f"{skip}:")
 
     def gen_bool_jump_false(self, cond, false_label):
-        if isinstance(cond, ast.Name) and cond.name.lower() == 'carry':
-            # PL/M's CARRY pseudo-variable reads the 8086 carry flag as
-            # last set by the previous arithmetic -- MOV/PUSH/POP (which
-            # is all this compiler emits between statements) never touch
-            # flags, so this is safe to check directly, with no
-            # intervening instruction to disturb it.
-            self.emit_jcc_far('jnc', false_label)
+        if isinstance(cond, ast.Name) and cond.name.lower() in self.FLAG_VARS:
+            # A flag pseudo-variable (CARRY/ZERO/SIGN/PARITY) reads the
+            # 8086 flag as last set by the previous arithmetic --
+            # MOV/PUSH/POP (which is all this compiler emits between
+            # statements) never touch flags, so this is safe to check
+            # directly, with no intervening instruction to disturb it.
+            jcc = self.FLAG_VARS[cond.name.lower()]
+            self.emit_jcc_far(self.JCC_INVERSE[jcc], false_label)
             return
         if isinstance(cond, ast.BinOp) and cond.op in self.REL_JFALSE:
             self.gen_expr(cond.left)
@@ -646,15 +878,20 @@ class CodeGen:
         return label
 
     def ex_Name(self, e):
-        if e.name.lower() == 'carry':
-            t_l = self.new_label('carryt')
-            e_l = self.new_label('carrye')
-            self.emit(f"\tjc {t_l}")
+        low = e.name.lower()
+        if low in self.FLAG_VARS:
+            jcc = self.FLAG_VARS[low]
+            t_l = self.new_label('flagt')
+            e_l = self.new_label('flage')
+            self.emit(f"\t{jcc} {t_l}")
             self.emit(f"\tmov ax,{FALSE}")
             self.emit(f"\tjmp {e_l}")
             self.emit(f"{t_l}:")
             self.emit(f"\tmov ax,{TRUE}")
             self.emit(f"{e_l}:")
+            return
+        if low == 'stackptr':
+            self.emit("\tmov ax,sp")
             return
         sym = self.resolve(e.name)
         if sym.kind == 'const':
@@ -791,13 +1028,70 @@ class CodeGen:
             self.err(f"unsupported operator '{e.op}'")
 
     # -- calls --------------------------------------------------------------
-    BUILTINS = {'move', 'length', 'last', 'size', 'low', 'high', 'shl', 'shr', 'rol', 'ror',
-                'signed', 'double'}
+    BUILTINS = {'move', 'movw', 'movb', 'dec', 'length', 'last', 'size', 'low', 'high', 'shl',
+                'shr', 'rol', 'ror', 'scl', 'scr', 'signed', 'double', 'unsign', 'time'}
 
     def gen_call(self, name, args):
         low = name.lower()
+        # A user-declared procedure always wins over a builtin name --
+        # SET.PLM declares its own parameterless "time: procedure;",
+        # wholly unrelated to PL/M's standard TIME builtin (see below);
+        # this check is what lets both coexist correctly.
+        if low in self.BUILTINS and self._user_proc(name) is not None:
+            low = None
         if low == 'move':
             return self.gen_move_builtin(args)
+        if low == 'movw':
+            return self.gen_movw_builtin(args)
+        if low == 'movb':
+            return self.gen_movb_builtin(args)
+        if low == 'dec':
+            # Confirmed, not a guess: Intel's own PL/M-80 language
+            # reference (orig/plm80s/PLMLANG.DOC, a direct ancestor of
+            # PL/M-86) documents "DEC(expr1 + expr2) and
+            # DEC(expr1 PLUS expr2)" verbatim -- "does the necessary
+            # decimal adjustment to produce the BCD result from the
+            # addition", i.e. exactly the 8086 DAA instruction, used
+            # right after a BCD addition. PIP.PLM's one use,
+            # "C1 = DEC(C1+ONE)", matches this exactly (C1/C2/C3 are
+            # packed-BCD digit counters -- PRINTDIG prints their two
+            # nibbles separately).
+            if len(args) != 1:
+                self.err("DEC requires 1 argument: DEC(value)")
+            self.gen_expr(args[0])
+            self.emit("\tdaa")
+            return
+        if low == 'time':
+            # Confirmed real: orig/plm80s/PLMLANG.DOC documents
+            # "CALL TIME(expression)" verbatim -- "delays 100
+            # microseconds times the value" on the original i8080
+            # target. ED.PLM's one use is a 20-iteration loop each
+            # calling TIME(250), commented "1/2 SECOND TIME OUT":
+            # 250 * 100us * 20 = 500ms, an exact match. That exact
+            # i8080-cycle-based timing can't be replicated on this
+            # compiler's 8086 target (different CPU, and the real
+            # duration depends on the host's actual clock speed
+            # regardless), so this is a busy-wait loop scaled by the
+            # argument -- correct in spirit (it genuinely delays
+            # proportionally to the argument), not calibrated to an
+            # exact wall-clock duration.
+            if len(args) != 1:
+                self.err("TIME requires 1 argument: CALL TIME(n)")
+            self.gen_expr(args[0])
+            self.emit("\tmov cx,ax")
+            outer = self.new_label('timeout')
+            inner = self.new_label('timein')
+            done = self.new_label('timedone')
+            self.emit("\tjcxz " + done)
+            self.emit(f"{outer}:")
+            self.emit("\tpush cx")
+            self.emit("\tmov cx,100")
+            self.emit(f"{inner}:")
+            self.emit(f"\tloop {inner}")
+            self.emit("\tpop cx")
+            self.emit(f"\tloop {outer}")
+            self.emit(f"{done}:")
+            return
         if low in ('length', 'last', 'size'):
             return self.gen_length_builtin(low, args)
         if low in ('low', 'high'):
@@ -806,16 +1100,27 @@ class CodeGen:
                 self.emit("\tmov al,ah")
             self.emit("\tmov ah,0")
             return
-        if low in ('signed', 'double'):
-            # Both are no-ops here: every value is already carried as a
-            # full word in AX (BYTEs are zero-extended on load), which is
-            # exactly what DOUBLE asks for; SIGNED's actual sign-aware
-            # comparison semantics aren't modeled (this compiler's
+        if low in ('signed', 'double', 'unsign'):
+            # All three are no-ops here. SIGNED/UNSIGN are PL/M-86's real
+            # conversion functions between INTEGER (signed 16-bit) and
+            # WORD/ADDRESS (unsigned) -- confirmed by STSCOM.PLM's
+            # "dcl i integer; ... low(unsign(i))", converting i back to
+            # unsigned before extracting its low byte. This compiler
+            # never distinguishes signed from unsigned bit patterns
+            # internally (every value is just a 16-bit word in AX, and
             # relational operators are always unsigned, see
-            # tools/plm/README.md), so it's treated as a pass-through.
+            # tools/plm/README.md), so the conversion has no bits to
+            # actually change either way. DOUBLE (BYTE -> ADDRESS,
+            # zero-extend) is likewise already true of every loaded BYTE.
             self.gen_expr(args[0])
             return
-        if low in ('shl', 'shr', 'rol', 'ror'):
+        if low in ('shl', 'shr', 'rol', 'ror', 'scl', 'scr'):
+            # SCL/SCR ("shift/rotate through carry") are confirmed real:
+            # orig/plm80s/PLMLANG.DOC documents them alongside ROL/ROR as
+            # "the carry flag participates in the rotate" -- exactly the
+            # 8086's RCL/RCR, as opposed to ROL/ROR's plain (non-carry)
+            # rotate.
+            mnem = {'scl': 'rcl', 'scr': 'rcr'}.get(low, low)
             self.gen_expr(args[0])
             self.emit("\tpush ax")
             self.gen_expr(args[1])
@@ -823,7 +1128,7 @@ class CodeGen:
             self.emit("\txchg ax,bx")
             self.emit("\tmov cl,al")
             self.emit("\tmov ax,bx")
-            self.emit(f"\t{low} ax,cl")
+            self.emit(f"\t{mnem} ax,cl")
             return
         sym = self.resolve(name)
         if sym.kind != 'proc':
@@ -831,12 +1136,72 @@ class CodeGen:
         for a in reversed(args):
             self.gen_expr(a)
             self.emit("\tpush ax")
+        if sym.info.get('nested'):
+            # Nested procedures take one extra hidden last argument: a
+            # static link to their enclosing procedure's frame (see
+            # gen_proc/LINK_OFFSET). Pushed after the real arguments, so
+            # it lands at [bp+4] in the callee and the real ones shift up
+            # to start at [bp+6].
+            reg = self._frame_reg_for_scope(sym.info['enclosing_scope'])
+            self.emit(f"\tpush {reg}")
         self.emit(f"\tcall {sanitize(name)}")
 
     def gen_move_builtin(self, args):
         if len(args) != 3:
             self.err("MOVE requires 3 arguments: MOVE(count, source, dest)")
         count, src, dst = args
+        self.gen_expr(dst)
+        self.emit("\tmov di,ax")
+        self.gen_expr(src)
+        self.emit("\tmov si,ax")
+        self.gen_expr(count)
+        self.emit("\tmov cx,ax")
+        self.emit("\tpush ds")
+        self.emit("\tpush ds")
+        self.emit("\tpop es")
+        self.emit("\trep movsb")
+        self.emit("\tpop ds")
+
+    def gen_movw_builtin(self, args):
+        # MOVW isn't a declared procedure anywhere in this tree, and
+        # appears exactly once -- SET.PLM's "CALL
+        # MOVW(@UDA.DF$PASSWORD,@UDA$PARENT.DF$PASSWORD,4)". Its argument
+        # order (source, dest, count) is the *reverse* of MOVE's
+        # (count, source, dest), and its count unit is words, not bytes:
+        # UDA.LIT declares DF$PASSWORD as exactly (8) BYTE, and the call
+        # passes a count of 4 -- 4 words = 8 bytes, confirming the
+        # hypothesis. Treated as a real (if undocumented/unconfirmed)
+        # PL/M-86 builtin rather than a bug, unlike e.g. ED.PLM's `TIME`
+        # (see docs/bugs.md and tools/plm/README.md for both).
+        if len(args) != 3:
+            self.err("MOVW requires 3 arguments: MOVW(source, dest, word_count)")
+        src, dst, count = args
+        self.gen_expr(dst)
+        self.emit("\tmov di,ax")
+        self.gen_expr(src)
+        self.emit("\tmov si,ax")
+        self.gen_expr(count)
+        self.emit("\tmov cx,ax")
+        self.emit("\tpush ds")
+        self.emit("\tpush ds")
+        self.emit("\tpop es")
+        self.emit("\trep movsw")
+        self.emit("\tpop ds")
+
+    def gen_movb_builtin(self, args):
+        # MOVB: the byte-granularity sibling of MOVW, same (source, dest,
+        # count) argument order. TOD.PLM's "CALL
+        # MOVB(@EXTRNL$TOD.DATE,@LCLTOD.DATE,5)" copies the DATE/HRS/MIN/
+        # SEC fields of a TOD structure (ADDRESS + 3 BYTEs = exactly 5
+        # bytes) with a count of 5 -- a direct byte count, confirming
+        # this one moves bytes rather than words. One of the two call
+        # sites even comments "/* use pl/m-86 move */", suggesting the
+        # original author considered it interchangeable with the
+        # confirmed MOVE builtin, just with MOVW's reversed argument
+        # convention.
+        if len(args) != 3:
+            self.err("MOVB requires 3 arguments: MOVB(source, dest, byte_count)")
+        src, dst, count = args
         self.gen_expr(dst)
         self.emit("\tmov di,ax")
         self.gen_expr(src)
@@ -867,20 +1232,41 @@ class CodeGen:
         self.emit(f"\tmov ax,{n}")
 
     # -- lvalues / addressing ------------------------------------------------
+    def _user_proc(self, name):
+        """Like resolve(), but returns None instead of raising, and only
+        for an actual user-declared procedure -- used to let a builtin
+        name be shadowed by a real DECLARE (see gen_call)."""
+        s = self.cur_scope if hasattr(self, 'cur_scope') else self.global_scope
+        while s is not None:
+            sym = s.vars.get(name.lower())
+            if sym is not None:
+                return sym if sym.kind == 'proc' else None
+            s = s.parent
+        return None
+
     def resolve(self, name):
-        sym = self.cur_scope.lookup(name) if hasattr(self, 'cur_scope') else None
-        if sym is None:
-            sym = self.global_scope.lookup(name)
-        if sym is None:
-            self.err(f"undefined identifier '{name}'")
-        return sym
+        s = self.cur_scope if hasattr(self, 'cur_scope') else self.global_scope
+        while s is not None:
+            sym = s.vars.get(name.lower())
+            if sym is not None:
+                # Remember where this was actually found, so a reference
+                # to an enclosing procedure's local/param (a closure
+                # access) can tell it needs to go through a static link
+                # rather than this procedure's own BP -- see
+                # _frame_reg_for.
+                sym.info['_scope'] = s
+                return sym
+            s = s.parent
+        self.err(f"undefined identifier '{name}'")
 
     def load_from(self, sym):
         if sym.kind == 'param':
-            self.emit(f"\tmov ax,[bp+{sym.info['offset']}]")
+            reg = self._frame_reg_for(sym)
+            self.emit(f"\tmov ax,[{reg}+{sym.info['offset']}]")
         elif sym.kind == 'local':
+            reg = self._frame_reg_for(sym)
             off = sym.info['offset']
-            self.emit(f"\tmov ax,[bp{off}]" if off < 0 else f"\tmov ax,[bp+{off}]")
+            self.emit(f"\tmov ax,[{reg}{off}]" if off < 0 else f"\tmov ax,[{reg}+{off}]")
         elif sym.kind == 'global':
             size = sym.info['size']
             label = sym.info['label']
@@ -920,10 +1306,12 @@ class CodeGen:
 
     def store_to(self, sym):
         if sym.kind == 'param':
-            self.emit(f"\tmov [bp+{sym.info['offset']}],ax")
+            reg = self._frame_reg_for(sym)
+            self.emit(f"\tmov [{reg}+{sym.info['offset']}],ax")
         elif sym.kind == 'local':
+            reg = self._frame_reg_for(sym)
             off = sym.info['offset']
-            self.emit(f"\tmov [bp{off}],ax" if off < 0 else f"\tmov [bp+{off}],ax")
+            self.emit(f"\tmov [{reg}{off}],ax" if off < 0 else f"\tmov [{reg}+{off}],ax")
         elif sym.kind == 'global':
             size = sym.info['size']
             label = sym.info['label']
@@ -964,6 +1352,12 @@ class CodeGen:
 
     def store_lvalue(self, lv):
         if isinstance(lv, ast.Name):
+            if lv.name.lower() == 'stackptr':
+                # Confirmed real (orig/plm80s/PLMLANG.DOC): "the variable
+                # may be assigned a new value to alter the stack
+                # register."
+                self.emit("\tmov sp,ax")
+                return
             sym = self.resolve(lv.name)
             self.store_to(sym)
         elif isinstance(lv, ast.Field):
@@ -994,8 +1388,9 @@ class CodeGen:
                 if off:
                     self.emit(f"\tadd ax,{off}")
             elif sym.kind in ('param', 'local', 'local_struct'):
+                reg = self._frame_reg_for(sym)
                 off = sym.info['offset']
-                self.emit(f"\tmov ax,bp")
+                self.emit(f"\tmov ax,{reg}")
                 if off >= 0:
                     self.emit(f"\tadd ax,{off}")
                 else:
@@ -1021,8 +1416,14 @@ class CodeGen:
 
     def gen_field_addr(self, fld):
         base = fld.base
-        if not isinstance(base, ast.Name):
-            self.err("field access base must be a plain variable name")
+        # base is ast.Name for a plain structure variable, or ast.Call for
+        # one element of an array of structures (e.g. ERAQ.PLM's
+        # "dir$entries(j).file") -- both have a plain '.name' to resolve,
+        # and gen_addr (below) already knows how to compute either one's
+        # address, so no further case-by-case handling is needed here.
+        if not hasattr(base, 'name'):
+            self.err(f"field access base must be a plain variable name or array element, "
+                      f"got {type(base).__name__}")
         sym = self.resolve(base.name)
         fields = sym.info.get('fields')
         if fields is None:
@@ -1053,6 +1454,24 @@ class CodeGen:
                 self.err(f"cannot index BASED structure '{call.name}' as an array")
             elemsize = 1 if sym.info['type'] == 'byte' else 2
             self.load_based_addr(sym)
+            self.emit("\tpush ax")
+            self.gen_expr(call.args[0])
+            if elemsize != 1:
+                self.emit(f"\tmov cx,{elemsize}")
+                self.emit("\tmul cx")
+            self.emit("\tpop bx")
+            self.emit("\tadd ax,bx")
+            return
+        if sym.kind == 'local' and sym.info.get('is_array'):
+            # A genuine local array ("DECLARE user(15) BYTE;"): its own
+            # stack storage holds the elements directly, so the base
+            # address is this local's own address (bp/static-link-
+            # relative, like any other local), not a value to load.
+            elemsize = sym.info.get('elemsize', 1)
+            reg = self._frame_reg_for(sym)
+            off = sym.info['offset']
+            self.emit(f"\tmov ax,{reg}")
+            self.emit(f"\tadd ax,{off}" if off >= 0 else f"\tsub ax,{-off}")
             self.emit("\tpush ax")
             self.gen_expr(call.args[0])
             if elemsize != 1:
@@ -1092,6 +1511,8 @@ class CodeGen:
     def _indexed_elem_size(self, sym):
         if sym.kind == 'based':
             return 1 if sym.info['type'] == 'byte' else 2
+        if sym.kind == 'local' and sym.info.get('is_array'):
+            return sym.info.get('elemsize', 1)
         if sym.kind in ('param', 'local'):
             return 1
         return sym.info.get('elemsize', 1)
@@ -1130,5 +1551,10 @@ class CodeGen:
         lines.append("\tdseg")
         lines.append("\torg\t0")
         lines.extend(self.dseg)
+        # MEMORY (see compile_module): its address must be past every
+        # other global *and* every string/array constant interned while
+        # generating procedure bodies, so this has to come after all of
+        # self.dseg, not be spliced in earlier.
+        lines.append("pl_memory:")
         lines.append("\tend")
         return '\n'.join(lines) + '\n'

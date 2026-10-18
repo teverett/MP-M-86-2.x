@@ -270,7 +270,9 @@ def _parse_bracket_inside(inside, ctx):
             disp_text = None
         else:
             regs = frozenset([first])
-            disp_text = rest
+            # A leading '+' is just a sign, not a unary operator this
+            # expression grammar supports (only unary '-' is); strip it.
+            disp_text = rest[1:].strip() if rest[0] == '+' else rest
     else:
         ctx.err(f"malformed memory operand: [{inside}]")
     if regs not in MEM_COMBOS:

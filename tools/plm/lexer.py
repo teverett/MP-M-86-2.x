@@ -216,14 +216,30 @@ def expand_literally(toks):
     'literally' this way (and, redundantly but harmlessly, 'dcl' for
     'declare'), so this step runs on the raw token stream before any
     keyword meaning is assumed, and applies to every token (not just
-    IDENTs), since a macro can shadow an already-keyworded spelling."""
-    macros = {}
+    IDENTs), since a macro can shadow an already-keyworded spelling.
+
+    Like any other DECLARE, a LITERALLY is scoped to the DO/PROCEDURE
+    block it's declared in, not visible for the rest of the file --
+    PIP.PLM declares "M LITERALLY '20'" inside one nested DO block, then
+    reuses the plain name "M" as an ordinary BYTE local in a *different*,
+    unrelated procedure later in the file. Scoping is tracked here with
+    a stack of macro dicts, pushed on every DO/PROCEDURE and popped on
+    its matching END, so that unrelated "M" falls back to being a plain
+    identifier once the defining block's END has gone by."""
+    scopes = [{}]
+
+    def lookup_macro(name):
+        for level in reversed(scopes):
+            m = level.get(name)
+            if m is not None:
+                return m
+        return None
 
     def pull(queue):
         while queue:
             t = queue[0]
             if t.kind not in ('STR', 'NUM', 'EOF') and t.val is not None:
-                m = macros.get(t.val.lower())
+                m = lookup_macro(t.val.lower())
                 if m is not None:
                     queue.pop(0)
                     queue[0:0] = m
@@ -241,6 +257,10 @@ def expand_literally(toks):
                 if t is not None:
                     out.append(t)
                 break
+            if t.kind in ('DO', 'PROCEDURE'):
+                scopes.append({})
+            elif t.kind == 'END' and len(scopes) > 1:
+                scopes.pop()
             if t.kind not in ('STR', 'NUM'):
                 t2 = pull(queue)
                 if t2 is not None and t2.kind == 'LITERALLY':
@@ -250,7 +270,7 @@ def expand_literally(toks):
                                        "quoted string", getattr(t, 'filename', None), t.lineno)
                     frag = tokenize([('<literally>', t3.lineno, t3.val)])
                     frag = frag[:-1]  # drop the fragment's own EOF
-                    macros[t.val.lower()] = run(frag)
+                    scopes[-1][t.val.lower()] = run(frag)
                     # A stripped definition leaves a dangling ',' behind in
                     # a DECLARE list; remove whichever side has one so the
                     # remaining list stays well-formed.

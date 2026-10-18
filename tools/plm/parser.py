@@ -296,6 +296,14 @@ class Parser:
         if self.at('IDENT') and self.peek().val.lower() == 'addr':
             self.next()
             return 'address'
+        if self.at('IDENT') and self.peek().val.lower() == 'integer':
+            # PL/M-86's signed 16-bit type (as opposed to WORD/ADDRESS,
+            # unsigned). This compiler doesn't distinguish signed from
+            # unsigned bit patterns internally -- SIGNED/UNSIGN below are
+            # both no-ops -- so INTEGER is just treated as a 2-byte type,
+            # same storage as ADDRESS.
+            self.next()
+            return 'address'
         if self.at_kw('STRUCTURE'):
             # An inline STRUCTURE(...) spec as a BASED type (this happens
             # after LITERALLY macro expansion, e.g. PROCES.LIT's
@@ -477,8 +485,21 @@ class Parser:
 
     def parse_add(self):
         v = self.parse_mul()
-        while self.peek().kind in ('+', '-'):
-            op = self.next().kind
+        while True:
+            t = self.peek()
+            if t.kind in ('+', '-'):
+                op = self.next().kind
+            elif t.kind == 'IDENT' and t.val.lower() == 'plus':
+                # Seen exactly once in this tree (PIP.PLM: "C2 PLUS 0"),
+                # never declared as anything -- a word-form synonym for
+                # '+', the same idea as PL/M's own word operators
+                # (AND/OR/XOR/MOD). Unconfirmed by a second usage, but
+                # the only reading that parses at all, and harmless if
+                # wrong (see tools/plm/README.md).
+                self.next()
+                op = '+'
+            else:
+                break
             v = ast.BinOp(op=op, left=v, right=self.parse_mul())
         return v
 

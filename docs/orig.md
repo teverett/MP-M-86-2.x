@@ -89,6 +89,55 @@ deliberately split in two, apparently for size.
    some cases on a VAX host via the `VAX.CPM` cross-development link
    (directory 03).
 
+## Reference material (`orig/newplm/`, `orig/plm80s/`, `orig/asm80/`)
+
+Three further trees live under `orig/`, added later and **not part of
+the DRI MP/M-86 2.x distribution** — third-party tooling/documentation
+used as independent references while building `tools/plm/`'s PL/M
+compiler and `tools/asm86/`'s assembler, specifically to check guesses
+about undocumented-looking builtins against a real specification
+instead of guessing blind (see each entry below for how much a given
+tree actually delivers on that).
+
+- **`orig/plm80s/`** — the FORTRAN IV source of Intel's original
+  **PL/M-80** cross-compiler (`PLM81.FOR`, `PLM82.FOR`; per
+  `README.PLM`, released by Intel sometime in the late 1970s, provenance
+  "a bit murky" but believed genuinely Intel's), plus `PLMLANG.DOC` (a
+  PL/M-80 language summary) and `PLMCOMP.DOC` (compiler-control
+  documentation), and a sample program (`PLMSAMP.PLM`/`.HEX`/`.PRN`).
+  `PLMLANG.DOC` is what confirmed several MP/M-86 utility sources were
+  calling real standard-library builtins (`TIME`, `DEC`/`PLUS`,
+  `MEMORY`, `CARRY`, `ZERO`/`SIGN`/`PARITY`, `STACKPTR`, `SCL`/`SCR`)
+  rather than referencing undeclared/missing procedures — see
+  `tools/plm/README.md`'s "Notable discoveries" for the specifics.
+  PL/M-86 is a direct descendant of PL/M-80 (same core builtins, plus
+  `ADDRESS`/`WORD`/`INTEGER` extensions for the 8086), so this doc's
+  builtin-function and pre-defined-variable sections transfer across
+  almost unchanged.
+- **`orig/newplm/`** — two independent, modern (1990s) third-party PL/M
+  tools, unrelated to each other and to Intel/DRI: `PLM.ZIP` contains a
+  basic lex/yacc PL/M-86-ish grammar/parser (`plm/plm-lex.l`,
+  `plm/plm-parse.y` — explicitly "does nothing useful" per its own
+  README, offered only as a published grammar reference) plus an
+  unrelated bundled AVL-tree library (`avl-subs/`); `PLM2C.ZIP` is a
+  PL/M-286-to-C source converter (`plm2c/`, originally written to
+  convert "several meg" of a former employer's PL/M source, maintained
+  only informally since).
+
+A third reference tree, **`orig/asm80/`**, is a 1997 third-party
+disassembly (by Larry A. Greene) of Digital Research's **original 1978
+8080 CP/M `ASM.COM`** — given in both 8080 form (`ASM.ASM`) and a
+hand-retargeted Z80 form (`ASM.Z80`), per `ASMREAD.ME`. This is a
+disassembly of the assembler's own 8080 machine code (labels are just
+addresses, e.g. `H0200`), not example assembly source or a syntax
+reference, and it predates the 8086 entirely — it's a different CPU
+from everything `tools/asm86/` targets, so despite the superficially
+similar name, **it cannot validate `tools/asm86.py`'s 8086 instruction
+encoding**, and nothing in it has been found to confirm or contradict
+anything in this project's own `asm86` implementation. Kept here only
+as a curiosity about DRI's assembler lineage (e.g. its one-letter
+internal error codes for "comma missing," "bad register syntax," etc.).
+
 ## Notes for anyone working in this tree
 
 - File extensions are not a fully reliable guide to text-vs-binary content

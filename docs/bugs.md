@@ -617,6 +617,60 @@ it already was. `LBDOSDAT.A86`'s own data, previously declared in a
 separate `dseg` that `tools/build_mpmldr.py` silently dropped (same
 issue as #15), was merged into `cseg` too.
 
+## 21. `tools/asm86` — `IRET` was never implemented at all, and
+silently assembled to *zero bytes* instead of erroring — FIXED
+
+Found continuing from #20, once `LDMPM.A86`'s own handoff into
+`LDBDOS.A86`'s `BDOS` entry point (`int 224`) finally ran: the real
+"MP/M-86 V2.0 Loader" signon message printed (further than boot had
+ever gotten), but control never returned to `LDMPM.A86` afterward.
+Narrowed with debug probes (not kept) bracketing `LBDOSENT.A86`'s own
+`bdose:` exit path: every step up to and including `iret` itself ran
+(confirmed reached), yet whatever came *after* `iret` never did. A
+register read back from memory right there showed `SP` short by
+exactly 6 bytes — precisely the three words (`FLAGS`/`CS`/`IP`) a real
+`IRET` pops that this one apparently didn't.
+
+The cause: `tools/asm86/isa.py`'s `NO_OPERAND` table (single-byte
+opcodes with no operand — `ret`, `retf`, `nop`, `cli`, ...) never had
+an entry for `iret` at all, and `ALL_MNEMONICS` (built from that same
+table) didn't recognize it as a mnemonic either — so `iret` in source
+wasn't treated as an unknown instruction (which would have raised a
+clear error); `parse_statement` instead read it as a bare, harmless
+label definition with nothing after it, and the assembler silently
+emitted *no bytes* for it at all. Every file using `iret`
+(`LBDOSENT.A86`, `src/kernel/SUPIF.SUP`, `src/kernel/DSPTCH.RTM`, and
+two `src/toolchain/` files) was affected the same way, each one byte
+short exactly where its own `IRET` should have been.
+
+**Fixed** by adding `'iret': 0xCF` to `NO_OPERAND` in `tools/asm86/
+isa.py`.
+
+## 22. QEMU's emulated floppy controller stalls partway through a PIO
+sector read — NOT YET FIXED
+
+Found continuing from #21: with `IRET` fixed, booting progressed much
+further — through `LDBDOS.A86`'s disk-select (`SELDSK`) and the real
+`LDBIOS86Q.A86` `HOME` (recalibrate/seek) call, into `LDBDOS.A86`'s
+own directory-initialization scan (`LBDOSF2.A86`'s `initialize`),
+which issues the first real sector *data* read (as opposed to a seek)
+of this whole boot sequence. That hangs: `LDBIOS86Q.A86`'s
+`fdc_pio_in` (polling `fdc_in_byte` 512 times for one sector) reads
+the same, small, *constant* number of bytes (7, confirmed via a
+per-byte progress probe, not kept) every time before `fdc_in_byte`'s
+own `MSR` poll (`fib_wait`) never sees `RQM`+`DIO` go ready again —
+reproduced identically with an added delay between each byte read
+(also not kept), ruling out a timing race.
+
+This looks like a genuine QEMU NEC765/82077 emulation behavior this
+driver's pure-PIO, no-DMA approach (`SPECIFY`'s `ND` bit set, see
+`LDBIOS86Q.A86`'s own header comment) doesn't satisfy past an initial
+FIFO-sized burst — not yet root-caused further, and not a source-level
+bug the way #1-#21 were. A real fix likely means implementing actual
+8237 DMA-driven floppy transfers (programming DMA channel 2 and
+clearing `SPECIFY`'s `ND` bit) instead of pure polled PIO, a
+substantially larger undertaking than anything else in this file.
+
 ## Status of the kernel/loader sources
 
 `src/kernel/CIO.A86`, `SYSDAT.A86`, `BDOS.A86`, `MEM.A86`, `RTM.A86`,
@@ -635,11 +689,12 @@ tree even after a second, closer look — its one fixable typo
 (`tick_int`) was corrected.
 
 Booting under QEMU (`make run`) now gets past the boot sector, all of
-`MPMLDR.bin` loading and its internal `LDBIOS86Q.A86`→`LDMPM.A86`
-handoff, and prints the real "MP/M-86 V2.0 Loader" signon message
-(#15-#20 above) — further than it ever has. It still hangs immediately
-after that, in `LDMPM.A86`'s next step (`initlbdos`/`openfnc`, opening
-`MPM.SYS` through `LDBDOS.A86`) — not yet diagnosed.
+`MPMLDR.bin` loading, its internal `LDBIOS86Q.A86`→`LDMPM.A86` handoff,
+the "MP/M-86 V2.0 Loader" signon message, and well into `LDBDOS.A86`
+(disk select, home/recalibrate, directory-scan initialization) —
+further than it ever has (#15-#21 above). It currently hangs on #22's
+own FDC PIO stall, the first real sector-data read of the boot
+sequence, not yet fixed.
 
 The RSP sources (`CLOCK.A86`, `ECHO.A86`, `TMP.A86`, `SUBMIT.A86`) and
 all 22 `.PLM` utilities in `src/utils/`/`src/toolchain/` compile and

@@ -57,7 +57,7 @@ F6_GROUP = {'not': 2, 'neg': 3, 'mul': 4, 'imul': 5, 'div': 6, 'idiv': 7}
 SHIFT_GROUP = {'rol': 0, 'ror': 1, 'rcl': 2, 'rcr': 3, 'shl': 4, 'sal': 4, 'shr': 5, 'sar': 7}
 
 NO_OPERAND = {
-    'ret': 0xC3, 'retf': 0xCB, 'nop': 0x90, 'hlt': 0xF4,
+    'ret': 0xC3, 'retf': 0xCB, 'iret': 0xCF, 'nop': 0x90, 'hlt': 0xF4,
     'clc': 0xF8, 'cld': 0xFC, 'cli': 0xFA, 'stc': 0xF9, 'std': 0xFD, 'sti': 0xFB,
     'cmc': 0xF5, 'daa': 0x27, 'das': 0x2F, 'aaa': 0x37, 'aas': 0x3F,
     'cbw': 0x98, 'cwd': 0x99, 'pushf': 0x9C, 'popf': 0x9D,

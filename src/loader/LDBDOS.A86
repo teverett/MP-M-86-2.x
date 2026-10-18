@@ -59,7 +59,7 @@ ldroffset       equ     0   	; offset of CPMLDR
 ; is only a seed for that first assemble-and-measure pass.
 bdosoffset      equ     3edh	; LDBDOS's own position within MPMLDR.bin
 				; (self-corrected -- see above)
-biosoffset      equ     1112h   ; offset of LBIOS-86 (self-corrected)
+biosoffset      equ     1113h   ; offset of LBIOS-86 (self-corrected)
 ;
 eject ! include lbdosequ.a86	 ; symbol definition
 eject ! include lbdosent.a86     ; entry module

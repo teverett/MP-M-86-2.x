@@ -54,7 +54,7 @@ lf		equ	0ah
 ;	was run (LDMPM=1007, LDBDOS=3744 bytes -- see docs/build.md).
 ldbdos_offset	equ	3edh		;offset of LDBDOS (= size of LDMPM's
 					; own code, not a fixed DRI constant)
-mldbios_offset	equ	1112h		;offset of LDBIOS (= ldbdos_offset
+mldbios_offset	equ	1113h		;offset of LDBIOS (= ldbdos_offset
 					; + size of LDBDOS's own code)
 bdos_int	equ	224		;lbdos interrupt number
 

@@ -1,0 +1,6 @@
+cz -ib: -ia: b:telnetm.c
+as -zap b:telnetm
+cz -ib: -ia: b:udp.c
+as -zap b:udp
+cz -ib: -ia: b:debug.c
+as -zap b:debug

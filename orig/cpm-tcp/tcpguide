@@ -1,0 +1,485 @@
+Amateur Radio Internet Programmer's Guide
+
+This article documents the various modules making up the KA9Q Amateur Radio
+Internet Protocol package. The following protocols are currently supported:
+
+1. Internet Protocol (IP) - the universal network-level datagram protocol
+of the ARPA Internet. It corresponds roughly to level 3 of the ISO Reference
+Model (ISORM, or the 3B internetwork sublayer if you follow the amoeboid
+proliferation of ISO sublayers). Routines are provided to generate, receive
+and route (i.e., packet switch) IP datagrams. IP is specified in ARPA RFC-791
+and MIL-STD-1777.
+
+2. Internet Control Message Protocol (ICMP) - the error reporting adjunct
+to IP. It appears as a pseudo-protocol on top of IP, but is actually
+considered to be part of IP. The IP routines automatically generate ICMP
+messages whenever an error occurs in the processing of IP datagrams;
+incoming ICMP messages are passed up to the originating end-to-end protocol
+for appropriate action. ICMP is specified in ARPA RFC-792.
+
+3. Transmission Control Protocol (TCP) - provides a reliable, sequenced
+"virtual circuit" or "connection-oriented" service atop IP on an end-to-end
+basis. It corresponds to the Transport layer (level 4) of the OSI model.
+Since a single TCP module supports multiple connections through the use of
+port numbers, it also provides Session (level 5) functionality without
+the need for a distinct layer. (Or it makes the session layer unnecessary,
+depending on your point of view). TCP is specified in ARPA RFC-793 and
+MIL-STD-1778.
+
+4. User Datagram Protocol (UDP) - provides a simple, unguaranteed "datagram"
+or "connectionless" service, adding only checksums and port multiplexing
+to the raw service provided by IP. As an alternative to TCP, UDP also
+sits at level 4 (and 5) of the ISORM. UDP is specified in ARPA RFC-768.
+
+The implementation is highly modular. For example, if one wants to build
+a dedicated packet switch without any local applications, the TCP and UDP
+modules may easily be omitted to save space.
+
+Data Structures
+
+To increase portability, the pseudo-types "int16" and "int32" are used to mean
+an unsigned 16-bit integer and a signed 32-bit integer, respectively.
+Ordinarily these types are defined in machdep.h to be "unsigned int"
+and "long".
+
+The various modules pass data in chained structures called mbufs, with the
+following format:
+
+struct mbuf {
+	struct mbuf *next;	/* Links mbufs belonging to single packets */
+	struct mbuf *anext;	/* Links packets on queues */
+	char *_buf;			/* Allocated data buffer, if any */
+	char *data;			/* Pointer to start of actual data in buffer */
+	int16 cnt;			/* Length of data in buffer */
+};
+
+Although somewhat cumbersome to work with, mbufs make it possible to avoid
+memory-to-memory copies that limit performance. For example, when user data
+is transmitted it must first traverse several protocol layers before
+reaching the transmitter hardware. With mbufs, each layer prepends its
+protocol header by allocating an mbuf and linking it to the head of the
+mbuf "chain" given it by the higher layer, thus avoiding several copy
+operations.
+
+A number of primitives operating on mbufs are available in mbuf.c.
+The user may create, fill, empty and free mbufs himself with the alloc_mbuf
+and free_mbuf primitives, or at the cost of a single memory-to-memory copy he
+he may use the more convenient qdata() and dqdata() primitives.
+
+Timer Services
+
+TCP and IP require timers. A timer package is included, so the user must
+arrange to call the single entry point "tick" on a regular basis. The constant
+MSPTICK in timer.h should be defined as the interval between ticks in
+milliseconds. One second resolution is adequate. Since it can trigger a
+considerable amount of activity, including upcalls to user level, "tick"
+should not be called from an interrupt handler.
+
+Internet Type-of-Service
+
+One of the features of the Internet is the ability to specify precedence
+(i.e., priority) on a per-datagram basis. There are 8 levels of precedence,
+with the bottom 6 defined by the DoD as Routine, Priority, Immediate,
+Flash, Flash Override and CRITICAL. (Two more are available for internal
+network functions). For amateur use we can use the lower four as
+Routine, Welfare, Priority and Emergency. Three more bits specify class
+of service, indicating that especially high reliability, high throughput
+or low delay is needed for this connection. Constants for this field
+are defined in internet.h.
+
+The Internet Protocol Implementation
+
+While the user does not ordinarily see this level directly, it is described
+here for sake of completeness. Readers interested only in the interfaces seen
+by the applications programmer should skip to the TCP and UDP sections.
+
+The IP implementation consists of three major functions: ip_route, ip_send
+and ip_recv.
+
+IP Gateway (Packet Router) Support
+
+The first, ip_route, is the IP packet switch. It takes a single argument,
+a pointer to the mbuf containing the IP datagram:
+
+void
+ip_route(bp)
+struct mbuf *bp;	/* Datagram pointer */
+
+All IP datagrams, coming or going, pass through this function. The datagram's
+destination address is extracted and an internal routing table consulted to
+determine where the datagram should be handled.  The routing table is a fast
+hash table keyed on IP destination addresses, called "targets". If the target
+address is not found, a special "default" entry, if available, is used.
+If a default entry is not available either, an ICMP "Destination Unreachable"
+message containing the offending IP header is returned to the sender.
+
+Entries are added to the IP routing table with the rt_add function:
+
+int
+rt_add(target,gateway,metric,interface)
+int32 target;		/* IP address of target */
+int32 gateway;		/* IP address of neighbor gateway to reach this target */
+int metric;			/* "cost" measurement, available for routing decisions */
+struct interface *interface;	/* device interface structure */
+
+"target" is the IP address of the destination; it becomes the hash index key
+for subsequent packet destination address lookups. If target == 0, the
+default entry is modified. "metric" is simply stored in the table; it is
+available for routing cost calculations when an automatic routing protocol
+is written. "interface" is the address of a control structure for the
+particular device to which the datagram should be sent; it is defined
+in the section "IP Interfaces".
+
+rt_add returns 0 on success, -1 on failure (e.g., out of memory).
+
+To remove an entry from the routing table, only the target address need
+be specified to the rt_drop call:
+
+int
+rt_drop(target)
+int32 target;
+
+rt_drop returns 0 on success, -1 if the target could not be found.
+
+IP Interfaces
+
+Every lower level interface used to transmit IP datagrams must have an
+"interface" structure, defined as follows:
+
+struct interface {
+	struct mbuf *sndq;	/* Encapsulated packets awaiting transmission */
+	int16 sndcnt;		/* Number of datagrams on queue */
+	int16 mtu;			/* Maximum transmission unit size */
+	int (*send)();		/* Routine to call to send datagram */
+	int16 dev;			/* Subdevice number to pass to send */
+	int16 flags;		/* State of interface */
+};
+
+Most of the interface structure is for the private use of the device driver.
+"sndq" and "sndcnt" may be used to keep a queue of encapsulated datagrams
+ready for transmission, while "dev" is used to distinguish between one of
+several identical devices (e.g., serial links or radio channels) that might
+share the same send routine.
+
+A pointer to this structure kept in the routing table. Two fields in the
+interface structure are examined by ip_route: "mtu" and "send". The maximum
+transmission unit size represents the largest datagram that this device can
+handle; ip_route will do IP-level fragmentation as required to meet this
+limit before calling "send", the function to queue datagrams on this
+interface. "send" is called as follows:
+
+(*send)(bp,interface,gateway)
+struct mbuf *bp;				/* Pointer to datagram */
+struct interface *interface;	/* Interface structure */
+int32 gateway;					/* IP address of gateway */
+
+The "interface" and "gateway" arguments are kept in the routing table and
+passed on each call to the send routine. The interface pointer is passed
+again because several interfaces might share the same output driver (e.g.,
+several identical physical channels).  "gateway" is the IP address of the
+neighboring IP gateway on the other end of the link; if a link-level address
+is required, the send routine must map this address either dynamically (e.g.,
+with the Address Resolution Protocol, ARP) or with a static lookup table.
+If the link is point-to-point, link-level addresses are unnecessary, and the
+send routine can therefore ignore the gateway address.
+
+It is expected that the send routine will prepend a link level header to the
+packet, add it to its interface queue, start output (if not already active)
+and return. It must NOT busy-wait for completion, since that would block the
+entire system.
+
+IP Host Support
+
+All of the modules described thus far are required in all systems. However,
+the routines that follow are necessary only if the system is to support
+higher-level applications. In a standalone IP gateway (packet switch)
+without servers or clients, the following modules (IP user level, TCP and
+UDP) may be omitted to allow additional space for buffering.
+
+A special interface structure is allocated for datagrams addressed to
+ourselves. The associated send routine is ip_recv:
+
+void
+ip_recv(bp,interface,gateway)
+struct mbuf *bp;
+struct interface *interface;
+int32 gateway;	/* Ignored */
+
+ip_recv reassembles IP datagram fragments, if necessary, and calls the input
+function of the next layer protocol (e.g., tcp_input, udp_input) with the
+appropriate arguments, as follows:
+
+(*protrecv)(bp,protocol,source,dest,tos,length);
+struct mbuf *bp;		/* Pointer to packet minus IP header */
+char protocol;			/* IP protocol ID */
+int32 source;			/* IP address of sender */
+int32 dest;				/* IP address of destination (i.e,. us) */
+char tos;				/* IP type-of-service field in datagram */
+int16 length;			/* Length of datagram minus IP header */
+
+The list of protocols is contained in a switch() statement in the ip_recv
+function. If the protocol is unsupported, an ICMP Protocol Unreachable
+message is returned to the sender.
+
+Higher level protocols such as TCP and UDP use the ip_send routine to
+generate IP datagrams. The arguments to ip_send correspond directly to
+fields in the IP header, which is generated and prepended to the user's data
+before being handed to ip_route:
+
+ip_send(source,dest,protocol,tos,ttl,bp,length,id,df)
+int32 source;			/* source address */
+int32 dest;				/* Destination address */
+char protocol;			/* Protocol */
+char tos;				/* Type of service */
+char ttl;				/* Time-to-live */
+struct mbuf *bp;		/* Data portion of datagram */
+int16 length;			/* Optional length of data portion */
+int16 id;				/* Optional identification */
+char df;				/* Don't-fragment flag */
+
+This interface is modeled very closely after the example given on page 32
+of RFC-791. Zeros may be passed for id or ttl, and system defaults will
+be provided. If zero is passed for length, it will be calculated automatically.
+
+The Transmission Control Protocol (TCP)
+
+A TCP connection is uniquely identified by the concatenation of local and
+remote "sockets". In turn, a socket consists of a host address (a 32-bit
+integer) and a TCP port (a 16-bit integer), defined here by the C structure
+
+struct socket {
+	long address;	/* 32-bit IP address */
+	short port;		/*16-bit TCP port */
+};
+
+It is therefore possible to have several simultaneous but distinct connections
+to the same port on a given machine, as long as the remote sockets are
+distinct. Port numbers are assigned either through mutual agreement, or more
+commonly when a "standard" service is involved, as a "well known port" number.
+For example, to obtain standard remote login service using the TELNET
+presentation-layer protocol, by convention one initiates a connection to TCP
+port 23; to send mail using the Simple Mail Transfer Protocol (SMTP) one
+connects to port 25. ARPA maintains port number lists and periodically
+publishes them; the latest revision is RFC-960, "Assigned Numbers".
+They will also assign port numbers to a new application on request if it
+appears to be of general interest.
+
+TCP connections are best modeled as a pair of one-way paths (one in each
+direction) rather than as a single full-duplex path. Station A may close
+its path to station B leaving the reverse path from B to A unaffected. B
+may continue to send data to A indefinitely until it too closes its half
+of the connection. This is known as "graceful close" and can greatly
+simplify an application.
+
+TCP Module Overview
+
+This package is written as a "module" intended to be compiled and linked with
+the application(s) so that they can be run as one program on the same machine.
+This greatly simplifies the user/TCP interface, which becomes just a set of
+internal subroutine calls on a single machine. The internal TCP state (e.g.,
+the address of the remote station) is easily accessed. Reliability is
+improved, since any hardware failure that kills TCP will likely take its
+applications with it anyway. Only IP datagrams flow out of the machine across
+hardware interfaces (such as asynch RS-232 ports or whatever else is available)
+so hardware flow control or complicated host/front-end protocols are
+unnecessary.
+
+The TCP supports five basic operations on a connection: open_tcp, send_tcp,
+receive_tcp, close_tcp and del_tcp. A sixth, state_tcp, is provided
+mainly for debugging. Since this TCP module cannot assume the presence of
+a sleep/wakeup facility from the underlying operating system, functions
+that would ordinarily block (e.g., recv_tcp when no data is available)
+instead set net_error to the constant EWOULDBLK and immediately return -1.
+Asynchronous notification of events such as data arrival can be obtained
+through the upcall facility described earlier.
+
+Each TCP function is summarized in the following section in the form of C
+declarations and descriptions of each argument.
+
+int net_error;
+
+This global variable stores the specific cause of an error from one of the
+TCP or UDP functions. All functions returning integers (i.e., all except
+open_tcp) return -1 in the event of an error, and net_error should be
+examined to determine the cause. The possible errors are defined as constants
+in the header file netuser.h.
+
+/* Open a TCP connection */
+struct tcb *
+open_tcp(lsocket,fsocket,active,window,r_upcall,t_upcall,s_upcall,tos)
+struct socket *lsocket;	/* Local socket */
+struct socket *fsocket;	/* Remote socket */
+int active;				/* Active/passive */
+int16 window;			/* Receive window (and send buffer) sizes */
+void (*r_upcall)();		/* Function to call when data arrives */
+void (*t_upcall)();		/* Function to call when ok to send more data */
+void (*s_upcall)();		/* Function to call when connection state changes */
+char tos;				/* Internet Type-of-Service */
+
+"lsocket" and "fsocket" are pointers to the local and foreign sockets,
+respectively.
+
+"active" is 0 for a "passive" open (one in the TCP LISTEN state). A
+passive open does not cause any packets to be sent, but enables TCP to
+accept a subsequent active open from another TCP. If a specific foreign
+socket is passed to a passive open, then connect requests from any other
+foreign socket will be rejected. If the foreign socket fields are set
+to zero, or if NULL is passed as fsocket, then connect requests from any
+foreign socket will be accepted. If "active" is 1, TCP will initiate
+a connection to a remote socket that must already have been created in
+the LISTEN state by its client. The foreign socket must be completely
+specified in an active open.
+
+"r_upcall", "t_upcall" and "s_upcall" provide optional upcall or pseudo-
+interrupt mechanisms useful when running in a non operating system environment.
+Each of the three arguments, if non-NULL, is taken as the address of a
+user-supplied function to call when receive data arrives, transmit queue space
+becomes available, or the connection state changes. The three functions are
+called with the following arguments:
+
+(*r_upcall)(tcb,count);	/* count == number of bytes in receive queue */
+(*t_upcall)(tcb,avail);	/* avail == space available in send queue */
+(*s_upcall)(tcb,oldstate,newstate);
+
+"tos" is the Internet type-of-service field. This parameter is passed along
+to IP and is included in every datagram. The actual precedence value used is
+the higher of the two specified in the corresponding pair of open_tcp calls.
+
+open_tcp returns a pointer to an internal Transmission Control Block
+(tcb). This "magic cookie" must be passed back as the first argument
+to all other TCP calls. In event of error, the NULL pointer (0) is
+returned and net_error is set to the reason for the error.
+
+The only limit on the number of TCBs that may exist at any time (i.e., the
+number of simultaneous connections) is the amount of free memory on the
+machine. Each TCB on a 16-bit processor takes up about 134 bytes; additional
+memory is consumed and freed dynamically as needed to buffer send and receive
+data. Deleting a TCB (see the delete_tcb call) reclaims its space.
+
+/* Send data on a TCP connection */
+int
+send_tcp(tcb,bp)
+struct tcb *tcb;		/* TCB pointer */
+struct mbuf *bp;		/* Pointer to user's data mbufs */
+
+"tcb" is the pointer returned by the open_tcp() call. "bp" points to the
+user's mbuf with data to be sent. After being passed to send_tcp, the user
+must no longer access the data buffer. TCP uses positive acknowledgments with
+retransmission to ensure in-order delivery, but this is largely invisible to
+the user. Once the remote TCP has acknowledged the data, the buffer will
+be freed automatically.
+
+The length of the send queue is limited to the value of "window" passed to
+open_tcp. An attempt to queue more than this amount of data for transmission
+will cause send_tcp to reject the entire request, set net_error == EWOULDBLK,
+and return -1. Otherwise the number of bytes actually queued for transmission
+is returned, which should equal "cnt".
+
+/* Receive data on a TCP connection */
+int
+recv_tcp(tcb,bp,cnt)
+struct tcb *tcb;
+struct mbuf **bp;
+int16 cnt;
+
+recv_tcp() passes back through bp a pointer to an mbuf chain containing any
+available receive data, up to a maximum of "cnt" bytes. The actual number of
+bytes received (the lesser of "cnt" and the number pending on the receive
+queue) is returned. If no data is available, net_error is set to EWOULDBLK
+and -1 is returned; the r_upcall mechanism may be used to determine when data
+arrives. (Technical note: "r_upcall" is called whenever a PUSH or FIN bit is
+seen in an incoming segment, or if the receive window fills. It is called
+before an ACK is sent back to the remote TCP, in order to give the user an
+opportunity to piggyback any data in response.)
+
+When the remote TCP closes its half of the connection and all prior incoming
+data has been read by the local user, subsequent calls to recv_tcp return 0
+rather than -1 as an "end of transmission" indicator.
+
+/* Close a TCP connection */
+close_tcp(tcb)
+struct tcb *tcb;
+
+This tells TCP that the local user has no more data to send. However, the
+remote TCP may continue to send data indefinitely to the local user, until
+the remote user also does a close_tcp.  An attempt to send data after a
+close_tcp is an error.
+
+/* Delete a TCP connection */
+del_tcp(tcb)
+struct tcb *tcb;
+
+When the connection has been closed in both connections and all incoming
+data has been read, this call is made to cause TCP to reclaim the space
+taken up by the TCP control block. Any incoming data remaining unread is lost.
+
+/* Dump a TCP connection state */
+state_tcp(tcb)
+struct tcb *tcb;
+
+This debugging call prints an ASCII-formatted dump of the TCP connection
+state on the terminal. You need a copy of the TCP specification (ARPA RFC
+793 or MIL-STD-1778) to interpret most of the numbers.
+
+The User Datagram Protocol (UDP)
+
+UDP is available for simple applications not needing the services of a
+reliable protocol like TCP.  A minimum of overhead is placed on top of the
+"raw" IP datagram service, consisting only of port numbers and a checksum
+covering the UDP header and user data. Four functions are available to the
+UDP user.
+
+/* Create a UDP control block for lsocket, so that we can queue
+ * incoming datagrams.
+ */
+int
+open_udp(lsocket,r_upcall)
+struct socket *lsocket;
+void (*r_upcall)();
+
+open_udp creates a queue to accept incoming datagrams (regardless of
+source) addressed to "lsocket". "r_upcall" is an optional upcall mechanism
+to provide the address of a function to be called as follows whenever
+a datagram arrives:
+
+(*r_upcall)(lsocket,rcvcnt);
+struct socket *lsocket;		/* Pointer to local socket */
+int rcvcnt;					/* Count of datagrams pending on queue */
+
+/* Send a UDP datagram */
+int
+send_udp(lsocket,fsocket,tos,ttl,bp,length,id,df)
+struct socket *lsocket;		/* Source socket */
+struct socket *fsocket;		/* Destination socket */
+char tos;					/* Type-of-service for IP */
+char ttl;					/* Time-to-live for IP */
+struct mbuf *bp;			/* Data field, if any */
+int16 length;				/* Length of data field */
+int16 id;					/* Optional ID field for IP */
+char df;					/* Don't Fragment flag for IP */
+
+The parameters passed to send_udp are simply stuffed in the UDP and IP
+headers, and the datagram is sent on its way.
+
+/* Accept a waiting datagram, if available. Returns length of datagram */
+int
+recv_udp(lsocket,fsocket,bp)
+struct socket *lsocket;		/* Local socket to receive on */
+struct socket *fsocket;		/* Place to stash incoming socket */
+struct mbuf **bp;			/* Place to stash data packet */
+
+The "lsocket" pointer indicates the socket the user wishes to receive a
+datagram on (a queue must have been created previously with the open_udp
+routine). "fsocket" is taken as the address of a socket structure to be
+overwritten with the foreign socket associated with the datagram being
+read; bp is overwritten with a pointer to the data portion (if any)
+of the datagram being received.
+
+/* Delete a UDP control block */
+int
+del_udp(lsocket)
+struct socket *lsocket;
+
+This function destroys any unread datagrams on a queue, and reclaims the
+space taken by the queue descriptor.
+

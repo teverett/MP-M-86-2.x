@@ -1,0 +1,73 @@
+Here is the second "friendly user" release of my TNC code for the Xerox
+820. The code is mostly in C and was developed with the Aztec C compiler.
+There are two ready-to-run COM files on this disk, but I'd strongly
+recommend that you acquire Aztec C. It will make it much easier to
+configure or modify the code, or to incorporate bug fixes.
+
+The major change from the first release is inclusion of support for the
+FADCA 8530 daughter board. Most of the files remain the same; to make a
+version for the FAD board you just replace 820.c, 820.h and line.c with
+fad.c and fad.h. Note: I developed the FAD code using an early version of
+the FAD board which did not have its own crystal; the Xerox 820 processor
+clock was used instead. Since I have not yet built up a copy of the newer
+FAD board, I have not tested the compile-time options which allow use of the
+onboard crystal. The binary file here is for the older board. From comparing
+the schematics of the two boards, I believe that it should still work on
+the newer board, ignoring the crystal. But again, I haven't tested this,
+so some reports from users trying out the new board would be welcome.
+
+I renamed the configuration file "CONFIG.TNC" to "PARAM.PAD". By
+coincidence, Hank, W0RLI picked the same name out of the air for his PBBS
+configuration file and since he got there first, I wanted to avoid any
+confusion.
+
+A compatibility problem with the Big Board (an 820 look-alike) was
+also resolved. This code should run as-is on the Big Board.
+
+Two executable files are provided: TNCSIO and TNCFAD. Use the first
+version when using the SIO on the 820 board; use the latter when running
+with the FAD board. It's important to run either program from the currently
+logged-in disk, since the program will attempt to read a file called
+"PARAM.PAD" and it must find it on the current drive.
+
+This version of the code supports only the keyboard and memory-mapped
+display as the console, and uses both channels of the SIO or 8530 for HDLC
+ports. If you are using the SIO, you must of course have added the necessary
+clock recovery/NRZI generator circuit, and in either case you need an external
+modem and radio. The RTS line from the SIO or FAD RS-232 port should key the
+transmitter; the modem must also return CTS before the TNC will actually begin
+a frame. Carrier detect from the modem must also be provided if CSMA
+(carrier-sense multiple-access) operation is desired, which is the usual case.
+A watchdog timer on the transmitter key line is also HIGHLY recommended.
+
+You can customize the PARAM.PAD file for your station with the various
+commands, followed by a "save" command so that you don't have to do this
+each time the program is run.
+
+The file 'USAGE.DOC' gives detailed instructions for each command. The
+file 'DESCRIPT.DOC' documents the internal layout and implementation
+details of the code itself.
+
+And now for the commercial.
+
+It would be very nice if you'd support two organizations which have done so
+much to make all this fun possible: AMSAT and TAPR. While I don't personally
+want any money for this code, you should honestly consider how much this
+program would have cost you had you bought it from one of the "for-profit"
+amateur radio software houses, and make a comparable donation to one of these
+non-profit organizations. You will feel VERY GUILTY if you do not do this.
+Remember, donations to AMSAT and TAPR are tax-deductible, and will do much
+to bring you the satellites and terrestrial hardware which YOU will use in
+the amateur packet radio networks of the future.  Thank you.
+
+AMSAT			TAPR
+PO Box 27		Box 22888
+Washington, DC 20044	Tucson, AZ 85734
+USA			USA
+
+73,
+Phil Karn, KA9Q
+25-B Hillcrest Rd
+Warren, NJ 07060
+USA
+201-561-2970 (Home, late evenings)

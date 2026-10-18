@@ -1,0 +1,266 @@
+Description of AX.25 'C' code  -- Phil Karn, KA9Q     October 21, 1984
+					Updated:      June 9, 1985
+
+Overview
+
+The code currently implements AX.25 Level 2 as defined in the Version 2.0
+document published by the ARRL. Depending on the choice of low level driver
+routines, it will use either the Zilog SIO (native to the 820, but requiring
+an external receive clock recovery "state machine" circuit) or the
+Zilog 8530 (requiring the FADCA daughter board, or "FAD board") for HDLC
+communications. In both cases, an external modem between the SIO or 8530
+and the radio is needed.
+
+This code contains a number of extensions to AX.25 which are new with
+Version 2.0:
+
+1. Idle link keep-alive polls (timer T3)
+2. Acknowledgement delay (timer T1)
+3. "C" bits and correct P/F bit usage according to LAPB
+
+Item 3 is upward compatible in that it is not used whenever the software
+detects an "old" (i.e., pre-Version 2.0) implementation of AX.25 (which
+at this point includes all other AX.25 implementations.)  The keep-alive
+polls require the proper use of the P/F bit and will not be sent to
+an old implementation.
+
+This code also supports multiple simultaneous logical links. This is an
+implementation rather than a protocol issue; it involves keeping individual
+"link descriptors" for each station, and using a hash lookup algorithm to
+find the appropriate link descriptor whenever a frame is received. Support is
+also provided for multiple physical HDLC ports so that more than one channel
+can be used.
+
+These extensions required me to separate and classify the commands and
+parameters (from a unit like the TAPR TNC) into groups that are applied on a
+per-link, -line or -terminal basis as appropriate.
+
+Digipeating works, but currently it will repeat a frame only on the physical
+link on which it was received. With relatively little work it would be
+possible to do cross-channel digipeating, although with the work underway to
+define and implement higher level protocols it is not clear this is a "clean"
+thing to do.  Hooks are provided for true level-3 packet switching, e.g.,
+with the ARPA Internet Protocol (IP), assuming there is memory left.
+
+A number of things which are in the TAPR TNC are not here. Some of
+these I haven't gotten around to implementing yet. Others, such as
+CW identification and the Vancouver protocol are obsolete in my opinion
+and I don't really feel like putting them in.
+
+Software description
+
+General
+
+All I/O is interrupt driven. Full use is made of the 820's interrupt
+capability; queues are emptied or filled with characters going to
+and from the terminal and SIO or 8530.  A top-level loop in main.c executes
+higher level functions which operate on the "other ends" of the interrupt
+queues.  The CTC timer ticks at a 10 hertz rate and provides all real-time
+functions.  A halt instruction at the end of the main loop causes the CPU
+to wait until an interrupt occurs; this might help reduce RFI and/or
+power consumption on a CMOS version of the Z-80.  It also makes possible
+the use of a "CPU speedometer" which monitors the HALT line from the CPU
+and indicates the amount of real time being used by the software.
+
+ax25.h
+
+The master file of global data structures, defined constants, etc. Included
+by just about every .c file, although it should probably be broken
+up into more manageable pieces.
+
+820.h, 820.c, line.c, inout.asm, 820ints.asm, fad.h, fad.c
+
+These files hopefully contain all of the machine-dependent code.
+820.h, 820.c and inout.asm contains the usual stuff to do bit and port
+level twiddling on the Z-80 family chips and the 820 machine.
+
+820ints.asm sets up the register save and restore sequences necessary to call
+a C routine directly from an interrupt.
+
+line.c implements routines to read and write raw HDLC frames which, despite
+my best efforts at portability, are tied closely to the way the Zilog SIO
+operates. It would probably have to be rewritten for a different HDLC chip.
+
+If you are using a FADCA daughter board (with the 8530 add-on), the two files
+fad.h and fad.c replace the three files 820.h, 820.c and line.c.
+
+queue.c
+
+Provides primitives getframe() and putframe() which operate on linked-list
+queues of an important internal structure called, naturally enough, a "frame".
+Two other primitives, allocframe() and freeframe() dynamically create and
+destroy frame structures from a common storage heap.
+
+"Fifos" containing individual characters are also provided for terminal
+I/O; putf() and getf() operate on these.
+
+addr.c, hash.c
+
+Provides those addressing functions which are unique to AX.25.
+It was my intention here to segregate our changes to X.25 to these
+files as much as possible.  The function "addrproc" examines the
+address fields in the raw frames received from the channel; it also performs
+digipeating (if enabled).  It passes frames which the link level protocol
+should see (addressed to us and passed all digipeaters) up to the next level
+with a command/response indication (if any) derived from the C bits
+in the address fields. It uses the hash algorithms in hash.c to find the
+appropriate link table entry for the frame, creating a new entry if needed.
+
+sendframe() provides a complementary service for the transmitter.
+It takes the link table pointer along with the various components of the
+frame (command/response indication, control and data fields), builds
+up a frame and queues it on the appropriate HDLC line queue.
+
+link.c
+
+This is the heart of the Level 2 protocol. process() implements all state
+transitions and side effects (e.g., timer control) which are required each
+time a frame is received. Most of the function consists of nested switch
+statements, corresponding to the combinations of received frame type and
+current state which dictate each action. This implementation style (as
+opposed to a state table) was a matter of personal choice. I found switch
+statements easier to read and easier to implement special side effects
+(such as changing state variables). I am not that adverse to using a state
+table version, but this one seems to work...
+
+After a frame has been processed, the response, if any, is sent to
+the transmitter.  Properly received I-frames are passed up to the
+next level.
+
+ackours(), frmr(), setstate() and sendctl() are subsidiaries to process();
+they are pulled out mainly to keep process() from becoming excessively large
+(it still is.) ltxstart() is a "kick" or "priming" routine that tries to
+move transmit data through the system whenever possible. It is called from a
+number of places whenever it might have just become possible to do this
+(e.g., when an acknowledgement has been received) but of course, it frequently
+can do nothing. This overhead is an unhappy artifact of the lack of a "real"
+operating system base that would support processes and their associated
+sleep/wakeup facilities.
+
+timer.c
+
+This file contains functions which implement real-time timers using a
+continuous 10 Hz clock tick.  Each timer has three states: stopped,
+running and expired. A timer is a data structure which is put on a 
+doubly-linked list whenever it is running, and automatically removed
+when it is stopped or expires. This allows the clock-tick routine
+(which could gobble up a fair bit of time since it runs frequently) to
+be as simple and fast as possible. User routines must poll the state
+of the timer to see if it has expired; there is no direct automatic
+execution of a function upon expiration. timer_srv(), called from the
+main loop, does this by calling various other routines in the file as
+appropriate to recover from link timeouts, etc.  Note that the only thing
+done by the clock interrupt handler proper is the setting of a flag which
+the higher level routines act on; this is to prevent a lot of computation
+from occurring at interrupt time, possibly starving other interrupts.
+
+term.c
+
+Handles all terminal related processing, e.g, input line editing and received
+I-frame output processing.  A number of low-level utility functions
+for terminal output via a common fifo (e.g., put string and format
+functions) are also provided.  Output processing uses an interrupt-driven
+queue; while this isn't needed on the 820 because of the memory-mapped
+display (in fact it slows it down a bit), writing it in this manner
+provides for output flow control and also allows the code to be easily
+modified to support a terminal on a UART port, such as the B channel of the
+SIO if it isn't needed for HDLC.
+
+trace.c
+
+Handles the display of frames. There are three display modes, encoded into
+the "tdata" argument of dump(): 0, meaning no display; 1, providing an
+abbreviated display containing the address and control fields broken out
+into "human-readable" form, and 2, which in addition provides a hex, ascii
+and shifted-ascii raw dump of the frame.
+
+control.c
+
+Top level control functions for level 2.  These include link connect and
+disconnect, as well as interfaces for higher level code to write data buffers
+to a link.  A main-loop function, level2(), is there to move data on queues
+in and out of the level two code.  The hook for level 3, protosw(), is also
+here; this is where protocol demultiplexing for I-frames belonging a given
+level 3 protocol e.g., DoD IP (or even, God forbid, X.25 level 3...gak!)
+will be done. The current level 3 "protocol", hex F0, is interpreted to mean
+"send directly to the terminal".
+
+command.h, command.c, cmdtab.c, cmdrout.c
+
+These files implement the command parser. This is a surprisingly large
+section of the whole code, reflecting all of the data structures which may
+be examined and changed by the user. command.c contains general common
+routines to parse command lines and search the tables, while cmdtab.c
+contains the tables to bind command strings to function names. cmdrout.c
+contains (most of) the functions which implement these user commands.
+
+misc.c
+
+misc.c contains a number of fairly low level utility routines which do such
+things as convert ascii strings to AX.25 shifted-ascii format and back,
+compare addresses, classify control fields, construct digipeater reply paths,
+etc.
+
+init.c
+
+Various hardware and data structure initialization routines, collected
+into one place.
+
+space.c
+
+space.c is where space for the external data data structures is defined.
+Some C compilers complain bitterly if you have global definitions of the
+form "int x;" in more than one file. My solution is to make the include
+file contain definitions of the form "EXTERN int x;". In all .c files except
+for space.c, EXTERN is defined as "extern"; in space.c, the "EXTERN" prefix
+is dropped. This is all done with a little preprocessor magic.  A bit kludgey,
+perhaps, but it is a technique now widely used by C programmers, and it DOES
+allow you to keep all your definitions in one place.
+
+mkconf.c
+
+This is a standalone program (not linked with the TNC code) which generates
+a PARAM.PAD file with some fairly reasonable defaults. There is no need to
+modify these defaults because you can always load up the PARAM.PAD file with
+the 'load' command, change them and 'save' them back to disk. mkconf just
+allows you to get started.
+
+Summary
+
+This is a necessarily sketchy outline of what I've done here. Hopefully,
+I have done enough of a good job commenting the code that along with this
+overview you shouldn't have too much trouble understanding what's going
+on.
+
+Naturally, like any good software hacker, I'm hard at work making improvements
+and additions to this code, so things are subject to change. In particular,
+I have the following planned:
+
+1. Adding DoD Internet Protocol as a Layer 3 module, along with the ARP
+(address resolution protocol).
+
+2. Improved support for serial terminals. There should be a command to
+switch the console over to the B channel of the SIO; better yet, the
+code should support multiple terminals in the way it now supports
+multiple HDLC channels, but there's only so much space on a Z80.
+
+3. Speed improvements. I'm rather disappointed with the speed of this code
+on the 820, although a 2.5 Mhz Z-80 isn't the fastest machine in the world.
+Channel speed is completely dominated by the interrupt routines in line.c,
+and while I've made them as tight as I can, some improvement might be had
+by coding sections of them in assembler.  However, I'd MUCH rather have DMA
+hardware available, as this is the only way to get the really dramatic
+speedup we need to run speeds like 56 kb and up.
+
+4. Improved deadlock protection. There is a lot of dynamic memory allocation
+going on, and although I throttle links with RNRs when necessary, there are
+still other ways that deadlock might occur, e.g., by having a very large
+number of entries in the link table (there is currently no enforced limit.)
+
+I hope this first release of my code is useful to you. Just because I'm
+continuing to work on it doesn't keep you from also doing so - I would dearly
+love to get back in return any enhancements or bug fixes. I'd also like
+comments on the program itself: does it solve your needs? What design flaws
+really bother you? Are the commands too awkward? Etc. Remember though that
+this is a labor of love for me, and I certainly won't be able to please
+everybody.  

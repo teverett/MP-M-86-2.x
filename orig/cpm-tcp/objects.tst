@@ -1,0 +1,15 @@
+b:netuser.o
+b:tcpuser.o
+b:tcpinput.o
+b:tcpoutpu.o
+b:tcpsubr.o
+b:tcptimer.o
+b:udp.o
+b:icmp.o
+b:ip.o
+b:iproute.o
+b:slip.o
+b:debug.o
+b:timer.o
+b:mbuf.o
+b:machdep.o

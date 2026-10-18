@@ -1,0 +1,104 @@
+PROGRAM STRIPIT; (* PROGRAM TO STRIP ENTRY POINT NAMES FROM AN OVERLAY *)
+
+TYPE
+  ALPHA = PACKED ARRAY [1..8] OF CHAR;
+
+  NAMEREC = RECORD
+                NAME : ALPHA;
+                ADDR : INTEGER
+            END;
+  NAMEARR = ARRAY [0..0] OF NAMEREC;
+  SECTOR = ARRAY [0..127] OF BYTE;
+
+VAR
+  NAMELIST : ^NAMEARR;
+  I : INTEGER;
+  BASE : INTEGER;
+  TITLE : STRING;
+  INFILE : FILE OF SECTOR;
+  OUTFILE : FILE OF SECTOR;
+  BUF : ARRAY [0..192] OF SECTOR;      (* OVERLAY LOADING AREA *)
+  COUNT : INTEGER;
+  INLINE : STRING;
+  DONE : BOOLEAN;
+  NEWSIZE : INTEGER;
+
+PROCEDURE KRUNCH(I:INTEGER);
+VAR
+  J : INTEGER;
+BEGIN
+  REPEAT
+    NAMELIST^[I] := NAMELIST^[I+1];
+    I := I + 1;
+  UNTIL ORD(NAMELIST^[I].NAME[1]) = 0
+END;
+
+BEGIN
+  WRITE('File name? ');
+  READLN(TITLE);
+  ASSIGN(INFILE,TITLE);
+  RESET(INFILE);
+  COUNT := 0;
+  WHILE IORESULT <> 1 DO
+    BEGIN
+      COUNT := COUNT + 1;
+      BUF[COUNT-1] := INFILE^;
+      SEEKREAD(INFILE,COUNT);
+    END;
+  WRITELN(Count,' sectors');
+
+  WRITE('Base addr? ');
+  READHEX(INPUT,BASE,2);
+
+  MOVE(BUF[0,1],I,2);
+
+  WRITE('Table starts at Offset = '); WRITEHEX(OUTPUT,I-BASE,2); WRITELN;
+
+  NAMELIST := ORD(ADDR(BUF)) + (I-BASE);
+
+  DONE := FALSE;
+  I := 0;
+  WHILE NOT DONE DO
+    BEGIN
+      WRITE(NAMELIST^[I].NAME,'?');
+      READLN(INLINE);
+      IF (length(inline) <> 0) and (INLINE[1] IN ['N','n']) THEN
+        KRUNCH(I)
+      ELSE
+        I := I + 1;
+      DONE := (NAMELIST^[I].NAME[1]=CHR(0)) OR (INLINE[1] = '.')
+    END;
+
+  (* Now write it out *)
+
+  I := 0;
+  REPEAT
+    WRITELN(NAMELIST^[I].NAME);
+    I := I + 1
+  UNTIL (NAMELIST^[I].NAME[1] = CHR(0));
+
+  WRITELN(i,' symbols remain');
+
+  NEWSIZE := (ORD(ADDR(NAMELIST^[I].NAME))-ORD(ADDR(BUF)));
+  IF (NEWSIZE MOD 128) <> 0 THEN
+    NEWSIZE := NEWSIZE + 128;
+
+  WRITELN('New size is ',NEWSIZE DIV 128,' sectors');
+
+  COUNT := NEWSIZE DIV 128;
+
+  WRITE('Writeit? ');
+  READLN(INLINE);
+  IF INLINE <> 'YESDOIT' THEN
+    EXIT;
+
+  ASSIGN(OUTFILE,TITLE);
+  REWRITE(OUTFILE);
+  FOR I := 0 TO COUNT-1 DO
+    BEGIN
+      OUTFILE^ := BUF[I];
+      SEEKWRITE(OUTFILE,I)
+    END;
+  CLOSE(OUTFILE,I)
+END.
+

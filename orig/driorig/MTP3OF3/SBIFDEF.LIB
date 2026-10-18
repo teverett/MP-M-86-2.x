@@ -1,0 +1,14 @@
+SB_INTERFACE = RECORD
+                 PREV_CMD : CHAR;       (* SET BY CALLING PROG IF IT WISHES *)
+                                        (* TO RETURN AFTER CALLED PROG      *)
+                 NEXT_CMD : CHAR;       (* SET BY CALLING PROG TO INDICATE  *)
+                                        (* WHAT PROG IS TO BE CALLED        *)
+                                        (* SET TO BLANK IF NONE DESIRED     *)
+                 END_STAT : (OK,IOERR,SYNERR,XTRA1,XTRA2,XTRA3);
+                                        (* ERROR CODE RETURNED FROM CALLED  *)
+                                        (* PROGRAM                          *)
+                 BUFIDX   : INTEGER;    (* POINTER INTO BUFFER RETURNED BY  *)
+                                        (* CALLED PROGRAM                   *)
+		 ERRNUM   : INTEGER;	(* ERROR NUMBER FOR END_STAT	    *)
+               END;
+

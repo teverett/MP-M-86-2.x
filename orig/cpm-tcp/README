@@ -1,0 +1,17 @@
+13 Nov 91:
+Some files that were copies of those in "AX25" directory were
+deleted.  (Addendum: I can't even remember if this was the original
+directory structure.)
+
+05 Nov 94:
+There seems to be a sudden interest in this stuff, following a
+casual mention on the BSD/386 mailing list...  OK: I can't remember
+from where I got this stuff, OK?  No warranty, no return, etc...
+There seems to be two separate versions, and I guess I should not
+have deleted the identical files mentioned above (but they can be
+easily reconstructed anyway); the files with the same names that
+remain have significant differences, and I lost interest at that
+point, since my CP/M box doesn't have a hard disk, so I couldn't
+even start to compile them...  Be aware that even Phil the Great
+(KA9Q - currently karn@qualcomm.com) has just about disowned this
+code, so you're on your own...  Share and enjoy!

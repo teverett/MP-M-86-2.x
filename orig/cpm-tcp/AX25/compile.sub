@@ -1,0 +1,40 @@
+;Note -- must be called as "submit compile fad" or "submit compile sio"
+cz -Ib: b:addr
+as -ZAP b:addr
+cz -Ib: b:link
+as -ZAP b:link
+cz -Ib: b:space
+as -ZAP b:space
+cz -Ib: -E200 b:command
+as -ZAP b:command
+cz -Ib: b:cmdtab
+as -ZAP b:cmdtab
+cz -E200 -Ib: -Ia: b:cmdrout
+as -ZAP b:cmdrout
+cz -Ia: -Ib: b:misc
+as -ZAP b:misc
+cz -Ia: -Ib: b:term
+as -ZAP b:term
+cz -Ib: b:820
+as -ZAP b:820
+cz -Ib: b:control
+as -ZAP b:control
+cz -Ib: b:queue
+as -ZAP b:queue
+cz -Ia: -Ib: b:trace
+as -ZAP b:trace
+cz -Ib: b:main
+as -ZAP b:main
+cz -Ib: b:line
+as -ZAP b:line
+cz -Ib: b:timer
+as -ZAP b:timer
+cz -Ib: b:hash
+as -ZAP b:hash
+cz -Ib: b:init
+as -zap b:init
+cz -DOLDFAD -Ib: b:fad
+as -zap b:fad
+as b:820ints
+as b:inout
+ln -o b:tnc$1.com -t -v -f b:objects.$1 -lc

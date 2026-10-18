@@ -633,6 +633,323 @@ assembler targets.
   line 22). None of `orig/cpn86src/` has been validated against
   `tools/asm86/` yet; this is just the inventory.
 
+## Related DRI source: factory-labeled disk images (`orig/driorig/`)
+
+The same collector's companion set to `orig/lastdri/` below, imaged the
+same way (`22disk` transfer, hence the `.CPM`-renamed CP/M `.COM`
+binaries; Teledisk v2.15 `.TD0` images; a `.JPG` label scan per disk) —
+but, per `orig/driorig/README.TXT`, "the last of my DRI 'original'
+disks **with factory labels**," i.e. genuine shrink-wrapped DRI product
+releases rather than `orig/lastdri/`'s in-house/development disks. The
+README specifically calls out two as OEM **master** disks: **Pascal
+MT+** and **CB86**. None of this is MP/M-86 source or needed to build
+it — it's further genuine DRI product material, same era, kept as
+reference the way `orig/lastdri/` and `orig/mpm_II/` are:
+
+- **`MTP1OF3/`, `MTP2OF3/`, `MTP3OF3/`** — the three-disk **Pascal MT+**
+  compiler distribution (confirmed by file naming — `MTPLUS.CPM`,
+  `LINKMT.CPM`, `FASTCOMP.CPM` — "MT" = Pascal MT+, DRI's 8080/Z80
+  Pascal product, a different language/product from PL/M, C, or
+  CBASIC):
+  - **`MTP1OF3`** — the compiler/linker/runtime itself: `MTPLUS.CPM`
+    (compiler), `FASTCOMP.CPM`, `LINKMT.CPM`, `MTPLUS.000`–`.006`
+    (numbered overlay segments), `PASLIB.ERL`/`ROVLMGR.ERL` (runtime
+    library and overlay-manager relocatables), and demo/sample source
+    (`DEMO.SRC`, `PROG.SRC`/`MOD1.SRC`/`MOD2.SRC` — an overlay demo
+    program with `EXTERNAL [n] PROCEDURE` overlay calls, `SPEED.DEM`).
+  - **`MTP2OF3`** — development tools built *with* Pascal MT+ itself:
+    `INDEXER.PAS`/`.DOC` (a Pascal source-indexer utility, with its own
+    usage doc), `PRETTY.PAS` (a pretty-printer), plus the low-level
+    runtime support those and the compiler need: `XREF.SRC`/`.CPM`/
+    `.DOC` (cross-reference utility), `DIS8080.CPM` (an 8080
+    disassembler), `DEBUGGER.ERL`/`DBUGHELP.TXT`, floating-point/BCD
+    runtime (`FPREALS.ERL`, `BCDREALS.ERL`, `REALIO.ERL`,
+    `TRANCEND.ERL` — transcendental functions), **AMD 9511** arithmetic
+    processing unit (APU) hardware floating-point support
+    (`AMD9511.CMD`/`AMD9511X.CMD`, `APUSUB.MAC`, `TRAN9511.SRC`/`.ERL`
+    — an optional hardware FPU co-processor chip, not emulated/software
+    floating point), and assorted `.MAC` glue (`CHN.MAC` chaining,
+    `OVLMGR.MAC`, `CWT.MAC`, `RST.MAC`, `DIVMOD.MAC`).
+  - **`MTP3OF3`** — a second, larger Pascal application built with the
+    same toolchain: **`SPP`** (`SPPMAIN.CMD`, `SPP.CPM`, `SPP.001`–
+    `.00A` as further numbered overlay segments, `LINKSPP.SUB`) — a
+    screen/structured editor judging by its module names
+    (`EDITWRIT.ERL`, `EDGLBLS.SRC`/`EDTYPES.SRC`, `SCANNER.ERL`,
+    `SYNCHECK.ERL`, `VARCHECK.ERL`, `TRAVERSE.ERL`, `DIROVL.ERL`,
+    `SBLOG.ERL`) alongside a second overlay set `SB001.CMD`–`SB00A.CMD`
+    with its own `SBINIT.ERL`/`SBIFDEF.LIB` — likely "SB" = a
+    syntax-directed/structured **editor** companion to "SPP," though
+    the exact SPP/SB relationship (two programs sharing the `MTP2OF3`/
+    `MTP3OF3` runtime vs. one program in two overlay families) hasn't
+    been traced further. `E2.CMD`/`E3.CMD`, `NSB.SRC`, `BACKUP.SRC`,
+    and `SMALLERR.TXT` round out the set.
+- **`PLI80/`** — a second, more complete copy of the **PL/I-80**
+  toolchain already seen in `orig/lastdri/09/` (`PLI.CPM`,
+  `PLI0-2.OVL`, `PLILIB.IRL`, `XREF.CPM`, `RMAC.CPM`, `LINK.CPM`,
+  `LIB.CPM`), here with the pieces specific to calling MP/M directly
+  from PL/I that `orig/lastdri/09/` didn't have: `MPMCALLS.PLI`/
+  `MPMCALLC.PLI` ("Direct MP/M Call Test Program[s]," per
+  `MPMCALLS.PLI`'s own header comment — demonstrating PL/I-to-MP/M
+  syscalls), `MPMDIO.ASM`/`.DCL` (the matching assembly-level direct-IO
+  stub and its PL/I `DECLARE` binding), and `PLIDIO.ASM` (a more
+  general direct-I/O interface). Direct, reusable precedent for how
+  DRI itself bound a third-party-language runtime into MP/M-86's own
+  syscall gate — relevant to this repo's own `tools/plm/runtime_stub.A86`.
+- **`CBASIC86-719/`, `CBASIC86-720/`** — two separate **CBASIC-86**
+  distribution-disk images (`CBAS86.CMD` compiler, `CRUN86.CMD`
+  runtime, `XREF86.CMD` cross-reference tool) — CBASIC being DRI's
+  BASIC-family product, a different language again from PL/M, C,
+  Pascal MT+, and PL/I. The two disks' file sets are otherwise
+  identical; the distinction between them (two pressings, two
+  revisions, or a compiler/runtime split) hasn't been investigated.
+- **`CB86-Master_Control/`** — per the README, one of the two **OEM
+  master disks** in this set, and per its own `READ.ME` ("CBASIC
+  Compiler (CB86) ... Version 2.0," June 1983) the master build/release
+  disk for the 8080/Z80 **CBASIC** compiler (not CBASIC-86 above —
+  despite the shared "CBASIC" name, this is the original 8-bit product,
+  confirmed by the overlay naming): `CB86.CMD` (compiler) built from
+  `CB86.L86` plus three overlay files `CB86.OR1`–`.OR3`, `LINK86.CMD`/
+  `LIB86.CMD` (the linker/librarian used to produce it — master-disk
+  build tooling, not end-user tools), and five CBASIC demo programs
+  (`TSTCIR.BAS`, `GRAPHR.BAS`, `GRAPHCOM.BAS`, `CIRCOM.BAS`,
+  `DEMOGRAF.BAS` — circuit/graphics demos).
+- **`CPNET80/`** — a fuller **CP/NET** disk than either
+  `orig/cpnet80s/` or `orig/cpn86src/` above: still the 8080/Z80 side
+  (per `CPNIOS.ASM`'s own title, "Requester Network I/O System for
+  CP/NET **1.2**" — a later version than `orig/cpnet80s/`'s "VER 1.0"),
+  but here as a mix of source *and* DRI's own built binaries:
+  `CCP.SPR` (the CP/NET-side console processor, built `.SPR` just like
+  `orig/mpm_II/`'s banked kernel modules), `NDOS.SPR`, `CPBDOS.REL`/
+  `CPNDOS.REL`/`CPNOS.REL` (relocatable BDOS/network-DOS objects),
+  `SERVER.RSP` (a CP/NET server-side RSP), plus source for the pieces
+  `orig/cpnet80s/` already has under different/renamed files
+  (`CPNIOS.ASM`, `CPBIOS.ASM`, `SNIOS.ASM`, `XIOSNET.ASM`,
+  `NETWRKIF.ASM`) and the user commands as both source and built
+  `.CPM` (`LOGIN.ASM`/`.CPM`, `LOGOFF.ASM`/`.CPM`, `CPNETSTS.CPM`,
+  `DSKRESET.CPM`, `MAIL.CPM`, `PIP.CPM`, `XSUB.CPM`). It also carries
+  **OEM sample slave drivers** for two specific third-party network
+  transports — `OMNINIOS.ASM`/`OMNINWIF.ASM` ("Sample Slave Network
+  I/O System for CORVUS OMNINET," dated 20 Oct 82) and
+  `ULCNIOS.ASM`/`ULCIF.ASM` (a second transport, "ULCN" — not yet
+  identified further) — concrete, dated precedent for exactly the kind
+  of "OEM supplies the hardware-specific driver, DRI supplies
+  everything else" split this repo's own XIOS problem already has
+  (see `orig/mpm_II/Control_2/`'s `ldrbios.asm` and `docs/build.md`).
+- **`ZSID/`** — **ZSID**, DRI's Z80-targeted symbolic debugger (the
+  Z80 counterpart to the 8080 `SID`/MP/M-86's own `DDT86` family):
+  `ZSID.CPM` plus `TRACE.UTL`/`HIST.UTL` (trace/history companion
+  utilities, same role as `orig/mpm862sr/06`'s `DDT86`-adjacent tools).
+
+Nothing in `orig/driorig/` has been assembled, compiled, or
+cross-checked against this repo's own tooling — it's a different set
+of DRI *products* (Pascal MT+, PL/I-80, CBASIC/CBASIC-86, CP/NET 1.2,
+ZSID), not MP/M-86 source, kept purely as further genuine, dated DRI
+reference material from the same era.
+
+## Related DRI source: in-house disk images (`orig/lastdri/`)
+
+A later addition: 25 numbered directories (`01`–`25`), each one disk
+image from the collector's own set of DRI in-house/development
+diskettes (not factory-labeled releases), per `orig/lastdri/README.TXT`
+— the collector's own notes on provenance, transcribed with `22disk`
+(which renames CP/M `.COM` files to `.CPM`, explaining the many
+`.CPM`-extension binaries throughout) and imaged whole with Teledisk
+v2.15. Each directory accordingly holds a `NN.TD0` (the raw Teledisk
+disk image) and an `NN.JPG` (a scan of the disk's handwritten label)
+alongside whatever files `22disk` could extract — three disks (`17`,
+`18`, `21`) extracted almost nothing beyond the image and label scan,
+and one disk ("Odd unreadable DRI disk.JPG") was unreadable entirely
+and is represented only by its label scan. Per the README, four disks
+use VAX-style 128/256-byte mixed sectors (DRI cross-compiled PL/M-86 on
+a VAX) and were not transferred file-by-file; disk `14` is serialized
+`M86-000-00001`, an actual MP/M-86 V2.0 master disk DRI would have
+copied and sent to an OEM.
+
+Unlike `orig/mpm862sr/`'s clean 11-disk distribution set, this is a
+grab-bag of unrelated in-house material spanning several DRI products
+and projects, in every stage of completion — nothing here has been
+diffed against `src/` or validated against this repo's tooling; it's
+inventoried, not analyzed:
+
+- **`01`, `02`** — label scan plus disk image only; no files extracted.
+- **`03`** — **Digital Research C** for CP/M-86 (`DRC860-862.CMD` —
+  three compiler-pass binaries, `SAMPLE.C`, `STARTUP.A86`, the
+  `SYSLIB*.L86` runtime libraries, standard headers `CTYPE.H`/`ERRNO.H`/
+  `SETJMP.H`/`PORTAB.H`), plus `READ.ME`, a June 1983 release-notes
+  file for "Digital Research C ... for the CP/M-86 Family," version
+  1.0 — a different DRI product from both MP/M-86 and PL/M-86.
+- **`04`** — more of the same C toolchain: `CC1-3.CMD`/`CL.CMD`/
+  `CVTH86.CMD`/`LIBR.CMD`/`ARCH.CMD`, `C80LIB.A86`, `CLIB.CL`/`.ARC`,
+  `STD.H` — looks like an earlier or parallel build of `03`'s compiler.
+- **`05`** — `LFUNC1.C`/`.OBJ`, `LOGO.H`/`LOGOPT.H`, `DRC861.CMD` — more
+  Digital Research C material, including what looks like a LOGO
+  language runtime piece.
+- **`06`** — **WordStar** (`WS.CPM`/`ZWS.CPM`, `WSOVLY1.OVR`,
+  `WSMSGS.OVR`) plus assorted unrelated CP/M utilities (`SID.CPM`
+  debugger, `DDT.CPM`, `PIP.CPM`, `STAT.CPM`, `FORMAT.CPM`,
+  `SYSGEN.CPM`, `COMPARE.CPM`, `ATTACH.CPM`) and a set of `.LIB`
+  macro/text libraries (`PLATE.LIB`, `MEMO.LIB`, `SCREEN.LIB`,
+  `TITLEPAG.LIB`, `LEV1-3.LIB`, `LITERAL.LIB`, `TOFCCOMS.LIB`,
+  `COPYRPAG.LIB`, `VERSIONS.LIB`, `GENFORM.LIB`) that look like a
+  document-production/publishing toolset (plates, memos, title pages,
+  table-of-contents, cover pages), not development tools — likely
+  support material for producing DRI's own printed documentation.
+- **`07`, `08`, `13`** — working **MP/M-86** installations: built
+  `.MPM` kernel modules (`BDOS`/`RTM`/`SUP`/`MEM`/`CIO`/`XIOS`/
+  `SYSDAT`), `MPM.SYS`/`MPMLDR.CMD`, the full `src/utils/`-equivalent
+  command set (`DIR`/`TYPE`/`PIP`/`ED`/`STAT`/`SDIR`/`ASM86`/`DDT86`
+  etc. as built `.CMD`s), and RSPs (`CLOCK`, `TMP`, `MPMSTAT`,
+  `ECHO`) — i.e. the same system this repo's `src/` builds from
+  source, here as DRI's own working binaries, plus live operational
+  artifacts not present anywhere in `orig/mpm862sr/`: a `MAIL.CMD`/
+  `MAIL.NDX`/`.HLP` internal mail system, `HELPNDX.CMD`/`MPM.HLP`
+  online help, a `TIMELOG.CMD` family with `.DBF`/`.SUB` data/batch
+  files (apparent time-tracking), `WTMP`/`WTMP.DBF` (a login/logoff
+  log, same name as the Unix convention), `PASSWD.SAM`/`MPMINIT.SAM`/
+  `USERINIT.SAM` (sample config files), and a stray `#DRI#07` file (a
+  CP/M "ambiguous/temp file" marker left over from an interrupted
+  operation, not meaningful content). `08` additionally has `CPM.SYS`
+  and `XIOSN.MPM`, suggesting a dual-boot CP/M-86 configuration, plus
+  `DDT86P.CMD`/`RUN.CMD` not seen on `07`/`13`. `13` is a
+  utilities-only subset (no kernel modules), evidently a second copy
+  of just the command set.
+- **`09`** — a **PL/I** toolchain, a third DRI/third-party language
+  entirely, distinct from both PL/M-86 and C: `PLI.CPM`/`PLI0-2.OVL`
+  (the compiler and its overlays), `PLILIB.IRL`, `LINK.CPM`,
+  `RMAC.CPM`, `SID.CPM`, plus PL/I *source* — `SCAN.PLI`, `XLATE.PLI`,
+  `MEXP.PLI`/`OLDMEXP.PLI`, `SC.PLI`, `X.PLI`, and, unexpectedly,
+  `LISP.PLI`: a Lisp interpreter written in PL/I, with `XLATE.PLI`
+  translating M-expressions (Lisp's original 1958 surface syntax) to
+  S-expressions — course-project or research-style code, not a DRI
+  product.
+- **`10`** — a grab-bag tied to the same C/overlay toolchain:
+  `WS.CPM`/`WSA.CPM`/overlays again, `NED.CPM` (a different editor),
+  `SOFTCOM.CPM`/`PSOFTCOM.CPM`/`SOFTLIBC.REL`, memory-model-specific
+  C runtime startups (`CRT0.MED`/`.SML`, `CRT1.A86`/`.B86`,
+  `MACHDEP.MED`/`.SML`, `OSCRT.MED`/`.SML` — "medium"/"small" model C
+  startup code), `SORT.PLI` (more PL/I), `DRCGSX.A86`/`.OBJ` (Digital
+  Research C "GSX" graphics-library linkage), and copies of the same
+  `MAIL`/`TIMELOG`/`WTMP` operational files seen on `07`.
+- **`11`** — three small standalone `.A86` utilities with no
+  surrounding system: `HIST.A86`/`.CMD` ("history"?), `TIMER.A86`,
+  `PARSE.A86` — no further context recovered.
+- **`12`, `14`, `20`** — three near-identical copies of a from-scratch
+  **loader/XIOS development** disk: `LDBIOS.A86`/`.H86`, `ROM.A86`,
+  `LDMPM.H86`, `LDBDOS.H86`, `DEBLOCK.LIB`, `SINGLES.LIB`/`.DEF`,
+  `SYSTEM.LIB`, alongside a full built MP/M-86 kernel/RSP set — i.e.
+  exactly the loader-plus-from-scratch-XIOS problem this repo's own
+  `src/loader/LDBIOS86Q.A86`/`ROM86Q.A86` solve for QEMU, except these
+  are DRI's *own* original equivalents for whatever real hardware this
+  disk set targeted (not yet identified) — likely worth a closer diff
+  against `src/loader/` if the loader work stalls.
+- **`15`** — `MPM86SRL.A86`/`.ASM`/`.CMD`/`.CPM`: a serialization
+  utility for MP/M-86 distribution disks, the direct 8086-port
+  counterpart to `orig/mpm_II/OEM/mpm2srl.asm` documented above.
+- **`16`** — a from-source MP/M-86 kernel build tied to a specific
+  OEM/test configuration: `SUP.A86`/`COMMAND.SUP`, `RTM`-family modules
+  (`ABORT.RTM`, `FINDPD.RTM`, `QUE1.RTM`), `SYSDAT.A86`, RSP sources
+  (`CLOCK.A86`, `RANDOM.A86`, `SUBMIT.A86`), a `RPLTEST.RSP` (test RSP,
+  no equivalent elsewhere in this project), and `TOVAX.SUB`/`ALL.SUB`
+  build scripts — i.e. source-level evidence for exactly the kind of
+  module-by-module kernel build `orig/mpm862sr/02`–`04` already
+  document, on a different (apparently in-progress/test) configuration.
+- **`17`, `18`, `21`** — effectively empty: `18` has only a stray
+  `TMP.A86`; `17`/`21` extracted nothing but the disk image and label
+  scan.
+- **`19`** — the fullest from-source MP/M-86 kernel snapshot in this
+  entire disk set: nearly every `.A86`/`.DEF`/`.FMT`/`.LIT`-equivalent
+  module named in `orig/mpm862sr/02`'s directory-map entry above,
+  together in one place with their `.MPM` build outputs and `.SUB`
+  build scripts (`ONE.SUB`, `CLEAN.SUB`, `ALL.SUB`) — the closest thing
+  in this repository to a single, coherent, buildable snapshot of the
+  full MP/M-86 kernel source tree outside of `orig/mpm862sr/` itself;
+  worth cross-referencing against `src/kernel/` if any kernel module
+  there is ambiguous or incomplete.
+- **`22`** — mixed: a `CPIP.CMD`/`SID86.CMD`/`VAX86.CMD`-flavored build
+  environment plus stray debug artifacts (`JUNK.*`, `RESUME.PRN`), a
+  `CACHE.RSP` (disk cache RSP, no equivalent elsewhere in this repo),
+  and three `MPMSEM{1,2,3}.TEX` files — internal **"MP/M-86 Seminar
+  Notes"** (marked "All Information Herein is Proprietary to Digital
+  Research, Inc."), a training/overview document walking through the
+  kernel module structure (SUP, RTM, memory layout, SYSDAT) at a
+  narrative level — the single best piece of *prose* documentation for
+  MP/M-86's own architecture found anywhere in `orig/`, worth a closer
+  read against `docs/glossary.md` and `docs/syscalls.md`.
+- **`23`** — `FDBIOS.A86`/`.H86`/`.SYM`/`.LST`: a floppy-disk BIOS
+  variant build, plus `CPM.SYS` and `VAX86.CMD`.
+- **`24`** — a cluster of loader variants for what looks like a
+  specific memory/boot configuration: `2MBIOS`/`2MCPM`/`2MLOADER`/
+  `2MLDBIOS` ("2M" likely a memory-size or model designator) alongside
+  plain `LOADER.CMD`/`MLOADER.CMD`/`MLDBIOS.H86`, `MROM.ODD`/`MROM.EVN`
+  (odd/even ROM half images — common for byte-interleaved ROM pairs),
+  and `TEST.H86`/`.CMD`.
+- **`25`** — unrelated to MP/M-86 entirely: Z80 tools (`Z80.LIB`,
+  `STRASM.CMD`, `M5.CMD`), a `TURTLE.M80` LOGO-turtle-graphics module,
+  and `Z19LOGO.SYM`/`.CPM` — a LOGO environment targeting the Heath/
+  Zenith **Z-19** terminal (its graphics/cursor primitives — `BEEP`,
+  `SCROLL`, `SETXY`, `GPLOT`, `GRAFON` — are named in `Z19LOGO.SYM`'s
+  symbol table), consistent with `05`'s `LOGO.H`/`LOGOPT.H` and `09`'s
+  general interest in alternative-language experiments rather than
+  MP/M-86 development proper.
+
+## Related third-party source: CP/M TCP/IP (`orig/cpm-tcp/`)
+
+A final tree, unrelated to Digital Research entirely: a CP/M port of
+**Phil Karn's (KA9Q) amateur-radio TCP/IP stack** — the same NET/NOS
+code family that became the basis for most early amateur packet-radio
+Internet stacks — kept here purely as further period-appropriate 8-bit
+systems-programming reference material, not as DRI source and not
+needed to build or boot MP/M-86. Per `orig/cpm-tcp/README` (dated
+13 Nov 1991 and 05 Nov 1994), the collector no longer remembers exactly
+where this came from, notes it may be an inconsistent merge of "two
+separate versions," and quotes Karn himself as having "just about
+disowned this code" by the time of writing — so provenance here is
+explicitly uncertain, by the collector's own admission, unlike every
+other tree in `orig/`.
+
+- **Protocol core** — an essentially complete, modular RFC-793/791/768
+  implementation in portable (`int16`/`int32`-typed) C, documented in
+  its own `tcpguide` ("Amateur Radio Internet Programmer's Guide"):
+  `ip.c`/`ip.h`/`iproute.c` (IP plus routing), `icmp.c`/`icmp.h`,
+  `tcp.h`/`tcpinput.c`/`tcpoutpu.c`/`tcpsubr.c`/`tcptimer.c`/
+  `tcpuser.c` (TCP, split by direction/role), `udp.c`/`udp.h`,
+  `mbuf.c`/`mbuf.h` (BSD-style packet buffer chains), `timer.c`/
+  `timer.h`, `netuser.c`/`netuser.h` (the session-layer API
+  applications call), and `slip.c` (SLIP framing for serial links).
+- **Applications** atop that core: `ftp.c`/`sftp.c` (FTP server/simple
+  client), `smtp.c`, `telnet.c`/`telnetm.c`/`telnet.h`, `server.c`, and
+  `ttydriv.c`.
+- **Hardware-specific glue**, explicitly for the **Xerox 820**
+  (a Z80 CP/M machine) per `820.h`'s own header comment (copyright
+  1986, Philip Karn): `820.c`/`820.h`/`820ints.asm` (Z80-SIO-chip
+  serial driver and interrupt handlers), `machdep.c`/`machdep.h`
+  (the machine-dependent shim the portable core calls into),
+  `csum.asm`/`inout.asm` (hand-written Z80 assembly for the checksum
+  inner loop and port I/O — the only non-C source outside `AX25/`),
+  and `debug.c`/`fragtest.c`/`tcptest.c` (test harnesses). `make.sub`/
+  `make1.sub` (Z80-targeted `cz`/`as` Submit build scripts) and
+  `objects.tst` list the resulting object set.
+- **`AX25/`** — a separate, self-contained program: per its own
+  `readme.doc` ("the second 'friendly user' release of my TNC code for
+  the Xerox 820"), this is Karn's **AX.25 packet-radio TNC**
+  (terminal-node-controller) firmware, not part of the TCP/IP stack
+  above — a different protocol (AX.25, not IP) built with the Aztec C
+  compiler, supporting either the Xerox 820's onboard Z80-SIO
+  (`820.c`/`.h`) or an add-on "FADCA 8530 daughter board"
+  (`fad.c`/`fad.h`) by swapping which driver is compiled in; also
+  includes its own `line.c`/`term.c`/`command.c`/`cmdtab.c`/`cmdrout.c`
+  (a command-line/terminal interface), `link.c`/`control.c`/`addr.c`/
+  `hash.c`/`queue.c` (AX.25 link-layer state), and `820ints.asm`/
+  `inout.asm` (its own copies of the Z80 interrupt/IO assembly, not
+  shared with the parent directory's copies). `objects.sio`/
+  `objects.fad` are its two build variants' object lists;
+  `descript.doc`/`usage.doc` are further prose documentation.
+
+Nothing in `orig/cpm-tcp/` has been built, assembled, or cross-checked
+against anything else in this repository — it targets a different CPU
+generation (Z80, not 8086) and a different problem domain (network
+protocols, not an operating-system kernel) from everything else here.
+
 ## Notes for anyone working in this tree
 
 - File extensions are not a fully reliable guide to text-vs-binary content

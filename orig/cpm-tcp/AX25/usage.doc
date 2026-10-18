@@ -1,0 +1,204 @@
+Usage Instructions for the Xerox 820 AX.25 TNC Code by KA9Q
+
+The commands are as follows:
+1. reset
+Do a soft reset. Configuration parameters are unaffected, but any
+established links are dropped.
+
+2. load [file]
+Load configuration data from disk. Default is "PARAM.PAD" on the currently
+logged-in disk, but an optional file name may be specified. This command
+involves a reset, so it drops any active links. Warning: loading a "garbage"
+file will cause strange things to happen!
+
+3. save [file]
+Save configuration information on disk. Default is "PARAM.PAD" on the
+currently logged-in disk, but an alternate file may be specified.  The
+information that is saved is as follows:
+
+Terminal parameters
+Default link parameters
+Number of HDLC lines
+HDLC line parameters
+
+4. connect <lineno> <call> [<digipeater>]
+Establish an AX.25 link with <call> via HDLC line number <lineno>, using
+optionally specified digipeaters. Note that the HDLC line number MUST be
+specified. There is no "via" clause between the destination and the
+digipeater string, if any.  When the connection is established, the terminal
+does NOT automatically become connected to the station; the "trans" or
+"convers" commands must then be used.
+
+Here are some examples (with comments in [brackets]):
+connect 0 wa2lqq	[initiate a direct connection to wa2lqq via line 0]
+connect 1 w2fpy wa2lqq	[connect to w2fpy via wa2lqq on line 1]
+
+5. disc wa2lqq
+Initiate a link disconnect with wa2lqq.
+
+6. purge
+Clear the link table of all entries in the disconnected state. Entries
+in any other state are unaffected. Link table entries remain indefinitely
+until this command is given.
+
+Parameter Display/Set Commands
+
+Valid parameters for these commands are of several types:
+
+"Characters" are the actual characters, typed in a single keystroke.
+On output, they are displayed as multi-character sequences (e.g, ^C)
+to make them readable.
+
+"Integers" are numbers between 0 and 65535 inclusive.
+
+"Time" units are integers representing units of 100 ms (0.1 sec).
+
+"On/Off" are the actual characters "On" and "Off", although the integers
+1 and 0 may also be used.
+
+For trace control commands, there are three values: 0 - no trace output;
+1 - short trace (decode frame header); 2 - long trace (dump entire frame
+in hex and ASCII).
+
+7. linkparam [call | default] param value
+This command does different things depending on how many arguments are given.
+
+a. linkparam
+Status and statistics for each link in the link table is displayed.
+
+b. linkparam wa2lqq
+The list of configurable parameters for the connection to wa2lqq
+is displayed. Valid parameters follow (these are distinct from
+the information given in case 'a' above).
+
+ackdel		(time) I frame acknowledgement delay (AX.25 timer T1)
+frack		(time) Acknowledgement timer (AX.25 timer T2)
+idlepoll	(time) Idle link keep-alive poll timer (AX.25 timer T3)
+
+
+maxframe	(1-7) Maximum number of outstanding I-frames
+newproto	(on/off) If set ON, use P/F bits in AX.25 level 2 during
+		recovery; if set OFF, use I-frame retransmission recovery
+retry		(integer) Retry count limit
+
+tfrmr		(0/1/2) Trace FRMR frames
+tstate		(0/1/2) Trace state transitions
+ttimer		(0/1/2) Trace link timer events
+
+c. linkparam wa2lqq retry
+Only the value of the "retry" parameter for the connection to wa2lqq
+is displayed (case 'b' displays all parameters.)
+
+d. linkparam wa2lqq retry 5
+Sets the value of the "retry" parameter for the connection to wa2lqq to 5.
+
+In cases b, c and d, the reserved name "default" may be used as a call sign;
+this allows display and modification of the default link parameters to be used
+whenever a new link entry is created. Example:
+
+linkparam default retry 5
+
+causes all new links to be established with a retry parameter of 5.
+Note that existing link table entries are unaffected, even those in
+the disconnected state.
+
+8. lineparam lineno param value
+This command also takes between 0 and 3 arguments.
+
+a. lineparam
+Displays state and traffic statistics for each HDLC line.
+
+b. lineparam 0
+Displays the list of configurable parameters for line 0. This information
+is distinct from that displayed in 'a' above:
+
+digipeat	(on/off) Enable/disable digipeating.
+mode		(0/1/2) 0: Carrier Sense Multiple Access (CSMA)
+			Defer transmitting when receiving carrier
+			1: Aloha - transmit at will, ignore receiver carrier
+			2: Full duplex - transmit continuously
+psize		(integer) Buffer allocation size for receive frames. Any
+		incoming frames larger than psize will be treated as
+		erroneous and ignored.
+speed		(integer) Set line speed. The following speeds are
+		theoretically supported by the 820: 800, 1200, 1760, 2144,
+		2400, 4800, 9600, 19200, 28800, 32000, 38400, 57600. However,
+		real-time constraints keep a 2.5 mhz 820 from operating
+		faster than 2400 baud in a full-duplex loopback mode. I'm
+		working	on this...
+tin		(0/1/2) Control tracing of incoming frames
+tout		(0/1/2) Control tracing of outgoing frames
+tused		(0/1/2) Control tracing of frames addressed to this station
+txdelay		(integer) Transmitter keyup delay (100 ms increments)
+
+c. lineparam 0 speed
+Displays only the line speed for HDLC line 0.
+
+d. lineparam 0 speed 1200
+Sets the speed of HDLC line 0 to 1200 bps. Also displays the previous
+line speed.
+
+Terminal session mode commands
+
+9.conv wa2lqq
+Enter conversational mode with station wa2lqq. The station must be
+present in the link table. If the link state is connected, normal
+I-frames will be sent; if the link state is disconnected, UI frames
+are sent.
+
+10. trans wa2lqq
+Enter transparent mode with wa2lqq. Otherwise the same as the 'conv'
+command.
+
+11. memory
+Display memory usage statistics.
+
+12. mycall ka9q
+Set the identity of this station to "ka9q". Without parameters, mycall
+displays the current setting of the station address.
+
+13. term 
+Display and/or change the following terminal parameters. Note that many
+of these are either no-ops on the 820, or are not yet really implemented.
+
+blen	(integer)	Number of bits/character to terminal. Noop on 820.
+bits	(integer)	Number of stop bits to terminal. Noop on 820.
+canline	(character)	Line cancel character.
+canpac	(character)	Packet cancel character. Not implemented. It was
+			never really clear to me that this is useful.
+command	(character)	Command recall character.
+cr	(on/off)	Control adding cr to packets. Not implemented.
+			This feature needs to be thought out more.
+delete	(character)	Character delete character.
+echo	(on/off)	Controls echoing of typed input.
+flow	(on/off)	Inhibit output while typing. Not implemented.
+hiwat	(integer)	Flow control point on keyboard buffer.
+lowat	(integer)	Flow control restart point on keyboard buffer.
+parity	(integer)	Parity control on terminal. Noop on 820.
+pass	(character)	Pass-through ("quoting") character. Not implemented.
+sendpac	(character)	Character which terminates commands and packets.
+speed	(integer)	Serial line speed. Noop on 820.
+start	(character)	Flow control restart character, user -> 820
+stop	(character)	Flow control stop character, user -> 820
+xoff	(character)	Flow control stop character, 820 -> user (not impl.)
+xon	(character)	Flow control restart char, 820 -> user (not impl.)
+
+a. term 
+Display the complete list.
+
+b. term speed
+Display only the terminal speed.
+
+c. term speed 1200
+Sets the terminal speed to 1200 baud. (Note that this is actually a
+no-op for the Xerox 820, as are several other terminal parameters,
+since the parallel keyboard and memory mapped display are used.)
+
+Summary
+
+The amount of work which the command interpreter code required surprised me.
+I am not completely satisfied with it, because it ought to be possible to
+do more cleanly than this. I am particularly interested in user feedback
+regarding the command set. Are there features missing that you really need?
+Useless commands that should be deleted to save space? Is the parser
+adequate? Are the commands reasonably named? etc.

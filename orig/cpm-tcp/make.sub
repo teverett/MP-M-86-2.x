@@ -1,0 +1,35 @@
+cz -DZ80 -Ib: b:ip.c
+as -zap b:ip
+cz -DZ80 -Ib: b:iproute.c
+as -zap b:iproute
+cz -DZ80 -iB: b:tcptimer.c
+as -zap b:tcptimer
+cz -DZ80 -ib: b:udp.c
+as -zap b:udp
+cz -DZ80 -ib: b:machdep.c
+as -zap b:machdep
+cz -DZ80 -ib: b:slip.c
+as -zap b:slip
+cz -DZ80 -ib: b:tcpuser.c
+as -zap b:tcpuser
+cz -DZ80 -ia: -ib: b:debug.c
+as -zap b:debug
+cz -DZ80 -ib: b:mbuf.c
+as -zap b:mbuf
+cz -DZ80 -ib: b:tcpinput.c
+as -zap b:tcpinput
+cz -DZ80 -ib: b:tcpout.c
+as -zap b:tcpout
+cz -DZ80 -ib: b:netuser.c
+as -zap b:netuser
+cz -DZ80 -ib: b:tcpsubr.c
+as -zap b:tcpsubr
+cz -DZ80 -ib: b:timer.c
+as -zap b:timer
+cz -DZ80 -Ib: b:mbuf.c
+as -zap b:mbuf
+cz -DZ80 -Ib: -Ia: b:tcptest.c
+as -zap b:tcptest
+cz -DZ80 -ib: b:icmp.c
+as -zap b:icmp
+ln -t -o b:tcptest.com b:tcptest.o -f b:objects.tst -lc

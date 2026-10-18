@@ -769,6 +769,131 @@ output): `src/kernel/SUP.A86`'s own kernel initialization has never
 been exercised in any form before this, a new frontier past everything
 #1-#24 covered.
 
+## 25. `src/loader/LDMPM.A86` — `jmpf mpm` read the far pointer to jump
+to from the wrong segment — FIXED
+
+Found continuing from #24: with `MPM.SYS` loading completely correctly,
+`LDMPM.A86` reached its own final `gompm: jmpf mpm` -- and execution
+never reached `MPM.SYS`'s own `init:` (its very first instruction,
+`src/kernel/INIT.SUP`) at all, confirmed by a debug probe placed at
+that label never printing.
+
+The cause: `mov ds,dldseg` (a few lines earlier, switching `DS` to
+MP/M's own data segment so the file's data can be validated/printed)
+runs *before* `jmpf mpm`, but `mpm`/`mpmstart`/`mpmcseg` are themselves
+data in `LDMPM.A86`'s own (now former) `DS` segment. An unprefixed
+`jmpf mpm` therefore read the far pointer to jump to out of the *MP/M*
+data segment instead of `LDMPM.A86`'s own -- garbage, not
+`{mpmstart,mpmcseg}`.
+
+**Fixed** by changing it to `jmpf cs:mpm`, the same `cs:` override
+already needed a few lines above it for `cs:.fcb1` for the exact same
+reason.
+
+## 26. `tools/build_mpmsys.py` — the module table's far-pointer
+segments were never patched at all, despite a stale comment claiming
+they were — FIXED
+
+Found continuing from #25: with the kernel entry point finally reached
+(debug probes placed at `INIT.SUP`'s `init:` now printed), execution
+still never reached `RTMIF.RTM`'s own `init:` via `INIT.SUP`'s `callf
+dword ptr rtmmod[bx]`. Reading back the module table's actual far
+pointers directly from the built `MPM.bin.dseg` (`struct.unpack`)
+showed every single one with segment `0000`.
+
+The cause: `tools/build_mpmsys.py` wrote `0` as the segment half of
+every module table far pointer, next to a comment claiming "Segment is
+patched in below, once" -- no such patch existed anywhere in this
+script or in `tools/build_disk.py` (checked). Every intermodule call
+through the table (every "xiosif"/"mpmif"/"supif"-style trampoline,
+down to `INIT.SUP`'s own first module-init call) therefore jumped to
+physical address `0x00000 + offset` -- straight into the IVT/BIOS data
+area.
+
+**Fixed** by adding a `MPM_CODE_SEG = 0x1000` constant (matching
+`tools/build_disk.py`'s own segment choice for where the combined code
+actually loads) and writing it as the segment half of every entry/init
+far pointer and the `dispatcher` field, instead of `0`.
+
+## 27. `tools/asm86` — a bare `BYTE`/`WORD`/`DWORD` size-literal used in
+field-offset arithmetic leaked its own byte-width onto the resulting
+EQU's size, misclassifying later bare references to it as memory
+operands — FIXED
+
+Found continuing from #26: with the module table's segments correctly
+patched (confirmed via `struct.unpack` showing `1000` everywhere), the
+hang at `RTMIF.RTM`'s `init:` persisted. A debug probe placed directly
+on `BX` right before `INIT.SUP`'s `callf dword ptr rtmmod[bx]` showed
+`BX` holding garbage instead of `4` (`mod_init`'s real value).
+
+The cause: `MODTAB.DEF`'s `mod_init equ mod_entry + dword` is pure
+offset-arithmetic (intentionally dimensionless -- it's meant to be
+used as a plain index, e.g. `mov bx,mod_init`), but the bare `dword`
+term's *value* (4, its own byte-width) was also being returned as that
+Value's `size` attribute in `tools/asm86/expr.py`'s expression parser.
+`size` doubles as a "this came from a sized memory reference" flag
+elsewhere in the same file, and `parse_add`'s `v.size or r.size`
+propagation carried that spurious size onto `mod_init`'s own stored
+EQU symbol -- with no `byte`/`word ptr` cast and no `offset`/`$`
+anywhere in its definition (the only two cases `tools/asm86/
+assembler.py`'s own prescan heuristic, added for #18, treats as
+"really is a memory-sized constant"). A later bare `mov bx,mod_init`
+then classified as a memory operand instead of an immediate, assembling
+as `mov bx,[0004]` (a direct read of whatever word happens to live at
+absolute offset 4) instead of `mov bx,4`.
+
+**Fixed** by having the bare `byte`/`word`/`dword` literal return only
+its numeric value, not also stamp that value as the Value's `size` --
+matching every one of this convention's other users in the tree (every
+`XXXlen equ ... + byte/word/dword` struct-length constant), none of
+which are meant to describe a sized memory reference either.
+
+## 28. `src/loader/LBDOSF1.A86`'s `seek` — read `SECTRAN`'s return
+value from the wrong register, corrupting every physical sector number
+whenever disk sector translation is disabled — FIXED
+
+Found continuing from #27: with the module table and `mod_init` both
+confirmed correct, `RTMIF.RTM`'s `init:` was finally reached (and ran
+successfully) -- but `MPM.SYS`'s own *data* segment, read back from
+memory at runtime, still didn't match what was verified correct on
+disk: the whole data segment (everything from the code/data boundary
+onward) was wrong, while the entire (much larger) code portion,
+spanning many tracks, loaded perfectly.
+
+Extensive debug probing (temporary, not kept) of `LDBIOS86Q.A86`'s
+`READ`'s destination addressing (`dma_seg`/`dma_adr`, printed for
+every one of the ~235 sector reads this load needs) showed it
+advancing correctly and contiguously the entire time -- ruling out the
+destination side entirely. Printing the *physical* sector number
+(`cur_psec`) computed for each read instead showed it climbing as high
+as `64`, impossible for this 18-sectors/track floppy; printing `seek`'s
+own `arecord`/`sectpt`/`DIV` remainder showed that intermediate value
+correctly bounded to `0..71` the entire time.
+
+The cause: `seek` computes the real 0-based sector in `DX` (verified
+correct), passes it to `SECTRAN` for translation, then reads
+`SECTRAN`'s result from the wrong register -- `mov cx,bx` instead of
+`mov cx,ax`. `SECTRAN`'s documented, real return value is always in
+`AX`; this disk's own DPB explicitly configures *no* sector
+translation (`xlt0 equ 0`), and `SECTRAN`'s "no translation" branch
+(`LDBIOS86Q.A86`) only ever sets `AX` (`mov ax,cx ! ret`), leaving `BX`
+stale from whatever last used it. Every `seek` therefore fed `SETSEC` a
+garbage sector number drawn from leftover `BX`, not the real one --
+confirmed by testing: `cur_psec` values well outside the real
+1-18 range, yet never erroring, because the stale `BX` values
+"happened" to still decode to *some* FDC-acceptable sector, just the
+wrong one, silently returning whatever was really at that wrong
+location instead. (`SECTRAN`'s *translation-table* branch happens to
+leave the correct value in `BX` too, built directly in `BL` by the
+table lookup -- which is presumably why this went unnoticed in the real
+DRI source for as long as it did: a DPB with real sector translation
+configured never exercises the branch that drops it.) No file in this
+tree had been big enough, read through this exact path, to notice
+before `MPM.SYS`.
+
+**Fixed** by changing it to `mov cx,ax`, matching `SECTRAN`'s actual,
+documented return convention in both of its branches.
+
 ## Status of the kernel/loader sources
 
 `src/kernel/CIO.A86`, `SYSDAT.A86`, `BDOS.A86`, `MEM.A86`, `RTM.A86`,
@@ -791,13 +916,29 @@ Booting under QEMU (`make run`) now gets past the boot sector, all of
 the "MP/M-86 V2.0 Loader" signon message, the entire floppy I/O layer
 in `LDBDOS.A86` (disk select, home/recalibrate, DMA sector reads,
 directory scan, `MPM.SYS` file lookup), and a complete, verified-
-correct load of the real on-disk `MPM.SYS` into memory (#15-#24 above)
-— no longer hanging or failing anywhere in the loader. It then jumps
-into the actual MP/M-86 kernel (`src/kernel/SUP.A86`'s own
-initialization) for the first time this project has ever reached that
-point, and currently stops there silently (no further output, not yet
-diagnosed) — a new frontier past the entire loader, not yet
-investigated at all.
+correct load of the real on-disk `MPM.SYS` into memory (#15-#24, #28
+above) — no longer hanging or failing anywhere in the loader. It then
+jumps into the actual MP/M-86 kernel (`src/kernel/INIT.SUP`'s own
+`init:`, #25) and, for the first time this project has ever gotten
+this far, successfully initializes every kernel module in turn --
+`RTM` (#26, #27), `MEM`, `BDOS`, `CIO`, and `XIOS` -- including `RTM`'s
+own process creation (`proc_creat`, called twice: once for the tick
+process, once for idle).
+
+It currently stops just past all of that, during `INIT.SUP`'s first
+*post-init* call back into `XIOS` (`io_maxconsole` via the `xiosif`
+trampoline) to query character-device counts -- not yet diagnosed.
+Debug probes left in place (`INIT.SUP`'s numbered serial markers
+`'1'`-`'D'`, `SUPIF.SUP`'s `'X'`, `XIOS86Q.A86`'s `'E'`/`'F'`,
+`RTMIF.RTM`'s pre/post-`proc_creat` far-pointer dump) show the module
+table's `XIOS` entry far pointer (`sysdat+0x28`) reads back correct
+immediately before `proc_creat`'s second call (for idle) and already
+corrupted immediately after it returns -- so whatever's happening is
+inside or around process creation/scheduling, not yet isolated to a
+single instruction. `XIOS86Q.A86`'s own `entry:` (the function
+dispatcher this call needs) is confirmed never reached at all.
+
+
 
 The RSP sources (`CLOCK.A86`, `ECHO.A86`, `TMP.A86`, `SUBMIT.A86`) and
 all 22 `.PLM` utilities in `src/utils/`/`src/toolchain/` compile and

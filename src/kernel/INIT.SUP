@@ -31,11 +31,13 @@ init:
 ; system initialization
 ; assume DS = Sysdat Segment
 ;
+	push ax ! mov al,'1' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 		;  set up stack,remember DSEG
 
 	mov ax,ds
 	mov ss,ax ! mov sp,offset (init_tos)
 	mov sysdat,ax
+	push ax ! mov al,'2' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 
 		; set up supervisor entry point
 	mov bx,(offset supmod)+2 ! mov ax,[bx]
@@ -65,17 +67,23 @@ init:
 
 		;initialize modules
 
+	push ax ! mov al,'3' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	mov bx,mod_init
 	push bx ! callf dword ptr rtmmod[bx] ! pop bx		; init RTM
+	push ax ! mov al,'4' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	push bx ! callf dword ptr memmod[bx] ! pop bx		; init MEM
+	push ax ! mov al,'5' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	test module_map,bdosmod_bit ! jz nbdom
 	    push bx ! callf dword ptr bdosmod[bx] ! pop bx	; init BDOS
-nbdom:	test module_map,ciomod_bit ! jz nciom
+nbdom:	push ax ! mov al,'6' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
+	test module_map,ciomod_bit ! jz nciom
 	    push bx ! callf dword ptr ciomod[bx] ! pop bx	; init CIO
-nciom:	test module_map,xiosmod_bit ! jz nxiom
+nciom:	push ax ! mov al,'7' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
+	test module_map,xiosmod_bit ! jz nxiom
 	    push ds ! push es
 	    callf dword ptr xiosmod[bx] ! pop es ! pop ds	; init XIOS
 nxiom:
+	push ax ! mov al,'8' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 		;if intflag is non-zero, interrupts
 		;are explicitly turned on at the RTM
 		;entry point.
@@ -89,15 +97,19 @@ nxiom:
 	mov i_mpm_cs,cs
 	mov ds,ax
 
+	push ax ! mov al,'9' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 		; get Character Dev Info from XIOS
 
 	mov ax,io_maxconsole ! call xiosif
+	push ax ! mov al,'A' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	mov ncondev,bl ! mov nciodev,bl
 	mov ax,io_maxlist ! call xiosif
+	push ax ! mov al,'B' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	mov nlstdev,bl ! add nciodev,bl
 
 		; Start RSPs
 nrsp:					;loop til done
+	push ax ! mov al,'C' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	mov ds,sysdat			;reset DS
 	mov cx,rspseg ! jcxz rsp_out	;?all done?
 	    mov es,cx			;ES->RSP
@@ -110,6 +122,7 @@ nrsp:					;loop til done
 	    mov dx,si ! int mpmint
 	    jmps nrsp			;Do another...
 rsp_out:
+	push ax ! mov al,'D' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 		; terminate init process
 	mov cl,f_terminate
 	mov dl,0ffh ! int mpmint

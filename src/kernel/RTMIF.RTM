@@ -35,6 +35,7 @@ init:		; RTM module Initialization
 	mov bx,(offset rtm_pdisp)	;init intermodule pdisp
 	mov word ptr [bx],offset farpdisp
 	mov word ptr 2[bx],cs
+	push ax ! push bx ! mov bx,28h ! mov ax,[bx] ! call ydbg ! pop bx ! pop ax	;TEMP DEBUG PROBE
 		;create tick and idle process
 	mov bx,offset tickpd		;Tick
 	mov ax,p_uda[bx]
@@ -50,10 +51,27 @@ init:		; RTM module Initialization
 	mov si,supervisor
 	mov ax,cs:2[si]
 	mov u_initcs,ax ! pop es
+	push ax ! push bx ! mov bx,28h ! mov ax,[bx] ! call ydbg ! pop bx ! pop ax	;TEMP DEBUG PROBE
 	mov dx,bx ! call proc_creat
+	push ax ! push bx ! mov bx,28h ! mov ax,[bx] ! call ydbg ! pop bx ! pop ax	;TEMP DEBUG PROBE
 		;init is now a process and can run
 		;concurrently with idle process
 	retf
+
+;TEMP DEBUG PROBE
+ydbg:
+	push ax ! push bx ! push cx ! push dx
+	mov cx,0404h
+ydbg1:	rol ax,cl
+	mov bl,al ! and bl,0fh ! cmp bl,9
+	ja ydbg2
+	add bl,'0' ! jmp ydbg3
+ydbg2:	add bl,'A'-10
+ydbg3:	mov dx,03f8h ! push ax ! mov al,bl ! out dx,al ! pop ax
+	dec ch ! jnz ydbg1
+	mov al,' ' ! mov dx,03f8h ! out dx,al
+	pop dx ! pop cx ! pop bx ! pop ax
+	ret
 
 ;*****************************************************
 ;*

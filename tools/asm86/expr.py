@@ -250,7 +250,23 @@ class _Parser:
             # symbol of that name (none exists in this tree).
             if low in ('byte', 'word', 'dword') and self.ctx.symtab.get(low) is None:
                 size = {'byte': 1, 'word': 2, 'dword': 4}[low]
-                return Value(size, size)
+                # This literal's *value* is its byte-width (1/2/4), but that
+                # width must NOT also become this Value's `size` attribute --
+                # `size` doubles as a "this came from a sized memory
+                # reference" flag (see parse_add's "v.size or r.size"
+                # propagation and expr.py's own operand classification at
+                # "sym.kind == 'equ' and sym.size"). Confirmed by testing:
+                # "mod_init equ mod_entry + dword" (MODTAB.DEF) was picking
+                # up size=4 from this `dword` term purely through arithmetic
+                # propagation, with no "ptr" cast anywhere -- making
+                # `mod_init` look like a sized/memory EQU even though it's
+                # a plain offset-arithmetic constant (4). That made every
+                # later `mov bx,mod_init` assemble as `mov bx,[0004]`
+                # (direct memory read) instead of the intended `mov bx,4`
+                # immediate, so BX never held the real module-table init
+                # offset -- the `callf dword ptr rtmmod[bx]` in INIT.SUP
+                # then jumped through garbage instead of RTM's init vector.
+                return Value(size)
             sym = self.ctx.lookup(t.val)
             return Value(sym.value, sym.size, symbol=sym)
         self.ctx.err(f"unexpected token {t.kind} ({t.val!r}) in expression")

@@ -132,8 +132,37 @@ seek:
         call    settrkf
         pop     cx                      ;set BIOS sector
         mov     dx,tranv
-        call    sectran
-        mov     cx,bx
+        call    sectran                 ;SECTRAN's real return value is in
+                                        ; AX, not BX -- confirmed by reading
+                                        ; its own two branches (LDBIOS86Q.A86):
+                                        ; the "no translation" branch (taken
+                                        ; whenever tranv/xlt0 is 0, as this
+                                        ; disk's own DPB sets it) only ever
+                                        ; sets AX ("mov ax,cx ! ret"), leaving
+                                        ; BX stale from whatever used it last.
+                                        ; "mov cx,bx" here used to pick up
+                                        ; that stale BX instead of the real
+                                        ; sector number -- confirmed by
+                                        ; testing: with no translation
+                                        ; configured, every `seek` call fed
+                                        ; SETSEC a garbage sector number
+                                        ; (e.g. logical sector values in the
+                                        ; 50s-60s on an 18-sector/track
+                                        ; floppy), corrupting every file read
+                                        ; spanning enough tracks to actually
+                                        ; exercise this path -- MPM.SYS was
+                                        ; the first file in this tree big
+                                        ; enough to notice, since everything
+                                        ; smaller fit in so few tracks the
+                                        ; garbage sector numbers happened to
+                                        ; still be in range by luck. Only the
+                                        ; translation-table branch happens to
+                                        ; also leave the right value in BX
+                                        ; (it's built directly in BL there),
+                                        ; which is why this went unnoticed
+                                        ; until a DPB with no translation was
+                                        ; actually exercised this far.
+        mov     cx,ax
         jmp     setsecf
         ;ret
 ;
@@ -596,6 +625,7 @@ rotr:
         mov     [bx],al
         pop     cx
         ret
+;
 ;
 ;************* end BDOS filesystem part 1 **************
 end

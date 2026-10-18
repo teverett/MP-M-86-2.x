@@ -85,6 +85,20 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KERNEL_DIR = os.path.join(ROOT, 'src', 'kernel')
 ASM86 = [sys.executable, os.path.join(ROOT, 'tools', 'asm86.py')]
 
+# Must match tools/build_disk.py's own MPM_CODE_SEG -- that script
+# chooses where MPM.SYS's combined code segment actually gets loaded
+# in memory, but the module table's far pointers (written here) need
+# that same segment baked in *now*, since nothing downstream ever goes
+# back to patch them. Missing that patch entirely (writing segment=0
+# for every entry, as this script used to) wasn't just a different
+# wrong address -- it was confirmed, by testing in QEMU, to make every
+# single intermodule call (every "xiosif"/"mpmif"/"supif"-style
+# trampoline, all the way down to `INIT.SUP`'s own first `callf dword
+# ptr rtmmod[bx]`) jump to physical address `0x00000 + offset` instead
+# of where the code actually lives -- straight into the IVT/BIOS data
+# area, with no further diagnostic output at all.
+MPM_CODE_SEG = 0x1000
+
 # Module name -> (source file stem, SYSDAT.FMT module-table field offset)
 MODULES = [
     ('SUP', 'SUP', 0x00),
@@ -167,20 +181,20 @@ def main():
               f"({len(code)} bytes), init={init_off:#x} entry={entry_off:#x}")
         if field_offset is not None:
             # Field layout (SYSDAT.FMT): entry far ptr (offset,segment),
-            # then init far ptr (offset,segment). Segment is patched in
-            # below, once; it's the same for every module here since
-            # they all share the one combined code segment.
+            # then init far ptr (offset,segment) -- same segment
+            # (MPM_CODE_SEG) for every module here, since they all
+            # share the one combined code segment.
             struct.pack_into('<HH', dseg, field_offset,
-                              (module_base + entry_off) & 0xFFFF, 0)
+                              (module_base + entry_off) & 0xFFFF, MPM_CODE_SEG)
             struct.pack_into('<HH', dseg, field_offset + 4,
-                              (module_base + init_off) & 0xFFFF, 0)
+                              (module_base + init_off) & 0xFFFF, MPM_CODE_SEG)
 
     # "dispatcher": no dedicated label found anywhere for this -- see
     # KNOWN LIMITATIONS above. Points at RTM's own general entry point.
     rtm_base = module_offsets['RTM']
     rtm_init, rtm_entry = get_init_entry_offsets('RTM')
     struct.pack_into('<HH', dseg, DISPATCHER_FIELD_OFFSET,
-                      (rtm_base + rtm_entry) & 0xFFFF, 0)
+                      (rtm_base + rtm_entry) & 0xFFFF, MPM_CODE_SEG)
 
     # module_map: which modules are present (MODFUNC.DEF's *mod_bit
     # values) -- every module built here except netmod.

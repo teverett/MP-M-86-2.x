@@ -93,10 +93,10 @@ the command utilities built in this repo (`src/utils/*.PLM` — `DIR`,
 
 ## XIOS
 
-**X**-shaped (extended) **I**nput/**O**utput **S**ystem — the one kernel
-module that is genuinely hardware-specific, analogous to CP/M's BIOS.
-It implements the low-level device drivers (disk controller, console
-UART, timer interrupt) for one particular machine. The copy in this tree
+e**X**tended **I**nput/**O**utput **S**ystem — the one kernel module
+that is genuinely hardware-specific, analogous to CP/M's BIOS. It
+implements the low-level device drivers (disk controller, console UART,
+timer interrupt) for one particular machine. The copy in this tree
 (`orig/mpm862sr/.../XIOS.A86`, `ROM.A86`) targets the Intel iSBC 86/12
 single-board computer with an SBC 204 disk controller — see
 `docs/build.md`'s note on why this specific XIOS can't be used to boot
@@ -104,6 +104,12 @@ MP/M-86 under QEMU without a replacement written for whatever disk/console
 hardware QEMU emulates. Every other kernel module (RTM, Supervisor, BDOS,
 memory manager, character I/O) is portable 8086 code that calls down
 into the XIOS rather than touching hardware directly.
+
+The term itself isn't an MP/M-86 invention: `orig/mpm_II/Control_2/
+resxios.asm` ("Sample Resident XIOS for MP/M II," per its own disk's
+README) shows DRI already using "XIOS" for the exact same role one CPU
+generation earlier, for MP/M II's own 8080/Z80 systems — see
+`docs/orig.md`'s "Related DRI source: MP/M II" section.
 
 ## DDT86
 
@@ -120,3 +126,49 @@ implementation has been found in this tree, so those externals remain
 unresolved in `tools/plmc`-built output — see `tools/plm/runtime_stub.A86`'s
 own header comment and `tools/plm/README.md`'s "Known limitations" for
 the current state of that gap.
+
+## CP/NET
+
+Digital Research's network/workstation-sharing layer for CP/M-family
+systems — lets a "slave" workstation (often diskless, or disk-light)
+log in over a link to a "master" machine and use its disks, printer,
+etc., a 1980s precursor to LAN-style file/printer sharing. It's a
+**separate DRI product from MP/M-86**, not a part of it or a dependency
+of it, just built by the same company in the same era; the two share no
+code. This tree has two CP/NET source trees for reference:
+`orig/cpnet80s/` (the original 8080/Z80 version, 1982, in DRI's MAC
+assembler dialect — a different CPU and dialect from everything
+`tools/asm86/` targets) and `orig/cpn86src/` (the 8086 port, CP/NET-86,
+1983, written in real ASM86 — the one dialect match with this repo's own
+tooling, though not yet validated against it). See `docs/orig.md`'s
+"Related DRI source: CP/NET" section for the full file-by-file
+breakdown.
+
+## SDIR
+
+An "extended directory" console command from **MP/M II** (Digital
+Research's 8080/Z80 multi-programming monitor, the direct ancestor
+MP/M-86 2.x was ported from — see `docs/orig.md`'s "Related DRI source:
+MP/M II" section), with no equivalent utility anywhere in this repo's
+own `src/utils/` — where plain `DIR.PLM` just lists filenames, SDIR adds
+sorting, searching, printing, and file time-stamp display. Found in
+`orig/mpm_II/CUSPs_5/`, split one module per file (all dated 14 Sept
+1981, by Danny Horovitz):
+
+- **`dm.plm`** — `$title('Super Directory Command')`, program name
+  `sdir`: the entry point/main module.
+- **`sn.plm`** — the command-line scanner (parses the typed `SDIR`
+  command line).
+- **`da.plm`** — the arithmetic module.
+- **`dse.plm`** — the search module (matching files to the command's
+  arguments).
+- **`dso.plm`** — the sort module.
+- **`dsh.plm`** — the show/display module.
+- **`dp.plm`** — the print module.
+- **`dts.plm`** — the time-stamp display module — its own header notes
+  the date/time-conversion code comes "From MP/M 1.1 TOD program,"
+  i.e. an even earlier ancestor of this repo's own `src/utils/TOD.PLM`.
+
+`sdir.prl`/`xsdir.prl` (`.PRL` = MP/M II's Page Relocatable binary
+format — see `docs/orig.md`) are two pre-built compiled forms of the
+same program, not further source.

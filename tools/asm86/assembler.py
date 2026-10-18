@@ -29,6 +29,11 @@ class EncodeCtx:
         # rel8 range?") must not be enforced yet -- only instruction
         # *length* (fixed per mnemonic, see isa.py) matters in pass 1.
         self.tentative = tentative
+        # For isa.SHORT_JUMP_MNEMONICS only: whether this specific
+        # occurrence has been relaxed to its long form. Decided by
+        # Assembler._relax_jumps before pass 1/2 ever run; see isa.py's
+        # _encode_jcc/_encode_jmps for what each mnemonic's long form is.
+        self.jump_long = False
 
     def err(self, msg):
         raise AsmError(msg, self.filename, self.lineno)
@@ -112,6 +117,15 @@ class Assembler:
         self.tentative = False
         self.presize = {}         # name(lower) -> 1/2, from _prescan_sizes()
         self.prekind = {}         # name(lower) -> ('equ'|'label', size), from _prescan_sizes()
+        # Jump-size relaxation state (see _relax_jumps). jump_long is
+        # keyed by a sequential index assigned to each SHORT_JUMP_MNEMONICS
+        # occurrence, in file order -- stable across repeated passes
+        # because every pass walks the exact same `lines` in the exact
+        # same order. jump_sites is only populated during a tentative
+        # pass, to be checked once that pass's symtab is fully resolved.
+        self.jump_long = {}
+        self.jump_sites = []
+        self._jump_idx = 0
 
     # -- segment / symbol helpers -----------------------------------
     def switch_seg(self, name):
@@ -152,21 +166,69 @@ class Assembler:
     def assemble(self, path, search_dirs):
         lines = flatten(path, search_dirs)
         self._prescan_sizes(lines)
-        self._run_pass(lines, is_final=False)
+        self._relax_jumps(lines)
         if self.pending:
             names = ', '.join(sorted(self.symtab[k].name for k in self.pending))
             raise AsmError(f"undefined symbol(s), never defined anywhere in the file: {names}")
-        # Pass 1 leaves self.symtab fully populated with every label's
-        # final address (lengths never depend on forward-referenced
-        # values -- see tools/README.md), so pass 2 reuses it verbatim and
-        # only resets the segment/location state before re-emitting bytes.
+        # Pass 1 (the last iteration _relax_jumps ran) leaves self.symtab
+        # fully populated with every label's final address -- lengths no
+        # longer depend on a forward reference's *value* (only on
+        # self.jump_long, which is now stable) -- so pass 2 reuses it
+        # verbatim and only resets the segment/location state before
+        # re-emitting bytes.
         self.segs = {}
         self.seg_order = []
         self.loc = {}
         self.cur_seg = None
         self.if_stack = []
         self.ended = False
+        self._jump_idx = 0
         self._run_pass(lines, is_final=True)
+
+    def _relax_jumps(self, lines, max_iters=50):
+        """Iterate pass 1 until every SHORT_JUMP_MNEMONICS occurrence's
+        jump_long decision is stable.
+
+        Growing a jump to its long form only ever *increases* the
+        distance other jumps have to cover (the long forms are strictly
+        bigger than the short ones they replace), never decreases it --
+        so jump_long only ever grows monotonically across iterations and
+        this is guaranteed to converge; max_iters is just a sanity cap in
+        case a future change breaks that invariant.
+        """
+        for _ in range(max_iters):
+            self.jump_sites = []
+            self._jump_idx = 0
+            self.symtab = {}
+            self.segs = {}
+            self.seg_order = []
+            self.loc = {}
+            self.cur_seg = None
+            self.if_stack = []
+            self.ended = False
+            self.pending = set()
+            self._run_pass(lines, is_final=False)
+            if not self._grow_out_of_range_jumps():
+                return
+        raise AsmError(f"jump-size relaxation did not converge after {max_iters} iterations "
+                        "(this would be an assembler bug, not a source issue)")
+
+    def _grow_out_of_range_jumps(self):
+        """Re-check every recorded short-jump site against the symtab
+        this (now-complete) tentative pass just resolved. Returns True if
+        any site needed growing (so the caller should re-run pass 1)."""
+        grown = False
+        for site in self.jump_sites:
+            idx = site['idx']
+            if self.jump_long.get(idx, False):
+                continue
+            ctx = ExprCtx(self.symtab, site['addr'], site['filename'], site['lineno'])
+            target = eval_text(site['operand_text'], ctx).n
+            rel = target - (site['addr'] + 2)
+            if not (-128 <= rel <= 127):
+                self.jump_long[idx] = True
+                grown = True
+        return grown
 
     def _run_pass(self, lines, is_final):
         self.tentative = not is_final
@@ -345,6 +407,20 @@ class Assembler:
         m = mnem.lower()
         addr = self.cur_addr()
         ectx = EncodeCtx(addr, filename, lineno, tentative=self.tentative)
+
+        if m in isa.SHORT_JUMP_MNEMONICS:
+            idx = self._jump_idx
+            self._jump_idx += 1
+            ectx.jump_long = self.jump_long.get(idx, False)
+            if self.tentative:
+                # Target isn't evaluated here -- a forward reference may
+                # not be defined yet at this point in a linear pass 1
+                # scan. _grow_out_of_range_jumps() re-evaluates this text
+                # once the whole pass (and so the symtab) is complete.
+                self.jump_sites.append({
+                    'idx': idx, 'addr': addr, 'operand_text': operand_text,
+                    'filename': filename, 'lineno': lineno,
+                })
 
         if m in isa.REP_PREFIXES:
             inner_label, inner_mnem, inner_rest = parse_statement(operand_text, ALL_MNEMONICS)

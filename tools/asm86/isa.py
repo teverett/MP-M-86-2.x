@@ -6,8 +6,14 @@ Design notes (see tools/README.md for the full rationale):
     reference's resolved value -- pass 1 and pass 2 compute identical
     lengths.
   - JMP/CALL default to the near full-size encoding (E9/E8); only the
-    explicit 'jmps' mnemonic uses the 2-byte short form (EB). No
-    automatic short/long jump optimization is attempted.
+    explicit 'jmps' mnemonic uses the 2-byte short form (EB).
+  - JMPS/Jcc/LOOP*/JCXZ (SHORT_JUMP_MNEMONICS below) *do* get real
+    jump-size relaxation: assembler.py's Assembler._relax_jumps decides,
+    per occurrence, whether the target fits the hardware 2-byte short
+    form or needs growing, and tells these encoders which via
+    EncodeCtx.jump_long. JMPS grows to a plain 3-byte near JMP; the
+    conditional forms grow to an 8-byte trampoline (see _encode_jcc)
+    since they can't just take a 16-bit displacement directly.
   - This assembler is not intended to produce byte-identical output to
     the original DRI ASM86 -- only functionally equivalent code.
 """
@@ -36,6 +42,13 @@ JCC = {
     'jp': 0x7A, 'jpe': 0x7A, 'jnp': 0x7B, 'jpo': 0x7B,
 }
 LOOP_OPS = {'loop': 0xE2, 'loope': 0xE1, 'loopz': 0xE1, 'loopne': 0xE0, 'loopnz': 0xE0}
+
+# Mnemonics with a hardware-fixed 2-byte short (rel8) form: JMPS and
+# every Jcc/LOOP*/JCXZ. assembler.py's relaxation pass (see
+# Assembler._relax_jumps) decides, per occurrence, whether the target is
+# in range for that 2-byte form or needs growing -- see EncodeCtx.jump_long
+# and the encoders below.
+SHORT_JUMP_MNEMONICS = set(JCC) | set(LOOP_OPS) | {'jcxz', 'jmps'}
 
 ALU = {'add': 0, 'or': 1, 'adc': 2, 'sbb': 3, 'and': 4, 'sub': 5, 'xor': 6, 'cmp': 7}
 
@@ -227,10 +240,26 @@ def _encode_jmp(ops, ctx):
 
 def _encode_jmps(ops, ctx):
     op = ops[0]
+    if ctx.jump_long:
+        # Relaxed: JMPS is already unconditional, so growing it just
+        # means "use the real near JMP form" -- no trampoline needed
+        # (contrast _encode_jcc below, which can't do this because its
+        # jump is conditional).
+        if ctx.tentative:
+            return bytes(3)
+        target = _rel_target(op, ctx)
+        rel = (target - (ctx.addr + 3)) & 0xFFFF
+        return bytes([0xE9]) + u16(rel)
+    if ctx.tentative:
+        return bytes(2)
     target = _rel_target(op, ctx)
     rel = target - (ctx.addr + 2)
-    if not ctx.tentative and not (-128 <= rel <= 127):
-        ctx.err(f"JMPS target out of short-jump range (rel={rel})")
+    if not (-128 <= rel <= 127):
+        # The relaxation pass (assembler.py) should have already caught
+        # this and set ctx.jump_long -- reaching here means relaxation
+        # didn't converge on this site, a relaxation bug, not a normal
+        # out-of-range source branch.
+        ctx.err(f"JMPS target out of short-jump range (rel={rel}) after relaxation")
     return bytes([0xEB]) + u8(rel & 0xFF)
 
 
@@ -261,11 +290,40 @@ def _encode_callf(ops, ctx):
 
 
 def _encode_jcc(opcode, ops, ctx):
+    if ctx.jump_long:
+        # Relaxed form: a conditional/LOOP/JCXZ opcode can't take a
+        # 16-bit displacement at all on the 8086, and (unlike JMPS) its
+        # condition means it can't simply be re-encoded as some other
+        # opcode with a longer displacement either. Use the standard
+        # trampoline instead -- it works uniformly for every mnemonic in
+        # SHORT_JUMP_MNEMONICS without needing a per-opcode "inverse
+        # condition" table:
+        #
+        #   addr+0: <opcode> 03         ; short jump, always in range:
+        #                                 always exactly 3 bytes forward,
+        #                                 landing on the second JMP below
+        #   addr+2: E9 <rel to addr+8>  ; near JMP, taken when the
+        #                                 original condition was FALSE;
+        #                                 skips over the real-target JMP
+        #   addr+5: E9 <rel to target>  ; near JMP to the real target,
+        #                                 only reached via the short jump
+        #                                 at addr+0 (condition TRUE)
+        #   addr+8: (falls through here when the condition was FALSE)
+        if ctx.tentative:
+            return bytes(8)
+        target = _rel_target(ops[0], ctx)
+        over_rel = 3  # addr+2's JMP always skips exactly the JMP at addr+5
+        target_rel = (target - (ctx.addr + 8)) & 0xFFFF
+        return (bytes([opcode, 0x03, 0xE9]) + u16(over_rel)
+                + bytes([0xE9]) + u16(target_rel))
+    if ctx.tentative:
+        return bytes(2)
     target = _rel_target(ops[0], ctx)
     rel = target - (ctx.addr + 2)
-    if not ctx.tentative and not (-128 <= rel <= 127):
-        ctx.err(f"conditional/loop branch out of range (rel={rel}); "
-                "8086 short jumps cannot reach this target")
+    if not (-128 <= rel <= 127):
+        # See the matching comment in _encode_jmps: the relaxation pass
+        # should have already grown this site to the long form above.
+        ctx.err(f"conditional/loop branch out of range (rel={rel}) after relaxation")
     return bytes([opcode]) + u8(rel & 0xFF)
 
 

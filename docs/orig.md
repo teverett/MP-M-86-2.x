@@ -138,6 +138,501 @@ anything in this project's own `asm86` implementation. Kept here only
 as a curiosity about DRI's assembler lineage (e.g. its one-letter
 internal error codes for "comma missing," "bad register syntax," etc.).
 
+## Related DRI source: MP/M II (`orig/mpm_II/`)
+
+A much larger, directly relevant tree added later: the complete source
+of **MP/M II V2.0** (per `orig/mpm_II/nucleus/mpm.asm`'s title line),
+Digital Research's 8080/Z80 multi-programming monitor — the **direct
+ancestor MP/M-86 2.x was ported from**, by the same company, with the
+same architecture (BDOS, a scheduler/dispatcher nucleus, RSPs, CUSPs)
+and even many of the same module/file names, just for an earlier CPU.
+Copyright notices throughout date it to 1976–1981, with some files
+explicitly revised "14 Sept 81 by Thomas Rolander" — i.e. written and
+maintained right up to around when the MP/M-86 2.x port (this repo's
+main subject) was done. 239 files across 15 top-level subdirectories
+(`ASM/` has one further level, `DDT/`, inside it):
+
+- **`nucleus/`** — the scheduler/dispatcher core, built the same way
+  real MP/M-86 kernel modules are built but with the actual steps
+  preserved in `xdos.sub` (unlike anything found so far in
+  `orig/mpm862sr/`): each module is individually assembled with `RMAC`
+  into a `.REL` relocatable object, the objects are grouped into three
+  `LIB.COM` libraries, and the libraries are `LINK`ed together into the
+  final `xdos.spr` — concrete, DRI-sanctioned precedent for real
+  multi-object linking, directly relevant to `docs/build.md`'s "do we
+  need a linker?" question (see also `mpmldr/gensys/` below). By title
+  line (all "MP/M II V2.0 ..."):
+  - `xdos1.lib` = `xdos.asm` (the XDOS dispatch entry itself — XDOS is
+    MP/M II's name for what MP/M-86 splits into the Supervisor),
+    `dsptch.asm` ("Dispatcher"), `queue.asm` ("Queue Management"),
+    `flag.asm` ("Flag Management"), `memmgr.asm` ("Memory Management" —
+    together with `dsptch`/`queue`/`flag`, the direct analogues of
+    MP/M-86's RTM/MEM modules), `th.asm` ("Terminal Handler," the CIO
+    analogue), `lst.asm` ("List Handler," the printer/list-device
+    analogue — MP/M-86 has no separate module for this, it's folded
+    into CIO).
+  - `xdos2.lib` = `cli.asm` ("Command Line Interpreter," MP/M II's
+    Supervisor-equivalent command parser), `tick.asm` ("Tick Process"),
+    `clock.asm` ("Clock Process" — the direct ancestor of
+    `src/rsp/CLOCK.A86`; this and `tmpsub.asm` below are themselves RSP
+    source, not nucleus code proper, despite living in this directory),
+    `attach.asm` ("Attach Process" — the ancestor of `src/utils/
+    ATTACH.PLM`, here apparently a background process rather than a
+    console utility).
+  - `xdos3.lib` = `datapg.asm` ("Data Page" — shared data storage),
+    `mpm.asm` ("Main Program," the entry point), `rlsmx.asm` ("Release
+    MX queues Procedure"), `rlsdev.asm` ("Release Console & List
+    Devices").
+  - Linked directly into `xdos.spr` alongside the three libraries:
+    `ver.asm` ("Version & Revision Date"), `clbdos.asm` ("CLBDOS
+    Procedures" — the nucleus's own gateway *into* BDOS, the opposite
+    direction from this repo's own `tools/plm/runtime_stub.A86`),
+    `xdosif.asm` ("Common/Banked XDOS I/F," the dispatch entry
+    application programs actually call into — MP/M II's analogue of
+    MP/M-86's single `INT 224` gate), and `patch.asm` ("Patch Area," a
+    reserved post-build patch space — the same role as this tree's own
+    `PATCH.COD`/`.CPM` convention in `docs/filetypes.md`).
+  - Built and linked *separately*, not part of `xdos.spr` itself:
+    `tmpsub.asm` ("Terminal Message Processor & Submit" — MP/M II
+    combines what MP/M-86 later splits into two separate RSPs,
+    `TMP.A86` and `SUBMIT.A86`, into this one module; its linked output
+    is renamed `tmp.spr`) and `bnkxdos.asm` ("Banked XDOS," the
+    banked-memory counterpart to `xdos.asm` — same relationship as
+    `bdos/`'s resident/non-resident split below, just for the nucleus).
+- **`bdos/`** — the BDOS file-system module for a **banked**
+  (multi-memory-bank) system, split into a resident part (lives in
+  every bank) and a non-resident part (swapped into whichever bank is
+  current) — confirmed by each file's own title line, not just file
+  naming — built by literally concatenating two `.asm` files with `PIP`
+  before assembling the result as one file, per `bdos.sub`:
+  - **`resbdos.spr`** = `resbdos1.asm` ("Resident Portion of Banked
+    BDOS") + `conbdos.asm` ("Console Portion" of BDOS — console-related
+    BDOS calls), concatenated into one `resbdos.asm` and assembled.
+  - **`bnkbdos.spr`** = `bnkbdos1.asm` ("Non-Resident Portion of Banked
+    BDOS") + `bdos30.asm` (the actual, ~100KB core file-system logic —
+    no `$title` line of its own since it's meant to be concatenated in,
+    but `dvers equ 30h` inside it confirms "BDOS 3.0"), concatenated
+    into one `bnkbdos.asm` and assembled. This is MP/M-86's own `.BDO`
+    fragment-concatenation convention (`BDOSIF.BDO`, `FILE1-4.BDO`,
+    etc. — `docs/filetypes.md`) done the exact same way one CPU
+    generation earlier, down to the same "glue source files together,
+    then assemble the result as one unit" mechanism — not a new idea
+    this repo's own `tools/asm86`/`tools/plmc` stub-concatenation
+    invented either (see `mpmldr/gensys/` below for a third instance of
+    the same pattern, at the hex-binary level instead of source level).
+  Banked vs. non-banked memory was an 8080/Z80-specific concern MP/M-86's
+  flat 8086 memory model doesn't have, so neither variant has a direct
+  MP/M-86 counterpart as such — `src/kernel/BDOS.A86` corresponds to
+  *both* of these together conceptually, not to either one alone.
+- **`RSPs/`** — background Resident System Processes, all with no direct
+  MP/M-86 equivalent in this tree. Three of the four follow the exact
+  same resident/banked split already seen in `bdos/` and `nucleus/`
+  above — confirmed directly by `brspbi.asm`'s own title, `"Banked
+  Resident System Process BDOS Interface"`, which settles what `.BRS`
+  actually stands for (not a guess from the extension alone):
+  - **Scheduler** (`scrsp.plm`, "Scheduler Process - Resident Portion"
+    → `sched.rsp`; `scbrs.plm`, "Scheduler Process - Banked Portion" →
+    `sched.brs`).
+  - **Spool** (`sprsp.plm`/`spbrs.plm`, same Resident/Banked split →
+    `spool.rsp`/`spool.brs` — a print-spooler process).
+  - **Status** (`msrsp.plm`/`msbrs.plm`, "Status Process," same split →
+    `mpmstat.rsp`/`mpmstat.brs` — the RSP behind the `MPMSTAT`/`STAT`
+    family of commands; `CUSPs_2/msts.plm` below is the user-facing
+    command that talks to it, the same command-talks-to-a-status-RSP
+    shape MP/M-86's own `STSCMD`/`STSRSP` split has, just for a
+    different RSP).
+
+  Each banked ("BRS") half is linked together with `brspbi.asm` itself
+  (a small shared BDOS-call interface for the banked side) and built
+  twice — located at both `0000H` and `0100H`, converted to Intel-hex,
+  then diffed and run through `GENMOD` (per `brsgen.sub`/`brsgent.sub`/
+  `cbrsgen.sub`, generic templates for this exact
+  two-location-then-diff-then-GENMOD build, parameterized on the RSP
+  name) — the same "assemble a module twice at two addresses and let
+  `GENMOD` diff the two hex outputs to find the address-dependent
+  bytes" relocation technique documented in full under `ASM/DDT/` below
+  (and, independently, in every `CUSPs_1`–`CUSPs_5` build script) — not
+  the simpler source-concatenation technique `bdos/` above uses, a
+  genuinely different mechanism despite both being "glue pieces
+  together" in spirit. `mscmn.plm`
+  ("Common Literals") is a shared, title-less PL/M fragment meant to be
+  pulled into each of these — `TRUE`/`FALSE`/`BOOLEAN` constants plus
+  `mon1`/`mon2`/... `EXTERNAL` procedure declarations for the BDOS/XDOS
+  call interface, the exact same shape (even the same names) as this
+  repo's own `tools/plm/README.md` calling-convention and
+  `tools/plm/runtime_stub.A86`'s `pl_mon1`–`pl_mon4`.
+
+  **Abort** (`abort.asm`, "Abort Resident System Process" → `abort.rsp`)
+  is the odd one out: a single, undivided RSP with no resident/banked
+  split at all, built directly by `abort.sub` (`RMAC` → `XREF` → `LINK`,
+  no `GENMOD`/hex-concatenation step) — a real architectural difference
+  from `ABORT.PLM`, which is an ordinary console utility under MP/M-86,
+  not a background process.
+
+`CUSPs_1` through `CUSPs_5` are "Console Utility Programs," MP/M II's
+name for the category `src/utils/` holds under MP/M-86 — split across
+five directories (by distribution disk, going by `Control_1`/`Control_2`
+below holding the equivalent pre-built binaries in the same groupings)
+rather than one, unlike `src/utils/`. Every one of them is built the
+same way, confirmed directly in each directory's own build script
+(`CUSPs_1/prla1-3.sub`, `CUSPs_2/prlb1-4.sub`, `CUSPs_4/pip.sub`,
+`CUSPs_5/dall.sub`): compile with `PLM80`, then `LINK` with a small
+shared external-stub object (`x0100`, the same file as `mpmldr/
+gensys/x0100.asm`'s "Externals" — reused across every `CUSPs_*`
+directory, not local to the loader) and `LOCATE` at `0100H`; separately
+link+locate the *same* object again at `0200H`; `OBJHEX` both, `PIP`
+them together, then `GENMOD` the combined hex into the final `.PRL` —
+the same two-address-then-diff relocation technique already confirmed
+for `RSPs/` above (and, below, for `ASM/DDT/` too), now shown to be how
+literally every CUSP in
+this tree is built, not an exception. The final `GENMOD` command spells
+out its own output filename by hand with a leading `x` (e.g. `genmod
+dir.hex xdir.prl`) — see the correction under `CUSPs_3/` below for where
+that `x`-prefix convention actually comes from.
+
+- **`CUSPs_1/`** — direct file-for-file ancestors of utilities already
+  in `src/utils/`, same PL/M source just for the 8080: `dir.plm`,
+  `era.plm`, `eraq.plm`, `ren.plm`, `set.plm`, `show.plm`, `type.plm`,
+  and `stat.plm` (the undivided ancestor of MP/M-86's `STSCMD.PLM`/
+  `STSCOM.PLM`/`STSRSP.PLM` split — one PL/M-80 program where MP/M-86
+  has three). The `x*.prl`/`prla*.sub` files are this disk's pre-built
+  compiled forms and build (Submit) scripts for the same set.
+- **`CUSPs_2/`** — more direct ancestors (`abort.plm`, `cns.plm`
+  ≈ `CONS.PLM`, `drst.plm` ≈ `DSKRST.PLM`, and `tod.plm` — the direct
+  ancestor of `src/utils/TOD.PLM`, title "MP/M II V2.0 Date and Time"),
+  plus several command-side utilities with **no equivalent in
+  `src/utils/`**: `mschd.plm` ("Scheduler Transient Program," controls
+  the `sched` RSP in `RSPs/`), `mspl.plm` ("Spool Program," controls the
+  `spool` RSP), `stpsp.plm` ("Stop Spooler Program"), `msts.plm`
+  ("Status Program," controls the `mpmstat` RSP — the same
+  command-talks-to-a-status-RSP shape as MP/M-86's `STSCMD`/`STSRSP`
+  split, just for a different RSP), `print.plm` ("List Number
+  Assign/Display," a LIST-device management command), `user.plm` ("User
+  Number Assign/Display"), `sub.plm` (the console-side `SUBMIT` command,
+  pairing with `nucleus/tmpsub.asm`'s RSP half), and `prlcm.plm` ("PRL
+  to COM File," a format-conversion utility). `mscmn.plm` is a shared
+  `DECLARE`d-literals/common-code module for the `ms*` family, not a
+  command on its own. `dump.asm`/`extrn.asm` are a sample `DUMP` utility
+  and its separately-assembled external-reference stub, per `dump.asm`'s
+  own header comment on how to build it — demonstration code, not a
+  real product utility. The `x*.prl`/`prlb*.sub` files are this disk's
+  compiled forms/build scripts.
+- **`CUSPs_3/`** — the `GENHEX`/`GENMOD`/`LOAD` system-generation
+  toolchain (MP/M II's equivalent of what `orig/mpm862sr/`'s numbered
+  disks hold for MP/M-86's own build process): `genhex.asm`/`.com` and
+  `genmod.asm`/`.com` (source plus pre-built binary for each — `GENMOD`
+  is "MP/M Relocatable Module Generator," per its own title line) and
+  `load.plm`/`.com` (`LOAD`, the "CP/M Command File Loader" — a generic
+  Intel-hex-to-`.COM` converter, the final step of building *any*
+  loadable binary, not an RSP-specific tool; see `mpmldr/gensys/`'s own
+  build scripts below for it in actual use). `comgen.sub` is a simpler,
+  *different* generic template (a single `link`+`locate` with no
+  double-address/`GENMOD` relocation step at all) — **correcting an
+  earlier version of this document**, which guessed the `x`-prefix on
+  every compiled CUSP (`xdir.prl`, `xabort.prl`, `xpip.prl`, etc.) came
+  from this file's own `LINK ... TO x$1.mod` output naming. It doesn't:
+  the real per-utility build scripts (`CUSPs_1/prla1-3.sub` etc., see
+  above) show the `x`-prefix is just typed directly into each `GENMOD`
+  command's own output filename argument (`genmod dir.hex xdir.prl`) —
+  a plain naming convention for the final compiled form, with no
+  acronym behind it, most likely chosen just to avoid colliding with
+  the same-named `.PLM` source file in the same directory during the
+  build: `Control_1/` (the actual distribution disk) has the *same*
+  compiled programs under their clean, unprefixed names (`dir.prl`,
+  `era.prl`, `sdir.prl`, etc., with no source `.PLM` alongside them to
+  collide with there), so the `x`-prefix is dropped again somewhere
+  between building a CUSP here and shipping it on that disk.
+- **`CUSPs_4/`** — two more direct ancestors of `src/utils/` utilities,
+  confirmed via `pip.sub` to use the exact same double-address/`GENMOD`
+  build as everything else in `CUSPs_1`–`CUSPs_5`: `ed.plm`/`.prl` and
+  `pip.plm`/`.prl`/`.sub` (`ED.PLM` and `PIP.PLM` already exist under
+  those exact names in `src/utils/`).
+- **`CUSPs_5/`** — a single program with no MP/M-86 equivalent in this
+  tree at all — **SDIR**, an "extended directory" command built from one
+  module per file (`dm.plm`, "Super Directory Command," is the entry
+  point; `da`=arithmetic, `dp`=print, `dse`=search, `dsh`=show/display,
+  `dso`=sort, `dts`=time-stamp display, `sn`=the command-line scanner,
+  each file's own `$title` confirms its role) — see `docs/glossary.md`'s
+  "SDIR" entry. `xsdir.prl` is `dall.sub`'s own `GENMOD` output;
+  `sdir.prl` (no `x`) is the same program under its clean, shipping
+  name — see the `x`-prefix note under `CUSPs_3/` above.
+- **`LITs/`** — `DECLARE ... LITERALLY` include files, the direct
+  ancestor of this tree's own `.LIT` convention (see
+  `docs/filetypes.md`). File-by-file, against what's actually in
+  `src/` (not just name-matching — each pair was `diff`ed):
+  - **`copyrt.lit`** → `src/utils/COPYRT.LIT`, nearly verbatim (just the
+    copyright year range shortened from "1979,1980,1981" to "1981").
+  - **`fcb.lit`** (`fcb$descriptor` structure) → `src/utils/`'s own FCB
+    handling, same concept, not a verbatim carryover.
+  - **`flag.lit`** → `src/utils/FLAG.LIT`: both define a process
+    flag/status data layout, but the actual fields differ (MP/M II's
+    is just `nmbflags literally '16'`; MP/M-86's is a full
+    `flag$structure` with `pd`/`ignore` fields) — same role, reworked
+    content, not a copy.
+  - **`proces.lit`** → `src/utils/PROCES.LIT` — and this is the one
+    with the smoking-gun evidence for the whole tree's lineage:
+    MP/M-86's own copy's banner comment literally reads `"Proces
+    Literals MP/M-8086 II"`, an intermediate name directly naming both
+    ancestor and descendant in one string.
+  - **`queue.lit`** (`queueheader` structure) → renamed to
+    `src/utils/QD.LIT` under MP/M-86 ("QD" = Queue Descriptor), not a
+    name match despite being the same concept.
+  - **`sysdat.lit`** (byte-offset layout comments for system data) →
+    renamed `src/utils/SD.LIT` ("System Data Page") under MP/M-86, same
+    concept (a based structure describing the system data page), not a
+    name match either.
+  - **`memmgr.lit`** (one combined `memory$descriptor` structure) →
+    split into three named structures, `src/utils/MDSAT.LIT`'s
+    `md$structure`/`ms$structure`/`sat$structure` — same role, evolved
+    layout, renamed file.
+  - **`common.lit`** (`TRUE`/`FALSE`/`BOOLEAN`/`FOREVER` plus the
+    `LITERALLY`→`LIT`/`DECLARE`→`DCL` abbreviation bootstrap) → renamed
+    `src/utils/COMLIT.LIT` under MP/M-86 — the exact file
+    `tools/plm/README.md`'s "Notable discoveries" already singles out
+    for "bootstrapping its own syntax sugar."
+  - **`dpgos.lit`**, **`xdos.lit`** — BDOS/XDOS function-code constants
+    with no identified direct `.LIT` counterpart in `src/`; the same
+    *information* (function numbers) lives on in `src/`'s own `.DEF`
+    files instead, under the 8086 port's own naming.
+
+  `src/utils/UDA.LIT`'s own banner comment is a second instance of the
+  same "MP/M-86 II" intermediate naming found in `PROCES.LIT` above —
+  `"MP/M-86 II  User Data Area format - August 8, 1981"` — further
+  confirming the whole `.LIT` set's lineage isn't just a resemblance,
+  it's a literal, dated, in-place evolution of these same files.
+- **`ASM/DDT/`** — the actual **original source** of DRI's 8080 `ASM.COM`
+  cross-assembler and of `DDT` (the 8080 ancestor of the `DDT86` this
+  tree's own `docs/glossary.md` already describes), each module
+  identified by its own title line, not guessed from the filename:
+  - **`ASM.COM`**: `as0com.asm` ("Asm Common Data Area"), `as1io.asm`
+    ("Asm IO Module"), `as2scan.asm` ("Asm Scanner Module"), `as3sym.asm`
+    ("Asm Symbol Table Module"), `as4sear.asm` ("Asm Table Search
+    Module"), `as5oper.asm` ("Asm Operand Scan Module"), `as6main.asm`
+    ("Asm Main Module").
+  - **`DDT.COM`**: `ddt2mon.asm` ("MP/M Debugger (DEMON) 9/81" — the
+    main debugger/monitor command loop; "DEMON" appears to be DRI's own
+    internal nickname, **DE**bugger-**MON**itor), `ddt1asm.asm` ("MP/M
+    Debugger (ASMOD) 9/81," commented "MP/M Debugger Disassembler/
+    Assembler Module" — DDT's own built-in mini-assembler/disassembler,
+    letting a user patch memory by typing mnemonics directly), and
+    `ddt0mov.asm` ("DDT Relocator Program," which the file's own
+    comment says exists "to perform the move from 200H to the
+    destination address" — a small relocation stub run once DDT is
+    loaded).
+
+  `asm.sub`/`ddt.sub` (this directory's own build scripts) reveal a
+  build technique used throughout MP/M II wherever a `.PRL` is the
+  final target, not just here: each module is assembled **twice**, with
+  a `$$pzsz+r`-style option changing the second pass, and the two hex
+  outputs are diffed by `GENMOD` — any byte that differs between the
+  two assemblies is address-dependent and gets flagged for load-time
+  relocation, which is mechanically *how* "Page Relocatable" binaries
+  work, not just what the format is called. The same two-pass-then-diff
+  shape already showed up in `RSPs/`'s `locate ... code(0000H)` /
+  `code(0100H)` pair. `DDT.COM`'s own build additionally runs through
+  `PRLCOM` (`CUSPs_2/prlcm.plm`, "PRL to COM File," already documented
+  above) as its very last step, converting the GENMOD'd `rdt.prl`
+  (DDT's own fully-relocated image, also present pre-built in
+  `Control_1/`) into the final loadable `.COM`.
+
+  Unlike `orig/asm80/` (a third-party *disassembly* of the compiled
+  `ASM.COM` binary — see the "Reference material" section above), this
+  is DRI's own original source, but it's still 8080 code, a different
+  CPU from everything `tools/asm86/` targets — so, like `orig/asm80/`,
+  it cannot directly validate this repo's 8086 instruction encoding,
+  only the surrounding directive/macro conventions.
+- **`Control_1/`** — a pre-built "golden master" distribution disk, not
+  source: compiled forms of essentially everything described above, in
+  MP/M II's native binary formats (`.PRL` = Page Relocatable — every
+  CUSP and `CUSPs_3`'s system-gen tools, plus `ASM/DDT/`'s own output —
+  `asm.prl` (`ASM.COM`'s final, shipped form is itself a `.PRL`, unlike
+  `DDT.COM`) and `rdt.prl` (an intermediate artifact from `DDT.COM`'s
+  build, kept here alongside the final `ddt.com`); `.SPR` =
+  the banked/resident kernel-module format, for `bnkbdos`/`bnkxdos`/
+  `resbdos`/`tmp`/`xdos`; `.BRS`/`.RSP` for the `abort`/`sched`/`spool`/
+  `mpmstat` RSPs; `.COM` for `gensys`/`load`/`mpmldr`/`ddt`). See
+  `docs/filetypes.md` for how this repo's own `.MPM`/`.RSP`/`.CMD`
+  conventions descend from these same formats.
+- **`Control_2/`** — DRI's **development toolchain** disk, also mostly
+  pre-built binaries rather than source. `disk.doc` (this disk's own
+  README) explicitly categorizes every file on it, resolving any
+  ambiguity about what's a real tool, what's a macro library, and what
+  is (and isn't) sample/demo code:
+  - **Tools**: `RMAC.COM` ("Relocating Macro Assembler," the actual
+    assembler used to build everything in `nucleus/`/`bdos/`/`ASM/DDT/`
+    — a more capable successor to plain `ASM.COM`), **`LINK.COM`**
+    ("Linkage Editor" — a real linker; see `docs/build.md`'s "do we
+    need a linker?" discussion, MP/M II's own build process evidently
+    used one throughout, unlike what's been found so far for MP/M-86),
+    `LIB.COM` ("Library Manager"), `XREF.COM` ("Cross Reference
+    Utility").
+  - **Macro libraries** (source, not binaries): `i8085.lib` (8085
+    RIM/SIM instruction macros), `z80.lib` (Z80 opcode macro library,
+    with its own `z80.doc`), `simpio.lib`/`seqio.lib` (simple/sequential
+    BDOS I/O), `stack.lib`/`dstack.lib` (stack-machine libraries),
+    `compare.lib`/`ncompare.lib` (8-bit comparison macros), and
+    `when.lib`/`dowhile.lib`/`select.lib` (structured-programming
+    control-flow macros — `WHEN`/`DOWHILE`/`SELECT` constructs grafted
+    onto assembly language). `inter.lib`/`treadles.lib`/`buttons.lib`
+    are `disk.doc`'s odd one out: macro libraries for a traffic-light
+    intersection control demo ("see manual"), unrelated to MP/M II
+    itself.
+  - **`disk.doc`'s own "Sample ... for MP/M II" group** — six files,
+    all genuinely samples by DRI's own categorization, not just the
+    hardware-specific ones: `ldrbios.asm` ("Sample Loader BIOS for
+    MP/M II MPMLDR" — direct precedent for the "write a new XIOS for
+    QEMU" problem `docs/build.md` already describes for MP/M-86),
+    `boot.asm` ("Sample Boot"), `deblock.asm` ("Sample Deblocking
+    algorithm"), `todcnv.asm` ("Sample Time & Date Conversion"),
+    `resxios.asm` ("Sample Resident XIOS" — confirming "XIOS" is an
+    MP/M II term MP/M-86 inherited, not something coined for the 8086
+    port; titled internally for a specific OEM machine, "DSC-2 Basic &
+    Extended I/O Systems"), and `dump.asm` ("Sample PRL" — a
+    demonstration of building a `.PRL`-format program, not a real
+    diagnostic tool). `extrn.asm` ("Sample External module for
+    DUMP.ASM") is `dump.asm`'s companion stub. Both `dump.asm` and
+    `extrn.asm` are byte-for-byte identical to the copies already
+    described under `CUSPs_2/` above — the same two files kept in both
+    places, not a coincidence of naming.
+- **`mpmldr/gensys/`** — MP/M II's own loader and system-generator, the
+  direct ancestor of `orig/mpm862sr/`'s `MPMLDR` (`docs/glossary.md`)
+  and of this repo's own `src/loader/`. Two separately-built programs,
+  each with its own PL/M main module plus supporting `.ASM` pieces —
+  and `mpmldr.sub`/`gensys.sub` (this directory's own build scripts, not
+  just a generic `comgen.sub`-style template) spell out exactly how:
+  - **`MPMLDR.COM`** (`mpmldr.plm`, "MP/M II V2.0 Loader" — reads the
+    system image off disk and starts MP/M running) is built from three
+    *separately* assembled/compiled pieces, combined two different ways:
+    `mpmldr.plm` and `ldmonx.asm` ("Loader BDOS Interface," a small
+    stub) are compiled/assembled then **`LINK`ed together** into one
+    module; `ldrbdos.asm` ("Loader BDOS," a cut-down standalone BDOS
+    usable before the real kernel is running) and `ldrbios.asm`
+    ("Skeleton Ldrbios" — explicitly a *skeleton*, i.e. the
+    OEM-adaptation point for this machine's own disk/console driver,
+    assembled with `MAC`, not `ASM80`) are instead each turned into
+    their own Intel-hex output and **concatenated at the hex level**
+    with the linked loader module (`pip mpmldr.hex=impmldr.hex[I],
+    ldrbdos.hex[I],ldrbios.hex[H]`), then run through `LOAD` (from
+    `CUSPs_3/`) to produce the final `.COM`. The hardware-specific
+    `ldrbios.asm` is deliberately kept *outside* the `LINK` step and
+    only glued on by simple concatenation — the same shape of problem
+    `docs/build.md` already describes for MP/M-86's own XIOS, and
+    concrete precedent that "assemble the OEM-specific piece separately
+    and concatenate" is a real, DRI-sanctioned pattern here, not
+    something invented for this repo's own `tools/plmc`+`tools/asm86`
+    stub-concatenation (`tools/plm/README.md`'s "pl_mon1–pl_mon4").
+  - **`GENSYS.COM`** (`gensys.plm`, "MP/M II V2.0 System Generation" —
+    the interactive program that actually builds a configured system
+    image, prompting for things like "Enter memory segment table" per
+    its own embedded strings) links together with `ldrlwr.asm` ("Load,
+    Relocate, and Write File" — the routine that reads each compiled
+    kernel/CUSP module and relocates+writes it into the final image;
+    this is the closest thing in either MP/M tree to "real loader/
+    linker logic," and the most concrete lead yet for `docs/build.md`'s
+    "do we need a linker?" question) and `x0100.asm` ("Externals," a
+    shared external-declaration stub for the other two — the same role
+    as this repo's own `tools/plm/runtime_stub.A86`).
+  - `mpmldr.com`/`gensys.com` are this directory's own pre-built
+    binaries of the above.
+- **`OEM/`** — `mpm2srl.asm`/`.com`, the "Serialization Program for
+  MP/M II diskettes" (per its own title line) — *not* a hardware/serial
+  **I/O** driver despite the name (an earlier version of this document
+  mistook it for one): it's a disk-duplication utility that copies the
+  distribution diskettes while stamping each copy with an incrementing
+  serial number (`nsrlsec`, `bserial`/`aserial`, `incserial` — real
+  identifiers inside it), the OEM-licensing/anti-piracy tracking
+  mechanism `TEX_Files/mpm2oem.tex` below documents how to use.
+- **`TEX_Files/`** — plain-text documentation (same `.TEX`-as-plain-text
+  convention already noted in `docs/filetypes.md`), each more specific
+  than its filename alone suggests:
+  - **`mpm2ltr.tex`** — a cover letter ("Dear MP/M II user:") shipped
+    with the V2.0 release, including DRI's own estimate of porting
+    effort: "less than a week" for a simple polled system on a machine
+    with working CP/M 2.2, "several weeks" for a fully interrupt-driven,
+    bank-switched configuration.
+  - **`mpm2oem.tex`** — the "OEM REDISTRIBUTION GUIDE," which turns out
+    to be the actual manual for the `OEM/` serialization program above,
+    not general hardware-porting guidance: it explains "the diskette
+    serialization process which allows construction and verification of
+    MP/M diskettes which are distributed by the OEM," and explicitly
+    names "Control 1/, 2/, and Serialization" as the three distribution
+    diskettes it covers — confirming that this tree's own `Control_1/`/
+    `Control_2/` directory names are taken directly from DRI's own
+    diskette-labeling scheme, not something assigned later.
+  - **`mpm2stat.tex`** — an internal DRI **project-status report**, not
+    end-user documentation for the `MPMSTAT` command (an earlier version
+    of this document assumed it was): a dated schedule table ("Status
+    reporting date: 08-17-81") tracking XDOS/BDOS/Utilities/
+    Serialization/Production-Release milestones by staff initial
+    ("Tom," "Dave" — almost certainly Thomas Rolander, credited in the
+    "Revised: 14 Sept 81" header comment on dozens of files throughout
+    this entire tree) against scheduled vs. completed dates.
+
+Nothing in `orig/mpm_II/` has been assembled or otherwise validated
+against this repo's own tooling — `tools/asm86/`/`tools/plmc.py` target
+the 8086, and this entire tree is 8080/Z80 source. It's kept here as
+architectural reference (the clearest available picture of what
+MP/M-86 2.x was actually ported *from*) and, via `Control_2/`, as the
+most concrete lead yet on what a real MP/M-86 linker and a real
+hardware-adaptation (XIOS-equivalent) layer should look like.
+
+## Related DRI source: CP/NET (`orig/cpn86src/`, `orig/cpnet80s/`)
+
+Two more trees, added later — genuine Digital Research product source,
+like the MP/M-86 tree itself, but a **different product**: CP/NET,
+DRI's network/workstation-sharing layer for CP/M-family systems (lets a
+diskless or disk-light "slave" workstation log in over a serial/network
+link and use a "master" machine's disks, printer, etc. — a 1980s
+precursor to LAN file-and-printer sharing, not related to MP/M-86's own
+multi-user/multi-process model beyond being built by the same company in
+the same era). Neither tree is needed to build or boot MP/M-86 itself;
+they're kept here as further genuine DRI source to potentially validate
+`tools/asm86/` against, since the newer of the two (`orig/cpn86src/`)
+happens to be written in the exact ASM86 dialect this repo's own
+assembler targets.
+
+- **`orig/cpnet80s/`** — **CP/NET** (the original, 8080/Z80 version,
+  "VER 1.0", dated 1982 in file headers), 9 `.MAC` files (DRI's
+  MAC/M80-style 8080/Z80 macro-assembler dialect — see `docs/filetypes.md`
+  for `.ASM`/`.Z80` vs this repo's own `.A86`; `tools/asm86/` does **not**
+  target this dialect or CPU at all, so none of this is assemblable with
+  this repo's tools): `CPNETLDR.MAC` (loader), `NBOOT.MAC` (network boot
+  loader for diskless slaves), `NBDOS.MAC` ("no disk operation" BDOS
+  variant for diskless slaves), `NDOS.MAC`/`NDOSS.MAC` (network DOS —
+  the slave-side redirector; `NDOSS.MAC` adds dated "NOS" modifications),
+  `SNIOS.MAC`/`NNIOS.MAC` (Slave Network I/O System — `NNIOS.MAC` is the
+  "NOS mode" variant), `SLVSP.MAC` (Slave Support Process), and
+  `GENNET.MAC` (the CP/NET system generator, "FOR NOS"). "NOS" here
+  appears to label a later sub-variant/mode of CP/NET within this same
+  source generation, not a separate DRI product.
+- **`orig/cpn86src/`** — **CP/NET-86**, the 8086 port (file headers dated
+  Aug–Sep 1983, a year after the `cpnet80s` files and two years after
+  this tree's own MP/M-86 2.x), 9 `.A86` files in real ASM86. Same
+  architecture as the 8080 version, renamed/reorganized: `CPNETLDR.A86`
+  (loader), `NDOS.A86`/`NDOSO.A86` (network DOS slave — identical source
+  apart from one `BASE EQU` relocation constant, `0` vs `100H`: two
+  link-address variants of the same module, not two different programs),
+  `SNIOS.A86`/`SNIOSO.A86` (Slave Network I/O System, same `0`-vs-`100H`
+  relocation-variant relationship, confirmed by diff), `CCPN.A86`
+  (Console Command Processor for CP/NET-86 — a CP/NET-aware command
+  shell, distinct from MP/M-86's own Supervisor/`COMMAND.SUP`),
+  `CPNETSTS.A86` (network status display utility), and `LOGIN.A86`/
+  `LOGOFF.A86` (the user-facing transient commands to join/leave the
+  network).
+
+  None of these 9 files `INCLUDE` anything else — each is fully
+  self-contained — but most of them (`CCPN.A86`, `CPNETLDR.A86`,
+  `LOGIN.A86`, `LOGOFF.A86`, `NDOS.A86`, `NDOSO.A86`, `SNIOS.A86`,
+  `SNIOSO.A86`) use MASM-style `SEGMENT`/`ASSUME` (and `NDOS.A86`/
+  `NDOSO.A86` also `MACRO`), which `tools/asm86/` explicitly doesn't
+  implement (see its README's "Known limitations") — the same gap
+  `tools/plm/runtime_stub.A86`'s own header notes for `MCD.A86`/
+  `SCD.A86`'s `SEGMENT`/`GROUP` usage. Only `CPNETSTS.A86` uses neither, but it
+  doesn't assemble cleanly with the current tooling either (a real,
+  not-yet-investigated gap — `trailing tokens in expression: '['` on its
+  line 22). None of `orig/cpn86src/` has been validated against
+  `tools/asm86/` yet; this is just the inventory.
+
 ## Notes for anyone working in this tree
 
 - File extensions are not a fully reliable guide to text-vs-binary content

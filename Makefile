@@ -40,18 +40,18 @@ PLM_TOOLCHAIN_PARTIAL := ASS86 DIS86
 # #1-3) and are deliberately not attempted here.
 RSP_OK := ECHO
 
-# --- Kernel: only CIO.A86/SYSDAT.A86 assemble cleanly so far.
-# BDOS.A86/MEM.A86/RTM.A86/SUP.A86/XIOS.A86 are blocked by further
-# genuine source defects and/or the documented short-jump-range
-# trade-off (docs/bugs.md #4-#7) and are deliberately not attempted
-# here.
-KERNEL_OK := CIO SYSDAT
+# --- Kernel: CIO.A86/SYSDAT.A86/BDOS.A86/MEM.A86/RTM.A86/SUP.A86 all
+# assemble cleanly now that the name-mismatch bugs are fixed (docs/bugs.md
+# #4/#5) and tools/asm86 does real jump-size relaxation (#6). XIOS.A86 is
+# still blocked on one genuinely unresolved symbol (#7) with no confident
+# fix available and is deliberately not attempted here.
+KERNEL_OK := CIO SYSDAT BDOS MEM RTM SUP
 
-# --- Loader: only LDBDOS.A86 assembles cleanly so far. LDBIOS.A86,
-# LDMPM.A86, and ROM.A86 are each blocked by further genuine source
-# defects, some with no confident fix available (docs/bugs.md #8-#10),
-# and are deliberately not attempted here.
-LOADER_OK := LDBDOS
+# --- Loader: LDBDOS.A86/LDBIOS.A86 both assemble cleanly now (docs/bugs.md
+# #8, plus jump-size relaxation). LDMPM.A86 and ROM.A86 are each still
+# blocked on a genuinely unresolved symbol (#9, #10) and are deliberately
+# not attempted here.
+LOADER_OK := LDBDOS LDBIOS
 
 PLM_UTILS_BIN      := $(addprefix $(BUILD)/utils/,$(addsuffix .cseg.bin,$(PLM_UTILS)))
 PLM_TOOLCHAIN_BIN   := $(addprefix $(BUILD)/toolchain/,$(addsuffix .cseg.bin,$(PLM_TOOLCHAIN_OK)))

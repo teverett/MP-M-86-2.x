@@ -151,10 +151,9 @@ Separately, `clierr` (`COMMAND.SUP`, 8 call sites) → `cli_err` — the
 label actually declared (`SYSDAT.FMT`/`SYSTEM.DAT`), and already used
 correctly once in the same file (line 475) before this fix.
 
-After all of the above, `BDOS.A86` has exactly one blocker left: the
-short-jump-range tooling trade-off (see #6) — confirmed by temporarily
-disabling that check and re-running, which produced no further errors
-of any kind.
+After all of the above, `BDOS.A86` assembles end-to-end cleanly (the
+short-jump-range tooling trade-off that used to block it, see #6, is
+now fixed too).
 
 ## 5. `src/kernel/ABORT.RTM` — five more of the same, inside one file — FIXED
 
@@ -163,25 +162,28 @@ Within a single file: `snipit`→`snip_it` (declared in the same file);
 `find_pdq`→`findpdq`; `findpd`→`find_pd` (declared and used correctly
 everywhere else in the same file); `plink`→`p_link` (`PD.DEF`); and
 `u_inint`→`u_in_int` (`UDA.FMT`). All patched. `RTM.A86` as a whole
-(which includes `ABORT.RTM`) has exactly one blocker left after these:
-the short-jump-range trade-off (see #6), confirmed the same way as #4.
+(which includes `ABORT.RTM`) now assembles end-to-end cleanly, same as
+`BDOS.A86` above.
 
-## 6. Short-jump-range tooling limitation — now the *only* blocker on `BDOS.A86`/`MEM.A86`/`RTM.A86`/`SUP.A86`/`LDBIOS.A86`
+## 6. Short-jump-range tooling limitation — FIXED (tools/asm86 now does real jump-size relaxation)
 
 `COMMAND.SUP:139` (`SUP.A86`), `SHARE.MEM:35` (`MEM.A86`),
 `DSPTCH.RTM:222` (`RTM.A86`), `FILE2.BDO:1193` (`BDOS.A86`), and one
-spot in `LDBIOS.A86` all hit `tools/asm86`'s own documented
-short-jump-range limitation (see "Design choices that trade size for
-simplicity" in `tools/README.md`) rather than a source bug — the
-disp16-everywhere trade-off this assembler makes can push an
-originally-in-range conditional jump/`JMPS` out of 8-bit range in *this*
-assembler's encoding, even though DRI's own assembler (with disp8
-optimization) kept it in range. Confirmed, by temporarily disabling the
-range check and re-assembling each of these five files, that this is
-the *only* remaining blocker in each — no further source defects are
-hiding behind it. Not fixed here: fixing it means implementing real
-jump-size relaxation in `tools/asm86` itself, a substantially bigger
-undertaking than a source-level bug fix, and out of scope for this pass.
+spot in `LDBIOS.A86` used to hit `tools/asm86`'s short-jump-range
+limitation rather than a source bug — the disp16-everywhere trade-off
+this assembler made could push an originally-in-range conditional
+jump/`JMPS` out of 8-bit range in *this* assembler's encoding, even
+though DRI's own assembler (with disp8 optimization) kept it in range.
+This was confirmed, at the time, by temporarily disabling the range
+check and re-assembling each of the five affected files, which showed
+it was the *only* remaining blocker in each — no further source defects
+were hiding behind it.
+
+**Fixed**: `tools/asm86` now does real relaxation (see "Design choices
+that trade size for simplicity" in `tools/README.md` for the
+mechanism). All five files named above — `BDOS.A86`, `MEM.A86`,
+`RTM.A86`, `SUP.A86`, `LDBIOS.A86` — now assemble end-to-end with no
+remaining blocker at all.
 
 ## 7. `src/kernel/XIOS.A86` — one more underscore typo (FIXED), plus one genuinely unresolved symbol
 
@@ -203,10 +205,9 @@ from the QEMU-bootable target (they're written for the Intel iSBC 86/12
 
 `ccpoffset`→`ccp_offset`, `dp_base`→`dpbase`, `seg_table`→`segtable`,
 and `z_ret`→`zret` — the same bug class, all four within this one file,
-each used exactly once. All patched. After accounting for all four, the
-only remaining blocker is the short-jump-range tooling trade-off (see
-#6), confirmed by temporarily disabling that check — no further defects
-of this kind.
+each used exactly once. All patched. `LDBIOS.A86` now assembles
+end-to-end cleanly (the short-jump-range trade-off that used to block
+it afterward, see #6, is now fixed too).
 
 ## 9. `src/loader/LDMPM.A86` — one genuinely unresolved symbol
 
@@ -230,13 +231,13 @@ further.
 
 ## Status of the kernel/loader sources
 
-`src/kernel/CIO.A86`, `src/kernel/SYSDAT.A86`, and `src/loader/LDBDOS.A86`
-compile and assemble cleanly end-to-end as-is. Every *source-level*
-defect found in `src/kernel/BDOS.A86`, `MEM.A86`, `RTM.A86`, `SUP.A86`,
-and `src/loader/LDBIOS.A86` has now been fixed (#4, #5, #8); each of
-those five files is blocked *only* by the short-jump-range tooling
-trade-off (#6), which is not a source bug and needs a bigger change to
-`tools/asm86` itself (real jump-size relaxation) to clear. `src/kernel/
+`src/kernel/CIO.A86`, `SYSDAT.A86`, `BDOS.A86`, `MEM.A86`, `RTM.A86`,
+`SUP.A86`, and `src/loader/LDBDOS.A86`/`LDBIOS.A86` all now compile and
+assemble cleanly end-to-end. Every source-level defect found in
+`BDOS.A86`, `RTM.A86`, and `LDBIOS.A86` has been fixed (#4, #5, #8), and
+the short-jump-range tooling trade-off that used to additionally block
+`BDOS.A86`/`MEM.A86`/`RTM.A86`/`SUP.A86`/`LDBIOS.A86` is also fixed now
+that `tools/asm86` does real jump-size relaxation (#6). `src/kernel/
 XIOS.A86`, `src/loader/LDMPM.A86`, and `src/loader/ROM.A86` remain
 blocked on at least one genuinely unresolved symbol each (#7, #9, #10)
 with no confident fix available from evidence in this tree — `XIOS.A86`

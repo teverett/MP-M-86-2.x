@@ -58,16 +58,34 @@ file's own directory, then in any `-I` directories given.
 ## Design choices that trade size for simplicity
 
 - **Displacements are always disp16** when present (never the ModRM
-  disp8 form), and **`JMP`/`CALL` always use the full near form**
-  (`E9`/`E8`) unless the source explicitly says `JMPS` (forces the
-  2-byte short `EB` form). This means an instruction's length never
-  depends on a forward reference's eventual value, so the assembler
-  never has to do iterative jump-size relaxation — at the cost of
-  slightly larger code than the original DRI output would have produced.
-  Conditional jumps/`LOOP`/`JCXZ` are still hardware-limited to an 8-bit
-  displacement (true 8086 behavior); if one of those is pushed out of
-  range by the size trade-off above, the assembler reports it rather
-  than silently producing wrong code.
+  disp8 form), and plain `JMP`/`CALL` (no explicit `JMPS`) always use
+  the full near form (`E9`/`E8`). This means a *memory operand*'s length
+  never depends on a forward reference's eventual value, so there's
+  nothing to relax there — at the cost of slightly larger code than the
+  original DRI output would have produced.
+- **`JMPS`/every `Jcc`/`LOOP*`/`JCXZ` do get real jump-size relaxation.**
+  These are hardware-limited to an 8-bit displacement in their normal
+  2-byte form, and the disp16-everywhere trade-off above can genuinely
+  push an in-range branch out of range in this assembler's (larger)
+  encoding even when DRI's own assembler kept it in range — this
+  actually happened in practice (see `docs/bugs.md` bug #6: `BDOS.A86`,
+  `MEM.A86`, `RTM.A86`, `SUP.A86`, `LDBIOS.A86`). `Assembler._relax_jumps`
+  (`tools/asm86/assembler.py`) handles it: it re-runs pass 1 in a loop,
+  assigning each `JMPS`/`Jcc`/`LOOP*`/`JCXZ` occurrence a stable
+  sequential index and checking its real (now fully resolved) target
+  against the 2-byte form's range after each run; any site found out of
+  range gets permanently marked "long" (`EncodeCtx.jump_long`) and the
+  loop reruns pass 1 again, since growing one site can push others out
+  of range too. This is guaranteed to terminate: growing a site only
+  ever *increases* distances for everyone else, never decreases them, so
+  `jump_long` only grows monotonically. `JMPS`'s long form is simply the
+  real 3-byte near `JMP` (`E9`) — it's already unconditional, so there's
+  nothing clever needed. The conditional forms can't do that (there's no
+  16-bit-displacement encoding for a `Jcc`/`LOOP`/`JCXZ` on the 8086 at
+  all), so they grow to an 8-byte trampoline instead — see the comment on
+  `_encode_jcc` in `tools/asm86/isa.py` for the exact byte layout — which
+  works identically for every mnemonic in the set without needing a
+  table of "inverse condition" opcodes.
 - **No sign-extended-immediate optimization**: `ADD r/m,imm` always uses
   the full-width immediate opcode matching the destination's size.
 - **No real segmentation**: `JMPF`/`CALLF` to a direct label always write
@@ -202,25 +220,27 @@ copy of `orig/`.
 
 ### Kernel sources (`src/kernel/`)
 
-`src/kernel/CIO.A86` and `src/kernel/SYSDAT.A86` compile cleanly
-end-to-end as-is. Every source-level name-mismatch bug in `BDOS.A86`,
-`RTM.A86` (45 + 6 names — see `docs/bugs.md` bugs #4/#5) has since been
-**patched directly in `src/`** (at the user's explicit request — this
-is the one place in this tree where `src/` is no longer an unmodified
-copy of `orig/`); `MEM.A86` and `SUP.A86` had no name-mismatch bugs of
-their own to begin with. All four of `BDOS.A86`/`MEM.A86`/`RTM.A86`/
-`SUP.A86` are now blocked *only* by the short-jump-range trade-off
-described above (bug #6) — confirmed by temporarily disabling that
-check and re-assembling each file, which produced no further errors.
-`XIOS.A86` had its one fixable typo patched too, but still has one
-genuinely unresolved symbol (`dp_base`) with no fix available from
-evidence in this tree (bug #7).
+`src/kernel/CIO.A86`, `SYSDAT.A86`, `BDOS.A86`, `MEM.A86`, `RTM.A86`,
+and `SUP.A86` all compile and assemble cleanly end-to-end now. Every
+source-level name-mismatch bug in `BDOS.A86`/`RTM.A86` (45 + 6 names —
+see `docs/bugs.md` bugs #4/#5) was **patched directly in `src/`** (at
+the user's explicit request — this is the one place in this tree where
+`src/` is no longer an unmodified copy of `orig/`); `MEM.A86` and
+`SUP.A86` had no name-mismatch bugs of their own to begin with, only the
+short-jump-range issue below. The short-jump-range trade-off that used
+to additionally block all four of `BDOS.A86`/`MEM.A86`/`RTM.A86`/
+`SUP.A86` (bug #6) is now handled by real jump-size relaxation (see
+"Design choices that trade size for simplicity" above) — no source
+patch needed for that part. `XIOS.A86` had its one fixable typo patched
+too, but still has one genuinely unresolved symbol (`dp_base`) with no
+fix available from evidence in this tree (bug #7).
 
 ### Loader sources (`src/loader/`)
 
-`src/loader/LDBDOS.A86` compiles cleanly end-to-end as-is.
-`LDBIOS.A86`'s four name-mismatch bugs (bug #8) have been patched; it's
-now blocked only by the short-jump-range trade-off, same as the kernel
-files above. `LDMPM.A86` and `ROM.A86` each still have one genuinely
-unresolved symbol (bugs #9, #10), the same situation as `XIOS.A86`'s
-`dp_base` above — not patched.
+`src/loader/LDBDOS.A86` and `LDBIOS.A86` both compile and assemble
+cleanly end-to-end now. `LDBIOS.A86`'s four name-mismatch bugs (bug #8)
+were patched; the short-jump-range issue that used to additionally
+block it is fixed the same way as the kernel files above (real
+relaxation, no source patch needed). `LDMPM.A86` and `ROM.A86` each
+still have one genuinely unresolved symbol (bugs #9, #10), the same
+situation as `XIOS.A86`'s `dp_base` above — not patched.

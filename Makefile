@@ -12,7 +12,11 @@
 #                   # incomplete toolchain files
 #   make clean
 
-PYTHON  := python3
+# Windows' python.org/GitHub Actions installs often expose only
+# "python", not "python3" -- pick whichever actually exists so this
+# Makefile works unmodified on Linux/macOS/Windows (see
+# .github/workflows/build.yml's os matrix).
+PYTHON  := $(shell command -v python3 2>/dev/null || command -v python)
 PLMC    := $(PYTHON) tools/plmc.py
 ASM86   := $(PYTHON) tools/asm86.py
 STUB    := tools/plm/runtime_stub.A86

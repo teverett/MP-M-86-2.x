@@ -3,7 +3,9 @@ name: build
 # Validates that the files this repo's own from-scratch toolchain
 # (tools/asm86/, tools/plmc.py) is currently known to compile/assemble
 # still do -- see the Makefile and docs/bugs.md for exactly which files
-# that covers and which are deliberately excluded.
+# that covers and which are deliberately excluded. Runs on all three
+# major OSes since the toolchain is plain-stdlib Python and the
+# Makefile is meant to be portable, not Linux-only.
 
 on:
   push:
@@ -12,13 +14,27 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # Windows runners default to PowerShell; Git Bash (with GNU
+        # grep/cat/mkdir) is present on all three OSes and is what the
+        # Makefile's recipes assume.
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+
+      - name: install make (Windows)
+        if: runner.os == 'Windows'
+        run: choco install make --no-progress -y
 
       - name: make (known-good sources)
         run: make
@@ -29,6 +45,6 @@ jobs:
       - name: upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-output
+          name: build-output-${{ matrix.os }}
           path: build/
           if-no-files-found: error

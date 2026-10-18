@@ -1003,25 +1003,35 @@ workflow):
   repository's `orig/` trees.
 - **`CBASIC_1982.pdf`** — the CBASIC language manual, covering both the
   8080 `CB86` compiler (`orig/driorig/CB86-Master_Control/`) and
-  CBASIC-86 (`orig/driorig/CBASIC86-719/`, `-720/`). Also available as
-  **`CBASIC_1982.md`**, a `pdftotext -layout` extraction lightly
-  restructured into real Markdown headings (one per Section/Appendix,
-  numbered subsection, and — the bulk of it — one per statement/
-  function reference entry) with stray page numbers and the original
-  dot-leader Table of Contents stripped; this is the one manual here
-  with a genuine embedded text layer (confirmed via `pdffonts`/
-  `pdftotext`), so the extraction is lossless prose, not OCR guesswork
-  — see the note below on why the rest of `orig/manuals/` isn't
-  converted the same way.
+  CBASIC-86 (`orig/driorig/CBASIC86-719/`, `-720/`).
 
-Every other PDF here is a **scanned image with no embedded text
-layer** (`pdftotext`/`pdffonts` return nothing for any of them, even
-on `MPM86_pgmr_Sep81.pdf`'s 364 pages) — `CBASIC_1982.pdf` is the one
-exception. Converting the rest to Markdown would mean actually OCR'ing
-1980s dot-matrix/typewriter-era scans, which risks silently wrong text
-on a reference document; they're left as PDFs (readable via a
-page-range read when needed) unless/until that's done deliberately,
-checked, and not just assumed correct.
+Every PDF in `orig/manuals/` now has a sibling `.md` of the same name,
+to make these faster for an LLM to search/read than paging through a
+scanned PDF — but they're not all extracted the same way, because only
+one of these PDFs actually has an embedded text layer:
+
+- **`CBASIC_1982.md`** — `CBASIC_1982.pdf` is the one manual here with
+  a genuine embedded text layer (confirmed via `pdffonts`/
+  `pdftotext`), so this is a lossless `pdftotext -layout` extraction,
+  further restructured into real Markdown headings (one per
+  Section/Appendix, numbered subsection, and — the bulk of it — one
+  per statement/function reference entry), with stray page numbers and
+  the original dot-leader Table of Contents stripped.
+- **Every other `.md` here is raw OCR**, produced with `pdftoppm`
+  (300dpi grayscale page rendering) piped through `tesseract`, since
+  `pdftotext`/`pdffonts` return nothing for any of these — confirmed
+  scanned images with no text layer, even on `MPM86_pgmr_Sep81.pdf`'s
+  364 pages. Each one is only lightly cleaned (stray page-number lines
+  dropped, literal `*`/leading `#` escaped so Markdown doesn't
+  misinterpret them) and kept as a flat, per-`_Page N_`-marker dump —
+  **no heading structure has been reconstructed**, unlike
+  `CBASIC_1982.md`, because OCR'ing 1980s dot-matrix/typewriter scans
+  already risks misread characters, garbled logos/graphics, and lost
+  table layout; inventing headings on top of that text without
+  checking it first would just compound the risk of confidently wrong
+  structure. Treat these as a grep-able first pass, not a verified
+  transcription — cross-check anything that matters against the
+  source PDF.
 
 ## Notes for anyone working in this tree
 

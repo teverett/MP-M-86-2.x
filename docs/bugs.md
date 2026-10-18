@@ -402,25 +402,220 @@ by tracing the exact encoded bytes and the arithmetic by hand, and by
 a debug probe placed directly inside `LDMPM.A86` (temporarily, not
 kept) confirming its own code at `0x103` was never reached.
 
-**Fixed** with an indirect jump through a register (`mov
+**First fix attempt**: an indirect jump through a register (`mov
 ax,ccp_offset ! jmp ax`) instead — absolute within `CS` regardless of
 where the instruction itself physically sits, immune to this module's
 own relocation. `WBOOT` (the real `LDBIOS.A86`'s own, different
-warm-boot target, `jmp ccp+6`) is simplified to the same target here,
-since it isn't on this loader's cold-boot path and isn't worth pinning
-down LDMPM.A86's exact byte offset for yet.
+warm-boot target, `jmp ccp+6`) was simplified to the same target here,
+since it isn't on this loader's cold-boot path.
 
-This fix is real and necessary — the jump target address was
-confirmed correct (`LDMPM.A86`'s own code lives exactly there) and the
-indirect-jump encoding was confirmed correct too — but applying it
-alone did **not** get this booting: still nothing from `LDMPM.A86`
-after the jump, including from a debug probe placed directly in its
-own code. That points to something else entirely still being wrong
-somewhere in this handoff (possibly a crash — a stray byte that
-couldn't have come from the debug probe's own print logic appeared in
-one test, suggesting something more serious than a benign hang) —
-not yet found. See `docs/build.md`'s "What's actually needed to boot
-under QEMU" item 4 for the current status.
+That got the jump landing on the right bytes, confirmed by inspection,
+but booting still didn't get past it — and testing in QEMU showed
+*why* not: a register-indirect `jmp` reliably failed to transfer
+control at all on this specific QEMU target, for a reason never root-
+caused. See #15 below for the real, structural fix this led to (which
+made the indirect jump unnecessary in the first place) and #16-#19 for
+everything else this same investigation turned up before the loader
+finally booted past `LDMPM.A86`'s own signon message.
+
+## 15. `src/loader/LDBIOS86Q.A86` — *every* local `offset`/direct
+reference was wrong the same way as #14, not just the one jump — FIXED
+
+The #14 jump wasn't a one-off: *every* plain `offset <label>` or
+direct-memory reference in this file (`stkbase`, `secbuf`,
+`specify_parms`, the FDC command tables, the DPB/DPE...) baked in an
+address relative to this module's own `org 0`, not its real position
+(`mldbios_offset`) in the concatenated `MPMLDR.bin` — the identical
+problem #14's jump had, just for every other reference instead of one
+jump target. Confirmed by testing in QEMU: boot got past the loader's
+own "jump into MPMLDR" message and ran `INIT`'s hardware setup (I/O
+port writes don't care about addressing), but then `mov sp,offset
+stkbase` pointed `SP` ~0xe97 bytes too low — into `LDMPM.A86`'s own
+code — so `INIT`'s own `PUSH`es corrupted it before the #14 jump back
+there ever ran. That's also why this file used to declare its data in
+a separate `dseg`: `tools/build_mpmldr.py` only ever copied each
+module's `.cseg.bin`, so that whole `dseg` — the signon string, DPB,
+FDC command tables, `secbuf`, the boot stack — was silently dropped
+from `MPMLDR.bin` entirely, on top of the addressing bug.
+
+**Fixed** structurally instead of one reference at a time: this
+module's `cseg` now starts with `org mldbios_offset` (a local copy of
+`LDMPM.A86`'s own constant, kept in sync by `tools/build_mpmldr.py`)
+instead of `org 0`, with the `dseg` merged into `cseg` right after it,
+so every `offset <label>` the assembler computes is already the real,
+absolute, `CS`-relative address — no per-reference fixup needed. This
+also makes a plain direct `jmp ccp_offset` compute the correct
+displacement on its own, so #14's register-indirect jump (which
+turned out to be unreliable on this QEMU target anyway) was replaced
+with that. `tools/build_mpmldr.py` strips the resulting leading
+`mldbios_offset` zero-padding bytes (`tools/asm86` pads a raw binary
+from 0 up to any `org` target) before concatenating this module's real
+content.
+
+## 16. `src/loader/LDBIOS86Q.A86` `INIT` — interrupts left enabled the
+whole way in, so raw FDC port I/O collided with SeaBIOS's own IRQ6
+handler — FIXED
+
+`src/loader/ROM86Q.A86`'s own boot sector re-enables interrupts (`sti`)
+right after setting up `SS:SP`, and nothing in the loader chain ever
+disabled them again — so by the time `INIT` started doing raw FDC
+register writes, IRQ6 (floppy) was still unmasked and still vectored
+through SeaBIOS's own `INT 0Eh` handler behind this code's back.
+Confirmed via GDB: the hang here wasn't this file's own polling loop
+spinning forever — `CS:IP` was sitting inside SeaBIOS itself
+(`CS=F000h`), stuck handling an IRQ6 it received while BIOS's own idea
+of the controller's state no longer matched reality.
+
+**Fixed** with a `cli` as the very first instruction of `INIT` — this
+driver is purely polled and never needs interrupts delivered at all,
+so there's no reason to re-enable them (`sti`) afterward either.
+
+A related, now-unnecessary "fix" this investigation also reverted: an
+earlier version of `INIT` added a synthetic DOR reset pulse (toggling
+`NDRESET` 0 then 1) to try to force the FDC into a known state, plus a
+loop draining 4 `SENSE INTERRUPT STATUS` responses before `SPECIFY`.
+That synthetic reset left QEMU's emulated 8272 with no genuine pending
+interrupt to report, so the SIS drain hung forever polling for a
+result byte QEMU's model never produces for a SIS it doesn't recognize
+as answering a real interrupt (it just silently drops back to idle
+instead of entering the result phase). Removed: SeaBIOS's own `INT
+13h` floppy driver already reset/initialized this controller for real
+during the boot sector's own reads (`ROM86Q.A86`'s `read_sector`), so
+`INIT` just re-asserts the already-working motor/DMA-enable/drive-
+select DOR state (no edge, no synthetic reset, no SIS needed) and goes
+straight to `SPECIFY`.
+
+## 17. `tools/asm86` — `JMPF`/`CALLF` with a bare memory-pointer
+operand silently became a *direct* far jump to the wrong place — FIXED
+
+Found continuing from #15/#16: with those fixed, `INIT`'s own code
+and jump all checked out by hand, yet a register read back from memory
+right after a `jmpf dword ptr <mem>`-style jump kept coming back
+`0` where it should have been the loader's own code segment.
+Reproduced in total isolation, outside this project's multi-module
+build entirely: a minimal boot sector that does `jmpf dword ptr
+leap_off` (the exact same idiom `ROM86Q.A86` uses to enter `MPMLDR`,
+and the exact idiom several `callf dword ptr .xiosmod`-style indirect
+calls in `src/kernel/INIT.SUP`/`SUPIF.SUP` use) landed with `CS=0`
+instead of the real target segment, confirmed by reading back the
+landed `CS` from memory.
+
+The cause: `tools/asm86`'s operand parser (`expr.py`'s
+`parse_operand`) always treated a bare label/memory operand to any
+mnemonic in `BRANCH_MNEMONICS` — which included `jmpf`/`callf` — as an
+immediate *relative branch target*, the correct reading for `jmp`/
+`call`/`jcc`/`loop`/etc, but not for `jmpf`/`callf`: their bare-label
+operand means "the far pointer *stored at* this address", a memory
+dereference, not a branch-target immediate. `isa.py`'s `_encode_jmpf`/
+`_encode_callf` then saw an `'imm'`-kind operand and emitted a
+*direct* far jump/call (opcode `0xEA`/`0x9A`) with that label's own
+*address* baked in as the literal target and the segment hardcoded to
+`0`, instead of the intended *indirect* far jump/call through memory
+(`0xFF /5` or `/3`) that would actually read the real target
+segment:offset from that address at runtime.
+
+**Fixed** in `tools/asm86/assembler.py`'s `_parse_operands`: `jmpf`/
+`callf` are excluded from the branch-target-immediate shortcut, so
+their operands fall through to the normal mem-vs-imm resolution (same
+logic `mov`/`call [reg]`/etc already use) instead.
+
+## 18. `tools/asm86` — a forward-referenced `label equ offset $`-style
+constant prescanned with the wrong size, destabilizing jump-size
+relaxation — FIXED
+
+Fixing #17 also corrected several previously-broken `callf dword ptr
+.xiosmod`/`.netmod`-style indirect calls in `src/kernel/SUPIF.SUP`/
+`INIT.SUP` that were silently wrong the same way — but fixing those
+changed code sizes enough to expose this second, independent bug:
+`src/kernel/SUP.A86` started failing to assemble with `LOAD.SUP:78:
+conditional/loop branch out of range (rel=129) after relaxation` —
+`tools/asm86`'s own short-jump relaxation pass (#6) is supposed to
+catch exactly this and grow the jump to its long form, so a relaxed
+jump still landing out of range pointed at a relaxation bug, not
+just a source-level distance problem.
+
+Tracing it (via targeted instrumentation of `Assembler._relax_jumps`/
+`_do_instruction`, not kept) found the same `SHORT_JUMP_MNEMONICS`
+occurrence computed at a different address in the final encoding pass
+than in the last (converged, stable) tentative relaxation pass — a
+genuine instability the relaxation loop can't see, since it only
+re-checks jump *ranges*, not whether every instruction's *size* is
+actually stable pass to pass. The culprit: a `callf dword ptr
+.netmod`-style operand encoded 5 bytes (a direct far call, `0x9A`, the
+#17 bug's own fallback) during early/tentative passes — because
+`.netmod` was still a forward reference there, and `_prescan_sizes`'s
+heuristic for an `EQU`'s eventual size only recognized an explicit
+`byte ptr`/`word ptr` cast, not `netmod equ (offset $)`'s implicit
+word-sized value — but 4 bytes (the real, correct indirect `0xFF /3`
+encoding, #17's fix) once `.netmod` was fully resolved in the final
+pass. That one-byte difference shifted every address after it for the
+rest of the file.
+
+**Fixed** in `_prescan_sizes`: an `EQU` whose expression uses the
+`offset` keyword anywhere, or is exactly `$`, now prescans as a
+2-byte value (matching what `offset <anything>`/`$` always actually
+evaluate to: a 16-bit address or address difference within one 64KB
+segment) even without an explicit cast — the same size `word ptr`
+would have declared, just inferred from the expression shape instead.
+
+## 19. `tools/asm86` — a segment-override prefix (`mov cs:foo,al`)
+landed *after* the opcode instead of before it, corrupting the
+instruction stream — FIXED
+
+Found continuing from #16/#17 once `INIT` reliably reached `SPECIFY`:
+booting now looped forever printing the same few debug characters,
+and a register read back right after a `call`/`ret` through
+`fdc_send_cmd` showed `SP` jumping by ~3000 bytes across one `call`,
+despite every instruction in that call chain checking out byte-for-
+byte correct by hand. Found by disassembling `fdc_out_byte`'s own
+assembled bytes directly: `mov cs:outbyte_tmp,al` (this file's own
+NEC765 driver, shared with `src/kernel/XIOS86Q.A86`) encoded as
+`88 2E 06 ...` — opcode first, *then* the `CS` prefix byte (`0x2E`) —
+instead of `2E 88 06 ...`. A segment-override prefix has to be the
+very first byte of an instruction; with it stuck in the middle, the
+CPU decoded the prefix byte as part of the `ModRM`/displacement
+instead, corrupting that instruction and everything decoded after it
+(here: scribbling over the stack via a garbage effective address).
+
+The cause: every mnemonic-specific encoder in `isa.py` built its
+result as `bytes([opcode]) + encode_rm(mem_operand, ...)`, and
+`encode_rm` included the segment-prefix byte as part of *its own*
+return value — landing it after the opcode that already got emitted,
+for every mnemonic with a memory operand that carries a segment
+override (not just `MOV`).
+
+**Fixed** centrally in `isa.py`: `encode_rm` no longer emits the
+prefix at all; the public `encode()` entry point now computes it once
+from the operand list and prepends it to whatever the mnemonic-
+specific encoder (now `_encode_body`) returns, for every mnemonic
+uniformly.
+
+## 20. `src/loader/LDBDOS.A86` — the exact same `org 0` addressing bug
+as #15, the opposite way around — FIXED
+
+With #16-#19 fixed, `INIT`/`LDMPM.A86`'s own handoff worked and the
+real "MP/M-86 V2.0 Loader" signon message finally printed — but the
+very next thing `LDMPM.A86` does, printing it via `LDBDOS.A86`'s own
+`BDOS` entry point (`int 224`), hung. An earlier fix (see `tools/
+build_mpmldr.py`'s own docstring/history) zeroed this file's
+`bdosoffset` (its own `org` self-positioning target) specifically to
+stop `tools/asm86`'s raw-binary `org`-padding from landing this
+module's real entry code at the wrong offset — but zeroing it just
+traded that bug for the #15 one instead: `LBDOSENT.A86`'s `lea
+sp,endstack` (and every other local `offset`/direct reference in this
+module) then computed an address relative to module-local `0`, not
+this module's real position (`ldbdos_offset`) in the concatenated
+`MPMLDR.bin`, pointing `SP` ~0x3ef bytes too low — into `LDMPM.A86`'s
+own code, the identical failure mode #15 fixed for `LDBIOS86Q.A86`.
+
+**Fixed** the same way as #15: `bdosoffset` is now this module's real,
+self-corrected absolute position (kept in sync by `tools/
+build_mpmldr.py`, which strips the resulting leading zero-padding
+before concatenating); `biosoffset` (an absolute `CALL`/`JMP` target
+into `LDBIOS86Q.A86`'s own jump table) is self-corrected the same way
+it already was. `LBDOSDAT.A86`'s own data, previously declared in a
+separate `dseg` that `tools/build_mpmldr.py` silently dropped (same
+issue as #15), was merged into `cseg` too.
 
 ## Status of the kernel/loader sources
 
@@ -438,6 +633,13 @@ XIOS.A86` remains blocked, on one genuinely unresolved symbol
 (`dp_base`, #7) with no confident fix available from evidence in this
 tree even after a second, closer look — its one fixable typo
 (`tick_int`) was corrected.
+
+Booting under QEMU (`make run`) now gets past the boot sector, all of
+`MPMLDR.bin` loading and its internal `LDBIOS86Q.A86`→`LDMPM.A86`
+handoff, and prints the real "MP/M-86 V2.0 Loader" signon message
+(#15-#20 above) — further than it ever has. It still hangs immediately
+after that, in `LDMPM.A86`'s next step (`initlbdos`/`openfnc`, opening
+`MPM.SYS` through `LDBDOS.A86`) — not yet diagnosed.
 
 The RSP sources (`CLOCK.A86`, `ECHO.A86`, `TMP.A86`, `SUBMIT.A86`) and
 all 22 `.PLM` utilities in `src/utils/`/`src/toolchain/` compile and

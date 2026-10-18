@@ -250,6 +250,7 @@ class Assembler:
                         presize=self.presize, prekind=self.prekind, lengths=self.lengths)
 
     _CAST_PREFIX_RE = re.compile(r'^\s*(byte|word)\s+ptr\b', re.IGNORECASE)
+    _OFFSET_KEYWORD_RE = re.compile(r'\boffset\b', re.IGNORECASE)
 
     def _prescan_sizes(self, lines):
         """Learn every DB/DW/RB/RW/EQU symbol's kind+size before pass 1, so a
@@ -272,7 +273,35 @@ class Assembler:
                     self.prekind[label.lower()] = ('label', 4)
                 elif low == 'equ':
                     m = self._CAST_PREFIX_RE.match(operand_text)
-                    size = (1 if m.group(1).lower() == 'byte' else 2) if m else None
+                    if m:
+                        size = 1 if m.group(1).lower() == 'byte' else 2
+                    elif (self._OFFSET_KEYWORD_RE.search(operand_text)
+                            or operand_text.strip() == '$'):
+                        # "label equ offset <expr>" / "label equ $" (and
+                        # arithmetic on these, e.g. SYSDAT.FMT's own
+                        # "netmod equ (offset $)" or PARSE.SUP's "ndelims
+                        # equ (offset $)-(offset delims)") always yield a
+                        # 16-bit word value -- an address or an address
+                        # difference, both within one 64KB segment --
+                        # same as an explicit `word ptr` cast would.
+                        # Without this, a forward reference to such a
+                        # label (e.g. a `callf dword ptr .netmod`-style
+                        # indirect far call, SUPIF.SUP) prescans as
+                        # size=None, misclassifying the operand as an
+                        # immediate instead of a memory operand during
+                        # the tentative pass -- confirmed by testing:
+                        # that encoded differently (and shorter) than
+                        # the real, final encoding once the symbol
+                        # actually resolved, throwing off every later
+                        # address in the file by that one instruction's
+                        # size difference -- the jump-size relaxation
+                        # pass never caught this because it only watches
+                        # jump *ranges* going out of bounds, not
+                        # instruction sizes being unstable between
+                        # passes in general.
+                        size = 2
+                    else:
+                        size = None
                     self.prekind[label.lower()] = ('equ', size)
 
     def _do_statement(self, stmt_text, filename, lineno, is_final):
@@ -461,7 +490,20 @@ class Assembler:
         self.emit(data)
 
     def _parse_operands(self, mnem, operand_text, ectx):
-        branch = mnem.lower() in isa.BRANCH_MNEMONICS
+        # JMPF/CALLF are in BRANCH_MNEMONICS (they do transfer control),
+        # but unlike every other entry there, their operand is never a
+        # relative branch-target label -- it's either a far pointer in
+        # memory ("jmpf dword ptr mem", or a bare `dd`-declared label
+        # like LDMPM.A86's own "jmpf mpm") or a direct seg:off immediate.
+        # branch_context's "bare label -> relative imm target" shortcut
+        # (parse_operand, expr.py) doesn't apply here and must not take
+        # over a `dword ptr <label>`/bare-dd-label operand before the
+        # normal mem-operand resolution gets a chance to -- confirmed by
+        # testing in QEMU: it silently produced a *direct* far jump
+        # (opcode 0xEA) to a hardcoded, wrong target (the label's own
+        # address, segment 0) instead of the intended indirect jump
+        # through the far pointer stored there.
+        branch = mnem.lower() in isa.BRANCH_MNEMONICS and mnem.lower() not in ('jmpf', 'callf')
         ctx = self._ectx(ectx.filename, ectx.lineno, ectx.addr)
         ops = []
         for part in split_top_commas(operand_text):

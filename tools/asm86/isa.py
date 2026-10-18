@@ -87,12 +87,15 @@ def u16(n):
 
 
 def encode_rm(op, reg_field, ctx):
-    """Return bytes for seg-prefix + ModRM + disp for a reg/mem operand."""
+    """Return bytes for ModRM + disp for a reg/mem operand -- NOT
+    including any segment-override prefix (see `encode`'s own comment:
+    that has to be the first byte of the whole instruction, before the
+    opcode this ModRM+disp gets appended after, so it's computed and
+    prepended once, centrally, in `encode` instead)."""
     if op.kind in ('reg', 'segreg'):
         return bytes([modrm(3, reg_field, op.reg)])
     if op.kind == 'mem':
         mem = op.mem
-        prefix = bytes([SEG_PREFIX[mem['seg']]]) if mem.get('seg') else b''
         base = mem['base']
         disp = mem.get('disp')
         if base is None:
@@ -109,7 +112,7 @@ def encode_rm(op, reg_field, ctx):
             else:
                 mb = modrm(2, reg_field, rm)
                 d = u16(disp)
-        return prefix + bytes([mb]) + d
+        return bytes([mb]) + d
     ctx.err("expected register or memory operand")
 
 
@@ -134,9 +137,40 @@ def _is_reg(op):
     return op is not None and op.kind in ('reg', 'segreg')
 
 
+def _seg_prefix_byte(ops):
+    """The one segment-override prefix byte (0x2E/0x26/0x36/0x3E) needed
+    for this instruction, if any of its memory operands carries one, or
+    b'' otherwise. Must be the very first byte of the whole encoded
+    instruction -- see `encode`'s own comment on why this is computed
+    centrally there instead of inside `encode_rm`."""
+    for op in ops:
+        if op is not None and op.kind == 'mem' and op.mem.get('seg'):
+            return bytes([SEG_PREFIX[op.mem['seg']]])
+    return b''
+
+
 def encode(mnemonic, ops, ctx):
     """ops: list of Operand (already parsed); ctx: EncodeCtx (see assembler.py).
-    Returns the encoded instruction bytes."""
+    Returns the encoded instruction bytes.
+
+    A segment-override prefix (`mov cs:foo,al`, say) must be the FIRST
+    byte of the instruction, before the opcode -- but `encode_rm` is
+    called by every mnemonic-specific encoder below *after* that
+    encoder has already emitted its own opcode byte(s), so a prefix
+    `encode_rm` returned inline used to land stuck in the middle of the
+    instruction instead (opcode, then prefix, then ModRM/disp),
+    corrupting it and everything decoded after it. Confirmed by testing
+    in QEMU: `mov cs:outbyte_tmp,al` (src/loader/LDBIOS86Q.A86's own
+    fdc_out_byte) silently became `MOV [outbyte_tmp],CH` plus a stray
+    extra byte feeding into whatever came next. Fixed by having
+    `encode_rm` leave the prefix out entirely and computing/prepending
+    it once, here, for every mnemonic uniformly, regardless of which
+    operand position the memory operand is in."""
+    prefix = _seg_prefix_byte(ops)
+    return prefix + _encode_body(mnemonic, ops, ctx)
+
+
+def _encode_body(mnemonic, ops, ctx):
     m = mnemonic.lower()
 
     if m == 'ret' and ops:

@@ -23,34 +23,43 @@
 cpmsegment      equ     0	; base of CP/M-86
 ldroffset       equ     0   	; offset of CPMLDR
 ;
-; bdosoffset/biosoffset/bdoscodesize are DRI's own fixed-layout values,
-; carried over unmodified from the real LDBDOS.A86. DRI's build placed
-; this module via Intel-hex "pip" (sparse, absolute-address records --
-; no file bytes at all for addresses this module doesn't use), so an
-; `org bdosoffset` here cost nothing. tools/asm86 emits raw binary,
-; where the same `org` means literal zero-byte padding from file offset
-; 0 up to bdosoffset -- which used to make this module's own entry
-; point (right where `org bdosoffset` lands, see LBDOSENT.A86) sit at
-; file-relative offset 0x400 inside its own LDBDOS.cseg.bin, while
-; tools/build_mpmldr.py placed that *whole* blob (padding included)
-; starting at LDMPM's own patched `ldbdos_offset` -- so the interrupt
-; vector LDMPM patches to point at LDBDOS actually pointed at zero
-; padding, not the real entry code, confirmed by inspecting the
-; combined MPMLDR.bin directly (see docs/bugs.md's LDBDOS entry).
+; bdosoffset/biosoffset are DRI's own fixed-layout values, carried over
+; unmodified from the real LDBDOS.A86 in spirit (both are still "this
+; module's own absolute position" and "LDBIOS's absolute position",
+; just no longer DRI's own fixed numbers). DRI's build placed this
+; module via Intel-hex "pip" (sparse, absolute-address records -- no
+; file bytes at all for addresses this module doesn't use), so an `org
+; bdosoffset` there cost nothing regardless of value. tools/asm86 emits
+; raw binary instead, where the same `org` means literal zero-byte
+; padding from file offset 0 up to bdosoffset.
 ;
-; Fixed by zeroing bdosoffset -- this module's position in the final
-; image is now established purely by tools/build_mpmldr.py's own
-; sequential concatenation, the same way LDMPM.A86/LDBIOS86Q.A86 are,
-; with no internal self-positioning org of its own. biosoffset (used as
-; an absolute CALL/JMP target into LDBIOS86Q's own jump table) and
-; bdoscodesize (used to place this module's own DSEG data right after
-; its real CSEG) are self-corrected by tools/build_mpmldr.py the same
-; way it already self-corrects LDMPM.A86's own offset constants; the
-; values below are only a seed for that first assemble-and-measure
-; pass.
-bdosoffset      equ     0	; LDBDOS's own position within MPMLDR.bin
-biosoffset      equ     0e8fh   ; offset of LBIOS-86 (self-corrected)
-bdoscodesize    equ     0aa0h   ; size of BDOS code (self-corrected)
+; That padding is exactly what's needed here, not a bug to avoid: this
+; module's own code (LBDOSENT.A86's `org bdosoffset`) and data
+; (LBDOSDAT.A86's cseg-resident variables, right after it) use plain
+; `offset <label>`/direct addressing throughout, assuming DS=SS=CS=the
+; one shared MPMLDR segment (same convention as LDBIOS86Q.A86) -- which
+; is only correct if bdosoffset, the position every one of those
+; addresses is computed relative to, equals this module's real,
+; absolute position in the concatenated MPMLDR.bin. A previous fix
+; zeroed bdosoffset instead, to stop tools/build_mpmldr.py's then-
+; sequential-only placement from stacking that padding *on top of*
+; where it placed this module -- confirmed by inspecting the combined
+; MPMLDR.bin (see docs/bugs.md's LDBDOS entry) -- but zeroing it just
+; traded that bug for the LDBIOS86Q.A86 one: `lea sp,endstack` (and
+; every other local `offset`/direct reference) then computed an address
+; relative to module-local 0, not this module's real position
+; (`ldbdos_offset`), pointing SP ~0x3ef bytes too low, into LDMPM.A86's
+; own code -- confirmed via testing in QEMU, past the loader's own
+; signon message. Fixed the same way as LDBIOS86Q.A86's own `org
+; mldbios_offset` fix: bdosoffset is now this module's real, self-
+; corrected absolute position (tools/build_mpmldr.py strips the
+; resulting leading zero-padding before concatenating, the same way);
+; biosoffset (an absolute CALL/JMP target into LDBIOS86Q.A86's own jump
+; table) is self-corrected the same way it already was. The value below
+; is only a seed for that first assemble-and-measure pass.
+bdosoffset      equ     3edh	; LDBDOS's own position within MPMLDR.bin
+				; (self-corrected -- see above)
+biosoffset      equ     1112h   ; offset of LBIOS-86 (self-corrected)
 ;
 eject ! include lbdosequ.a86	 ; symbol definition
 eject ! include lbdosent.a86     ; entry module

@@ -11,8 +11,13 @@ SP_save                 dw      0
 ;
 ;       Variables in data segment:
 ;
-dseg    cpmsegment
-        org     bdosoffset+bdoscodesize
+;       Stays in cseg here (no separate dseg/org) -- see LDBDOS.A86's own
+;       header comment: tools/build_mpmldr.py only ever copies this
+;       module's .cseg.bin, so a real dseg's content was silently
+;       dropped from MPMLDR.bin entirely; this data (and DS=SS=CS=the
+;       one shared MPMLDR segment, same as LDBIOS86Q.A86) only works if
+;       it's really in cseg, continuing right where the code above left
+;       off.
 ;
 ;       byte I/O variables:
 ;

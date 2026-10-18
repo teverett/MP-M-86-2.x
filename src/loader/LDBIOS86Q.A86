@@ -124,7 +124,7 @@ ccp_offset	equ 0103h	;base of MPMLDR -- see the real LDBIOS.A86's
 				; own identical EQU; INIT/WBOOT JMP back
 				; here (a plain direct JMP -- see this
 				; file's header comment), they aren't CALLed
-mldbios_offset	equ 0e8fh	;this module's own real position in the
+mldbios_offset	equ 1112h	;this module's own real position in the
 				; concatenated MPMLDR.bin -- local copy of
 				; LDMPM.A86's own constant of the same name,
 				; self-corrected by tools/build_mpmldr.py;

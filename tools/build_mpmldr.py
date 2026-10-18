@@ -28,34 +28,21 @@ pieces actually land -- rewriting that one source file in place if the
 sizes have drifted since it was last correct (e.g. after a future
 tools/asm86 change), then re-assembling it, before concatenating.
 
-LDBDOS.A86 turned out to need the exact same treatment, for a related
-but distinct reason: unlike LDMPM.A86, it used to compute its *own*
-absolute position via an internal `org bdosoffset` (DRI's original
-fixed value, 400h) -- harmless under DRI's own Intel-hex-based build,
-but under tools/asm86's raw-binary output this padded LDBDOS.cseg.bin
-with literal zero bytes from file offset 0 up to bdosoffset, which this
-script's sequential placement then stacked *on top of*, landing the
-real entry code 0x400 bytes past where LDMPM's own patched
-ldbdos_offset actually pointed (confirmed by inspecting the combined
-MPMLDR.bin -- see docs/bugs.md's LDBDOS entry). LDBDOS.A86's own
-bdosoffset is now permanently 0 (no more internal self-positioning,
-sequencing is this script's job alone); its biosoffset (an absolute
-CALL/JMP target into LDBIOS86Q.A86's jump table) and bdoscodesize (used
-to place LDBDOS's own DSEG data right after its real CSEG) are
-self-corrected here the same way LDMPM.A86's constants are.
-
-LDBIOS86Q.A86 needs the *opposite* of LDBDOS.A86's fix: every plain
-`offset <label>` reference to its own local data (`stkbase`, `secbuf`,
-the FDC command tables, ...) is only correct if this module's `cseg`
-really is `org`'d at its own real position (`mldbios_offset`) rather
-than 0 -- see that file's own header comment for how this was found
-(a stack pointer landing ~0xe8f bytes too low, corrupting LDMPM.A86's
-own code). So unlike LDBDOS.A86, this script keeps LDBIOS86Q.A86's own
-internal `org mldbios_offset` self-positioning and, after patching that
-constant to match, strips the resulting leading zero-padding (the same
-padding LDBDOS.A86's fix above avoided needing, not reused here since
-mldbios_offset is this module's one genuine absolute position) before
-concatenating its real content.
+LDBDOS.A86 and LDBIOS86Q.A86 both need the same fix as each other now
+(an earlier version of this script gave LDBDOS.A86 the *opposite*
+fix -- zeroing its self-positioning `org` -- which traded one addressing
+bug for another; see LDBDOS.A86's own header comment for the story):
+every plain `offset <label>` reference to a module's own local data (or
+plain direct `jmp`/`call` to another module's absolute position) is
+only correct if that module's `cseg` is really `org`'d at its own real
+position in the concatenated MPMLDR.bin (`ldbdos_offset`/
+`mldbios_offset` respectively) rather than at 0 -- see LDBIOS86Q.A86's
+own header comment for how this was first found (a stack pointer
+landing bytes too low, corrupting another module's code). So this
+script keeps both modules' internal self-positioning `org`, and after
+patching that module's own offset constant to match, strips the
+resulting leading zero-padding (asm86 pads a raw binary from 0 up to
+any `org` target) before concatenating its real content.
 
 Usage: python3 tools/build_mpmldr.py [-o OUTPUT]
 """
@@ -81,8 +68,8 @@ BIOSOFFSET_RE = re.compile(
     r'^(biosoffset\s+equ\s+)([0-9a-fA-F]+[hH])(\s*;.*)?$',
     re.MULTILINE,
 )
-BDOSCODESIZE_RE = re.compile(
-    r'^(bdoscodesize\s+equ\s+)([0-9a-fA-F]+[hH])(\s*;.*)?$',
+BDOSOFFSET_RE = re.compile(
+    r'^(bdosoffset\s+equ\s+)([0-9a-fA-F]+[hH])(\s*;.*)?$',
     re.MULTILINE,
 )
 
@@ -100,6 +87,22 @@ def assemble(name, out_dir):
     cseg_path = out_base + '.cseg.bin'
     size = os.path.getsize(cseg_path) if os.path.exists(cseg_path) else 0
     return cseg_path, size
+
+
+def strip_org_padding(path, offset, label):
+    """Read the assembled file at `path` and strip the `offset` leading
+    zero-padding bytes asm86 emits for a module whose cseg starts with
+    `org <self-position>` instead of `org 0` -- see LDBDOS.A86's and
+    LDBIOS86Q.A86's own header comments for why they need this."""
+    with open(path, 'rb') as f:
+        data = f.read()
+    assert len(data) > offset, (
+        f"{label} assembled to {len(data)} bytes, not even past its "
+        f"own org target ({offset:#x})")
+    assert data[:offset] == b'\0' * offset, (
+        f"{label}'s leading org-padding wasn't all zero -- something "
+        "is emitting bytes before its own org target")
+    return data[offset:]
 
 
 def hexlit(value):
@@ -153,21 +156,46 @@ def main():
     out_dir = os.path.join(ROOT, 'build', 'loader')
     os.makedirs(out_dir, exist_ok=True)
 
-    # Pass 1: assemble LDBDOS to learn its real current size. Unlike
-    # LDBIOS86Q.A86 (below), this doesn't depend on LDMPM's offsets at
-    # all, so it's safe to do before LDMPM is known to be correct.
-    ldbdos_path, ldbdos_size = assemble('LDBDOS', out_dir)
-
     # LDMPM's own assembled size doesn't depend on the *value* of
-    # ldbdos_offset/mldbios_offset either (they're used as a stored
-    # data value and a dangling, nothing-emitted org-jump respectively
-    # -- see the comment above LDMPM.A86's own declaration of them) --
-    # so it's safe to assemble it once, check/patch, and only
-    # re-assemble if a patch was actually needed.
+    # ldbdos_offset/mldbios_offset (they're used as a stored data value
+    # and a dangling, nothing-emitted org-jump respectively -- see the
+    # comment above LDMPM.A86's own declaration of them), so it's safe
+    # to assemble it first and learn ldbdos_offset (LDBDOS.A86's own
+    # real position) before LDBDOS.A86 itself is known to be correct.
     ldmpm_path, ldmpm_size = assemble('LDMPM', out_dir)
-
     ldbdos_offset = ldmpm_size
-    mldbios_offset = ldmpm_size + ldbdos_size
+
+    # Patch LDBDOS.A86's own bdosoffset (its self-positioning `org`
+    # target -- see that file's header comment) and biosoffset (an
+    # absolute CALL/JMP target into LDBIOS86Q's jump table) to match,
+    # assemble, and strip the resulting leading padding to learn its
+    # real content size. bdosoffset itself doesn't affect that size
+    # (it's only ever used positionally, plus one dead/commented-out
+    # line) -- but biosoffset can: tools/asm86 does real jump-size
+    # relaxation (docs/bugs.md #6), so a CALL/JMP to biosoffset can
+    # encode shorter or longer depending on its actual value, which
+    # changes mldbios_offset (biosoffset's own target), in a loop. Keep
+    # patching both against the latest guess and re-measuring until it
+    # stops moving -- confirmed to need a second pass in practice, so
+    # don't assume one pass is enough here the way LDMPM.A86's patch
+    # above safely does.
+    mldbios_offset = ldbdos_offset  # first guess, corrected below
+    for _ in range(5):
+        patch_offsets('LDBDOS.A86', [
+            (BDOSOFFSET_RE, ldbdos_offset, 'bdosoffset'),
+            (BIOSOFFSET_RE, mldbios_offset, 'biosoffset'),
+        ])
+        ldbdos_path, _ = assemble('LDBDOS', out_dir)
+        ldbdos_bytes = strip_org_padding(ldbdos_path, ldbdos_offset, 'LDBDOS.A86')
+        new_mldbios_offset = ldbdos_offset + len(ldbdos_bytes)
+        if new_mldbios_offset == mldbios_offset:
+            break
+        mldbios_offset = new_mldbios_offset
+    else:
+        raise SystemExit(
+            "LDBDOS.A86's content size kept changing after patching "
+            "bdosoffset/biosoffset -- didn't converge in 5 passes")
+    ldbdos_size = len(ldbdos_bytes)
 
     if patch_offsets('LDMPM.A86', [
         (OFFSET_RE, ldbdos_offset, 'ldbdos_offset'),
@@ -178,58 +206,26 @@ def main():
               "to match the current assembled sizes")
         ldmpm_path, ldmpm_size = assemble('LDMPM', out_dir)
 
-    # LDBDOS.A86's own biosoffset (an absolute CALL/JMP target into
-    # LDBIOS86Q's jump table) and bdoscodesize (where its own DSEG data
-    # starts, right after its real CSEG) don't affect its assembled
-    # CSEG size -- they're baked in as fixed-width immediate operands
-    # regardless of value -- so ldbdos_size above is already final; one
-    # patch-and-reassemble pass is enough, same as LDMPM.A86 above.
-    if patch_offsets('LDBDOS.A86', [
-        (BIOSOFFSET_RE, mldbios_offset, 'biosoffset'),
-        (BDOSCODESIZE_RE, ldbdos_size, 'bdoscodesize'),
-    ]):
-        print(f"build_mpmldr: patched LDBDOS.A86's biosoffset="
-              f"{mldbios_offset:#x}, bdoscodesize={ldbdos_size:#x} "
-              "to match the current assembled sizes")
-        ldbdos_path, ldbdos_size_new = assemble('LDBDOS', out_dir)
-        assert ldbdos_size_new == ldbdos_size, (
-            "LDBDOS.A86's assembled size changed after patching "
-            "biosoffset/bdoscodesize -- it shouldn't (see comment above)")
-
     # LDBIOS86Q.A86's own mldbios_offset (see that file's header
-    # comment) is now known -- patch it to match and assemble. Its
-    # `org mldbios_offset` makes asm86 pad the raw .cseg.bin with
-    # `mldbios_offset` leading zero bytes (nothing is emitted before
-    # that `org`); strip them before concatenating, since this
-    # script's own sequential placement already accounts for that
-    # offset (same trade-off LDBDOS.A86's bdosoffset fix made the
-    # opposite way -- see this script's own docstring).
+    # comment) is now known -- patch it to match, assemble, and strip
+    # its leading padding the same way.
     patch_offsets('LDBIOS86Q.A86', [
         (MLDBIOS_RE, mldbios_offset, 'mldbios_offset'),
     ])
-    ldbios_path, ldbios_padded_size = assemble('LDBIOS86Q', out_dir)
-    with open(ldbios_path, 'rb') as f:
-        ldbios_padded = f.read()
-    assert ldbios_padded_size > mldbios_offset, (
-        f"LDBIOS86Q.A86 assembled to {ldbios_padded_size} bytes, not "
-        f"even past its own org target ({mldbios_offset:#x})")
-    assert ldbios_padded[:mldbios_offset] == b'\0' * mldbios_offset, (
-        "LDBIOS86Q.A86's leading org-padding wasn't all zero -- "
-        "something is emitting bytes before its own org mldbios_offset")
-    ldbios_bytes = ldbios_padded[mldbios_offset:]
+    ldbios_path, _ = assemble('LDBIOS86Q', out_dir)
+    ldbios_bytes = strip_org_padding(ldbios_path, mldbios_offset, 'LDBIOS86Q.A86')
 
     out_path = args.output or os.path.join(out_dir, 'MPMLDR.bin')
     with open(out_path, 'wb') as out:
-        for path, size, name in (
-            (ldmpm_path, ldmpm_size, 'LDMPM'),
-            (ldbdos_path, ldbdos_size, 'LDBDOS'),
-        ):
-            with open(path, 'rb') as f:
-                data = f.read()
-            assert len(data) == size
-            out.write(data)
-            print(f"build_mpmldr: {name:8s} {size:6d} bytes "
-                  f"@ {out.tell() - size:#06x}")
+        with open(ldmpm_path, 'rb') as f:
+            ldmpm_data = f.read()
+        assert len(ldmpm_data) == ldmpm_size
+        out.write(ldmpm_data)
+        print(f"build_mpmldr: {'LDMPM':8s} {ldmpm_size:6d} bytes "
+              f"@ {out.tell() - ldmpm_size:#06x}")
+        out.write(ldbdos_bytes)
+        print(f"build_mpmldr: {'LDBDOS':8s} {len(ldbdos_bytes):6d} bytes "
+              f"@ {out.tell() - len(ldbdos_bytes):#06x}")
         out.write(ldbios_bytes)
         print(f"build_mpmldr: LDBIOS86Q {len(ldbios_bytes):6d} bytes "
               f"@ {out.tell() - len(ldbios_bytes):#06x}")

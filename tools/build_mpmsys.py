@@ -115,9 +115,97 @@ NLSTDEV_OFFSET = 0x84
 NCIODEV_OFFSET = 0x85
 TICKSPERSEC_OFFSET = 0x51
 
+# SYSDAT.FMT's "pul" (Process Descriptor Unused List head, 0x5c) -- a
+# RUNTIME state variable (the free-PD-slot linked list RTM's own
+# getpdadr/freepd maintain), not a GENSYS config answer, but its
+# backing storage (SYSDAT.A86 -> DATA.BDO, real unmodified DRI source)
+# still bakes in a stale non-zero value (0x0020) left over from
+# whatever state the real system's template captured it in. "0" means
+# "list is empty" (the correct state for a fresh boot, matching how
+# every entry ever gets *added* to it, via `freepd`/`mov pul,si`) --
+# left as 0x0020, `getpdadr`'s `gpd_bad`/`gpd_have` path (triggered the
+# very first time RTM creates a process whose PD didn't already live
+# in the sysdat-relative PD table -- i.e. immediately, for the first
+# process RTM ever creates) trusted it as a real PD-table slot address
+# and blindly `rep movsw`'d a 48-byte PD copy to absolute SYSDAT offset
+# 0x20 -- confirmed with a QEMU hardware watchpoint on SYSDAT+0x28
+# (the module table's `xiosmod` entry, squarely inside that 0x20-0x4f
+# range): it fired on exactly this `rep movsw`, with SI/DI showing the
+# copy ran from `idlepd` to offset 0x20. That silently clobbered
+# `bdosmod`/`xiosmod`/`netmod`/`dispatcher`/`rtm_pdisp` in the module
+# table with garbage, well after `INIT.SUP`'s own module-init calls
+# (which only read the table, never got to see it broken) -- the first
+# symptom was `INIT.SUP`'s very next XIOS call (`io_maxconsole`, via
+# `xiosif`) silently jumping nowhere once `xiosmod`'s far pointer was
+# gone.
+#
+# Checking every other "unused list"/"xxx root" field in SYSDAT.FMT
+# the same way (dumping SYSDAT.A86's own raw assembled dseg.bin) found
+# more of the same: `mdul` (Memory Descriptor Unused List, 0x58) is
+# *also* a stale non-zero leftover, and `qlr` (Queue List Root, 0x74)
+# holds a stale non-zero value too even though no queue has been
+# created yet this boot. `rlr`/`thrdrt` (0x68/0x72) are left alone --
+# both hold `initpd`'s own address, which really is correct for a
+# fresh boot (the init process is what's running, and is on its own
+# thread list).
+#
+# `qul` (QCB Unused List, 0x5e) needed more than just zeroing, though:
+# unlike `pul` (whose only real callers here, `getpdadr`'s `gpd_bad`
+# fallback, never actually trigger for RTM's own tick/idle process
+# creation -- their PDs are already sysdat-resident, confirmed by
+# re-deriving `getpdadr`'s address math by hand), `getqdaddr`'s own
+# `gqd_bad` fallback (QUE2.RTM) *does* genuinely trigger here: BDOS's
+# own init (BDOSIF.BDO) creates "mxdiskqd" by passing its *own cseg*
+# address (it's declared via DATA.BDO inside BDOS's own module, not in
+# sysdat), which `getqdaddr` always treats as "foreign" and copies
+# into a real system-table slot pulled from `qul` -- a slot this tree
+# never had, since there's no GENSYS equivalent anywhere here to have
+# built one. Leaving `qul` zeroed just turns the corruption into a
+# clean, immediate `e_no_qd` error return instead of a wild write --
+# better, but it means queue creation can never actually succeed.
+# Fixed by writing a small real QD pool straight into existing slack
+# space in SYSDAT's own 4096-byte dseg (SYSDAT.A86's real assembled
+# size has ~1.1KB of room after its last declared field, `mxmemcount`)
+# and linking it through `qul` below -- no SYSDAT.FMT change needed:
+# unlike the module table, nothing anywhere ever needs to reference
+# this pool *by name* at compile time (`qul` is purely a runtime
+# pointer RTM's own code follows, never a label other code assembles
+# against), and SYSDAT.FMT doesn't drive SYSDAT.A86's real content
+# anyway -- every *other* module includes it only to resolve its own
+# label offsets, while SYSDAT.A86 gets its real bytes from SYSTEM.DAT/
+# DATA.BDO instead (confirmed: adding a field there left SYSDAT.A86's
+# own assembled dseg.bin size completely unchanged).
+MDUL_FIELD_OFFSET = 0x58
+QLR_FIELD_OFFSET = 0x74
+PUL_FIELD_OFFSET = 0x5c
+QUL_FIELD_OFFSET = 0x5e
+QD_POOL_SLOT_SIZE = 0x1c  # qdlen (QD.DEF) -- first word of each slot is
+                          # its own q_link, matching getqdaddr's own
+                          # free-list convention (QUE2.RTM).
+QD_POOL_SLOTS = 4
+
 SYSDAT_DSEG_SIZE = 4096  # see XIOS86Q.A86's own comment on this number
 
 SYM_RE = re.compile(r'^\s*(init|entry)\s+label\s+([0-9A-Fa-f]+)h', re.MULTILINE)
+ANY_SYM_RE = re.compile(r'^\s*(\S+)\s+(?:label|equ)\s+([0-9A-Fa-f]+)h', re.MULTILINE)
+
+
+def get_symbol(src_stem, name):
+    """Look up one arbitrary symbol's value via `asm86 --symbols` -- used
+    to place the QD pool (see QUL_FIELD_OFFSET's own comment) right after
+    SYSDAT.FMT's own last declared field (`mxmemcount`), instead of
+    hardcoding that boundary, since it moves whenever SYSDAT.FMT does."""
+    src = os.path.join(KERNEL_DIR, src_stem + '.A86')
+    result = subprocess.run(ASM86 + [src, '--symbols'],
+                             capture_output=True, text=True)
+    if result.returncode != 0:
+        sys.stderr.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        raise SystemExit(f"asm86 --symbols failed for {src_stem}.A86")
+    for sym_name, value in ANY_SYM_RE.findall(result.stdout):
+        if sym_name.lower() == name.lower():
+            return int(value, 16)
+    raise SystemExit(f"{src_stem}.A86: could not find symbol {name!r}")
 
 
 def run_asm86(src_stem, out_dir, extra_args=()):
@@ -208,6 +296,36 @@ def main():
     dseg[NLSTDEV_OFFSET] = 0
     dseg[NCIODEV_OFFSET] = 1
     dseg[TICKSPERSEC_OFFSET] = 60
+
+    # pul/mdul/qlr: reset every stale "unused list"/"queue list root"
+    # head to empty -- see PUL_FIELD_OFFSET's own comment for why their
+    # inherited DATA.BDO values are actively wrong for a fresh boot, not
+    # just unused.
+    struct.pack_into('<H', dseg, PUL_FIELD_OFFSET, 0)
+    struct.pack_into('<H', dseg, MDUL_FIELD_OFFSET, 0)
+    struct.pack_into('<H', dseg, QLR_FIELD_OFFSET, 0)
+
+    # qul: link a real pool of free QD slots instead -- see its own
+    # comment above for why zeroing it (like the others) isn't enough.
+    # Placed right after SYSDAT.FMT's own last declared field so it
+    # can't collide with anything a real field offset ever resolves
+    # to; chained as a standard singly-linked free list (each slot's
+    # first word, its own q_link, points to the next slot; the last
+    # points to 0), matching exactly what getqdaddr's gqd_have path
+    # (QUE2.RTM) already expects to find there.
+    qd_pool_start = get_symbol('RTM', 'mxmemcount') + 1
+    qd_pool_end = qd_pool_start + QD_POOL_SLOTS * QD_POOL_SLOT_SIZE
+    if qd_pool_end > SYSDAT_DSEG_SIZE:
+        raise SystemExit(
+            f"QD pool (offset {qd_pool_start:#x}..{qd_pool_end:#x}) no "
+            f"longer fits in SYSDAT's {SYSDAT_DSEG_SIZE}-byte dseg -- "
+            "SYSDAT.FMT grew too close to the end")
+    for slot in range(QD_POOL_SLOTS):
+        slot_off = qd_pool_start + slot * QD_POOL_SLOT_SIZE
+        next_off = (slot_off + QD_POOL_SLOT_SIZE
+                    if slot < QD_POOL_SLOTS - 1 else 0)
+        struct.pack_into('<H', dseg, slot_off, next_off)
+    struct.pack_into('<H', dseg, QUL_FIELD_OFFSET, qd_pool_start)
 
     # XIOS86Q's own private tail: the bytes from SYSDAT_DSEG_SIZE
     # onward in its own dseg.bin (see its own comment on why its

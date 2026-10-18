@@ -894,6 +894,65 @@ before `MPM.SYS`.
 **Fixed** by changing it to `mov cx,ax`, matching `SECTRAN`'s actual,
 documented return convention in both of its branches.
 
+## 29. `tools/build_mpmsys.py` — RTM's "unused list" heads (`pul`,
+`mdul`, `qlr`) inherit stale, actively-wrong values from the real
+system's `DATA.BDO` template, and `qul` has no real pool to point to
+at all — FIXED (partially; see below)
+
+Found continuing from #28: with `MPM.SYS` now loading byte-for-byte
+correctly, booting reached `RTM`'s own `init:` (confirmed: all three
+debug probes bracketing its `proc_creat` call -- before, during, and
+after -- agreed), but the module table's `xiosmod` entry (`sysdat`
+offset `0x28`) still ended up corrupted by the time `INIT.SUP` tried
+to use it, moments later.
+
+A QEMU hardware watchpoint on that exact address (`watch
+*(unsigned short*)<physical sysdat+0x28>`, via `-s -S`/gdb) caught the
+corrupting write directly: a `rep movsw` inside RTM's `getpdadr`
+(`PROC.RTM`), copying 48 bytes (`pdlen`) from `idlepd` to absolute
+`sysdat` offset `0x20` -- squarely inside the module table (`0x20` is
+`bdosmod`, with `xiosmod` right after it at `0x28`). `getpdadr`'s
+`gpd_bad`/`gpd_have` fallback trusts `pul` (the free-PD-slot list
+head) as a real destination address whenever it's non-zero; dumping
+`SYSDAT.A86`'s own raw assembled `dseg.bin` found `pul` baked in as
+`0x0020` -- a stale leftover from whatever the real system's `DATA.BDO`
+template (real, unmodified DRI source) captured it as, not the empty
+list ("0") a fresh boot actually has. Checking every other "unused
+list"/"xxx root" field in `SYSDAT.FMT` the same way found two more:
+`mdul` (Memory Descriptor Unused List) and `qlr` (Queue List Root)
+are *also* non-zero when they should start empty.
+
+**Fixed** `pul`/`mdul`/`qlr` by resetting them to 0 at build time.
+`qul` (QCB Unused List) needed more: unlike `pul` (whose only real
+caller here, creating RTM's own `tick`/`idle` processes, never
+actually hits the fallback -- their PDs are already sysdat-resident),
+`getqdaddr`'s own `gqd_bad` fallback (`QUE2.RTM`) genuinely fires the
+first time `BDOSIF.BDO`'s own init creates its "mxdiskqd" queue (that
+QD lives in BDOS's own code segment via `DATA.BDO`, not in `sysdat`,
+so `getqdaddr` always treats it as "foreign" and tries to copy it into
+a real system-table slot). This tree never had such a slot -- there's
+no GENSYS equivalent anywhere here to have built one. **Fixed** by
+writing a small real 4-slot QD pool directly into existing slack space
+in `SYSDAT`'s 4096-byte `dseg` (starting right after `SYSDAT.FMT`'s own
+last declared field, `mxmemcount`, computed via `asm86 --symbols`
+rather than hardcoded) and linking it as a proper free list through
+`qul`.
+
+This is only a **partial** fix: `BDOSIF.BDO`'s "create disk mx queue"
+(`qmake`) now reaches its following debug marker either way (clean
+`e_no_qd`/success both return control the same way, since the caller
+never checks), but the *next* call, "open mx disk queue" (`qopen`, via
+`openq_entry` in `QUE1.RTM`), now hangs with no further output at all
+-- a new, different, not-yet-diagnosed hang, confirmed to be a true
+hang (no output) rather than a repeat/reset (ruled out directly: a
+probe printing the *incoming* `SS:SP` at `INIT.SUP`'s own `init:` only
+ever fires once per boot). `openq_entry`'s own queue-list walk
+(`qo_nqd: mov si,q_link[si] ...`) looks structurally incapable of
+looping forever with only one queue linked, so the cause is still
+open -- possibly another address-translation bug in the same family
+as #28/this one, triggered somewhere between `qmake` successfully
+linking the queue and `qopen` trying to find it again.
+
 ## Status of the kernel/loader sources
 
 `src/kernel/CIO.A86`, `SYSDAT.A86`, `BDOS.A86`, `MEM.A86`, `RTM.A86`,
@@ -925,18 +984,23 @@ this far, successfully initializes every kernel module in turn --
 own process creation (`proc_creat`, called twice: once for the tick
 process, once for idle).
 
-It currently stops just past all of that, during `INIT.SUP`'s first
-*post-init* call back into `XIOS` (`io_maxconsole` via the `xiosif`
-trampoline) to query character-device counts -- not yet diagnosed.
-Debug probes left in place (`INIT.SUP`'s numbered serial markers
-`'1'`-`'D'`, `SUPIF.SUP`'s `'X'`, `XIOS86Q.A86`'s `'E'`/`'F'`,
-`RTMIF.RTM`'s pre/post-`proc_creat` far-pointer dump) show the module
-table's `XIOS` entry far pointer (`sysdat+0x28`) reads back correct
-immediately before `proc_creat`'s second call (for idle) and already
-corrupted immediately after it returns -- so whatever's happening is
-inside or around process creation/scheduling, not yet isolated to a
-single instruction. `XIOS86Q.A86`'s own `entry:` (the function
-dispatcher this call needs) is confirmed never reached at all.
+With #29's `pul`/`mdul`/`qlr`/`qul` fixes, `RTM`'s own process creation
+no longer corrupts the module table (`RTMIF.RTM`'s pre/post-`proc_creat`
+far-pointer dump now reads back identical, correct values all three
+times), and `INIT.SUP` successfully makes its first *post-init* call
+back into `XIOS` (`io_maxconsole` via `xiosif`) to query character-
+device counts.
+
+It currently stops one module init later than that: inside `BDOSIF.BDO`'s
+own init, which creates, opens, then writes a system message queue
+("mxdiskqd") -- "create" (`qmake`) returns either way (debug markers
+`'q'`/`'r'` in `BDOSIF.BDO` both print), but "open" (`qopen`, via
+`openq_entry` in `QUE1.RTM`) hangs with no further output at all
+(marker `'s'` never prints) -- see #29's own writeup for what's been
+ruled out so far. Debug probes left in place throughout this whole
+path (`INIT.SUP`'s numbered serial markers `'1'`-`'D'`, `SUPIF.SUP`'s
+`'X'`, `XIOS86Q.A86`'s `'E'`/`'F'`, `BDOSIF.BDO`'s `'q'`/`'r'`/`'s'`/`'t'`)
+are ready for picking this up again.
 
 
 

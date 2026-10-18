@@ -36,18 +36,22 @@ init:
 	mov ax,[bx] ! mov cs:[si],ax
 	mov ax,2[bx] ! mov cs:2[si],ax
 
+	push ax ! mov al,'q' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 		; create disk mx queue
 	mov dx,offset mxdiskqd ! mov cx,f_qmake
 	call mpmif
 
+	push ax ! mov al,'r' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 		; open mx disk queue
 	mov dx,offset mxdiskqpb ! mov cx,f_qopen
 	call mpmif
 
+	push ax ! mov al,'s' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 		; write mx disk queue
 	mov dx,offset mxdiskqpb ! mov cx,f_qwrite
 	call mpmif
 
+	push ax ! mov al,'t' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	retf
 
 ;*****************************************************

@@ -1,0 +1,10 @@
+version: 2
+updates:
+  # Keeps the actions pinned in .github/workflows/build.yml (checkout,
+  # setup-python, upload-artifact) current. No other ecosystem applies:
+  # tools/asm86 and tools/plmc are plain-stdlib Python with no
+  # requirements.txt/pyproject.toml to track.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

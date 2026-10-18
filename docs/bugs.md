@@ -13,16 +13,19 @@ hardware.
 
 **Patch status, by section below:** #1–#3 (the RSPs) are left
 **unpatched** — `src/rsp/` remains an unmodified copy of `orig/` for
-those files. #4, #5, #7 (partially), #8, #9, #10, #11, #12, and #13
-(the kernel/loader name typos, the `LDBDOS.A86` fixed-offset
+those files. #4, #5, #7 (partially), #8, #9, #10, #11, #12, #13, and
+#14 (the kernel/loader name typos, the `LDBDOS.A86` fixed-offset
 interaction with `tools/asm86`'s raw-binary output, the `tools/asm86`
-port-truncation bug, and `ROM86Q.A86`'s own two real runtime bugs)
+port-truncation bug, `ROM86Q.A86`'s own two real runtime bugs, and
+`LDBIOS86Q.A86`'s relative-jump-to-an-absolute-address bug)
 **have been patched** directly in `src/kernel/`/`src/loader/`,
 `tools/asm86/`, or `tools/build_mpmldr.py` — once a fix is this
 confidently evidence-backed (an exact squashed-name match to a real
 declaration used incorrectly nowhere else, a byte-level confirmation of
-the wrong address landing in the combined image, or — for #12/#13 —
-confirmed by actually running the code in QEMU),
+the wrong address landing in the combined image, or — for #12-#14 —
+confirmed by actually running the code in QEMU; #14's fix is confirmed
+correct on its own terms but has not, on its own, gotten this actually
+booting — see that section),
 leaving it broken forever didn't serve the "get this booting" goal,
 and each patched spot is called out explicitly below so the change is
 traceable back to its evidence. #6 and #7 (the `dp_base` part) remain
@@ -374,6 +377,50 @@ real size), prints its "about to jump" message, and actually jumps
 into `MPMLDR` — the first piece of this entire project confirmed
 running correctly on real (emulated) hardware, not just assembled and
 reviewed by hand.
+
+## 14. `src/loader/LDBIOS86Q.A86` — a relative jump used to reach an absolute cross-module address — FIXED (but booting is still blocked past this point)
+
+Found continuing the same QEMU boot testing as #12/#13, after those two
+fixes got the boot sector and `MPMLDR.bin`'s own loading fully working
+(confirmed: boot message, all 9 body-sector progress dots, "about to
+jump" message, then the actual jump into `MPMLDR`) but nothing from
+`LDMPM.A86` itself ever appeared afterward.
+
+The real `LDBIOS.A86` ends its `INIT` routine with `jmp ccp`, where
+`ccp_offset equ 0103h ;base of MPMLOADER` and `ccp:` is declared via
+`org ccp_offset` *within LDBIOS.A86's own single-pass assembly* —
+since the jump and the label it targets are both resolved by the same
+assembler run, a plain relative jump between them is computed
+correctly no matter how far apart they land in the final image.
+`LDBIOS86Q.A86` is assembled as a separate, independent module and
+only concatenated into `MPMLDR.bin` afterwards
+(`tools/build_mpmldr.py`) — a relative `jmp ccp_offset` encoded
+assuming this module starts at address 0 is wrong once it's relocated
+to wherever it actually lands (`mldbios_offset`): it lands at
+`mldbios_offset + 0x103`, not the intended absolute `0x103`. Confirmed
+by tracing the exact encoded bytes and the arithmetic by hand, and by
+a debug probe placed directly inside `LDMPM.A86` (temporarily, not
+kept) confirming its own code at `0x103` was never reached.
+
+**Fixed** with an indirect jump through a register (`mov
+ax,ccp_offset ! jmp ax`) instead — absolute within `CS` regardless of
+where the instruction itself physically sits, immune to this module's
+own relocation. `WBOOT` (the real `LDBIOS.A86`'s own, different
+warm-boot target, `jmp ccp+6`) is simplified to the same target here,
+since it isn't on this loader's cold-boot path and isn't worth pinning
+down LDMPM.A86's exact byte offset for yet.
+
+This fix is real and necessary — the jump target address was
+confirmed correct (`LDMPM.A86`'s own code lives exactly there) and the
+indirect-jump encoding was confirmed correct too — but applying it
+alone did **not** get this booting: still nothing from `LDMPM.A86`
+after the jump, including from a debug probe placed directly in its
+own code. That points to something else entirely still being wrong
+somewhere in this handoff (possibly a crash — a stray byte that
+couldn't have come from the debug probe's own print logic appeared in
+one test, suggesting something more serious than a benign hang) —
+not yet found. See `docs/build.md`'s "What's actually needed to boot
+under QEMU" item 4 for the current status.
 
 ## Status of the kernel/loader sources
 

@@ -229,11 +229,13 @@ Shared includes pulled in by the modules above:
    through SeaBIOS, the boot sector prints its own startup message,
    reads the loader header and all of `MPMLDR.bin`'s body sectors
    (confirmed by its own per-sector progress dots), and jumps into
-   `MPMLDR`. Two real bugs were found and fixed this way — see
-   `docs/bugs.md` #12 and #13. What hasn't been confirmed yet is
-   `MPMLDR`/`LDBDOS.A86`/`LDBIOS86Q.A86` actually running correctly
-   past that jump (no console output was observed from that point
-   before this testing session ended) — that's the next thing to
-   verify, not a new piece of work to build.
+   `MPMLDR`. Three real bugs were found and fixed this way so far —
+   see `docs/bugs.md` #12, #13, and #14 — but **this still does not
+   boot**: nothing is observed from `LDMPM.A86` itself after that jump
+   (no signon message, nothing from a debug probe placed directly in
+   its own code right after it resumes), consistent with a crash
+   rather than a benign hang. Pinning this down further needs a real
+   debugger attached to QEMU (its GDB stub, `-s -S`) rather than more
+   printf-style probing — not yet done.
 5. At minimum `SUBMIT.CMD` and a console RSP (section 4) to have a usable
    command line once booted; the utilities in section 5 to do real work.

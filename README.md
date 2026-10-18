@@ -57,6 +57,9 @@ Makefile        Build everything with `make`; see its own header
   piece (what's done, what's new/from-scratch, what's still missing).
 - [docs/diskformat.md](docs/diskformat.md) — the exact byte-for-byte
   layout of the bootable QEMU floppy image `make disk` produces.
+- [docs/utilities.md](docs/utilities.md) — the 19 user-facing
+  `src/utils/` commands (`PIP`, `ED`, `DIR`, `TYPE`, etc.), what each
+  one does, and how they're built and placed on disk.
 - [docs/syscalls.md](docs/syscalls.md) — the MP/M-86 kernel's and the
   loader's own system-call tables: every `CL` function number, what it
   does, and where it's implemented.

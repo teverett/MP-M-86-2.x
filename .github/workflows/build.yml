@@ -6,6 +6,15 @@ name: build
 # that covers and which are deliberately excluded. Runs on all three
 # major OSes since the toolchain is plain-stdlib Python and the
 # Makefile is meant to be portable, not Linux-only.
+#
+# Also builds and uploads the bootable QEMU floppy image (`make disk`,
+# see docs/diskformat.md) as its own artifact, separate from the full
+# build-output dump, so it can be downloaded and booted directly
+# without digging through the rest of build/. Bytes are identical
+# across the 3 OSes (pure-Python, deterministic), so this is somewhat
+# redundant across the matrix, but keeping one artifact per OS matches
+# how build-output is already uploaded and avoids extra conditional
+# logic for no real benefit.
 
 on:
   push:
@@ -42,9 +51,47 @@ jobs:
       - name: make partial (known-incomplete toolchain sources)
         run: make partial
 
+      - name: make disk (bootable QEMU floppy image)
+        run: make disk
+
       - name: upload build artifacts
         uses: actions/upload-artifact@v7
         with:
           name: build-output-${{ matrix.os }}
           path: build/
+          if-no-files-found: error
+
+      - name: upload bootable disk image
+        uses: actions/upload-artifact@v7
+        with:
+          name: mpm86q-floppy-image-${{ matrix.os }}
+          path: build/disk/mpm86q.img
+          if-no-files-found: error
+
+  docs-pdf:
+    # Renders every docs/*.md to PDF with pandoc. A single Linux job,
+    # not part of the build matrix above: the output is OS-independent
+    # and there's no reason to pay for it three times.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install pandoc and a LaTeX engine
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc texlive-xetex
+
+      - name: convert docs/*.md to PDF
+        run: |
+          mkdir -p build/docs-pdf
+          for f in docs/*.md; do
+            name=$(basename "$f" .md)
+            pandoc "$f" -o "build/docs-pdf/$name.pdf"
+          done
+
+      - name: upload docs PDFs
+        uses: actions/upload-artifact@v7
+        with:
+          name: docs-pdf
+          path: build/docs-pdf/
           if-no-files-found: error

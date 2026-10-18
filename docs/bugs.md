@@ -647,29 +647,47 @@ short exactly where its own `IRET` should have been.
 isa.py`.
 
 ## 22. QEMU's emulated floppy controller stalls partway through a PIO
-sector read — NOT YET FIXED
+sector read — FIXED (switched to real 8237 DMA transfers)
 
 Found continuing from #21: with `IRET` fixed, booting progressed much
 further — through `LDBDOS.A86`'s disk-select (`SELDSK`) and the real
 `LDBIOS86Q.A86` `HOME` (recalibrate/seek) call, into `LDBDOS.A86`'s
 own directory-initialization scan (`LBDOSF2.A86`'s `initialize`),
 which issues the first real sector *data* read (as opposed to a seek)
-of this whole boot sequence. That hangs: `LDBIOS86Q.A86`'s
-`fdc_pio_in` (polling `fdc_in_byte` 512 times for one sector) reads
+of this whole boot sequence. That hung: `LDBIOS86Q.A86`'s
+`fdc_pio_in` (polling `fdc_in_byte` 512 times for one sector) read
 the same, small, *constant* number of bytes (7, confirmed via a
 per-byte progress probe, not kept) every time before `fdc_in_byte`'s
-own `MSR` poll (`fib_wait`) never sees `RQM`+`DIO` go ready again —
+own `MSR` poll (`fib_wait`) never saw `RQM`+`DIO` go ready again —
 reproduced identically with an added delay between each byte read
-(also not kept), ruling out a timing race.
+(also not kept), ruling out a timing race: a genuine QEMU NEC765/82077
+emulation behavior this driver's pure-PIO, no-DMA approach (`SPECIFY`'s
+`ND` bit set) doesn't satisfy past an initial FIFO-sized burst.
 
-This looks like a genuine QEMU NEC765/82077 emulation behavior this
-driver's pure-PIO, no-DMA approach (`SPECIFY`'s `ND` bit set, see
-`LDBIOS86Q.A86`'s own header comment) doesn't satisfy past an initial
-FIFO-sized burst — not yet root-caused further, and not a source-level
-bug the way #1-#21 were. A real fix likely means implementing actual
-8237 DMA-driven floppy transfers (programming DMA channel 2 and
-clearing `SPECIFY`'s `ND` bit) instead of pure polled PIO, a
-substantially larger undertaking than anything else in this file.
+**Fixed** by implementing real 8237 DMA-driven transfers instead of
+polled PIO: a new `dma_setup`/`dma_setup_read`/`dma_setup_write` in
+`LDBIOS86Q.A86` programs DMA channel 2 (mask, clear flip-flop, mode,
+address split into a 16-bit address + an 8-bit page register computed
+from `secbuf`'s real physical address `CS*16 + offset(secbuf)`, count)
+before each `READ DATA`/`WRITE DATA` command; `specify_parms`'s `ND`
+bit is cleared (DMA mode) to match; `fdc_pio_in`/`fdc_pio_out` collapse
+into one routine that only drains the 7-byte PIO *result* phase every
+`READ`/`WRITE DATA` command still has regardless of DMA vs PIO data
+transfer.
+
+That alone led to a second, related hang in the exact same
+call sites: `READ`/`WRITE`'s own trailing `SENSE INTERRUPT STATUS`
+call (after the command's own result phase was already drained) hung
+the same way #16 already diagnosed for a different call site — no
+genuine pending interrupt for QEMU's model to report. Removed (the
+command's own result phase already *is* its status; a further SIS
+isn't needed or expected here).
+
+With both fixed, booting gets past the entire floppy I/O layer —
+seek, DMA read, directory scan, `MPM.SYS` file lookup — and reaches
+real file-content validation, reporting `Bad Header Record in MPM.SYS`
+(a data/filesystem-format mismatch, not a hang; see the status section
+below).
 
 ## Status of the kernel/loader sources
 
@@ -690,11 +708,15 @@ tree even after a second, closer look — its one fixable typo
 
 Booting under QEMU (`make run`) now gets past the boot sector, all of
 `MPMLDR.bin` loading, its internal `LDBIOS86Q.A86`→`LDMPM.A86` handoff,
-the "MP/M-86 V2.0 Loader" signon message, and well into `LDBDOS.A86`
-(disk select, home/recalibrate, directory-scan initialization) —
-further than it ever has (#15-#21 above). It currently hangs on #22's
-own FDC PIO stall, the first real sector-data read of the boot
-sequence, not yet fixed.
+the "MP/M-86 V2.0 Loader" signon message, and the entire floppy I/O
+layer in `LDBDOS.A86` (disk select, home/recalibrate, DMA sector
+reads, directory scan, `MPM.SYS` file lookup — #15-#22 above) — no
+longer hanging anywhere. It now reaches real file-content validation
+and stops there, reporting `Bad Header Record in MPM.SYS`: the header
+record `LDMPM.A86` reads back from the start of `MPM.SYS` doesn't
+match what it expects (code segment then data segment, contiguous,
+matching `tools/build_mpmsys.py`'s own header format) — a
+filesystem-image/content mismatch to investigate next, not a hang.
 
 The RSP sources (`CLOCK.A86`, `ECHO.A86`, `TMP.A86`, `SUBMIT.A86`) and
 all 22 `.PLM` utilities in `src/utils/`/`src/toolchain/` compile and

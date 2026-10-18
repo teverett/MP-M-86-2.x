@@ -178,6 +178,30 @@ fd_secsize	equ	512
 fd_gap3		equ	01bh
 fd_dtl		equ	0ffh
 
+;*****************************************************
+;*	8237 DMA (channel 2, the ISA floppy channel)
+;*	EQUATES -- see dma_setup's own comment for why
+;*	this driver needs these at all now.
+;*****************************************************
+
+dma_addr2	equ	04h	;channel 2 current-address register
+dma_count2	equ	05h	;channel 2 current-count register
+dma_page2	equ	81h	;channel 2 page register (addr bits 16-23)
+				; -- fixed ISA wiring, not simply "0x80+
+				; channel"; ch0/1/2/3 page ports are
+				; 87h/83h/81h/82h respectively
+dma_mask	equ	0ah	;single-channel mask set/clear register
+dma_mode	equ	0bh	;mode register
+dma_clrff	equ	0ch	;clear first/last flip-flop (write any value)
+dma_mask_set2	equ	06h	;mask channel 2 (bit2=set, bits1-0=channel)
+dma_mask_clr2	equ	02h	;unmask channel 2
+dma_mode_read	equ	46h	;single/increment/no-autoinit/"write to
+				; memory" (disk->RAM, for a floppy READ)/
+				; channel 2
+dma_mode_write	equ	4ah	;single/increment/no-autoinit/"read from
+				; memory" (RAM->disk, for a floppy WRITE)/
+				; channel 2
+
 	cseg
 	org	mldbios_offset	;see header comment -- NOT org 0
 
@@ -401,10 +425,22 @@ READ:
 	call	rw_physical
 	call	fdc_seek_to
 	call	fdc_fill_rw_parms
+	call	dma_setup_read		;arm the 8237 before the command that
+					; triggers execution phase -- see
+					; dma_setup's own comment
 	mov	bx,offset read_parms
 	call	fdc_send_cmd
-	call	fdc_pio_in
-	call	fdc_sense_int
+	call	fdc_pio_in		;drains READ DATA's own 7-byte result
+					; phase -- no separate SENSE
+					; INTERRUPT STATUS call after this:
+					; confirmed via testing that QEMU
+					; hangs on one here (see docs/bugs.md
+					; #16's identical finding for a
+					; different call site) since there's
+					; no genuine pending interrupt for it
+					; to report -- the result phase this
+					; command just finished already is
+					; this command's real status
 	push	si ! push di ! push ds ! push es
 	mov	si,offset secbuf ! add si,cur_bufoff
 	push	cs ! pop ds
@@ -418,10 +454,13 @@ WRITE:
 	call	rw_physical
 	call	fdc_seek_to
 	call	fdc_fill_rw_parms
+	call	dma_setup_read		;read-modify-write: read the other
+					; 3/4 of this sector first (see
+					; dma_setup's own comment)
 	mov	bx,offset read_parms
 	call	fdc_send_cmd
-	call	fdc_pio_in
-	call	fdc_sense_int
+	call	fdc_pio_in		;no SENSE INTERRUPT STATUS after
+					; this -- see READ's own comment
 	push	si ! push di ! push ds ! push es
 	mov	di,offset secbuf ! add di,cur_bufoff
 	mov	si,dma_adr ! push cs ! pop es
@@ -429,10 +468,13 @@ WRITE:
 	mov	cx,128 ! rep movsb
 	pop	es ! pop ds ! pop di ! pop si
 	call	fdc_fill_rw_parms
+	call	dma_setup_write		;now the real write, modified
+					; secbuf back out to disk
 	mov	bx,offset write_parms
 	call	fdc_send_cmd
-	call	fdc_pio_out
-	call	fdc_sense_int
+	call	fdc_pio_in		;same routine now, and likewise no
+					; SENSE INTERRUPT STATUS after it --
+					; see READ's own comment
 	xor	al,al
 	ret
 
@@ -547,32 +589,82 @@ fib_wait:
 	pop	dx
 	ret
 
-fdc_pio_in:
-	mov	di,offset secbuf
-	mov	cx,fd_secsize
-pio_in_loop:
-	    call	fdc_in_byte
-	    mov	cs:[di],al
-	    inc	di
-	    loop	pio_in_loop
+fdc_pio_in:			;despite the name, the actual fd_secsize
+				; data bytes now move via DMA (dma_setup
+				; was called before the command that
+				; started this execution phase) -- the CPU
+				; only needs to drain the 7-byte PIO result
+				; phase every READ/WRITE DATA command ends
+				; with regardless of DMA vs non-DMA mode.
+				; READ and WRITE's own call sites both call
+				; this same routine now (there's nothing
+				; left that differs between them).
 	mov	cx,7
 pio_in_res:
 	    call	fdc_in_byte
 	    loop	pio_in_res
 	ret
 
-fdc_pio_out:
-	mov	si,offset secbuf
-	mov	cx,fd_secsize
-pio_out_loop:
-	    mov	al,cs:[si]
-	    call	fdc_out_byte
-	    inc	si
-	    loop	pio_out_loop
-	mov	cx,7
-pio_out_res:
-	    call	fdc_in_byte
-	    loop	pio_out_res
+;*********************************************
+;*	dma_setup -- arm 8237 DMA channel 2 (the ISA floppy channel)
+;*	for one fd_secsize-byte transfer into/out of secbuf, before
+;*	issuing a READ DATA/WRITE DATA command. Needed because pure
+;*	PIO (the CPU polling fdc_in_byte/fdc_out_byte fd_secsize
+;*	times, like this file used to for the whole sector, not just
+;*	the result phase above) stalls after a handful of bytes on
+;*	this QEMU target's NEC765/82077 emulation -- confirmed by
+;*	testing: fdc_in_byte's own MSR poll (fib_wait) simply never
+;*	saw RQM+DIO go ready again after the first several bytes, with
+;*	or without an added delay between bytes (ruling out a timing
+;*	race) -- see docs/bugs.md #22. specify_parms's own ND
+;*	(non-DMA) bit is cleared to match (see its own declaration).
+;*********************************************
+
+dma_setup_read:
+	mov	bl,dma_mode_read
+	jmps	dma_setup
+
+dma_setup_write:
+	mov	bl,dma_mode_write
+
+dma_setup:
+	mov	al,dma_mask_set2 ! mov dx,dma_mask ! out dx,al
+				;mask channel 2 off while reprogramming it
+	mov	al,0 ! mov dx,dma_clrff ! out dx,al
+				;clear the address/count byte-pointer
+				; flip-flop -- the next write to either
+				; port below is the LOW byte regardless of
+				; what this channel was left at before
+	mov	al,bl ! mov dx,dma_mode ! out dx,al
+				;single-transfer, address-increment,
+				; no-autoinit, channel 2, direction per
+				; dma_setup_read/_write's own caller
+
+	mov	ax,cs		;secbuf's physical (20-bit) address =
+	mov	bx,ax		; cs*16 + offset(secbuf) -- split into a
+	mov	cl,4		; 16-bit "address" (the low 16 bits) and
+	shl	ax,cl		; an 8-bit "page" (bits 16-23) the 8237
+	mov	cl,12		; wants as two separate registers
+	shr	bx,cl
+	add	ax,offset secbuf
+	adc	bx,0
+
+	mov	dx,dma_addr2
+	out	dx,al		;address low byte
+	mov	al,ah
+	out	dx,al		;address high byte
+	mov	al,bl
+	mov	dx,dma_page2 ! out dx,al
+
+	mov	ax,fd_secsize-1	;8237 count register is (bytes - 1)
+	mov	dx,dma_count2
+	out	dx,al		;count low byte
+	mov	al,ah
+	out	dx,al		;count high byte
+
+	mov	al,dma_mask_clr2 ! mov dx,dma_mask ! out dx,al
+				;unmask channel 2 -- armed and ready for
+				; the FDC command about to be sent
 	ret
 
 ;*********************************************
@@ -597,7 +689,11 @@ cur_psec	db	0
 cur_bufoff	dw	0
 outbyte_tmp	db	0
 
-specify_parms	db	3,cmd_specify,0dfh,03h
+specify_parms	db	3,cmd_specify,0dfh,02h
+				;last byte: HLT=1 (2ms), ND=0 -- DMA mode,
+				; not the non-DMA/PIO mode the original
+				; 03h (ND=1) selected; see dma_setup's own
+				; comment for why
 recal_parms	db	2,cmd_recal,0
 seek_parms	db	3,cmd_seek,0,0
 read_parms	db	9,cmd_read,0,0,0,0,fd_secsize_n,fd_spt,fd_gap3,fd_dtl

@@ -32,7 +32,7 @@ init:
 
 		; save sysdat segment
 	mov sysdat,ds
-	mov bx,offset supmod ! mov si,supervisor
+	mov bx,offset supmod ! mov si,offset supervisor
 	mov ax,[bx] ! mov cs:[si],ax
 	mov ax,2[bx] ! mov cs:2[si],ax
 
@@ -128,7 +128,7 @@ WRRAN_OFF dw	func34	! db   11	; 21: write random
 entry:
 ;=====
 
-	mov ch,0 ! mov ax,btablen
+	mov ch,0 ! mov ax,offset btablen
 	push dx ! mul cx ! pop dx
 	mov si,offset functab ! add si,ax
 	TEST cs:btab_flag[si],bf_getmx ! jz nomx

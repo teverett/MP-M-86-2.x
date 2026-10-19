@@ -212,7 +212,7 @@ init:
 	;	instead of going through DS each time.
 
 	mov	bx,offset supmod
-	mov	si,supervisor
+	mov	si,offset supervisor
 	mov	ax,[bx] ! mov cs:[si],ax
 	mov	ax,2[bx] ! mov cs:2[si],ax
 
@@ -225,7 +225,7 @@ init:
 	;	say should happen.)
 
 	mov	bx,offset dispatcher
-	mov	si,mydispatch
+	mov	si,offset mydispatch
 	mov	ax,[bx] ! mov cs:[si],ax
 	mov	ax,2[bx] ! mov cs:2[si],ax
 
@@ -298,7 +298,7 @@ entry:
 	cld
 	mov	ah,0 ! shl ax,1
 	mov	bx,ax
-	call	functab[bx]
+	call	cs:functab[bx]
 	push ax ! mov al,'F' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	mov	bx,ax
 	retf

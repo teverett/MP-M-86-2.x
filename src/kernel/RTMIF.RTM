@@ -41,14 +41,14 @@ init:		; RTM module Initialization
 	mov ax,p_uda[bx]
 	add ax,sysdat
 	push es ! mov es,ax
-	mov si,supervisor
+	mov si,offset supervisor
 	mov ax,cs:2[si]
 	mov u_initcs,ax ! pop es
 	mov bx,offset idlepd		;IDLE
 	mov ax,p_uda[bx]
 	add ax,sysdat
 	push es ! mov es,ax
-	mov si,supervisor
+	mov si,offset supervisor
 	mov ax,cs:2[si]
 	mov u_initcs,ax ! pop es
 	push ax ! push bx ! mov bx,28h ! mov ax,[bx] ! call ydbg ! pop bx ! pop ax	;TEMP DEBUG PROBE
@@ -104,9 +104,12 @@ function	dw	sysreset_entry	;0
 ;=====		=================
 entry:		; RTM Entry Point
 ;=====		=================
+	push ax ! push dx ! mov al,'V' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	mov ch,0 ! shl cx,1 ! mov si,cx
 	call cs:function[si]
-rtm_ret:retf
+rtm_ret:
+	push ax ! push dx ! mov al,'W' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
+	retf
 
 ;=====		===============
 mpmif:		; MPM Interface

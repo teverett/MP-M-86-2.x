@@ -476,7 +476,7 @@ init:		; XIOS system initialization routine.
 		;into Code Segment (supervisor)
 
 	mov bx,offset supmod
-	mov si,supervisor
+	mov si,offset supervisor
 	mov ax,[bx] ! mov cs:[si],ax
 	mov ax,2[bx] ! mov cs:2[si],ax
 

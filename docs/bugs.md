@@ -953,6 +953,119 @@ open -- possibly another address-translation bug in the same family
 as #28/this one, triggered somewhere between `qmake` successfully
 linking the queue and `qopen` trying to find it again.
 
+## 30. Six genuinely broken module-dispatch mechanisms, all cousins of
+#28/#29's "assembled standalone, never relocated" bug family -- three
+source typos plus `tools/build_mpmsys.py` never relocating the
+dispatch *instructions* that locate each module's own internal
+function table, only the table's own contents -- CONFIRMED, PARTIALLY
+FIXED
+
+Found continuing from #29, chasing the `qopen` hang with a QEMU
+hardware watchpoint on `QUE1.RTM`'s `openq_entry` (the technique that
+found #28): the watchpoint never fired at all. A watchpoint on
+`makeq_entry` (`QUE1.RTM`'s *other* queue entry point, called just
+before `openq_entry` by the same `BDOSIF.BDO` init sequence) didn't
+fire either -- meaning `RTM`'s own `entry:` dispatcher (every
+intermodule call into `RTM`, including `qmake` itself) was never
+really working, the apparent `qmake`/`qopen` success in #29 having
+been a lucky wild jump into harmless bytes rather than real code.
+
+Single-stepping `RTM`'s `entry:` dispatcher (`RTMIF.RTM`) with GDB
+found the first bug directly: `mov si,supervisor` (used to cache
+`SUP`'s far pointer locally, and -- in a different spot -- to fetch a
+process's initial CS) has no `offset` keyword, so `tools/asm86.py`
+assembles it as `mov si,[supervisor]` (a memory *read* of whatever is
+at that small offset) instead of `mov si,8` (the intended constant
+load). `RTMIF.RTM`'s *first* use of this pattern already has `offset`
+and works; its own other two uses, plus the *only* use in each of
+`MEMIF.MEM`, `CIOIF.CIO`, `BDOSIF.BDO`, and `XIOS.A86`, are all missing
+it. Since `supervisor`'s own offset (8) happens to fall inside
+`SUP`'s own module-table "supervisor" slot once `SUP`'s module_base=0
+is applied, the bogus memory read ends up loading *that* slot's
+already-correct value anyway -- except when the module in question is
+dispatching an *inter*module call (`RTM`'s own `mov si,supervisor` at
+its PD-setup for `tickpd`/`idlepd`, used to read back a process's
+initial CS), where it instead silently loads garbage from SYSDAT
+offset 8 (`rtmmod`'s own far pointer) as if it were a segment value.
+**Fixed** by adding the missing `offset` everywhere (`RTMIF.RTM`
+×2 more, `MEMIF.MEM`, `CIOIF.CIO`, `BDOSIF.BDO`, `XIOS.A86` ×1 each).
+
+The same bug, same assembler quirk, found a second source bug:
+`BDOSIF.BDO`'s `entry:` does `mov ax,btablen` (meant to load the
+3-byte-per-entry function-table stride as a constant) with no
+`offset`, so it loads whatever's at SYSDAT offset 3 instead of `3`,
+corrupting the `mul cx` right after it (and so every BDOS dispatch's
+table index). **Fixed** the same way (added `offset`).
+
+A third, different bug in the same dispatcher family: `XIOS86Q.A86`'s
+`entry:` does `call functab[bx]` with **no segment override at all**,
+so (`[bx]` defaulting to DS, not CS) it reads the call target from
+whatever DS happens to be -- `sysdat`, at the point XIOS's `entry:` is
+actually reached -- instead of from XIOS's own code segment. **Fixed**
+by adding the `cs:` override this needed (`call cs:functab[bx]`),
+matching every other module's own dispatcher.
+
+With those three source bugs fixed, GDB still found `RTM`'s `entry:`
+dispatcher jumping into garbage instead of `makeq_entry` on the very
+next call. Tracing it with `set architecture i8086` and single-stepping
+found why: `call word ptr cs:[si+0107h]` (`entry:`'s own "call through
+my function table" instruction -- `0107h` is `function`'s *standalone*
+`RTM.A86` offset) is a *second*, distinct kind of unrelocated-address
+bug from #29's `FUNCTION_TABLES` fix. That fix already correctly adds
+`module_base` to every *value stored in* the table -- but the
+dispatch instruction that *locates the table itself* still points at
+bare offset `0107h`, not `module_base+0107h`. Since `CS` is the one
+`MPM_CODE_SEG` shared by every module, `cs:[0107h]` always resolves
+inside **`SUP`'s** own code (module_base 0) regardless of which
+module's dispatcher is running -- i.e. every non-`SUP` module's
+internal function-table dispatch was reading 21-47 words of
+essentially random `SUP` bytes as if they were its own relocated
+table, the entire time, `FUNCTION_TABLES`' own fix notwithstanding.
+`RTM`/`MEM`/`CIO` encode this as `2E FF 94 <table_off>` (`call word
+ptr cs:[si+table_off]`); `XIOS` (after the `cs:` fix above) as `2E FF
+97 <table_off>` (`cs:[bx+table_off]`); `BDOS` as the immediate-load
+`C7 C6 <table_off>` (`mov si,offset functab`). **Fixed** in
+`tools/build_mpmsys.py`: for each `FUNCTION_TABLES` module, after
+relocating the table's own contents, find that exact byte pattern
+(unique-match-checked, same discipline as every other patch in that
+script) and add `module_base` to its own embedded `table_off`
+immediate too.
+
+**Confirmed fixed by this**: `RTM`'s own `entry:` dispatch now
+genuinely reaches `makeq_entry` (`getqdaddr`'s own probes -- `I`
+through `N` -- all fire in the right order), and `qmake` completes for
+real, not by lucky accident.
+
+**Still open**: by the time `BDOSIF.BDO`'s init makes its *second*
+call through this same path (`qspace`'s own `f_maualloc`, routed to
+`MEM`), `SYSDAT`'s `module_map` byte (offset `0x46`, bit per module,
+`MEM`'s bit confirmed `0x3F` at build time) has silently changed to
+`0x01` -- `MEM`'s bit no longer set -- so the call is rejected as
+"not implemented" before ever reaching `MEM`'s own dispatcher.
+Narrowed with more probes (dumping `module_map` at several points):
+it still reads `0x3F` correctly on both sides of `getqdaddr`'s own
+`qul`-pool copy (`rep movs`, the obvious suspect -- ruled out), and
+every instruction between there and the corrupted read was checked
+by hand and either doesn't touch `SYSDAT` at all or touches an
+unrelated, correctly-segmented field (`u_func`/`u_wrkseg`, confirmed
+by probe to be genuinely `ES`-relative via this assembler's `eseg`
+directive, not a repeat of this same bug class). With no in-line
+write found, the leading hypothesis going into the next session is an
+*asynchronous* one: interrupts are not obviously disabled across this
+window, and `XIOS86Q.A86`'s tick ISR calls through `dispatcher` (fixed
+in #29/this session to correctly point at `RTM`'s own `fdisp`) into
+`DSPTCH.RTM`'s scheduler (`fdisp`/`dsptch`/`int_disp_exit`) -- a
+largish, not-yet-audited routine that reads/writes several more
+`SYSDAT` fields (`rlr`, `p_stat`, `p_uda`, the `u_*` save slots) during
+a real context switch. A real timer tick firing mid-dispatch and
+corrupting something there, rather than anything in the `qmake`/
+`qspace` code path itself, would explain why the corruption isn't
+findable by reading that path's own instructions. Not yet confirmed.
+Debug probes left in place throughout (`SUPIF.SUP`'s `Q`/`R`/`S`/`T`/
+`U`/`Y`/`Z`, `RTMIF.RTM`'s `V`/`W`, `QUE1.RTM`'s `G`/`H`, `QUE2.RTM`'s
+`I`-`P` including the two `module_map` dumps at `K`/`L`) are ready for
+picking this up again.
+
 ## Status of the kernel/loader sources
 
 `src/kernel/CIO.A86`, `SYSDAT.A86`, `BDOS.A86`, `MEM.A86`, `RTM.A86`,
@@ -991,16 +1104,23 @@ times), and `INIT.SUP` successfully makes its first *post-init* call
 back into `XIOS` (`io_maxconsole` via `xiosif`) to query character-
 device counts.
 
-It currently stops one module init later than that: inside `BDOSIF.BDO`'s
-own init, which creates, opens, then writes a system message queue
-("mxdiskqd") -- "create" (`qmake`) returns either way (debug markers
-`'q'`/`'r'` in `BDOSIF.BDO` both print), but "open" (`qopen`, via
-`openq_entry` in `QUE1.RTM`) hangs with no further output at all
-(marker `'s'` never prints) -- see #29's own writeup for what's been
-ruled out so far. Debug probes left in place throughout this whole
-path (`INIT.SUP`'s numbered serial markers `'1'`-`'D'`, `SUPIF.SUP`'s
-`'X'`, `XIOS86Q.A86`'s `'E'`/`'F'`, `BDOSIF.BDO`'s `'q'`/`'r'`/`'s'`/`'t'`)
-are ready for picking this up again.
+With #30's fixes, `BDOSIF.BDO`'s own init now gets further still:
+`RTM`'s own `entry:` dispatcher -- used by every intermodule call
+into `RTM`, including "create disk mx queue" (`qmake`) -- genuinely
+works for the first time (confirmed: `makeq_entry`/`getqdaddr`'s own
+probes all fire in the real, correct order instead of silently never
+executing). It currently stops on the *second* such call this same
+init makes, routed to `MEM` instead of `RTM` (`qspace`'s own
+`f_maualloc`, allocating the queue's message buffer): that call is
+rejected outright because `SYSDAT`'s `module_map` has lost `MEM`'s bit
+by the time it's checked, cause not yet found -- see #30's own
+writeup for what's been ruled out and the leading (not yet confirmed)
+hypothesis. Debug probes left in place throughout this whole path
+(`INIT.SUP`'s numbered serial markers `'1'`-`'D'`, `SUPIF.SUP`'s `'X'`/
+`'Q'`/`'R'`/`'S'`/`'T'`/`'U'`/`'Y'`/`'Z'`, `XIOS86Q.A86`'s `'E'`/`'F'`,
+`BDOSIF.BDO`'s `'q'`/`'r'`/`'s'`/`'t'`, `RTMIF.RTM`'s `'V'`/`'W'`,
+`QUE1.RTM`'s `'G'`/`'H'`, `QUE2.RTM`'s `'I'`-`'P'`) are ready for
+picking this up again.
 
 
 

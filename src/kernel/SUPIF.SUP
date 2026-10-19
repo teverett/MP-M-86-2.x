@@ -73,6 +73,7 @@ func:		; call system function
 ;		CL = function #
 ;		DX = arg
 
+	push ax ! push cx ! push dx ! mov al,'Y' ! mov dx,03f8h ! out dx,al ! mov ax,es ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop cx ! pop ax	;TEMP DEBUG PROBE
 	mov u_func,cl
 func1:	cmp ch,0 ! je userf
 	    mov al,ch ! mov ch,0
@@ -87,17 +88,33 @@ userf:	mov si,cx ! shl si,1 ! add si,cx
 nonet:	mov cl,ent_func[si] ! mov ch,0
 	mov al,ent_mod[si]
 		;AL=mod,CL=func,CH=0
+	push ax ! push dx ! mov al,'Q' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
+	push ax ! push dx ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 inmod:	cmp al,sup ! jne gofar
 	    shl cx,1 ! mov si,cx
 	    jmp cs:supfunc[si]
 gofar:	push cx ! mov cx,ax ! dec cl
-	mov al,module_map ! shr al,cl
+	push ax ! push dx ! push cx ! mov al,'Z' ! mov dx,03f8h ! out dx,al ! mov al,cl ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop cx ! pop dx ! pop ax	;TEMP DEBUG PROBE
+	mov al,module_map
+	push ax ! push dx ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
+	shr al,cl
+	push ax ! push dx ! mov al,'R' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
+	push ax ! push dx ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	and al,1 ! jnz goodmod
 	    pop cx ! mov cx,e_not_implemented
+	    push ax ! mov al,'U' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	    mov bx,0ffffh ! mov ax,bx ! ret
-goodmod:mov ch,0 ! mov si,cx
+goodmod:
+	push ax ! push dx ! mov al,'S' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
+	mov ch,0 ! mov si,cx
 	mov cl,3 ! shl si,cl ! pop cx
+	push ax ! push dx ! push cx
+	mov ax,cx ! call zdbg ! mov al,':' ! mov dx,03f8h ! out dx,al	;TEMP DEBUG PROBE: CX (module#,local func#)
+	mov ax,word ptr module_table[si] ! call zdbg ! mov al,':' ! mov dx,03f8h ! out dx,al	;TEMP DEBUG PROBE: target offset
+	mov ax,word ptr module_table[si+2] ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al	;TEMP DEBUG PROBE: target segment
+	pop cx ! pop dx ! pop ax
 	callf dword ptr module_table[si]
+	push ax ! push dx ! mov al,'T' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	ret
 
 ;=====

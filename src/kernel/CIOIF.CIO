@@ -23,7 +23,7 @@ serial		db	'654321'
 init:
 ;====
 	mov sysdat,ds
-	mov bx,offset supmod ! mov si,supervisor
+	mov bx,offset supmod ! mov si,offset supervisor
 	mov ax,[bx]
 	mov cs:[si],ax
 	mov ax,2[bx]

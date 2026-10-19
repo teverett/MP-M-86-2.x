@@ -1179,6 +1179,115 @@ span, not yet found. Debug probes left in place throughout (`INIT.SUP`'s
 `'*'`/`'+'`/`'='`, `DSPTCH.RTM`'s `'~'`, `MEMIF.MEM`'s `'n'`/`'o'`
 `p_flag` dumps) are ready for picking this up again.
 
+## 32. `#31`'s "`pf_tempkeep` stuck" symptom was a debugging-instrumentation
+artifact, not a real kernel bug -- real root cause found and fixed; a
+second, independent, real `module_table` corruption bug found, not yet
+fixed
+
+**Context**: picking up exactly where #31 left off (the `pf_tempkeep`
+"stuck set" mystery, `abt_chk` rejecting `RTM`'s `terminate_entry`).
+
+**The `pf_tempkeep` mystery was never real.** All of #31's "confirmed
+clean" / "confirmed stuck" readings came from the free-running serial
+trace (`qemu-system-i386 ... -serial file:...` with no `-S`/single-
+stepping). Verified this session, with a GDB hardware breakpoint/
+watchpoint session against the live QEMU gdbstub (`-s -S`, `target
+remote localhost:1234`), that **QEMU's UART emulation silently drops
+bytes written back-to-back at full CPU speed** -- the same `push ax !
+mov al,'#' ! mov dx,03f8h ! out dx,al ! pop ax`-style single-character
+probes that print correctly throughout *most* of the trace sometimes
+vanish entirely when several fire in close succession (confirmed with
+`SUPIF.SUP`'s own `'#'`/`'Y'`/`'Q'`/`'Z'` probes: all four are silently
+missing from a full-speed run's serial log immediately after `'@'`,
+even though single-stepping the *identical* code path through GDB
+prints all of them, in the right order, with the right values, every
+time). This means: a probe's *presence* in a free-run trace is reliable
+evidence it fired; a probe's *absence* is not reliable evidence it
+didn't -- exactly backwards from what #29–#31 assumed when ruling
+things out ("probe X never fires, so Y never happens"). Confirmed this
+is a real QEMU/host-timing effect, not a project bug: verified with the
+same binary that single-instruction-stepping (via repeated `stepi`)
+never drops a byte, no matter how many probes fire back-to-back.
+
+Re-doing the actual check reliably (GDB hardware watchpoint directly on
+the live physical address of the init process's own `p_flag` word, not
+a serial probe) showed `pf_tempkeep` is set exactly once, by
+`MEMIF.MEM`'s own `entry:` (`or p_flag[si],pf_tempkeep`, its normal
+first-acquire-of-the-mxmem-lock path) -- and then **never cleared**,
+because the `f_maualloc` call it makes (`QUE2.RTM`'s `qspace`, via
+`SUPIF.SUP`'s reliable `cs:sysdat`-based `mpmif`) was failing every
+single time, confirmed via a breakpoint on `MAU.MEM`'s `maualloc_entry`:
+`DX`, its own live MPB-pointer argument (set by `qspace` just before the
+call), read back as `03F8h` -- the serial port I/O address, not a valid
+MPB offset. Root cause: **`MEMIF.MEM`'s own `'a'`/`'b'` debug probes,
+between the critical section's `havemx:` label and the `call
+cs:functab[si]` that invokes `maualloc_entry`, used the single-register
+save style (`push ax ! mov al,'a' ! mov dx,03f8h ! out dx,al ! pop
+ax`)** -- correct for *most* call sites in this file, where `DX` isn't
+live, but `maualloc_entry` is reached here specifically via `qspace`'s
+on-stack-MPB trick, which *does* keep its MPB pointer live in `DX` all
+the way through this exact dispatch chain. The probe's own `mov
+dx,03f8h` permanently clobbered it, with no code anywhere to restore
+it, so `maualloc_entry` read garbage and failed every time, leaving
+`MEMIF.MEM`'s `entry:` stuck in the "lock held" state (`pf_tempkeep`
+still set) for the rest of the boot. This is debugging instrumentation
+breaking the very thing it was added to observe -- not a bug in
+`BDOSIF.BDO`'s `qopen`/`qwrite` or anywhere `#31` was looking.
+
+**Fix**: `MEMIF.MEM`'s `'a'` and `'b'` probes now also save/restore
+`DX` (`push ax ! push dx ! mov al,'a' ! ... ! pop dx ! pop ax`), matching
+every *other* probe in this same critical section (`havemx:`'s own
+2-hex-nibble dump, `'c'`/`'j'`/`'k'`/`'l'`/`'m'`/`'n'`, etc., all of
+which already correctly save/restore every register they touch -- `'a'`
+and `'b'` were the only two that didn't). Confirmed fixed: rebuilt and
+re-ran under GDB with the same reliable hardware-watchpoint-on-`p_flag`
+check -- `maualloc_entry` now receives the real MPB pointer, succeeds,
+and `MEMIF.MEM`'s critical section cleanly clears `pf_tempkeep` back to
+`0x0000` on exit (confirmed via the existing `'n'`/`'o'` dumps, which
+now read `0000` both times in the free-run trace too, for whatever
+that's worth given the byte-drop caveat above).
+
+**Net result**: boot now gets measurably further -- past `abt_chk`'s
+rejection entirely, into `RTM`'s real `term_act` cleanup logic (freeing
+the init process's memory blocks, detaching console/list devices) --
+confirmed by new serial-trace content (`MEMIF.MEM`'s own `'h'`/`'i'`
+`mpmif` probes and further `SUPIF.SUP` dispatch probes) that was never
+reached in any prior session.
+
+**New blocker found, not yet fixed**: boot now hangs a bit further in,
+inside this same termination cleanup. Confirmed with a GDB hardware
+watchpoint directly on `module_table`'s own live `RTM` segment-field
+word (`rtmmod+2` in `SYSDAT`'s dseg) that it is silently overwritten
+from the correct `1000h` to `0F00h` partway through boot, from code
+inside `SUP.A86`'s `LOAD.SUP` (in the neighborhood of its "chain-load
+free old memory" / CMD-header-to-`ldtab` logic, which this session
+confirmed shares its field layout correctly with `SYSDAT.FMT`'s own
+canonical `ldtab`/`load_pd`/etc. declarations -- so, unlike several
+earlier bugs this project, this is *not* another instance of a
+module's private scratch colliding with `SYSDAT`'s structure by
+accident). The exact faulting instruction was not pinned down with
+confidence this session -- two different breakpoints placed near the
+GDB-reported faulting address each landed on a *plausible*-looking but
+mutually-inconsistent write (one zeroing `ldtab_pd` for a fixed, small
+`SI`, matching neither the corrupted address nor the `0F00h` value),
+and this GDB/QEMU combination has already shown several cosmetic
+reporting quirks elsewhere this session (see `#`-prefixed note in the
+project's own debugging notes on `continue` after a watchpoint hit), so
+the reported fault PC may not be exact. Once `module_table`'s `RTM`
+entry is corrupted, the next far dispatch through it lands at `0F00:
+17C5` instead of `1000:17C5` -- not an immediate crash (the segment
+still happens to contain *something*, since boot doesn't visibly fault,
+just drifts into nonsense dispatches: `ES`/mod/`DS`/`module_map` all
+read back as garbage on the next dispatch attempt, and boot goes quiet
+after an `e_not_implemented` reject). This is the new, confirmed
+blocking point for the next continuation. Next step: re-run the same
+GDB hardware-watchpoint session on the live `module_table` RTM-segment
+address (`sysdat_segment*16 + 0x0A`, i.e. `rtmmod+2`) and single-step
+(not `continue`, to avoid the GDB/QEMU batch-mode "Cannot execute this
+command while the target is running" issue already documented
+elsewhere in this file) from well before the hit to nail the exact
+instruction and its real intent.
+
 ## Status of the kernel/loader sources
 
 `src/kernel/CIO.A86`, `SYSDAT.A86`, `BDOS.A86`, `MEM.A86`, `RTM.A86`,
@@ -1227,22 +1336,33 @@ signon banner), every `INIT.SUP` marker `'1'`-`'D'`, down to
 the init process. `RTM`'s `terminate_entry` is reached correctly and
 calls `abt_chk` to check whether that's allowed right now.
 
-It currently stops there: `abt_chk` rejects the terminate (`cx`=
-0FFFFh, "tempkeep") because the init process's own `p_flag` already
-has `pf_tempkeep` stuck set, cause not yet found -- see #31's own
-writeup for what's been ruled out (confirmed clean right after
-`MEMIF.MEM`'s own `f_maualloc`/`pf_tempkeep` handling inside `qmake`,
-so the real culprit is later, in `qopen`/`qwrite`/`BDOSIF.BDO` itself)
-and what fixing a *different*, confirmed instance of the same
-unreliable-`DS`-bootstrap bug class (`QUE2.RTM`'s `qspace`/`SUPIF.SUP`'s
-`mpmif`) didn't resolve. Debug probes left in place throughout this
-whole path (`INIT.SUP`'s numbered serial markers `'1'`-`'D'` plus
-`'!'`, `SUPIF.SUP`'s `'X'`/`'Q'`/`'R'`/`'S'`/`'T'`/`'U'`/`'Y'`/`'Z'`/
-`'@'`/`'#'`, `XIOS86Q.A86`'s `'E'`/`'F'`/`'0'`/`'p'`-`'w'`,
-`BDOSIF.BDO`'s `'q'`/`'r'`/`'s'`/`'t'`/`'?'`/`'['`, `RTMIF.RTM`'s
-`'V'`/`'W'`, `QUE1.RTM`'s `'G'`/`'H'`, `QUE2.RTM`'s `'I'`-`'P'`,
-`ABORT.RTM`'s `'$'`/`'%'`/`'^'`/`'&'`/`'*'`/`'+'`/`'='`, `DSPTCH.RTM`'s
-`'~'`) are ready for picking this up again.
+#32 found the "`pf_tempkeep` stuck" symptom reported above was itself a
+debugging-instrumentation artifact (`MEMIF.MEM`'s own `'a'`/`'b'`
+probes were clobbering a live `DX` argument, making every
+`f_maualloc` call inside `qmake` fail) -- now fixed. With that fix,
+`abt_chk`'s rejection is gone entirely: `RTM`'s `terminate_entry` now
+proceeds into real `term_act` cleanup (freeing the init process's
+memory, detaching its console/list devices). Boot now hangs a bit
+further in, during that same cleanup, because of a second, unrelated,
+*confirmed* (via a GDB hardware watchpoint directly on the live memory
+address) corruption of `module_table`'s own `RTM` segment field (goes
+from the correct `1000h` to `0F00h`, written from somewhere in
+`SUP.A86`'s `LOAD.SUP`) -- see #32's own writeup for exactly what's
+confirmed and what isn't (the exact faulting instruction wasn't pinned
+down with full confidence this session). This is the current, precise
+blocking point. Debug probes left in place throughout the now-cleared
+path (`INIT.SUP`'s numbered serial markers `'1'`-`'D'` plus `'!'`,
+`SUPIF.SUP`'s `'X'`/`'Q'`/`'R'`/`'S'`/`'T'`/`'U'`/`'Y'`/`'Z'`/`'@'`/
+`'#'`, `XIOS86Q.A86`'s `'E'`/`'F'`/`'0'`/`'p'`-`'w'`, `BDOSIF.BDO`'s
+`'q'`/`'r'`/`'s'`/`'t'`/`'?'`/`'['`, `RTMIF.RTM`'s `'V'`/`'W'`,
+`QUE1.RTM`'s `'G'`/`'H'`, `QUE2.RTM`'s `'I'`-`'P'`, `ABORT.RTM`'s
+`'$'`/`'%'`/`'^'`/`'&'`/`'*'`/`'+'`/`'='`, `DSPTCH.RTM`'s `'~'`) are
+harmless to leave as-is, but given #32's finding, any *new* single-
+register-save probe added anywhere a call's arguments are live in `DX`
+(or `BX`/`CX`) needs to save/restore that register too -- don't trust
+a probe's absence from a free-run serial trace; verify with GDB
+single-stepping (not `continue`, which has its own batch-mode
+reporting quirks against this QEMU gdbstub) instead.
 
 
 

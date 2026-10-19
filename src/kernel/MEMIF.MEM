@@ -76,11 +76,30 @@ mcd7:	add bl,'A'-10
 mcd8:	mov al,bl ! out dx,al
 	mov al,' ' ! out dx,al
 	pop dx ! pop cx ! pop bx ! pop ax	;TEMP DEBUG PROBE
-	push ax ! mov al,'a' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
+	push ax ! push dx ! mov al,'a' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE:
+										;DX is a live caller argument here
+										;(e.g. QUE2.RTM's qspace passes its
+										;MPB pointer through to
+										;maualloc_entry in DX) -- the
+										;original single-register ("push
+										;ax ... pop ax") probe style used
+										;throughout this file treats DX as
+										;pure scratch, which is safe at
+										;most call sites but silently
+										;clobbered the MPB pointer here,
+										;making every maualloc_entry call
+										;through this path read garbage
+										;and fail. Confirmed via a GDB
+										;hardware watchpoint/breakpoint
+										;session: DX read 03f8h (the
+										;serial port, left over from this
+										;very probe) instead of the real
+										;MPB offset at maualloc_entry's
+										;entry.
 	inc mxmemcount
 	mov ch,0 ! shl cx,1
 	mov si,cx
-	push ax ! mov al,'b' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
+	push ax ! push dx ! mov al,'b' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE: see 'a' above
 	call cs:functab[si]
 	push ax ! mov al,'c' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	dec mxmemcount

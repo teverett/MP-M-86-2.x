@@ -207,6 +207,38 @@ QUL_FIELD_OFFSET = 0x5e
 # (the second, tighter "within 64K of sysdat" check always is), so
 # there's no need to compute a tight, true end-of-RAM value here.
 ENDSEG_FIELD_OFFSET = 0x44
+
+# `flags` (SYSTEM.DAT: "dw 0 ;addr. Flag Table") is the base pointer to
+# the logical-interrupt-flag table (`FLAG.RTM`'s own header comment:
+# "GENSYS initializes the flag table with 0ffh's") -- another field
+# GENSYS computed and backfilled in the original build that this
+# tree's `tools/build_mpmsys.py` never patched, same class of gap as
+# `pul`/`mdul`/`qlr`/`qul`/`qmau`/`endseg` above. With `flags` stuck at
+# its static source value (0), `flag_valid`'s own `mov si,flags ! add
+# si,ax` (FLAG.RTM) resolves to whatever real SYSDAT field happens to
+# sit at that small byte offset (not physical address 0 like the
+# `qmau`/`m_start` bug -- `flags` is read bare, i.e. DS-relative, and
+# DS is sysdat here -- but garbage all the same: it's some *other*
+# unrelated field, reinterpreted as flag-table entries). Confirmed via
+# a serial-trace probe: `TICK.SUP`'s own `tick:` loop (`mov dx,
+# flag_tick ! mov cx,f_flagwait ! int mpmint`, meant to block until the
+# next real timer tick) looped at a wildly higher rate than 60Hz with
+# no throttling at all -- `flag_wait_entry` (`FLAG.RTM`) reads back
+# neither `flag_on` (0FFFEh) nor `flag_off` (0FFFFh) from the garbage
+# table entry, takes its `fw_noff: mov cx,e_flag_underrun` error exit
+# instead of ever calling `dsptch` to actually block, and `TICK.SUP`
+# doesn't check that return code at all, so it just spins straight
+# back round to `tick:` and tries again immediately, forever, burning
+# CPU and flooding the serial trace with a probe-dump for every single
+# spin. Fixed the same way as the others: a real, zero-initialized-
+# then-flag_off-filled table is carved out of SYSDAT's own slack space
+# (right after the `qmau` buffer) and `flags` is pointed at it.
+FLAGS_FIELD_OFFSET = 0x56
+NFLAGS = 0x20          # SYSTEM.DAT's own static "nflags db 20h" -- the
+                       # table's entry *count* was always correctly
+                       # declared; only the base pointer and the
+                       # entries' own contents were never initialized.
+FLGLEN = 3             # flg_pd (word, FLG.DEF) + flg_ignore (byte)
 QD_POOL_SLOT_SIZE = 0x1c  # qdlen (QD.DEF) -- first word of each slot is
                           # its own q_link, matching getqdaddr's own
                           # free-list convention (QUE2.RTM).
@@ -594,6 +626,20 @@ def main():
                       QMAU_BUF_SIZE, 0)
     struct.pack_into('<H', dseg, QUL_FIELD_OFFSET, qd_pool_start)
     struct.pack_into('<H', dseg, ENDSEG_FIELD_OFFSET, 0xFFFF)
+
+    # flag table: real, zero-initialized-then-filled entries right
+    # after the qmau buffer -- see FLAGS_FIELD_OFFSET's own comment.
+    flagtab_start = qmau_buf_end
+    flagtab_end = flagtab_start + NFLAGS * FLGLEN
+    if flagtab_end > SYSDAT_DSEG_SIZE:
+        raise SystemExit(
+            f"flag table (offset {flagtab_start:#x}..{flagtab_end:#x}) "
+            f"no longer fits in SYSDAT's {SYSDAT_DSEG_SIZE}-byte dseg -- "
+            "SYSDAT.FMT grew too close to the end")
+    for i in range(NFLAGS):
+        off = flagtab_start + i * FLGLEN
+        struct.pack_into('<HB', dseg, off, 0xFFFF, 0xFF)  # flag_off, flag_zig
+    struct.pack_into('<H', dseg, FLAGS_FIELD_OFFSET, flagtab_start)
 
     # XIOS86Q's own private tail: the bytes from SYSDAT_DSEG_SIZE
     # onward in its own dseg.bin (see its own comment on why its

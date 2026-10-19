@@ -10,6 +10,7 @@ fdisp:
 ;=====
 ; This entry point used by interrupt routines in XIOS
 
+	push ax ! push dx ! mov al,'z' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	cli
 	push ds ! mov ds,sysdat
 	cmp indisp,true ! jne do_dispatch
@@ -227,6 +228,7 @@ term_act:
 ; free memory,free pd
 ;	input:	SI=pd address
 
+	push ax ! mov al,'~' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	mov ax,rlr
 	mov p_link[si],ax
 	mov rlr,si

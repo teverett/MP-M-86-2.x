@@ -41,16 +41,44 @@ init:
 	mov dx,offset mxdiskqd ! mov cx,f_qmake
 	call mpmif
 
+	push ax ! push bx ! push cx ! push dx ! mov al,'[' ! mov dx,03f8h ! out dx,al ! mov ax,ds ! mov ch,al
+	mov cl,4 ! mov bl,ah ! shr bl,cl ! and bl,0fh ! cmp bl,9 ! ja dsd1
+	    add bl,'0' ! jmps dsd2
+dsd1:	add bl,'A'-10
+dsd2:	mov al,bl ! out dx,al
+	mov bl,ah ! and bl,0fh ! cmp bl,9 ! ja dsd3
+	    add bl,'0' ! jmps dsd4
+dsd3:	add bl,'A'-10
+dsd4:	mov al,bl ! out dx,al
+	mov al,ch ! mov cl,4 ! mov bl,al ! shr bl,cl ! and bl,0fh ! cmp bl,9 ! ja dsd5
+	    add bl,'0' ! jmps dsd6
+dsd5:	add bl,'A'-10
+dsd6:	mov al,bl ! out dx,al
+	mov al,ch ! mov bl,al ! and bl,0fh ! cmp bl,9 ! ja dsd7
+	    add bl,'0' ! jmps dsd8
+dsd7:	add bl,'A'-10
+dsd8:	mov al,bl ! out dx,al
+	mov al,']' ! out dx,al
+	pop dx ! pop cx ! pop bx ! pop ax	;TEMP DEBUG PROBE
+	push ax ! push bx ! push dx ! mov al,'?' ! mov dx,03f8h ! out dx,al ! mov bx,rlr ! test p_flag[bx],pf_tempkeep ! jz tkq1 ! mov al,'Y' ! jmps tkq2
+tkq1:	mov al,'N'
+tkq2:	out dx,al ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE
 	push ax ! mov al,'r' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 		; open mx disk queue
 	mov dx,offset mxdiskqpb ! mov cx,f_qopen
 	call mpmif
 
+	push ax ! push bx ! push dx ! mov al,'?' ! mov dx,03f8h ! out dx,al ! mov bx,rlr ! test p_flag[bx],pf_tempkeep ! jz tkq3 ! mov al,'Y' ! jmps tkq4
+tkq3:	mov al,'N'
+tkq4:	out dx,al ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE
 	push ax ! mov al,'s' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 		; write mx disk queue
 	mov dx,offset mxdiskqpb ! mov cx,f_qwrite
 	call mpmif
 
+	push ax ! push bx ! push dx ! mov al,'?' ! mov dx,03f8h ! out dx,al ! mov bx,rlr ! test p_flag[bx],pf_tempkeep ! jz tkq5 ! mov al,'Y' ! jmps tkq6
+tkq5:	mov al,'N'
+tkq6:	out dx,al ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE
 	push ax ! mov al,'t' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	retf
 

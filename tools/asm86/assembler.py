@@ -117,6 +117,7 @@ class Assembler:
         self.tentative = False
         self.presize = {}         # name(lower) -> 1/2, from _prescan_sizes()
         self.prekind = {}         # name(lower) -> ('equ'|'label', size), from _prescan_sizes()
+        self.preseg = {}          # name(lower) -> 'cseg'/'dseg'/'eseg'/'aseg'/None, from _prescan_sizes()
         # Jump-size relaxation state (see _relax_jumps). jump_long is
         # keyed by a sequential index assigned to each SHORT_JUMP_MNEMONICS
         # occurrence, in file order -- stable across repeated passes
@@ -160,7 +161,8 @@ class Assembler:
             if existing.kind != kind or existing.value != value:
                 raise AsmError(f"symbol '{name}' redefined (was {existing.kind}={existing.value}, "
                                 f"now {kind}={value})", filename, lineno)
-        self.symtab[key] = Symbol(name, kind, value, size)
+        seg = self.cur_seg if kind == 'label' else None
+        self.symtab[key] = Symbol(name, kind, value, size, seg)
         self.pending.discard(key)
 
     def active(self):
@@ -247,30 +249,45 @@ class Assembler:
     def _ectx(self, filename, lineno, addr=None):
         return ExprCtx(self.symtab, addr if addr is not None else self.cur_addr(),
                         filename, lineno, tentative=self.tentative, pending=self.pending,
-                        presize=self.presize, prekind=self.prekind, lengths=self.lengths)
+                        presize=self.presize, prekind=self.prekind, preseg=self.preseg,
+                        lengths=self.lengths)
 
     _CAST_PREFIX_RE = re.compile(r'^\s*(byte|word)\s+ptr\b', re.IGNORECASE)
     _OFFSET_KEYWORD_RE = re.compile(r'\boffset\b', re.IGNORECASE)
 
     def _prescan_sizes(self, lines):
-        """Learn every DB/DW/RB/RW/EQU symbol's kind+size before pass 1, so a
-        forward reference to it still classifies correctly (mem vs imm) and
-        gets the right size (see ExprCtx.presize/prekind)."""
+        """Learn every DB/DW/RB/RW/EQU symbol's kind+size (and, for the
+        former, which segment it'll be declared under) before pass 1, so
+        a forward reference to it still classifies correctly (mem vs
+        imm), gets the right size, and -- for ESEG labels specifically,
+        see parse_operand's own comment on ESEG -- gets the right
+        default segment override too (see ExprCtx.presize/prekind/
+        preseg). `prescan_seg` tracks CSEG/DSEG/ESEG/ASEG switches the
+        same way `switch_seg` does during a real pass, just without
+        touching any other assembler state."""
+        prescan_seg = None
         for filename, lineno, text in lines:
             for stmt_text in split_statements(text):
                 label, mnem, operand_text = parse_statement(stmt_text, ALL_MNEMONICS)
+                if mnem is not None:
+                    low = mnem.lower()
+                    if low in ('cseg', 'dseg', 'eseg', 'aseg'):
+                        prescan_seg = low
                 if label is None or mnem is None:
                     continue
                 low = mnem.lower()
                 if low in ('db', 'byte', 'rb', 'rs'):
                     self.presize[label.lower()] = 1
                     self.prekind[label.lower()] = ('label', 1)
+                    self.preseg[label.lower()] = prescan_seg
                 elif low in ('dw', 'word', 'rw'):
                     self.presize[label.lower()] = 2
                     self.prekind[label.lower()] = ('label', 2)
+                    self.preseg[label.lower()] = prescan_seg
                 elif low == 'dd':
                     self.presize[label.lower()] = 4
                     self.prekind[label.lower()] = ('label', 4)
+                    self.preseg[label.lower()] = prescan_seg
                 elif low == 'equ':
                     m = self._CAST_PREFIX_RE.match(operand_text)
                     if m:

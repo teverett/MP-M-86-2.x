@@ -184,6 +184,31 @@ QD_POOL_SLOT_SIZE = 0x1c  # qdlen (QD.DEF) -- first word of each slot is
                           # free-list convention (QUE2.RTM).
 QD_POOL_SLOTS = 4
 
+# `qmau` (SYSDAT.FMT offset 0x60, "MAU for queue buffer") is a raw MD
+# {link,start,length,plist} struct, same "never initialized, stale
+# DATA.BDO template" bug as pul/mdul/qlr/qul above: its `m_start` is
+# 0, i.e MAU.MEM's own `maualloc_entry` ends up doing `mov
+# ds,m_start[bx]` -> `mov ds,0`, then walking/allocating-from (and, on
+# success, incrementing an alloc count *into*) whatever happens to sit
+# at absolute segment 0 -- the real-mode interrupt vector table --
+# confirmed by a probe dump: completely unrelated SYSDAT fields read
+# as corrupted immediately after the first `f_maualloc` call this tree
+# ever makes (BDOSIF.BDO's own "create disk mx queue" asking for its
+# message buffer). Unlike pul/mdul/qlr/qul (small free-list heads
+# living entirely within SYSDAT's own segment), `m_start` is read as a
+# real, independent *segment value* -- so this needs actual backing
+# memory with its own paragraph-aligned address, not just a SYSDAT-
+# relative offset. Fixed by carving `QMAU_BUF_SIZE` bytes out of
+# SYSDAT's own slack space (right after the QD pool, paragraph-
+# aligned) and pointing `qmau` at it with a from-scratch, minimal
+# Suballocation Table (MAU.MEM's own header comment on SAT0/SAT1
+# describes the format) -- one real entry covering the whole buffer
+# past the table's own 10 bytes, marked free (`nall`=0).
+QMAU_FIELD_OFFSET = 0x60
+QMAU_BUF_SIZE = 0x200  # matches the stale template's own m_length
+QMAU_SAT_ENTRIES = 10  # generous capacity -- see the fix's own comment
+                       # on why this must exceed the real entry count
+
 # Every module (SUP/RTM/MEM/CIO/BDOS/XIOS) dispatches its own "entry:"
 # function calls through a local jump table ("function"/"functab"),
 # built by each module's own standalone `asm86` run as a `dw label`
@@ -411,6 +436,40 @@ def main():
             struct.pack_into('<H', cseg, idx + len(dispatch_prefix),
                               (module_base + table_off) & 0xFFFF)
 
+        if name == 'RTM':
+            # DSPTCH.RTM's own `dsp_table` (the process-status-code ->
+            # handler jump table `dsptch` uses to decide what to do
+            # with the process it just took off the Ready list) is a
+            # *second*, completely separate internal jump table in
+            # this same module -- not covered by FUNCTION_TABLES/
+            # DISPATCH_PATCHES above, which only ever knew about
+            # RTM's "function" (its *external*, intermodule entry
+            # table). Same bug, same fix, on both the table's own
+            # entries and the `jmp cs:dsp_table[bx]` instruction's own
+            # embedded (unrelocated) displacement -- found only once
+            # something actually exercised RTM's scheduler itself
+            # (`poll_entry`'s `jmp dsptch`) for the first time this
+            # whole tree's ever managed to.
+            dsp_table_off = get_symbol(stem, 'dsp_table')
+            dsp_table_entries = 9
+            for i in range(dsp_table_entries):
+                entry_addr = module_base + dsp_table_off + i * 2
+                target = struct.unpack_from('<H', cseg, entry_addr)[0]
+                struct.pack_into('<H', cseg, entry_addr,
+                                  (target + module_base) & 0xFFFF)
+            needle = b'\x2e\xff\xa7' + struct.pack('<H', dsp_table_off)
+            idx = cseg.find(needle, module_base, module_base + len(code))
+            if idx == -1:
+                raise SystemExit(
+                    "RTM.A86: couldn't find the 'jmp cs:dsp_table[bx]' "
+                    f"instruction to relocate (expected {needle.hex()})")
+            if cseg.find(needle, idx + 1, module_base + len(code)) != -1:
+                raise SystemExit(
+                    "RTM.A86: 'dsp_table' dispatch-instruction pattern "
+                    "isn't unique -- relocation would be ambiguous")
+            struct.pack_into('<H', cseg, idx + 3,
+                              (module_base + dsp_table_off) & 0xFFFF)
+
     # "dispatcher": no dedicated label found anywhere for this -- see
     # KNOWN LIMITATIONS above. Points at RTM's own general entry point.
     rtm_base = module_offsets['RTM']
@@ -459,6 +518,52 @@ def main():
         next_off = (slot_off + QD_POOL_SLOT_SIZE
                     if slot < QD_POOL_SLOTS - 1 else 0)
         struct.pack_into('<H', dseg, slot_off, next_off)
+
+    # qmau: point it at a real, paragraph-aligned backing buffer with a
+    # from-scratch Suballocation Table instead of the stale (m_start=0)
+    # template -- see QMAU_FIELD_OFFSET's own comment for why. Placed
+    # right after the QD pool, rounded up to the next paragraph so
+    # `m_start`'s segment:0 lands exactly on this buffer's first byte.
+    # `sysdat_segment` is MPM_CODE_SEG plus however many paragraphs the
+    # combined cseg takes up -- the same arithmetic build_disk.py's own
+    # `build_two_segment_body` uses to place SYSDAT right after the
+    # code on disk, so this always agrees with where the loader will
+    # actually put it at runtime.
+    #
+    # SAT0's `ents` is NOT "how many real entries exist" -- it's the
+    # table's own *capacity*. `maualloc_entry`'s own scan loop
+    # (QUE1.RTM... er, MAU.MEM's `maua_nsat`) stops at the first
+    # zero-`sat_start` entry regardless of `ents`, and `mau_insert`
+    # (used whenever an allocation needs to *split* a free entry into
+    # an allocated piece + a smaller leftover-free piece) only
+    # succeeds if the entry at offset `ents*satlen` is still all-zero
+    # -- i.e. `ents` must reserve real *slack* beyond however many
+    # entries are actually filled in, or every single allocation that
+    # doesn't consume an entry's *entire* remaining length fails outright
+    # (confirmed directly: `mau_insert` returns CX=0FFFFh otherwise,
+    # which `mau_split` treats as an error). `QMAU_SAT_ENTRIES` reserves
+    # generous room for that; only the first slot starts non-zero (one
+    # real entry covering the whole buffer past the table itself).
+    sysdat_segment = MPM_CODE_SEG + (len(cseg) + 15) // 16
+    qmau_buf_off = (qd_pool_end + 15) & ~0xF
+    qmau_buf_end = qmau_buf_off + QMAU_BUF_SIZE
+    if qmau_buf_end > SYSDAT_DSEG_SIZE:
+        raise SystemExit(
+            f"qmau buffer (offset {qmau_buf_off:#x}..{qmau_buf_end:#x}) "
+            f"no longer fits in SYSDAT's {SYSDAT_DSEG_SIZE}-byte dseg -- "
+            "SYSDAT.FMT grew too close to the end")
+    satlen = 5  # sat_start(2) + sat_length(2) + sat_nall(1)
+    sat_table_len = satlen * (QMAU_SAT_ENTRIES + 1)  # +1 for SAT0 itself
+    for i in range(sat_table_len):
+        dseg[qmau_buf_off + i] = 0  # whole table starts zeroed/unused
+    dseg[qmau_buf_off] = QMAU_SAT_ENTRIES  # SAT0.ents = capacity
+    struct.pack_into('<HHB', dseg, qmau_buf_off + satlen,
+                      sat_table_len,                   # SAT1.start
+                      QMAU_BUF_SIZE - sat_table_len,    # SAT1.length
+                      0)                                # SAT1.nall (free)
+    struct.pack_into('<HHHH', dseg, QMAU_FIELD_OFFSET,
+                      0, sysdat_segment + (qmau_buf_off >> 4),
+                      QMAU_BUF_SIZE, 0)
     struct.pack_into('<H', dseg, QUL_FIELD_OFFSET, qd_pool_start)
 
     # XIOS86Q's own private tail: the bytes from SYSDAT_DSEG_SIZE

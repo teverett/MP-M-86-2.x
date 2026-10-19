@@ -5,13 +5,22 @@ from .lex import tokenize_expr, parse_number, SEGREG, REG16, REG8, MEM_COMBOS
 
 
 class Symbol:
-    __slots__ = ('name', 'kind', 'value', 'size')
+    __slots__ = ('name', 'kind', 'value', 'size', 'seg')
 
-    def __init__(self, name, kind, value, size=None):
+    def __init__(self, name, kind, value, size=None, seg=None):
         self.name = name       # original-case name
         self.kind = kind       # 'equ' or 'label'
         self.value = value     # resolved integer
         self.size = size       # 1, 2, or None
+        # Which segment ('cseg'/'dseg'/'eseg'/'aseg') this label was
+        # declared under, or None for an EQU / not-yet-known-at-this-pass
+        # symbol. See parse_operand's own comment on ESEG for why this
+        # matters: a bare reference to a label declared under ESEG must
+        # default to an ES-relative memory operand, not DS, and nothing
+        # in the source ever spells that out with an explicit "es:"
+        # prefix (real ASM86's ESEG is defined as "whatever ES currently
+        # points at", not just a third arbitrary segment like ASEG).
+        self.seg = seg
 
 
 class Value:
@@ -30,7 +39,7 @@ class Value:
 
 class ExprCtx:
     def __init__(self, symtab, cur_addr, filename, lineno, tentative=False, pending=None,
-                 presize=None, prekind=None, lengths=None):
+                 presize=None, prekind=None, preseg=None, lengths=None):
         self.symtab = symtab
         self.cur_addr = cur_addr
         self.filename = filename
@@ -50,6 +59,14 @@ class ExprCtx:
         # name(lower) -> ('equ'|'label', size) for every EQU in the file,
         # learned the same way (see _prescan_sizes in assembler.py).
         self.prekind = prekind or {}
+        # name(lower) -> 'cseg'/'dseg'/'eseg'/'aseg'/None, learned the
+        # same way -- which segment a forward-referenced *label* (not
+        # EQU) will be declared under, so a bare reference to it ahead
+        # of its own declaration gets the same ESEG-default-to-ES
+        # treatment (see parse_operand) in pass 1 as it will in pass 2,
+        # instead of being one byte shorter in pass 1 and silently
+        # invalidating every later address computed from it.
+        self.preseg = preseg or {}
         # name(lower) -> total emitted byte length of a DB/DW/DD/RB/RW/RS
         # declaration, for ASM86's "LENGTH name" operator (e.g. ROM.A86's
         # "er0 rb length cer0", computing a string constant's own size).
@@ -78,7 +95,8 @@ class ExprCtx:
         if sym is None:
             if self.tentative:
                 kind, size = self.prekind.get(key, ('label', self.presize.get(key)))
-                sym = Symbol(name, kind, 0, size)
+                seg = self.preseg.get(key) if kind == 'label' else None
+                sym = Symbol(name, kind, 0, size, seg)
                 self.symtab[key] = sym
                 if self.pending is not None:
                     self.pending.add(key)
@@ -415,6 +433,11 @@ def parse_operand(text, ctx, branch_context=False):
             v = eval_text(prefix, ctx)
             disp = v.n
             dsize = v.size
+            # Same ESEG default as the bare (no-brackets) case below --
+            # "u_func[si]"-style indexed references need it just as much
+            # as a plain "u_func" does.
+            if seg_override is None and v.symbol is not None and v.symbol.seg == 'eseg':
+                seg_override = 'es'
         if disp_text is not None:
             v = eval_text(disp_text, ctx)
             disp = (disp or 0) + v.n
@@ -432,6 +455,14 @@ def parse_operand(text, ctx, branch_context=False):
         return Operand('imm', size=explicit_size or 2, mem={'value': v.n})
     if sym is not None and (sym.kind == 'label' or (sym.kind == 'equ' and sym.size)):
         size = explicit_size or sym.size
+        # A bare reference to a label declared under ESEG defaults to
+        # ES, not DS -- see Symbol.seg's own comment for why (ESEG is
+        # "whatever ES points at", not an arbitrary third segment, and
+        # nothing in this source tree ever spells the override out
+        # explicitly with "es:").
+        mem_seg = seg_override
+        if mem_seg is None and sym.seg == 'eseg':
+            mem_seg = 'es'
         return Operand('mem', size=size,
-                        mem={'base': None, 'disp': v.n, 'seg': seg_override})
+                        mem={'base': None, 'disp': v.n, 'seg': mem_seg})
     return Operand('imm', size=explicit_size or v.size, mem={'value': v.n})

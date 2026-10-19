@@ -35,6 +35,7 @@ user_entry:
 ;	u_retseg == user's ES
 
 		;initialize critical areas
+	push ax ! mov al,'@' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	cld ! mov di,ds			;DI=user's DSEG
 	mov ds,sysdat ! mov bx,rlr	;BX=pd address
 	mov ax,es ! mov es,p_uda[bx]	;ES=uda
@@ -52,6 +53,7 @@ uecont:	inc u_insys
 noints:		;initialized non-critical areas
 	mov u_retseg,ax
 	mov u_wrkseg,di
+	push ax ! push dx ! push cx ! mov al,'#' ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop cx ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	mov ch,0 ! call func	; execute function
 	mov ax,bx		; for INTEL's PL/M
 	mov ds,u_wrkseg ! cli
@@ -95,6 +97,7 @@ inmod:	cmp al,sup ! jne gofar
 	    jmp cs:supfunc[si]
 gofar:	push cx ! mov cx,ax ! dec cl
 	push ax ! push dx ! push cx ! mov al,'Z' ! mov dx,03f8h ! out dx,al ! mov al,cl ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop cx ! pop dx ! pop ax	;TEMP DEBUG PROBE
+	push ax ! push dx ! mov al,'d' ! mov dx,03f8h ! out dx,al ! mov ax,ds ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	mov al,module_map
 	push ax ! push dx ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	shr al,cl
@@ -134,7 +137,18 @@ mpmif:
 	push u_wrkseg
 	mov al,u_func ! push ax
 	mov u_wrkseg,ds
-	mov ds,sysdat
+	mov ds,cs:sysdat	;bare "mov ds,sysdat" only works when the
+				;*caller's* ds (just saved above, as
+				;u_wrkseg) already happens to be sysdat-
+				;ish -- normally true, but not when a
+				;caller (QUE2.RTM's qspace) deliberately
+				;calls through here with ds pointed at
+				;something else (ss, for an on-stack MPB);
+				;SUP's own module_base is 0, so cs:sysdat
+				;addresses the exact same combined
+				;location "mov cs:sysdat,ax" (INIT.SUP)
+				;now reliably writes, regardless of
+				;what ds currently is
 	call func
 	mov ds,u_wrkseg
 	pop ax ! mov u_func,al

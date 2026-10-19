@@ -7,6 +7,19 @@
 ;*****************************************************
 
 	DSEG
+	; this whole file overlays the REAL, absolute interrupt vector
+	; table (per its own header comment: "set DS to 0 and use the
+	; following variables"), so it must start at offset 0 regardless
+	; of how much DSEG content anything included before it (BASEP.FMT/
+	; LSTK.FMT in SUP.A86) already declared -- without this, every
+	; field here (including i_mpm_ip/i_mpm_cs, used to install INT
+	; mpmint's real vector) lands 1 for 1 shifted by however many
+	; bytes those files used, so the write meant to install that
+	; vector lands on the WRONG absolute offset -- confirmed: in
+	; SUP.A86, i_mpm_ip resolved to 3E0h instead of the real 380h
+	; (mpmint*4 = 0E0h*4) that INT 0E0h actually reads, so the vector
+	; it needs was never actually installed at all.
+	org	0
 
 i_divide_ip	rw	1	; int 0
 i_divide_cs	rw	1

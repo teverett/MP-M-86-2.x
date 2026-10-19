@@ -1036,35 +1036,148 @@ genuinely reaches `makeq_entry` (`getqdaddr`'s own probes -- `I`
 through `N` -- all fire in the right order), and `qmake` completes for
 real, not by lucky accident.
 
-**Still open**: by the time `BDOSIF.BDO`'s init makes its *second*
-call through this same path (`qspace`'s own `f_maualloc`, routed to
-`MEM`), `SYSDAT`'s `module_map` byte (offset `0x46`, bit per module,
-`MEM`'s bit confirmed `0x3F` at build time) has silently changed to
-`0x01` -- `MEM`'s bit no longer set -- so the call is rejected as
-"not implemented" before ever reaching `MEM`'s own dispatcher.
-Narrowed with more probes (dumping `module_map` at several points):
-it still reads `0x3F` correctly on both sides of `getqdaddr`'s own
-`qul`-pool copy (`rep movs`, the obvious suspect -- ruled out), and
-every instruction between there and the corrupted read was checked
-by hand and either doesn't touch `SYSDAT` at all or touches an
-unrelated, correctly-segmented field (`u_func`/`u_wrkseg`, confirmed
-by probe to be genuinely `ES`-relative via this assembler's `eseg`
-directive, not a repeat of this same bug class). With no in-line
-write found, the leading hypothesis going into the next session is an
-*asynchronous* one: interrupts are not obviously disabled across this
-window, and `XIOS86Q.A86`'s tick ISR calls through `dispatcher` (fixed
-in #29/this session to correctly point at `RTM`'s own `fdisp`) into
-`DSPTCH.RTM`'s scheduler (`fdisp`/`dsptch`/`int_disp_exit`) -- a
-largish, not-yet-audited routine that reads/writes several more
-`SYSDAT` fields (`rlr`, `p_stat`, `p_uda`, the `u_*` save slots) during
-a real context switch. A real timer tick firing mid-dispatch and
-corrupting something there, rather than anything in the `qmake`/
-`qspace` code path itself, would explain why the corruption isn't
-findable by reading that path's own instructions. Not yet confirmed.
-Debug probes left in place throughout (`SUPIF.SUP`'s `Q`/`R`/`S`/`T`/
-`U`/`Y`/`Z`, `RTMIF.RTM`'s `V`/`W`, `QUE1.RTM`'s `G`/`H`, `QUE2.RTM`'s
-`I`-`P` including the two `module_map` dumps at `K`/`L`) are ready for
-picking this up again.
+**Resolved in #31** (see below): the `module_map` misread wasn't an
+in-line write or an async interrupt at all -- it was `tools/asm86`
+silently defaulting every bare `ESEG`-declared symbol reference (not
+just `module_map`, every UDA field) to `DS` instead of `ES`, the same
+"never implemented" gap as `ESEG` itself once was (`tools/README.md`).
+
+## 31. The real `ESEG`-default fix, three more dispatch tables/instructions
+in the same unrelocated-address family, and five independent, unrelated
+bugs found chasing the boot sequence from "first `MEM` dispatch" to
+"the last instruction `INIT.SUP` executes" -- MOSTLY FIXED, one new
+bug still open
+
+This is one long continuous debugging session picking up exactly where
+#30 left off (the `module_map` mystery), so its findings are grouped
+here as one entry rather than split by exact chronology.
+
+**The real `module_map` fix**: `tools/asm86` never implements an
+`ASSUME`-style default segment for memory operands -- confirmed by
+reading `tools/asm86/expr.py`'s `parse_operand`, which only ever
+applies an explicit `es:`/`cs:`/etc. prefix already written in the
+source; the real DRI `ASM86`'s `ESEG`, by definition, means "wherever
+ES currently points," so a bare reference to an `ESEG`-declared symbol
+is supposed to default to `ES`, with no explicit prefix needed anywhere
+-- and nothing in this entire source tree ever writes one. Confirmed
+directly: `u_func`/`u_wrkseg` (`UDA.FMT`, declared under `ESEG`) read
+via `cs:[6]`-style disassembly showed plain `[6]` with no override at
+all, meaning every bare UDA-field reference anywhere in the tree was
+silently `DS`-relative instead of `ES`-relative the whole time -- which
+is also, in hindsight, why `MEMIF.MEM`'s own `pf_tempkeep` save/restore
+(`push p_flag[si]` et al -- *not* a UDA field, so unaffected by this
+specific fix, but neighboring code that first made this visible)
+looked consistent in isolation while the *real* bug was a module away.
+**Fixed** in the assembler itself (not a source workaround): `Symbol`
+now carries which segment (`cseg`/`dseg`/`eseg`/`aseg`) it was declared
+under (`Assembler.define_symbol`), and a new prescan (`Assembler.
+_prescan_sizes`'s own `preseg`, parallel to its existing `presize`/
+`prekind`, needed for exactly the same forward-reference-stability
+reason already documented there) lets `parse_operand` default a bare
+reference to `es:` whenever the symbol's segment is `eseg`, in both the
+bracketed (`label[reg]`) and plain forms. Confirmed fixed: `module_map`
+reads `0x3F` correctly on both the first (`RTM`) and second (`MEM`)
+dispatch now, and `MEM`'s own dispatch succeeds for the first time.
+
+**`DSPTCH.RTM`'s own `dsp_table`** (the process-status-code -> handler
+jump table `dsptch` uses, reached for real for the first time once
+`RTM`'s own `entry:` dispatch started working) is a *second*, separate
+internal jump table in `RTM.A86`, not covered by #30's `FUNCTION_TABLES`/
+`DISPATCH_PATCHES` (which only knew about `RTM`'s *external* `function`
+table) -- same unrelocated-table-contents-and-locating-instruction bug,
+same fix, in `tools/build_mpmsys.py`.
+
+**Five further, independent, confirmed bugs**, found in order while
+tracing the boot sequence past `MEM`'s now-working dispatch, each
+blocking the next step until fixed:
+
+1. `MAU.MEM`'s `qmau` (`SYSDAT.FMT`'s MAU for queue buffers) has the
+   same never-initialized-real-backing-memory problem as #29's
+   `pul`/`mdul`/`qlr`/`qul`: `m_start`=0 (absolute segment 0, the real
+   interrupt vector table) instead of a real buffer. **Fixed** in
+   `tools/build_mpmsys.py`: carves `QMAU_BUF_SIZE` bytes out of
+   `SYSDAT`'s own slack space (paragraph-aligned, right after #29's QD
+   pool) with a from-scratch Suballocation Table -- `QMAU_SAT_ENTRIES`
+   reserves real slack beyond the one real entry, needed because
+   `MAU.MEM`'s own `mau_insert` (used whenever an allocation has to
+   *split* a free entry) only succeeds if the table has an all-zero
+   slot beyond the declared entries to grow into, confirmed by reading
+   it directly -- a 1-entry table fails every allocation that doesn't
+   consume an entry's *entire* length.
+2. `XIOS86Q.A86`'s `pmsg` (prints `signon` at the end of `init:`) uses
+   `bx` as its own message-pointer loop variable across a `call conout`
+   whose own contract (`bh`/`bl` = `c0outdev`) doesn't preserve it --
+   confirmed by probe: the signon message printed one garbage byte and
+   stopped. **Fixed** by saving/restoring `bx` around that one call.
+3. The same `init:` ends with a bare `pop ds` with no matching `push`
+   anywhere in the routine (the *other* push/pop ds pair, for a brief
+   segment-0 IVT-hook access, is already self-balanced) -- confirmed by
+   probe: nothing past it ever executed; it was popping the far return
+   address's own IP word into DS, leaving the following `retf` to pop
+   the wrong two words as its own CS:IP. **Fixed** by deleting it.
+4. `VEC.FMT` (the real, absolute interrupt-vector-table overlay, used
+   by "set DS to 0 and use the following variables") has no `org 0` of
+   its own, so its fields land wherever the DSEG location counter
+   already is when it's included -- in `SUP.A86`, 60h bytes into
+   `BASEP.FMT`/`LSTK.FMT`'s own content, so `i_mpm_ip` (`INT mpmint`'s
+   real IVT entry) resolved to 3E0h instead of the real 380h
+   (`mpmint`*4) that `INT 0E0h` actually reads: the vector `INIT.SUP`
+   needs to terminate the init process was never actually installed.
+   **Fixed** by adding the missing `org 0`.
+5. `QUE2.RTM`'s `qspace` and `SUPIF.SUP`'s own `mpmif` (used by *every*
+   intermodule call) both do a bare `mov ds,sysdat` to restore/bootstrap
+   DS -- discovered while tracing why DS read back as pure garbage (not
+   0x0000 by coincidence, an actual uninitialized stack word) the one
+   time `qspace` calls through `mpmif` with DS deliberately pointed at
+   SS instead of SYSDAT (for an on-stack MPB). `sysdat` is declared
+   identically in every module's own CSEG, but is **not** a per-module
+   cache the way `supervisor` is: every module's own init-time
+   `mov sysdat,ax` is *also* a bare write, so at cold boot (where DS
+   genuinely is SYSDAT) it writes into SYSDAT's own self-referential
+   offset 6 -- not into that module's CSEG cell -- and every later bare
+   read, as long as DS is *already* SYSDAT-ish, finds that same
+   (coincidentally self-consistent) value there. It only breaks when
+   something calls through with DS deliberately not SYSDAT-ish, as
+   `qspace` does. **Fixed**: `qspace` now saves/restores the real DS
+   around its own DS=SS window via the stack (timed so it doesn't
+   disturb the on-stack MPB's own addressing); `SUPIF.SUP`'s `mpmif`
+   now reads/writes its own cold-boot value via `cs:sysdat` instead of
+   bare -- safe for `SUP` specifically only because its `module_base`
+   is 0, so no `tools/build_mpmsys.py` relocation patch is needed for
+   this one (unlike every other CS-relative fix this tree has needed).
+
+**Net result this session**: boot now gets all the way through
+`INIT.SUP`'s own sequence -- every module's `init:` (`RTM`'s `MEM`'s,
+`CIO`'s, `BDOS`'s including its own `qmake`/`qopen`/`qwrite` sequence,
+and `XIOS86Q`'s, which now actually arms the UART/PIT/floppy controller
+and prints its real signon banner end to end) -- through every
+`INIT.SUP` marker (`'1'`-`'D'`), to `INIT.SUP`'s own final instruction,
+`int mpmint` asking to terminate the init process. `RTM`'s own
+`terminate_entry` (`ABORT.RTM`) is reached correctly (confirmed by
+probe) and correctly calls `abt_chk` to check whether the init process
+may actually terminate now.
+
+**Still open**: `abt_chk` rejects it (`cx`=0FFFFh, "tempkeep") because
+the init process's own `p_flag` already has `pf_tempkeep` (0200h) set
+by this point -- confirmed stuck as early as `INIT.SUP`'s own marker
+`'6'` (immediately after `BDOSIF.BDO`'s `init:` returns), i.e. set
+somewhere during `BDOSIF.BDO`'s own `qmake`/`qopen`/`qwrite` sequence.
+Narrowed by probe: `MEMIF.MEM`'s own `pf_tempkeep` set/clear (around
+its `f_maualloc` work, inside `qmake`) is confirmed clean -- `p_flag`
+reads back `0x0000` right after its own cleanup, and again after its
+own `f_qwrite` lock-release call -- so the bit gets set *after* `qmake`
+returns, somewhere in `qopen`/`qwrite` or back in `BDOSIF.BDO` itself.
+`QUE1.RTM`/`QUE2.RTM` (openq_entry/writeq_entry, and everything they
+call) never reference `p_flag`/`pf_tempkeep` at all by direct grep, so
+the write isn't in-line there either -- not yet resolved. The
+`qspace`/`mpmif` DS-bootstrap fix above (found and fixed while chasing
+*this* bug) was necessary but not sufficient; it's possible there's
+one more occurrence of the exact same "bare `mov ds,sysdat` when DS
+isn't already reliable" bug still lurking somewhere in this remaining
+span, not yet found. Debug probes left in place throughout (`INIT.SUP`'s
+`'!'`, `BDOSIF.BDO`'s `'?'`/`'['`, `ABORT.RTM`'s `'$'`/`'%'`/`'^'`/`'&'`/
+`'*'`/`'+'`/`'='`, `DSPTCH.RTM`'s `'~'`, `MEMIF.MEM`'s `'n'`/`'o'`
+`p_flag` dumps) are ready for picking this up again.
 
 ## Status of the kernel/loader sources
 
@@ -1104,23 +1217,32 @@ times), and `INIT.SUP` successfully makes its first *post-init* call
 back into `XIOS` (`io_maxconsole` via `xiosif`) to query character-
 device counts.
 
-With #30's fixes, `BDOSIF.BDO`'s own init now gets further still:
-`RTM`'s own `entry:` dispatcher -- used by every intermodule call
-into `RTM`, including "create disk mx queue" (`qmake`) -- genuinely
-works for the first time (confirmed: `makeq_entry`/`getqdaddr`'s own
-probes all fire in the real, correct order instead of silently never
-executing). It currently stops on the *second* such call this same
-init makes, routed to `MEM` instead of `RTM` (`qspace`'s own
-`f_maualloc`, allocating the queue's message buffer): that call is
-rejected outright because `SYSDAT`'s `module_map` has lost `MEM`'s bit
-by the time it's checked, cause not yet found -- see #30's own
-writeup for what's been ruled out and the leading (not yet confirmed)
-hypothesis. Debug probes left in place throughout this whole path
-(`INIT.SUP`'s numbered serial markers `'1'`-`'D'`, `SUPIF.SUP`'s `'X'`/
-`'Q'`/`'R'`/`'S'`/`'T'`/`'U'`/`'Y'`/`'Z'`, `XIOS86Q.A86`'s `'E'`/`'F'`,
-`BDOSIF.BDO`'s `'q'`/`'r'`/`'s'`/`'t'`, `RTMIF.RTM`'s `'V'`/`'W'`,
-`QUE1.RTM`'s `'G'`/`'H'`, `QUE2.RTM`'s `'I'`-`'P'`) are ready for
-picking this up again.
+With #31's fixes -- chiefly `tools/asm86` finally defaulting bare
+`ESEG` references to `ES` instead of silently reading `DS` -- boot now
+runs the *entire* `INIT.SUP` sequence end to end: every module's own
+`init:` (including `BDOSIF.BDO`'s full `qmake`/`qopen`/`qwrite`
+sequence and `XIOS86Q`'s real UART/PIT/floppy-controller setup and
+signon banner), every `INIT.SUP` marker `'1'`-`'D'`, down to
+`INIT.SUP`'s own final instruction: `int mpmint` asking to terminate
+the init process. `RTM`'s `terminate_entry` is reached correctly and
+calls `abt_chk` to check whether that's allowed right now.
+
+It currently stops there: `abt_chk` rejects the terminate (`cx`=
+0FFFFh, "tempkeep") because the init process's own `p_flag` already
+has `pf_tempkeep` stuck set, cause not yet found -- see #31's own
+writeup for what's been ruled out (confirmed clean right after
+`MEMIF.MEM`'s own `f_maualloc`/`pf_tempkeep` handling inside `qmake`,
+so the real culprit is later, in `qopen`/`qwrite`/`BDOSIF.BDO` itself)
+and what fixing a *different*, confirmed instance of the same
+unreliable-`DS`-bootstrap bug class (`QUE2.RTM`'s `qspace`/`SUPIF.SUP`'s
+`mpmif`) didn't resolve. Debug probes left in place throughout this
+whole path (`INIT.SUP`'s numbered serial markers `'1'`-`'D'` plus
+`'!'`, `SUPIF.SUP`'s `'X'`/`'Q'`/`'R'`/`'S'`/`'T'`/`'U'`/`'Y'`/`'Z'`/
+`'@'`/`'#'`, `XIOS86Q.A86`'s `'E'`/`'F'`/`'0'`/`'p'`-`'w'`,
+`BDOSIF.BDO`'s `'q'`/`'r'`/`'s'`/`'t'`/`'?'`/`'['`, `RTMIF.RTM`'s
+`'V'`/`'W'`, `QUE1.RTM`'s `'G'`/`'H'`, `QUE2.RTM`'s `'I'`-`'P'`,
+`ABORT.RTM`'s `'$'`/`'%'`/`'^'`/`'&'`/`'*'`/`'+'`/`'='`, `DSPTCH.RTM`'s
+`'~'`) are ready for picking this up again.
 
 
 

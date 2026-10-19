@@ -69,6 +69,7 @@ maualloc_entry:		; Alloc from MAU
 ;		mpb_start = start address
 ;		mpb_min = mcb_max = length
 
+	push ax ! push bx ! push dx ! mov al,'e' ! mov dx,03f8h ! out dx,al ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE
 	push es ! mov es,u_wrkseg
 
 		; if absolute, see if within MAU

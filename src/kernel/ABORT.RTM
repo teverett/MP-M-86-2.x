@@ -21,10 +21,13 @@ terminate_entry:	; Terminate - DX=terminate code
 ; terminated when it comes back into context, as set up by
 ; abort specified process.
 
+	push ax ! mov al,'$' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	mov bx,rlr
 	call abt_chk
+	push ax ! push bx ! push cx ! push dx ! mov al,'%' ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call ydbg ! mov al,':' ! mov dx,03f8h ! out dx,al ! mov ax,p_flag[bx] ! call ydbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop cx ! pop bx ! pop ax	;TEMP DEBUG PROBE
 	cmp cx,0 ! jle term_err
-terminate:  pushf ! cli
+terminate:  push ax ! mov al,'^' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
+	    pushf ! cli
 	    mov bx,(offset thrdrt)-p_thread
 	    mov ax,rlr
 nchld:	    mov bx,p_thread[bx]
@@ -39,14 +42,18 @@ nochld:	    mov bx,ax
 		    or p_flag[bx],pf_childabort
 term_r1:    popf
 	    mov si,rlr ! call rlsmx
+	    push ax ! mov al,'&' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	    mov u_error_mode,0feh
 	    mov cx,f_bdosterm ! call mpmif
+	    push ax ! mov al,'*' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	    mov dx,offset mxmemqpb ! mov cx,f_qread
 	    call mpmif
+	    push ax ! mov al,'+' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	    mov bx,rlr
 	    mov mxmemowner,bx
 	    mov mxmemcount,1
  	    mov p_stat[bx],ps_term
+	    push ax ! mov al,'=' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	    jmp dsptch
 term_err:
 	jcxz term_err1

@@ -37,7 +37,25 @@ init:
 
 	mov ax,ds
 	mov ss,ax ! mov sp,offset (init_tos)
-	mov sysdat,ax
+	mov cs:sysdat,ax	;a bare "mov sysdat,ax" writes via DS
+				;(still the real sysdat segment here,
+				;cold boot) to SYSDAT's OWN offset 6
+				;instead of into this module's own cseg
+				;cell at that same bare offset -- SUP's
+				;module_base is 0, so "cs:sysdat" and
+				;plain "sysdat" happen to address the
+				;exact same *combined* location only for
+				;this one module, which is exactly why
+				;this was never caught: every *read* of
+				;bare "sysdat" elsewhere also defaults to
+				;DS, so as long as DS is already sysdat-
+				;ish wherever it's read, it finds the
+				;same (wrong-but-consistent) SYSDAT-
+				;resident value this write just put there
+				;-- it only breaks once something (like
+				;QUE2.RTM's qspace, mid on-stack-MPB trick)
+				;calls back in with DS deliberately set to
+				;something else, e.g SS
 	push ax ! mov al,'2' ! mov dx,03f8h ! out dx,al  ! push ax ! push dx ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 
 		; set up supervisor entry point
@@ -77,6 +95,7 @@ init:
 	test module_map,bdosmod_bit ! jz nbdom
 	    push bx ! callf dword ptr bdosmod[bx] ! pop bx	; init BDOS
 nbdom:	push ax ! mov al,'6' ! mov dx,03f8h ! out dx,al  ! push ax ! push dx ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
+	push ax ! push bx ! push dx ! mov al,'!' ! mov dx,03f8h ! out dx,al ! mov bx,rlr ! mov ax,p_flag[bx] ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE
 	test module_map,ciomod_bit ! jz nciom
 	    push bx ! callf dword ptr ciomod[bx] ! pop bx	; init CIO
 nciom:	push ax ! mov al,'7' ! mov dx,03f8h ! out dx,al  ! push ax ! push dx ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
@@ -124,6 +143,7 @@ nrsp:					;loop til done
 	    jmps nrsp			;Do another...
 rsp_out:
 	push ax ! mov al,'D' ! mov dx,03f8h ! out dx,al  ! push ax ! push dx ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
+	push ax ! push bx ! push dx ! mov al,'!' ! mov dx,03f8h ! out dx,al ! mov bx,rlr ! mov ax,p_flag[bx] ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE
 		; terminate init process
 	mov cl,f_terminate
 	mov dl,0ffh ! int mpmint

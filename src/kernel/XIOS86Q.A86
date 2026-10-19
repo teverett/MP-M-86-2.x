@@ -202,6 +202,7 @@ mydispatch	equ	(offset $)
 ;	itself, only arm the hardware so it's ready once SUP does.
 
 init:
+	push ax ! mov al,'0' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	mov	sysdat,ds
 
 	;	copy this module's own "entry" far pointer out of
@@ -242,6 +243,7 @@ init:
 	mov	al,0 ! mov dx,uart_ier ! out dx,al	;no UART interrupts
 	mov	al,03h ! mov dx,uart_mcr ! out dx,al	;assert DTR/RTS
 
+	push ax ! mov al,'p' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	;	--- timer: program the PIT for 60Hz on channel 0 ---
 
 	mov	al,pit_mode3 ! out pit_cmd,al
@@ -251,6 +253,7 @@ init:
 	out	pit_ch0,al			;count high byte
 	mov	tick_count,60
 
+	push ax ! mov al,'q' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	;	hook interrupt vector 8 (IRQ0) to tickint. DS:0 is
 	;	not sysdat here, so switch DS to segment 0 briefly.
 
@@ -260,6 +263,7 @@ init:
 	mov	word ptr .022h,cs		;IVT offset 8*4+2=22h
 	pop	ds
 
+	push ax ! mov al,'r' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	;	unmask IRQ0 on the master 8259 without touching
 	;	anything else it's already set up (ICW1-4 are assumed
 	;	already programmed sanely by whatever got this XIOS
@@ -270,23 +274,43 @@ init:
 	and	al,0feh
 	out	pic_m_mask,al
 
-	;	--- disk: reset and arm the floppy controller ---
+	push ax ! mov al,'s' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
+	;	--- disk: arm the floppy controller ---
+	;	NOT a reset pulse, and deliberately NOT followed by a
+	;	SENSE INTERRUPT STATUS -- see LDBIOS86Q.A86's own DOR-write
+	;	comment (docs/bugs.md #15) for why: SeaBIOS's own INT 13h
+	;	floppy driver already reset/armed this controller for real
+	;	during the boot sector's own reads, so re-asserting the
+	;	same already-working motor/DMA-enable/drive-select state
+	;	(no edge, no synthetic reset) leaves it in the same real,
+	;	working state those reads already proved functional --
+	;	calling fdc_sense_int here (as this init used to) polls
+	;	fdc_in_byte for a result byte QEMU's 8272 model never
+	;	produces for a SIS that isn't answering a genuine pending
+	;	interrupt, hanging forever.
+	mov	al,dor_ndreset+dor_mota+dor_dmaen+dor_drvsel_a
+	mov	dx,fdc_dor ! out dx,al
 
-	mov	al,dor_ndreset+dor_drvsel_a ! mov dx,fdc_dor ! out dx,al
-						;motor+DMA still off,
-						;released from reset
-	call	fdc_sense_int			;clear any stale status
-
+	push ax ! mov al,'u' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	mov	bx,offset specify_parms
 	call	fdc_send_cmd			;SPECIFY: step/head
 						; timings, non-DMA mode
 
+	push ax ! mov al,'v' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	mov	clockon,false
 
 	mov	bx,offset signon
 	call	pmsg
 
-	pop	ds
+	push ax ! mov al,'w' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
+	; NOT "pop ds" here -- there is no matching push anywhere in this
+	; routine (the only other push/pop ds pair, above, for the brief
+	; segment-0 IVT-hook access, is already self-balanced). This used
+	; to pop the far return address's own IP word into DS instead,
+	; leaving `retf` right after it to pop the wrong two words as its
+	; own CS:IP -- a wild jump into garbage immediately after this
+	; init prints its signon message, confirmed by probe: nothing
+	; past this point ever executes.
 	retf
 
 ;*****************************************************
@@ -374,10 +398,12 @@ conout:	    ; Function 2: Console Output
 ;	input:	CL = character, DL = console device # (ignored)
 ;	output:	none
 
+	push ax ! mov al,'[' ! mov dx,03f8h ! out dx,al ! mov al,cl ! out dx,al ! mov al,']' ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	push	cx
 	mov	bh,0 ! mov bl,c0outdev
 	call	rtm_poll
 	pop	ax
+	push ax ! push bx ! mov bl,al ! mov al,'{' ! mov dx,03f8h ! out dx,al ! mov al,bl ! out dx,al ! mov al,'}' ! out dx,al ! pop bx ! pop ax	;TEMP DEBUG PROBE
 	mov	dx,uart_rxtx ! out dx,al
 	ret
 
@@ -569,11 +595,15 @@ rtm_poll:   ; check a device; if not ready, yield via RTM
 
 	push	bx ! mov cx,bx
 	call	polldev ! pop bx
+	push ax ! mov al,'3' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	cmp	al,0ffh ! je rtm_poll_ret
+	    push ax ! mov al,'4' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	    cmp	stoppoll,true ! je rtm_poll
 	    mov	dx,bx ! mov cl,f_polldev
+	    push ax ! mov al,'5' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	    jmp	supif
 rtm_poll_ret:
+	push ax ! mov al,'6' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	ret
 
 ;=======
@@ -856,12 +886,23 @@ pio_out_res:
 ;*****************************************************
 
 pmsg:
+	; message pointed to by BX lives in DSEG (SYSDAT, via this
+	; module's own private tail -- see `signon`'s own declaration
+	; alongside specify_parms/dpb0/etc.), addressed by this module's
+	; module_base-free "offset", not CSEG -- it needs DS (already
+	; sysdat throughout this init routine), not a `cs:` override,
+	; which read whatever garbage happened to sit at that same bare
+	; offset within XIOS's own *code* instead (XIOS's module_base
+	; isn't baked into a plain "offset signon" the way build_mpmsys.py
+	; patches the few CSEG table/call sites that need it).
 	push	bx
 pmsg_loop:
-	mov	al,cs:[bx]
+	mov	al,[bx]
 	or	al,al ! jz pmsg_done
 	mov	cl,al ! mov dl,0
-	call	conout
+	push	bx			;conout clobbers bx (bh/bl =
+	call	conout			;c0outdev) for its own use --
+	pop	bx			;doesn't preserve our message ptr
 	inc	bx
 	jmps	pmsg_loop
 pmsg_done:

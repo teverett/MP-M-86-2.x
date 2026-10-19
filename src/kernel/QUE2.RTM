@@ -102,13 +102,41 @@ qspace:
 		;call maualloc
 	mov cx,0 ! push cx ! push cx ! push ax
 	push ax ! push cx
-	mov dx,sp ! mov ax,ss ! mov ds,ax
+	mov dx,sp			;dx->MPB (5 words already pushed above)
+	push ds				;save the real ds *before* the next
+					;line clobbers it -- pushed *after*
+					;dx was captured, so it doesn't shift
+					;the MPB's own addressing; popped
+					;back below, before anything re-reads
+					;the MPB via bp (see this push's own
+					;pop for why a bare "mov ds,sysdat"
+					;can't be used to restore it instead)
+	mov ax,ss ! mov ds,ax
 	mov bx,offset qmau
 	push si
 	push ax ! push dx ! mov al,'O' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	mov cx,f_maualloc ! call mpmif
 	push ax ! mov al,'P' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
-	pop si ! mov ds,sysdat
+	pop si
+	pop ds				;restore the real ds saved above --
+					;NOT "mov ds,sysdat": that bare
+					;reference only ever works when ds
+					;is *already* sysdat-ish (it reads
+					;SYSDAT's own self-referential cached
+					;copy of its own segment number, at
+					;a fixed offset -- not some per-
+					;module cell despite living in each
+					;module's own cseg too); with ds
+					;still = ss here (just set above,
+					;for this on-stack MPB), that read
+					;went via ss instead, pulling
+					;whatever word happened to be on the
+					;*stack* at that same bare offset --
+					;confirmed by probe: ds came back
+					;holding garbage, not the real
+					;sysdat segment, leaving every
+					;sysdat-relative read for the rest
+					;of this call silently wrong
 	cmp cx,0 ! jne qspace_ret
 	    mov bp,sp ! mov ax,mpb_start[bp]
 	    mov q_buf[si],ax

@@ -28,6 +28,7 @@ delay_entry:		;Delay - DX = ticks
 dispatch_entry:		;Call dispatch
 ;===============	==============
 
+	push ax ! push dx ! mov al,',' ! mov dx,03f8h ! out dx,al ! mov ax,rlr ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: dump rlr at dispatch_entry start
 	mov bx,0 ! mov cx,bx
 	jmp pdisp
 

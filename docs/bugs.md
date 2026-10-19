@@ -1462,6 +1462,503 @@ another bug of the same kind as this entry's -- not investigated this
 session; this is the next thing to chase, with the two GDB caveats above
 firmly in hand this time.
 
+## 34. The second `terminate_entry` rejection was itself a real bug chain
+(four more fixes, one in `tools/asm86` again) -- the scheduler now runs
+a full dispatch cycle for the first time ever; boot reaches real queue
+I/O before hitting yet another new blocking point
+
+Continuing directly from #33's open question: is the second,
+`abt_chk`-rejected `terminate_entry` call legitimate MP/M behavior, or a
+bug? It was a bug -- four of them, found the same way as #33: `break`+
+`ignore N`+single `continue` for register snapshots, `watch` only on
+`dseg` addresses, and (new this round) adding short-lived, uniquely-
+charactered serial probes at specific source lines, rebuilding, and
+reading the resulting trace, rather than trying to single-step through
+the whole dispatcher by hand.
+
+**Bug 1 (confirmed, fixed) -- the real second caller was
+`CHARIO.CIO`'s `constat_entry`, not a scheduler-level abort check.**
+Tracing the dispatch sequence between the first and second
+`terminate_entry` hits (via a new `(CX)` dump added right after
+`SUPIF.SUP`'s `nonet:` sets up the target module/function) showed the
+call landing on `CIO` local function 8 (`constat_entry`) partway
+through `BDOSIF.BDO`'s `getdiskmx` wrapper (its own, unrelated
+`F_CONSTAT` call, made before `f_qread` -- nothing to do with
+`f_bdosterm`/`PR_TERM`'s own logic, which was the wrong place #33 had
+been looking). `constat_entry` (`CHARIO.CIO`):
+
+```
+constat_entry:
+	call coninit
+	mov di,rlr ! cmp di,c_attach[si]
+	je cse_cl
+	    mov cl,f_dispatch ! call mpmif	;not console-attached -> yield
+	    mov bl,0 ! ret
+cse_cl:	call conbrk
+	mov bl,al ! ret
+```
+
+Since `INIT` isn't the process attached to the console, it correctly
+calls `f_dispatch` (global function 142, routed via `sysent` to
+`RTM`'s local function 12, `dispatch_entry`) to voluntarily yield the
+CPU. This is legitimate MP/M behavior, not a bug -- but it exposed
+three real bugs in the scheduler path it called into, below.
+
+**Bug 2 (confirmed, fixed) -- `DSPTCH.RTM`'s `dsptch` had the `bare
+mov ds,sysdat` bug a seventh time**, right where the current process is
+taken off the ready list:
+
+```
+		; save interrupt vectors
+	mov bx,0 ! mov ds,bx			;DS=0, to copy from 0:0 (real IVT)
+	mov si,bx ! mov di,offset u_ivectors
+	mov cx,10 ! rep movs ax,ax
+	mov si,offset i_mpm_ip ! mov di,offset u_mpm_ip
+	mov cx,4 ! rep movs ax,ax
+		; take current process off RLR.
+	mov ds,sysdat				;WRONG: DS is still 0 here
+	cli
+	mov si,rlr
+	mov ax,p_link[si] ! mov rlr,ax
+```
+
+`DS` was deliberately set to `0` a few instructions earlier (to copy
+the real interrupt-vector table from physical address `0:0`), and this
+bare `mov ds,sysdat` -- same bug class as #33's six instances in
+`MAU.MEM`/`MEMORY.MEM`/`ML.MEM` -- reads the module's own `sysdat`
+cache cell through `DS=0` instead of `CS`, picking up garbage from the
+very bottom of memory instead of the real `SYSDAT` segment. Confirmed
+via a temporary serial probe dumping `si`/`rlr` right at this point:
+`rlr` read back as a nonsense value (`0E99h`) instead of `initpd`
+(`09C0h`), which then made `dsptch`'s `jmp cs:dsp_table[bx]` (indexed
+by `p_stat[si]`, read through the same wrong `DS`) jump hundreds of
+bytes past the end of the 9-entry table into unrelated code/data --
+the proximate cause of a full CPU reset a few instructions later.
+Fixed the same way as every other instance: `mov ds,cs:sysdat`.
+
+Two more instances of the identical bug were found and fixed
+proactively in the same file once this one was spotted, both also
+"restore DS after deliberately pointing it elsewhere" spots that
+hadn't been exercised yet by anything this session: `fdisp`'s own
+entry (`DS` = whatever segment the *interrupted* code had, not
+sysdat-ish) and `switch:`'s tail (`DS` = the newly-switched-to
+process's own UDA segment, set a few lines above via `mov ds,dx` from
+`p_uda[bx]`, not sysdat-ish either).
+
+**Bug 3 (confirmed, fixed) -- a second, genuinely new `tools/asm86`
+bug: `parse_add` lost an operand's `is_offset` flag when propagating
+its label/size through further `+`/`-` arithmetic.** `DSPTCH.RTM`'s
+`insert_process` (called from `disp_act` to put `INIT` back on the
+ready list after it yields) is invoked with `BX=(offset rlr)-p_link` --
+a standard "treat a plain variable as if it were a linked list's head
+node" trick (`p_link` is a zero-offset structure field EQU, so this is
+meant to assemble as a pure constant: `rlr`'s address minus 0).
+`"offset rlr"` correctly sets `Value.is_offset=True` to flag this as a
+constant even though it still carries `rlr`'s label/size (this is
+exactly what `parse_operand`'s `if v.is_offset: return Operand('imm',
+...)` check -- added for #27/#33 -- exists to catch). But
+`parse_add`'s `"+"`/`"-"` handling, when it decided to carry a label's
+`.symbol`/`.size` through the subtraction (so that bare `LABEL+const`
+offset arithmetic, e.g. `FILE1.BDO`'s `ARECORD+2`, still sizes
+correctly -- the fix from #33), rebuilt the result with `Value(n, size,
+sym)` and never passed `is_offset` through, silently resetting it to
+`False`. So `"(offset rlr)-p_link"` lost its "offset"-ness midway and
+fell through to the *next* check instead (`sym.kind=='label'` ->
+`Operand('mem', ...)`), misassembling `mov bx,(offset rlr)-p_link` as
+a live memory read of `DS:rlr`'s address instead of loading the
+intended constant. Net effect: `insert_process`'s final `mov
+p_link[bx],si` -- which is *supposed* to be `mov rlr,si` via the same
+trick -- silently went to the wrong place, so the real `rlr` variable
+was *never actually updated*, leaving the ready list permanently empty
+after the very first `dispatch_entry`/`schedule()` cycle completed.
+Confirmed via a temporary probe dumping `rlr` immediately after the
+`call insert_process` returns (`rlr` still read back `0000h`) and via
+direct disassembly comparison before/after the fix. Fixed in
+`tools/asm86/expr.py`'s `parse_add` by carrying the chosen operand's
+`is_offset` through into the rebuilt `Value`, symmetrically with how
+`.symbol`/`.size` are already carried.
+
+**Net result of bugs 2+3 together**: `schedule()`/`switch()` now
+complete a full cycle correctly for the first time ever -- confirmed via
+probes showing `rlr` holding the correct PD (`09C0h`) at every step
+through `insert_process`, `switch:`, and back -- and `dispatch_entry`'s
+call into the scheduler now *returns* normally to its caller
+(`constat_entry`) instead of crashing/resetting the system. Boot no
+longer double-prints the signon banner (the tell-tale sign of the
+previous CPU-reset loop): the serial trace is now a single, clean,
+uninterrupted run, and goes well past the previous `module_table`
+fnchk/goodmod dispatch for the first `f_qread` call -- which now
+correctly reaches `RTM`'s `readq_entry` (local function 7, not
+`dispatch_entry`'s 12 as it had been misrouted to while `rlr` was
+still corrupted) -- into further genuine queue I/O (further `f_qread`/
+`f_qwrite` dispatches completing normally) and a `term_act` cleanup
+cycle that gets measurably further than #33's.
+
+**New, not-yet-fixed blocking point**: shortly after this, the trace
+shows signs of a *different* kind of corruption -- an `fnchk`/`goodmod`
+module-table-integrity mismatch at slot `0` (`SUP`'s own slot, not the
+benign, expected slot-`0x30`/`net`-module mismatch seen everywhere
+else in every trace this session) during what looks like a *second*
+`term_act` cycle (reached via `ABORT.RTM`'s own `'+'`/`'='` markers,
+i.e. a real `terminate:` completing its memory-free loop and calling
+`jmp dsptch` again), with `rlr`/`si` reading `0BBBh` -- a value that
+doesn't match any of the three known static PDs (`initpd=09C0h`,
+`idlepd=09F0h`, `tickpd=0A20h`) and falls inside `dsptchtos`'s own
+dispatcher-stack region (`0B5Eh`-ish upward), suggesting a stack/
+register-corruption bug of some kind, not yet root-caused. This is the
+next thing to chase, with the same proven methodology (targeted,
+uniquely-charactered serial probes + rebuild + trace read, reserving
+GDB for register snapshots where a probe can't reach). Note for next
+session: many single ASCII characters are now already claimed by
+probes across the tree (checked via a quick per-character `grep -rl`
+sweep); pick an unused one before adding a new probe, or two unrelated
+probes' output becomes indistinguishable in the trace.
+
+All fixes from this entry are in `src/kernel/DSPTCH.RTM` and
+`tools/asm86/expr.py`; the temporary diagnostic probes added and then
+*not* removed (`CHARIO.CIO`'s `cdbg`/`'|'`/`'_'`/`` '`' ``,
+`SYSENT.RTM`'s `','`, `DSPTCH.RTM`'s `'['`/`'<'`/`'>'`) are left in
+place deliberately, the same way #31-#33's probes were, since they're
+still actively useful for the next session and carry no behavioral
+risk (temp probes are documented at the top of this file).
+
+**Follow-up within the same session, after the above was written**:
+chased the new blocking point further. Added more probes (`DSPTCH.RTM`'s
+`'.'` at every `dsptch` entry, dumping `DS` and `indisp`; `ABORT.RTM`'s
+`'*'` extended to also dump `DS`; `XIOS86Q.A86`'s `'"'` at `tickint`'s
+entry, to rule in/out a mid-flight timer interrupt; `QUE1.RTM`'s marker
+byte `0x01` at `writeq`'s `qw_wait`, to rule in/out the write-queue-full
+sleep path; `RTMIF.RTM`'s `'W'` extended to also dump `DS`; `SUPIF.SUP`'s
+`'('`/`')'` extended to also dump the target module number alongside
+the local function number). All printable ASCII marker characters are
+now exhausted across the tree (confirmed by a per-character `grep -rl`
+sweep) -- the `tickint` probe had to reuse `'"'` and the `qw_wait`
+probe had to fall back to a raw, non-printable marker byte (`0x01`,
+shows as an unlabelled control character under `cat -v`) for lack of
+any free printable character; future probes should do the same (pick
+an unused byte value, not necessarily printable) rather than reusing
+an existing marker and making the trace ambiguous.
+
+Confirmed via these probes: no timer interrupt fires anywhere in this
+whole window (ruling out `fdisp`/`do_dispatch`/`int_disp_exit` as the
+source), and the write-queue-full/sleep path is never taken either
+(ruling out `sleep_act`). `DS` is confirmed *correct* (`cs:sysdat`'s
+value) at every `RTM`-module call return (`RTMIF.RTM`'s `'W'` probe)
+right up through a `writeq_entry` (`f_qwrite`, global function 139)
+call completing normally -- but by the very next instruction with a
+probe (`SUPIF.SUP`'s `nonet:` probe for the *next* dispatch, module
+`0002`=`RTM`, local function `5`=`openq_entry`), `ABORT.RTM`'s `'*'`
+probe immediately after reads `DS=0000`. That next dispatch's target
+module now reads correctly as `RTM` (not the `0028`/`'('`-byte
+artifact an earlier, buggy version of this same probe briefly showed --
+self-inflicted: the probe's own `mov al,'('` was clobbering the very
+`AL`/module byte it was about to print, before the fix of saving it in
+`BL` first). The exact instruction that zeroes `DS` between those two
+probes is still not pinned down.
+
+Re-running with the fixed, module-aware probe produced a *longer and
+further* trace than every previous run this session (grew to 2609
+bytes, confirmed stable/non-growing over a 20-second wait, vs. ~1950
+bytes before) -- `makeq_entry`, a second `openq_entry`/`writeq_entry`
+round with module correctly shown as `0002` throughout, and a *third*
+`terminate_entry` hit for `initpd` (`bx=09C0`), this time with
+`abt_chk` returning `CX=FFFFh` (tempkeep-deferred, not outright
+rejected) and `p_flag=0285h`. Immediately after, `INIT.SUP`'s own
+`init:` markers (`'1'`-`'5'`, `'q'`) print *again*, but this time with
+a plausible, non-garbage `SS:SP` (`16D0:0F82`, inside `BDOSIF.BDO`'s
+own `bdosstack` region) instead of the `0000:FFFC`-style garbage seen
+at every previous crash/reset this session -- i.e. this does not look
+like the same CPU-reset failure mode as before; it looks like
+something is deliberately re-entering `SUP`'s `init:` from within
+`BDOS`'s own internal stack context, which is suggestive of a genuine
+MP/M warm-boot/restart path (`BDOSIF.BDO` has unreferenced
+`bootf:`/`wbootf:` labels that were assumed to be dead code earlier
+this session -- worth re-checking whether something *does* reach them
+via a jump table not yet found) rather than a bug of the same kind as
+everything else in this entry. Not yet root-caused or categorized as
+bug-vs-intended-behavior; this is where the next session should pick
+up, armed with the `DS=0000` lead above and the "is this actually a
+reboot vs. a real warm-boot path" question.
+
+**Further follow-up**: traced what happens *after* that second `init:`
+re-entry completes. It is a genuine, controlled re-entry, not a CPU
+reset -- there is no repeated loader banner (`"Code Paragraph
+Address..."` etc.) before it, which a real reset would always produce,
+and the `SS:SP` it reports (`16D0:0F82`, inside `BDOSIF.BDO`'s own
+`bdosstack`) is consistent with a live jump/call, not a fresh CPU
+coming out of reset with a BIOS-default stack. `SUP`'s `init:` runs
+the *entire* module-init sequence a second time end to end (`RTM`
+twice-created idle/tick far-pointer dump, `BDOS`'s own disk-mx-queue
+`qmake`/`qopen`/`qwrite` dance complete with its own `pf_tempkeep`
+probes showing `p_flag=0205h` this time instead of `0005h`, `CIO`,
+`XIOS`'s UART/PIT/IRQ/floppy setup and signon banner) and then, as its
+own very last act (same as the very first boot), issues `int mpmint`
+to terminate itself again. This time `abt_chk` returns `CX=FFFFh`
+(tempkeep-deferred, not an outright "ok" or "not ok") because
+`p_flag[initpd]` has `pf_tempkeep` (`0200h`) set in it (confirmed:
+`0285h & 0200h = 0200h`) -- and that is where the trace permanently
+stops (stable across a 40-second wait).
+
+Investigated *why* `pf_tempkeep` is still set on `initpd` at this
+point, since every writer of that bit (`BDOSIF.BDO`'s `getdiskmx`,
+`MEMIF.MEM`'s `entry:`) is supposed to balance every `or
+p_flag[si],pf_tempkeep` with a matching clear once its critical
+section ends. Added a probe at `MEMIF.MEM`'s `entry:` dumping
+`mxmemowner` right before the `cmp ax,mxmemowner`/`je havemx` decision
+that distinguishes a *fresh* mx-queue acquisition (which pushes/sets
+`pf_tempkeep`) from a *nested/reentrant* one (which skips both the
+push and the set, relying on the outer call's balance) -- hypothesis
+being that some reentrant call was mis-detected as fresh or vice
+versa, permanently losing the restore. That specific probe, as first
+written, introduced a *new* regression worth recording as its own
+lesson: it was inserted directly between `cmp ax,mxmemowner` and the
+`je havemx` that reads the comparison's flags, and its own body
+(`dec`/`cmp`/`and` for the hex-nibble dump) silently clobbered those
+flags, so `je havemx` branched on garbage and the boot regressed to
+hanging far earlier (453 bytes instead of 2609+). Fixed by wrapping
+the probe in `pushf`/`popf`. **General lesson for future probes in
+this tree**: never insert a probe between a flag-setting instruction
+and the conditional jump that consumes it without `pushf`/`popf`
+around it -- this is a distinct failure mode from the register-clobber
+bug class (#3/#5/#33's DX-clobber entries) that this session hadn't
+hit before. With the fix in place, the probe shows `mxmemowner=0003h`
+at *every* `MEM` `entry:` call this entire boot (both the very first
+one and the last one right before the hang) -- never `initpd`'s real
+value (`09C0h`), and never changing -- which means every single
+`MEM`-module call this whole session takes the *fresh-acquire* branch,
+never the reentrant `havemx` shortcut. This rules out the
+reentrancy-confusion theory for the `pf_tempkeep` leak: `MEMIF.MEM`'s
+push/set-then-pop/clear dance around `pf_tempkeep` is always balanced,
+once per call, every time. The real source of the stuck
+`pf_tempkeep` bit on `initpd` is therefore still open -- most likely
+`BDOSIF.BDO`'s `getdiskmx`/`RETMONX` dance (the *other* writer of this
+bit) rather than `MEMIF.MEM`, not yet checked with the same rigor.
+Next step: apply the identical "dump the flag right before every
+write/clear, across every call this boot" technique to
+`BDOSIF.BDO`'s `pf_tempkeep` save/restore in `getdiskmx`/`RETMONX`
+instead.
+
+**Root cause finally found, via exactly that approach, plus one
+important new methodology lesson about this file's own probes.**
+Bisected forward from `getdiskmx`'s `push si` (saving the function-
+table index across `getdiskmx`'s own body) to the final `pop si`
+(right before `CALL_BDOS` dispatches through it) using a raw, non-
+printable marker byte (`0x07`/`0x08`, since every printable ASCII
+character is now claimed by some existing probe -- confirmed by a
+`grep -rl "'<char>'"` sweep across the whole `src/kernel/` tree) to
+dump `SI` at each end: it changed from a plausible-looking value
+(`4184h`) to obvious garbage (`7580h`) *somewhere in between*, and
+`CALL_BDOS`'s own call target (`cs:btab_addr[si]`) read back `1000h`
+-- not a real function address, but a wild near-jump landing inside
+`SUP`'s own code (the single shared 0x1000 code segment holds every
+module back-to-back, `SUP` first), which is exactly why this looked
+like "`SUP`'s `init:` is somehow being re-entered" in the earlier
+investigation above: it wasn't a deliberate warm-boot path after all,
+it was a crash landing in a plausible-looking place purely because of
+the combined segment's layout.
+
+Bisecting further (peeking the stack slot directly, without popping,
+immediately before and after the one call in between -- `entryzero`
+then a conditional `call setdata` -- both individually confirmed
+stack-balanced) narrowed it to `entryzero` itself: `mov cx,
+uda_ovl_len ! rep movs al,al`. `uda_ovl_len` (`UDA.FMT`) is `equ
+(offset $)-(offset u_dma_ofst)` -- the exact same "distance between
+two offsets, used bare as a pure byte count" idiom as `MAU.MEM`'s
+`satlen` and `LOAD.SUP`'s `ldtablen` from bug #33's `tools/asm86` fix,
+just not caught by that fix because this one goes one level deeper:
+`"(offset $)-(offset u_dma_ofst)"` *does* correctly evaluate with
+`is_offset=True` during the EQU's own definition (bug #33's fix for
+`parse_add` already carries that flag through the subtraction
+correctly), but `is_offset` was never a saved property of the defined
+Symbol -- only ever a transient attribute of the `Value` live during
+that one evaluation. Every *later* bare reference to the EQU by name
+(`mov cx,uda_ovl_len`) built a brand new `Value` from the Symbol's
+bare `(value, size)`, with `is_offset` defaulting back to `False`,
+which fell through to the `sym.kind=='equ' and sym.size` memory-
+operand check and misassembled as `mov cx, word ptr [0019h]` (a live
+read of whatever happens to be at `DS:0019h`) instead of `mov cx,
+19h`. That garbage `CX` fed directly into `rep movs al,al`'s count,
+running the copy for a huge, essentially random length and scribbling
+over unrelated `SYSDAT` memory -- including, in this exact call
+chain, `getdiskmx`'s own saved `SI` sitting a little further up the
+very same internal `bdosstack` the copy's destination (`dmaad`) also
+lives in.
+
+First fix attempt (persist `is_offset` on the `Symbol` itself, so
+every later lookup inherits it) was **too broad and caused a real
+regression**: it also flipped every *single-term* `LABEL equ offset
+$` EQU across the whole tree (a completely different, extremely
+common idiom used purely to make an EQU alias a label exactly, e.g.
+`stkbase`/`lastoff`/`dpb0`/`begdat`/`enddat`/`drombegin`/`dromend` in
+various loader and kernel files) from their original "behaves exactly
+like the label it aliases, including reading memory when referenced
+bare" semantics to "always an immediate" -- several of which are
+genuinely read as memory elsewhere by design. Caught immediately by
+the standard boot smoke test: the *loader* itself (not even the
+kernel) crash-looped, repeating its own signon banner thousands of
+times a second (confirmed: `grep -c` on the serial log, not just an
+eyeball guess) because `LBDOSDAT.A86`'s own `dpblist equ (offset
+endlist)-(offset sectpt)` (the loader's independent copy of the exact
+same idiom, used by `LBDOSF1.A86` to size a DPB-table copy) flipped
+the same way and broke *its* copy length instead. **Lesson**: never
+assume a `(offset X)-(offset Y)` EQU's bare-reference semantics should
+always become "immediate" just because that's what one call site
+needs -- some of this 1981 codebase's `offset`-based EQUs are
+genuinely meant to alias a label (memory-read semantics), and there is
+no cheap, purely-structural way for the assembler to tell those apart
+from a true offset-subtraction byte count at the point an EQU is
+*defined* (only at each individual *use site* does the surrounding
+code's intent become clear, which is exactly why ASM86 leaves this
+ambiguous and 1981 MP/M's own authors apparently never had to care,
+having presumably written each use site by hand with the right form).
+
+**Final fix, much narrower and verified not to regress the loader**:
+reverted the `Symbol.is_offset` persistence entirely. Instead,
+`parse_add` now special-cases the exact shape that's unambiguous --
+both operands of a `+`/`-` individually already `is_offset`-flagged
+(i.e. the EQU's own right-hand side is *itself* built from two
+`offset X` terms, not a bare single `offset X` with no arithmetic at
+all) -- and only then drops the resulting `Value`'s `size` (and
+`symbol`) to `None`. Unlike `is_offset`, `size` already flows straight
+into `define_symbol`'s stored `Symbol.size` through the existing,
+unmodified code path, so this is exactly the minimum change that
+makes a later bare reference correctly fall through every
+memory-operand check in `parse_operand` to the plain-immediate case,
+without touching any single-term `offset $`-style EQU's behavior at
+all (confirmed: rebuilt and reran the full boot smoke test after this
+narrower fix -- still broke the loader identically, because
+`LBDOSDAT.A86`'s `dpblist` *also* matches the "both operands
+individually offset-flagged" shape, same as `UDA.FMT`'s
+`uda_ovl_len`, so the general rule still isn't safe to apply to every
+EQU shaped this way across the whole tree).
+
+Given that, the fix actually kept is **source-level, not
+assembler-level**: `tools/asm86/expr.py`'s `parse_add` change was
+reverted back out entirely (confirmed back to bug #33's state, no
+diff), and instead every bare reference to one of these EQUs that
+this session could find and confirm matters was replaced with its
+literal, pre-computed value plus a comment explaining why (checked via
+`--symbols` against the real built value, not guessed): `BDOSIF.BDO`'s
+two `uda_ovl_len` uses (`getdiskmx`, `RETMON`) -- the one that was
+actually diagnosed as corrupting memory this session -- `BDOSIF.BDO`'s
+one `zerolength` use (`entryzero`, the very function this corruption
+was found inside, copied as a precaution since it shares the exact
+same bare-EQU-feeding-`rep`-count shape), `PARSE.SUP`'s one `ndelims`
+use, and `FILE1.BDO`'s one `dpblist` use (`DATA.BDO`'s copy of this
+EQU, distinct from the loader's own `LBDOSDAT.A86` copy of the same
+name -- the loader's own use was deliberately left untouched, since
+reverting the assembler change already restores its previously-working
+behavior and this session never diagnosed it as actually broken).
+`grep -rn "equ.*(offset.*-.*(offset\|equ.*offset \$-"` across
+`src/kernel/` turned up exactly these four EQU definitions and no
+others; a future session touching `src/loader/` should run the same
+grep there before assuming the loader's own `dpblist` is safe to leave
+alone forever.
+
+**Net result, confirmed via the serial trace**: boot is a clean,
+single run again (no loader crash-loop), `SI` no longer gets corrupted
+through `entryzero`, and the trace reaches a new high-water mark
+(3401 bytes, confirmed stable across a 25-second wait, up from the
+2621-2661-byte plateau every run previously stalled at). A **new**,
+not-yet-root-caused symptom appears at this new, further point: `rlr`
+reads back `0000h` at `switch:` (previously-reliable at `09C0h`
+through this exact code path) and *stays* `0000h` all the way through
+a third `terminate_entry` hit (`bx=0000h` this time, not `09C0h`;
+`p_flag` dumps as `16DDh`, which doesn't look like a real flags word
+at all and is worth treating with suspicion rather than taken at face
+value). This is the next thing to chase, with the same proven
+methodology (and the same character-exhaustion caveat for any new
+probe).
+
+## 35. `endseg` was never initialized (GENSYS-era gap, now patched at
+build time) -- `proc_creat` could never link `idle`/`tick` onto the
+ready list, which was the real cause of every "`rlr` reads back
+0000h/0BBBh" symptom above; fixed, and the dispatcher now sustains a
+live scheduler loop for the first time in this project's history
+
+Picked up the #34 entry's open "`rlr=0BBBh` inside the dispatcher
+stack" lead. Bisected forward through `DSPTCH.RTM`'s own
+`insert_process` (confirmed correct and already fixed by #34) using
+the same raw-marker-byte technique, this time tracing all the way
+back to `RTMIF.RTM`'s `init:` calling `PROC.RTM`'s `proc_creat` (once,
+for `idlepd` -- chained to also create `tickpd` via `p_link`, a real,
+intentional design: processing one PD pops the next one to process
+off a list threaded through the PDs' own `p_link` fields before those
+get repurposed for the real ready-list linkage). Found, bisecting
+instruction-by-instruction with marker probes (including one
+self-inflicted false lead: a badly-written probe read `DX` *after*
+already clobbering it for its own port write, briefly looking like yet
+another register-corruption bug before the mistake was spotted and the
+probe fixed) that `proc_creat`'s call to `getpdadr` (which validates a
+PD's address before using it) returns `CX=000Ch` (`e_no_pd`) for
+*both* `idlepd` and `tickpd` -- real, legitimate, in-range SYSDAT
+addresses, rejected as invalid.
+
+Root cause: `getpdadr` (`PROC.RTM`) and `QUE2.RTM`'s `getqdaddr` both
+gate on `cmp ax,sysdat ! jb bad ! cmp ax,endseg ! jae bad` before a
+second, tighter "within 64K of sysdat" check. `endseg` (`SYSTEM.DAT`:
+`"dw 0 ;1st parag. outside of MP/M"`) is `GENSYS`-computed data in the
+original 1981 build (`SYSTEM.DAT`'s own header comment: "This data is
+initialized by GENSYS") -- and `tools/build_mpmsys.py`, this tree's
+from-scratch replacement for `GENSYS`, already patches several other
+fields this same way (`pul`/`mdul`/`qlr`/`qul`/`qmau`, see their own
+comments) but never patched `endseg`. Confirmed via `grep -rn
+"endseg,"` across the whole tree: nothing ever writes to it, so it
+stays at its static source value, `0`. With `endseg=0`, `cmp
+ax,endseg ! jae bad` is true for literally every real address (any
+real SYSDAT address is `> 0`), so `getpdadr` unconditionally fails --
+which is why `proc_creat` never reached the "put on dispatcher ready
+list" code for either `idlepd` or `tickpd`, which is why `drl` (the
+dispatcher ready list `proc_creat` feeds) stayed `0` for the entire
+rest of boot, which is why every `schedule()` call's `drltorlr` loop
+had nothing to transfer onto `rlr` beyond whichever single process
+yielded into it, which is the real explanation for every "`rlr` reads
+back `0000h`/`0BBBh`" symptom in this entry's own earlier paragraphs
+(not a new, separate corruption bug after all -- `idle`/`tick` were
+simply never on the list to begin with).
+
+Fixed in `tools/build_mpmsys.py`, patched the same way as the other
+GENSYS-era fields: `ENDSEG_FIELD_OFFSET = 0x44` (confirmed against
+`--symbols` output, consistent across every module that includes
+`SYSTEM.DAT`), written as `0xFFFFh` -- deliberately generous (the
+largest representable 16-bit paragraph address, just under the 1MB
+real-mode ceiling) since neither check this guards is really meant to
+be the *binding* constraint; the second, tighter "within 64K of
+sysdat" check always is, so there's no need to compute a true,
+precise end-of-RAM value here.
+
+**Net result, confirmed via the serial trace**: boot still completes
+cleanly (no loader crash-loop, no reset), and the trace volume
+explodes from the low-thousands-of-bytes plateau every previous bug
+this session got stuck at to **3.8MB in a 15-second window** -- the
+dispatcher now sustains a real, continuous scheduling loop, visibly
+alive, for the first time this from-scratch reimplementation has ever
+reached. The specific pattern seen repeating indefinitely is a tight
+cycle dispatching to `RTM` local function 2 (`flag_wait_entry`,
+`S0002`) over and over, with no crash, no reset, and no further
+*distinct* progress visible in the trace -- almost certainly `idle`
+(or `tick`) legitimately looping (that is `idle`'s actual job when
+there's nothing else ready to run), but not yet confirmed whether
+`INIT` itself ever finished terminating and handed off cleanly, or
+whether it's stuck somewhere else now that `idle`/`tick` are finally
+real, schedulable competitors for the CPU. **This is the next thing to
+check**: is this `flag_wait` loop `idle`'s normal, correct behavior (in
+which case the real next step is making sure `INIT`'s own termination
+actually completes and something -- `CCP`, presumably -- gets loaded
+and started next), or is `INIT` now stuck waiting on a flag that
+nothing will ever set? Given the sheer trace volume now, prefer a
+short, time-boxed capture (a few hundred KB, not multiple MB) and grep
+for distinct markers rather than reading the whole thing, and consider
+disabling/thinning some of this session's noisier always-fire probes
+(`#0030#`/`Y`/`Q`/`Z`/`d`/`R` in particular) before the next round,
+since they now dominate the trace at this scale.
+
+All temporary diagnostic probes added and removed during this entry's
+own bisection were cleaned up afterward (`git diff --stat
+src/kernel/PROC.RTM` is empty) -- the only real, permanent fix is the
+one-line `tools/build_mpmsys.py` patch described above, plus its
+`ENDSEG_FIELD_OFFSET` constant and explanatory comment.
+
 ## Status of the kernel/loader sources
 
 `src/kernel/CIO.A86`, `SYSDAT.A86`, `BDOS.A86`, `MEM.A86`, `RTM.A86`,

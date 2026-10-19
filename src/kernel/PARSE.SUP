@@ -113,7 +113,14 @@ delim:		; see if char is delim, if not UPPER it, err if illegal
 ;		character converted to UPPER if 'a'-'z'
 ;		AL = converted char
 
-	mov cl,ndelims ! mov al,[si]		;See if Delimiter
+	mov cl,0Eh ! mov al,[si]		;See if Delimiter -- cl=ndelims
+						;(PARSE.SUP: "(offset $)-
+						;(offset delims)" = 0Eh/14
+						;decimal) hardcoded: same
+						;tools/asm86 "distance between
+						;two offsets" EQU limitation
+						;as uda_ovl_len, see
+						;BDOSIF.BDO's getdiskmx
 	push di ! mov di,offset delims		;look at delim string
 delnxt:	cmp cl,0 ! je no_del			;if end of delims,not delim
 	    cmp cs:[di],al ! je delret		;if delim, ret w/ z set

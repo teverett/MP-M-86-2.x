@@ -12,7 +12,12 @@ fdisp:
 
 	push ax ! push dx ! mov al,'z' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	cli
-	push ds ! mov ds,sysdat
+	push ds ! mov ds,cs:sysdat	;bare form is wrong -- fdisp is entered
+					;from an interrupt, with DS = whatever
+					;segment the interrupted code happened
+					;to have, not necessarily sysdat-ish
+					;(same bug class as the dsptch/switch
+					;fixes just above/below)
 	cmp indisp,true ! jne do_dispatch
 	    pop ds ! iret
 do_dispatch:
@@ -22,6 +27,7 @@ do_dispatch:
 	mov es,p_uda[bx]
 	mov u_in_int,true
 	pop u_ds_sav
+	push ax ! push dx ! mov al,'\' ! mov dx,03f8h ! out dx,al ! mov ax,u_ds_sav ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: dump the DS being saved off (interrupted code's real DS)
 	push bx
 	mov bl,p_stat[bx]
 	mov u_stat_sav,bl
@@ -44,6 +50,7 @@ int_disp_exit:
 	mov bx,bx_sav
 	mov indisp,false
 	mov ds,u_ds_sav
+	push ax ! push dx ! mov al,']' ! mov dx,03f8h ! out dx,al ! mov ax,ds ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: dump DS right after restoring it from u_ds_sav
 	mov es,u_es_sav
 	iret
 
@@ -93,6 +100,7 @@ dsptch:
 
 		; set indisp flag
 	pushf ! cld ! cli
+	push ax ! push dx ! mov al,'.' ! mov dx,03f8h ! out dx,al ! mov ax,ds ! call ydbg ! mov al,':' ! mov dx,03f8h ! out dx,al ! mov al,indisp ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE: dump DS and indisp at every dsptch entry
 	cmp indisp,true ! jne dispin
 	    popf ! ret
 dispin:	mov indisp,true
@@ -121,9 +129,24 @@ dispin:	mov indisp,true
 	mov si,offset i_mpm_ip ! mov di,offset u_mpm_ip
 	mov cx,4 ! rep movs ax,ax
 		; take current process off RLR.
-	mov ds,sysdat
+	mov ds,cs:sysdat	;bare "mov ds,sysdat" is wrong here -- DS was
+				;just set to 0 a few instructions above (to
+				;copy the interrupt vector table from 0:0),
+				;so reading the module's own "sysdat" cache
+				;cell through DS=0 picks up garbage from low
+				;memory instead of the real SYSDAT segment.
+				;Confirmed via GDB/serial trace: "mov si,rlr"
+				;right after this read rlr back as 0E99h
+				;(garbage) instead of the correct 09C0h,
+				;corrupting the ready list on the very first
+				;real dispatch_entry/schedule() call of the
+				;session and jumping dsp_table out of bounds.
+				;Same bug class as MAU.MEM's maua_out/mauf_out,
+				;MEMORY.MEM's mall_ml/mall_try_mau/mfree_it,
+				;and ML.MEM's mlalloc_entry tail.
 	cli
 	mov si,rlr
+	push ax ! push dx ! mov al,11 ! mov dx,03f8h ! out dx,al ! mov ax,si ! call ydbg ! mov ax,p_link[si] ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 11 (raw byte), dump si (old rlr) then p_link[si] (new rlr) at the moment it's taken off the ready list
 	mov ax,p_link[si] ! mov rlr,ax
 	mov p_link[si],0
 		; We are now in NO-MAN's land
@@ -133,6 +156,7 @@ dispin:	mov indisp,true
 		; SI -> PD just taken out of context.
 		; jump to routine for given status
 	mov bh,0 ! mov bl,p_stat[si] ! shl bx,1
+	push ax ! push bx ! push si ! mov al,'{' ! mov dx,03f8h ! out dx,al ! mov ax,si ! call ydbg ! mov al,':' ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call ydbg ! mov al,'}' ! mov dx,03f8h ! out dx,al ! pop si ! pop bx ! pop ax	;TEMP DEBUG PROBE: dump si(pd just taken off rlr) and bx(dsp_table index*2)
 	jmp cs:dsp_table[bx]
 
 dsp_table	dw	disp_act	;00 - run
@@ -273,7 +297,9 @@ disp_act:
 
 	mov p_stat[si],ps_run
 	mov bx,(offset rlr)-p_link
-	call insert_process ! jmp schedule
+	call insert_process
+	push ax ! push dx ! mov al,'[' ! mov dx,03f8h ! out dx,al ! mov ax,rlr ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: dump rlr right after insert_process
+	jmp schedule
 
 ;==============
 insert_process:
@@ -344,6 +370,7 @@ drltorlr:
 		;playing with DRL since interrupts
 		;doing a Flag_set may also.
 	cli ! mov si,drl
+	push ax ! push dx ! mov al,12 ! mov dx,03f8h ! out dx,al ! mov ax,si ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 12 (raw byte), dump drl at every drltorlr check
 	cmp si,0 ! jz switch
 	    mov ax,p_link[si] ! mov drl,ax
 	    mov p_stat[si],ps_run
@@ -356,6 +383,7 @@ switch:
 ; switch to the first process on the Ready List 
 
 	mov bx,rlr
+	push ax ! push bx ! push dx ! mov al,'<' ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call ydbg ! mov al,'>' ! mov dx,03f8h ! out dx,al ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE: dump rlr (PD about to run)
 	mov dx,p_uda[bx] ! mov ds,dx
 	push dx				;UDA on stack
 		; restore interrupt vectors
@@ -377,7 +405,11 @@ switch:
 	pop es
 	mov ss,u_ss
 	mov sp,u_sp
-	mov ds,sysdat
+	mov ds,cs:sysdat	;bare form is wrong -- DS is still the
+				;just-switched-to process's own UDA segment
+				;here (set above via "mov ds,dx" from
+				;p_uda[bx]), not sysdat-ish (same bug class
+				;as the two fixes above)
 	cmp u_in_int,true ! jne dret
 	    jmp int_disp_exit
 dret:	push u_flag_sav ! popf

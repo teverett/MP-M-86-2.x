@@ -918,6 +918,7 @@ tickint_sp	dw	0
 ax_save		dw	0
 
 tickint:
+	push ax ! mov al,'"' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE: timer interrupt fired
 	push	ds ! push cs ! pop ds
 	mov	tickint_ss,ss
 	mov	tickint_sp,sp

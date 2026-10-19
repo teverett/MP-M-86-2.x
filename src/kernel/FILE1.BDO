@@ -160,7 +160,13 @@ selectdisk:
                                         ;parameter block
         mov     dx,dpbaddr
         mov     bx,offset sectpt        ;bx is destination
-        mov     cl,dpblist
+        mov     cl,0Fh                  ;dpblist (DATA.BDO: "(offset
+                                        ;endlist)-(offset sectpt)" =
+                                        ;0Fh/15 decimal) hardcoded: same
+                                        ;tools/asm86 "distance between
+                                        ;two offsets" EQU limitation as
+                                        ;uda_ovl_len, see BDOSIF.BDO's
+                                        ;getdiskmx
         call    move                    ;data filled
                                         ;set single/double map mode
         mov     al,byte ptr maxall+1    ;largest allocation number

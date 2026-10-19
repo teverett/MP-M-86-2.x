@@ -39,7 +39,7 @@ terminate_entry:	; Terminate - DX=terminate code
 								;own comment).
 	mov bx,rlr
 	call abt_chk
-	push ax ! push bx ! push cx ! push dx ! mov al,'%' ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call ydbg ! mov al,':' ! mov dx,03f8h ! out dx,al ! mov ax,p_flag[bx] ! call ydbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop cx ! pop bx ! pop ax	;TEMP DEBUG PROBE
+	push ax ! push bx ! push cx ! push dx ! mov al,'%' ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call ydbg ! mov al,':' ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call ydbg ! mov al,':' ! mov dx,03f8h ! out dx,al ! mov ax,p_flag[bx] ! call ydbg ! mov al,':' ! mov dx,03f8h ! out dx,al ! pop dx ! mov ax,dx ! push dx ! call ydbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop cx ! pop bx ! pop ax	;TEMP DEBUG PROBE: now also dumps BX (the PD) first, then DX (saved copy, popped+repushed so DX itself is unaffected)
 	cmp cx,0 ! jle term_err
 terminate:  push ax ! mov al,'^' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	    pushf ! cli
@@ -57,10 +57,10 @@ nochld:	    mov bx,ax
 		    or p_flag[bx],pf_childabort
 term_r1:    popf
 	    mov si,rlr ! call rlsmx
-	    push ax ! mov al,'&' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
+	    push ax ! push dx ! mov al,'&' ! mov dx,03f8h ! out dx,al ! mov ax,rlr ! call ydbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE: dump rlr right after rlsmx, before f_bdosterm
 	    mov u_error_mode,0feh
 	    mov cx,f_bdosterm ! call mpmif
-	    push ax ! mov al,'*' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
+	    push ax ! push dx ! mov al,'*' ! mov dx,03f8h ! out dx,al ! mov ax,ds ! call ydbg ! mov al,':' ! mov dx,03f8h ! out dx,al ! mov ax,rlr ! call ydbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE: dump DS and rlr right after f_bdosterm returns
 	    mov dx,offset mxmemqpb ! mov cx,f_qread
 	    call mpmif
 	    push ax ! mov al,'+' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE

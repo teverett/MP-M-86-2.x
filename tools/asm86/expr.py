@@ -200,11 +200,61 @@ class _Parser:
             # itself, to misfire.
             sym = None
             size = None
+            is_offset = False
             if v.symbol is not None and v.symbol.kind == 'label':
-                sym, size = v.symbol, v.size
+                sym, size, is_offset = v.symbol, v.size, v.is_offset
             elif r.symbol is not None and r.symbol.kind == 'label':
-                sym, size = r.symbol, r.size
-            v = Value(n, size, sym)
+                sym, size, is_offset = r.symbol, r.size, r.is_offset
+            # Carry the left operand's is_offset through too -- "(offset
+            # LABEL)-EQU" (e.g. DSPTCH.RTM's "(offset rlr)-p_link", used to
+            # compute a fake-PD list-head pointer for insert_process) must
+            # stay a plain immediate the same way bare "offset LABEL" is:
+            # parse_operand's is_offset check (its first line of defense,
+            # ahead of the label/equ-size check below it) is exactly the
+            # escape hatch for this, but it only works if is_offset survives
+            # this arithmetic -- previously it was always reset to False
+            # here, so "(offset rlr)-p_link" fell through to the next check
+            # (sym.kind=='label') and got misassembled as a *memory read of
+            # DS:rlr's address* instead of the intended constant. Confirmed
+            # via GDB/serial trace: insert_process's "mov p_link[bx],si"
+            # (bx computed this way) silently never updated the real "rlr"
+            # variable, so the ready list stayed empty after every dispatch,
+            # and the next scheduler switch() picked an invalid (zero) PD,
+            # crashing/resetting the whole system.
+            # A DISTANCE between two offsets (both operands individually
+            # "offset"-flagged, e.g. "uda_ovl_len equ (offset $)-(offset
+            # u_dma_ofst)", UDA.FMT, or "dpblist equ (offset endlist)-
+            # (offset sectpt)", LBDOSDAT.A86) is a pure byte count with no
+            # memory-operand meaning at all, even bracketed -- unlike a
+            # single bare "LABEL equ offset $" (no +/- at all, never
+            # reaches this loop body), which is the standard ASM86 idiom
+            # for making an EQU alias a label exactly, including reading
+            # memory through it when referenced bare later, so its size
+            # must NOT be touched. Dropping size (and symbol) here, only
+            # for this specific both-sides-offset shape, is what actually
+            # survives past this expression's own evaluation: unlike
+            # is_offset (a transient Value attribute, never saved on the
+            # defined EQU's own Symbol), `size` already flows straight
+            # into define_symbol's stored Symbol.size, so a later bare
+            # reference like "mov cx,uda_ovl_len" correctly falls through
+            # every memory-operand check in parse_operand (no symbol, no
+            # truthy size) to the plain-immediate case. Confirmed via GDB/
+            # serial trace: "mov cx,uda_ovl_len" (BDOSIF.BDO's getdiskmx,
+            # copying UDA overlay fields) used to read CX back as garbage
+            # from DS:0019h instead of the real, small constant 19h (25
+            # decimal), making the following "rep movs al,al" copy run for
+            # a huge, essentially random length and scribble over
+            # unrelated SYSDAT memory -- including, in this specific call
+            # chain, getdiskmx's own saved SI further up the same internal
+            # BDOS stack, corrupting the very function dispatch that call
+            # was trying to carry out. (An earlier version of this fix
+            # tried persisting is_offset on Symbol itself so it would
+            # survive to later lookups unconditionally -- reverted: it
+            # also flipped every bare "LABEL equ offset $" position-marker
+            # EQU across the whole tree, several of which are genuinely
+            # read as memory elsewhere, to immediates instead, and broke
+            # the loader almost immediately.)
+            v = Value(n, size, sym, is_offset=is_offset)
         return v
 
     def parse_mul(self):

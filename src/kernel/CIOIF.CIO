@@ -75,4 +75,19 @@ mpmif:		; MPM interface
 xiosif:		; XIOS interface
 ;======		================
 	callf dword ptr .xiosmod ! ret
+
+;TEMP DEBUG PROBE: dump AX as 4 hex digits over serial
+cdbg:
+	push ax ! push bx ! push cx ! push dx
+	mov cx,0404h
+cdbg1:	rol ax,cl
+	mov bl,al ! and bl,0fh ! cmp bl,9
+	ja cdbg2
+	add bl,'0' ! jmp cdbg3
+cdbg2:	add bl,'A'-10
+cdbg3:	mov dx,03f8h ! push ax ! mov al,bl ! out dx,al ! pop ax
+	dec ch ! jnz cdbg1
+	mov al,' ' ! mov dx,03f8h ! out dx,al
+	pop dx ! pop cx ! pop bx ! pop ax
+	ret
 

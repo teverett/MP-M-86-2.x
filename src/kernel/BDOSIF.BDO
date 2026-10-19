@@ -186,6 +186,7 @@ getdiskmx:
 	push si! push dx
 
 	mov cx,f_qread ! mov dx,offset mxdiskqpb
+	push ax ! push cx ! push dx ! mov al,'[' ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call bdbg ! mov al,']' ! mov dx,03f8h ! out dx,al ! pop dx ! pop cx ! pop ax	;TEMP DEBUG PROBE: dump CX right before mpmif for f_qread
 	call mpmif
 	pop dx ! pop si
 
@@ -202,6 +203,7 @@ getdiskmx:
 	push ax ! popf
 
 		;initialize bdos data area for user
+	push ax ! push dx ! mov al,7 ! mov dx,03f8h ! out dx,al ! mov ax,si ! call bdbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 7, dump SI right before it gets pushed for the bdosstack-relative section
 	push si ! push dx
 	mov ax,u_wrkseg
 	mov parametersegment,ax
@@ -230,7 +232,22 @@ nodmabch:
 		;copy uda bdos vars to local area
 	push es ! push ds ! pop es ! pop ds
 	mov si,offset u_dma_ofst ! mov di,offset dmaad
-	mov cx,uda_ovl_len ! rep movs al,al
+	mov cx,19h	;uda_ovl_len (UDA.FMT: "(offset $)-(offset u_dma_ofst)",
+			;the byte length of the u_dma_ofst..u_pd_cnt overlay
+			;region, = 19h/25 decimal) hardcoded here rather than
+			;referenced by name: tools/asm86 has no clean way to
+			;mark a "distance between two offsets" EQU as a pure
+			;immediate without also affecting unrelated EQUs of
+			;the single-term "LABEL equ offset $" shape elsewhere
+			;in the tree (tried; broke the loader's own "dpblist"
+			;EQU, LBDOSDAT.A86, which legitimately needs to stay a
+			;memory reference) -- so "mov cx,uda_ovl_len" silently
+			;assembled as a live memory read of DS:0019h instead
+			;of this constant, making this rep movs run for a
+			;huge, essentially random length and scribble over
+			;unrelated SYSDAT memory, including getdiskmx's own
+			;saved SI further up the internal BDOS stack.
+	rep movs al,al
 	push es ! push ds ! pop es ! pop ds
 
 	TEST PD_CNT,1! JZ PDCNT_OK	;RESET PD_CNT IF LOW ORDER BIT SET
@@ -244,15 +261,19 @@ PDCNT_OK:
 
 	call entryzero
 
+	push ax ! push bx ! push dx ! mov al,9 ! mov dx,03f8h ! out dx,al ! mov bx,sp ! add bx,6 ! mov ax,ss:[bx+2] ! call bdbg ! mov al,setbf ! mov ah,0 ! call bdbg ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE: marker 9, peek the stack-saved SI (at sp+2 relative to before this probe's own 3 pushes, i.e. +6+2) without popping it, plus setbf
+
 	;Set DMA buffer if needed
 
 	cmp setbf,true ! jne nsetbf
 	    call setdata
 nsetbf:
+	push ax ! push bx ! push dx ! mov al,10 ! mov dx,03f8h ! out dx,al ! mov bx,sp ! add bx,6 ! mov ax,ss:[bx+2] ! call bdbg ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE: marker 10 (as a raw byte, 0x0A), peek the same stack slot after the setdata call
 
 	;ready to go to the function
 
 	pop dx ! pop si
+	push ax ! push dx ! mov al,8 ! mov dx,03f8h ! out dx,al ! mov ax,si ! call bdbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 8, dump SI right after popping it back
 	PUSH ES! PUSH DS! POP ES
 
 	MOV AH,CS:btab_flag[SI]
@@ -266,7 +287,8 @@ NOSHELL:
 RETMON:
 	POP ES
 	mov si,offset dmaad ! mov di,offset u_dma_ofst
-	mov cx,uda_ovl_len
+	mov cx,19h	;uda_ovl_len -- hardcoded, see the other use site's
+			;comment above (getdiskmx) for why
 	rep movs al,al
 		;setup return registers
 	mov dx,returnseg
@@ -280,6 +302,7 @@ RETMON:
 		;release mxdisk queue
 
 RETMONX:
+	push ax ! mov al,3 ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE: marker byte 3, confirms RETMONX is reached at all
 	push bx
 	mov cx,f_qwrite ! mov dx,offset mxdiskqpb
 	call mpmif
@@ -287,11 +310,18 @@ RETMONX:
 	mov si,rlr
 	pop bx! pop ax! not ax
 	xor ax,pf_tempkeep! and p_flag[si],ax
+	push ax ! mov al,'(' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
+	push ax ! mov ax,p_flag[si] ! call bdbg ! pop ax	;TEMP DEBUG PROBE: dump p_flag WORD (was wrongly truncated to a byte before -- "mov al,p_flag[si]" only reads bits 0-7, missing pf_tempkeep entirely, which is bit 9/0200h)
+	push ax ! mov al,')' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	test p_flag[si],pf_ctlc
 	jz mxdiskexit
 	    mov cx,f_terminate ! push bx
-	    sub dx,dx ! call mpmif
-	    pop bx 
+	    sub dx,dx
+	    push ax ! mov al,'(' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
+	    push ax ! mov ax,dx ! call bdbg ! pop ax	;TEMP DEBUG PROBE: dump dx (should be 0000)
+	    push ax ! mov al,')' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
+	    call mpmif
+	    pop bx
 mxdiskexit:
 	ret
 ;
@@ -381,10 +411,12 @@ COMPARE_RECS:
 	POP BX! MOV BX,7! JMP SHELL_ERR
 ;
 CALL_BDOS:
+	push ax ! push dx ! mov al,4 ! mov dx,03f8h ! out dx,al ! mov ax,si ! call bdbg ! mov ax,cs:btab_addr[si] ! call bdbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker byte 4, then SI, then the actual call target offset
 	MOV SAVE_SP,SP
 
 	call cs:btab_addr[si]
 
+	push ax ! mov al,5 ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE: marker byte 5, confirms the real function (e.g. PR_TERM) returned
 BDOS_RETURN:
 	MOV AL,SELDSK
 	cmp resel,0
@@ -501,11 +533,31 @@ mpmif:
 	POP	ES
 	ret
 
+;TEMP DEBUG PROBE: dump AX as 4 hex digits over serial
+bdbg:
+	push ax ! push bx ! push cx ! push dx
+	mov cx,0404h
+bdbg1:	rol ax,cl
+	mov bl,al ! and bl,0fh ! cmp bl,9
+	ja bdbg2
+	add bl,'0' ! jmp bdbg3
+bdbg2:	add bl,'A'-10
+bdbg3:	mov dx,03f8h ! push ax ! mov al,bl ! out dx,al ! pop ax
+	dec ch ! jnz bdbg1
+	mov al,' ' ! mov dx,03f8h ! out dx,al
+	pop dx ! pop cx ! pop bx ! pop ax
+	ret
+
 entryzero:
 ;---------
 	push cx ! push es
 	mov cx,ds ! mov es,cx
-	mov cx,zerolength ! mov al,0
+	mov cx,09h	;zerolength (DATA.BDO: "(offset usrcode)-(offset
+			;fcbdsk)" = 09h/9 decimal) hardcoded -- same
+			;tools/asm86 "distance between two offsets" EQU
+			;limitation as uda_ovl_len, see BDOSIF.BDO's
+			;getdiskmx for the full explanation
+	mov al,0
 	mov di,offset fcbdsk
 	rep stos al
 	pop es ! pop cx

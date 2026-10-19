@@ -127,6 +127,7 @@ nonet:	mov cl,ent_func[si] ! mov ch,0
 		;AL=mod,CL=func,CH=0
 	push ax ! push dx ! mov al,'Q' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	push ax ! push dx ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
+	push ax ! push bx ! push dx ! mov bl,al ! mov al,'(' ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call zdbg ! mov al,bl ! mov ah,0 ! call zdbg ! mov al,')' ! mov dx,03f8h ! out dx,al ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE: dump CX (CH=0,CL=local func#) then AL (target module#, saved in BL first, AH zeroed) right after nonet
 inmod:	cmp al,sup ! jne gofar
 	    shl cx,1 ! mov si,cx
 	    jmp cs:supfunc[si]

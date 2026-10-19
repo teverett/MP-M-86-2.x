@@ -201,7 +201,8 @@ qw_ver:	push es ! mov es,u_wrkseg
 	    inc ax ! jnz qw_wait
 		popf ! pop es ! mov bx,0ffffh
 		mov cx,e_q_full ! jmps qw_exit
-qw_wait:    lea dx,q_nq[bx]			;DX = NQ List
+qw_wait:    push ax ! mov al,1 ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE: queue full, about to sleep (marker byte 0x01, all printable chars already claimed by other probes)
+	    lea dx,q_nq[bx]			;DX = NQ List
 	    mov bx,rlr ! mov p_stat[bx],ps_nq	;status=NQ
 	    popf ! pop es ! push si
 	    mov cx,f_sleep ! call mpmif		;Sleep on NQ List

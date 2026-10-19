@@ -179,6 +179,34 @@ MDUL_FIELD_OFFSET = 0x58
 QLR_FIELD_OFFSET = 0x74
 PUL_FIELD_OFFSET = 0x5c
 QUL_FIELD_OFFSET = 0x5e
+
+# `endseg` (SYSTEM.DAT: "dw 0 ;1st parag. outside of MP/M") is GENSYS-
+# computed data in the original 1981 build -- this tree's own
+# SYSTEM.DAT just declares it statically as 0 and nothing in src/
+# kernel/ ever writes to it afterward (confirmed: grep -rn "endseg,"
+# across the whole tree turns up nothing). `PROC.RTM`'s `getpdadr`
+# (used by `proc_creat` to validate a PD address, e.g. when creating
+# the tick/idle processes during RTM's own `init:`) and `QUE2.RTM`'s
+# `getqdaddr` both do `cmp ax,sysdat ! jb bad ! cmp ax,endseg ! jae
+# bad` before a *second*, separate, tighter "within 64K of sysdat"
+# check -- so with `endseg` stuck at 0, literally every real SYSDAT
+# address (always >= sysdat, which is always > 0) fails the "below
+# endseg" half unconditionally, regardless of how valid it actually
+# is. Confirmed via a serial-trace probe: `getpdadr` returned
+# `e_no_pd` (`CX=000Ch`) for `idlepd`'s own, perfectly valid address
+# during RTM's `init:`'s two `proc_creat` calls (chained via
+# `p_link`, one call creates both tick and idle), silently failing to
+# ever link either process onto the dispatcher ready list (`drl`) --
+# which is why `rlr` read back `0000h` (an empty ready list) at the
+# very first `switch:` this tree ever reached with no process besides
+# the caller yielding. Fixed the same way as `pul`/`mdul`/`qlr`/`qul`/
+# `qmau` above: patched in at build time, standing in for GENSYS.
+# `0xFFFF` (the largest representable 16-bit paragraph address, just
+# under the 1MB real-mode ceiling) is deliberately generous -- neither
+# check this guards is really meant to be the *binding* constraint
+# (the second, tighter "within 64K of sysdat" check always is), so
+# there's no need to compute a tight, true end-of-RAM value here.
+ENDSEG_FIELD_OFFSET = 0x44
 QD_POOL_SLOT_SIZE = 0x1c  # qdlen (QD.DEF) -- first word of each slot is
                           # its own q_link, matching getqdaddr's own
                           # free-list convention (QUE2.RTM).
@@ -565,6 +593,7 @@ def main():
                       0, sysdat_segment + (qmau_buf_off >> 4),
                       QMAU_BUF_SIZE, 0)
     struct.pack_into('<H', dseg, QUL_FIELD_OFFSET, qd_pool_start)
+    struct.pack_into('<H', dseg, ENDSEG_FIELD_OFFSET, 0xFFFF)
 
     # XIOS86Q's own private tail: the bytes from SYSDAT_DSEG_SIZE
     # onward in its own dseg.bin (see its own comment on why its

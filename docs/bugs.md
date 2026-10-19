@@ -1959,6 +1959,146 @@ src/kernel/PROC.RTM` is empty) -- the only real, permanent fix is the
 one-line `tools/build_mpmsys.py` patch described above, plus its
 `ENDSEG_FIELD_OFFSET` constant and explanatory comment.
 
+## 36. Wiring up `src/rsp/TMP.A86` (the real MP/M-86 shell) as the
+system's first RSP -- one genuine new kernel bug found and fixed
+(`INIT.SUP`'s own `nrsp:` loop), substantial new build-system support
+added, but one more real bug still blocking `f_createproc` itself,
+not yet root-caused
+
+With #35's fix, boot finally sustains a live scheduler -- but with
+nothing except `IDLE`/`TICK` ever running, since `INIT` terminates
+without anything to hand off to. Checked `tools/build_disk.py`'s own
+comments first, as asked: confirmed, in its own words, "no CCP/process
+loader exists anywhere in this tree yet to actually read a .CMD/.RSP
+file and run it." But `src/rsp/TMP.A86` -- the *real* MP/M-86 Terminal
+Message Process (its actual console/shell equivalent, not a CP/M-style
+CCP) -- already exists in this tree, just never wired to anything,
+with exactly one known, trivial, already-diagnosed bug (docs/bugs.md
+#2: `call print_string` should be `call printstring`, line 147).
+Fixed directly in `src/rsp/TMP.A86` itself this time (unlike #1/#3,
+left alone) -- the project's own stated policy for kernel/loader files
+("once a fix is this confidently evidence-backed... leaving it broken
+forever didn't serve the 'get this booting' goal") applies just as
+much to the one file that's now directly on the critical path to an
+actual prompt. It assembles cleanly once fixed.
+
+**Baking TMP into the boot image.** `INIT.SUP`'s own `nrsp:` loop
+already walks a chain of RSPs starting from `rspseg` (SYSTEM.DAT:
+`"dw 0 ;segment of first RSP"`), calling `f_createproc` once per
+entry -- never exercised before because nothing ever set `rspseg`.
+TMP is an "8080 Model" RSP per its own header comment (MP/M-86
+Programmer's Guide 5.2: CS=DS=ES=SS all the same segment), so its
+assembled code+data are appended, back to back, onto the end of the
+combined kernel `cseg` blob in `tools/build_mpmsys.py` (new
+`RSPSEG_FIELD_OFFSET` section) -- the same general technique as
+XIOS86Q's own private dseg tail, just appended to `cseg` instead.
+
+Two real placement bugs were found and fixed while getting this right:
+- **First attempt**: appended TMP's bytes to `cseg` *after*
+  `sysdat_segment` was already computed from the original, smaller
+  `cseg`. Collision: `tmp_code_seg` (computed the same way,
+  `MPM_CODE_SEG + ceil(len(cseg)/16)`, from that same, still-
+  unmodified `cseg`) came out *identical* to `sysdat_segment` --
+  SYSDAT and TMP's code would have loaded on top of each other.
+- **Second attempt**: fixed the collision by placing TMP after
+  SYSDAT's own full span instead, but this broke something subtler:
+  `tools/build_disk.py`'s own `build_two_segment_body` independently
+  *recomputes* "where SYSDAT loads" from `MPM.bin.cseg`'s real,
+  on-disk file length (its own comment already says so: "the same
+  arithmetic build_disk.py's own `build_two_segment_body` uses"). Since
+  TMP's bytes were now part of that file, appended *after* where
+  `sysdat_segment` had already been fixed, the two computations
+  disagreed -- the kernel's own internal patches (`module_table`,
+  `qmau`, etc.) were correct for one segment while the loader
+  actually placed SYSDAT at a different one, corrupting everything
+  within the first few dispatches after boot (confirmed via serial
+  trace: widespread, cascading `module_table` integrity-check
+  failures, previously only ever seen as a single, benign, expected
+  mismatch at the unused network-module slot).
+- **Fix**: moved the entire TMP-assembly-and-append step to *before*
+  `sysdat_segment = MPM_CODE_SEG + (len(cseg)+15)//16` is computed, so
+  that single, shared formula -- used identically by both
+  `build_mpmsys.py` internally and `build_disk.py`'s own independent
+  recomputation -- counts TMP's bytes either way. Confirmed via the
+  loader's own printed "Data Paragraph Address" matching
+  `build_mpmsys.py`'s own computed `sysdat_segment` exactly.
+
+TMP's own dseg template needed two fields patched at build time
+(GENSYS would have filled these in the real 1981 build): `stack_top`'s
+2nd word (the "code seg" slot of its 3-word IRET-start structure,
+left as the placeholder `unknown` equ/0 in the template) and
+`u_initcs` (UDA-relative offset `50h`, confirmed against `--symbols`
+on a real kernel file that includes `UDA.FMT`) -- both set to TMP's
+own computed code segment, matching "Small Model" semantics (DS/ES/SS
+deliberately left 0 so `PROC.RTM`'s own `cp_uda` auto-fills them from
+`ax`=`u_wrkseg`, which `INIT.SUP`'s `nrsp:` loop already arranges to
+be `rspseg` via `mov ds,cx` right before `int mpmint`).
+
+**A second, genuine, pre-existing kernel bug found and fixed in the
+process** (never exercised before, for the same reason as #35's
+`endseg`/flag-table gaps -- `rspseg` was always 0 until now):
+`INIT.SUP`'s own `nrsp:` loop does `mov ds,cx` (loading the RSP's data
+segment into DS) immediately followed by `mov cl,f_createproc` -- an
+**8-bit** move that only sets `CL`, leaving `CH` holding whatever it
+last was, which at that exact point is still the *high byte of `cx`*
+from the `mov ds,cx` just above (i.e. the RSP segment's own high
+byte). `SUPIF.SUP`'s dispatcher (`func1: cmp ch,0 ! je userf`) reads a
+nonzero `CH` as an *explicit module number* rather than routing this
+as the global function it actually is, sending `f_createproc`'s global
+number (144/90h) hunting for local function 90h in whatever bogus
+"module" the stray high byte named -- confirmed directly via a serial-
+trace probe at `user_entry`'s own entry point: `CX` read back as
+`1790h` (rspseg's own high byte, `17h`, joined with `f_createproc`'s
+low byte, `90h`), not `0090h`. Fixed: `mov cl,f_createproc` ->
+`mov cx,f_createproc`.
+
+**Not yet root-caused**: fixing that bug changed the symptom (`CX`
+now correctly reads `0090h` at `user_entry`) but did not fully fix the
+underlying problem -- the same widespread `module_table` corruption
+still happens on this exact call. Bisected with marker-byte probes
+(the same technique as #34/#35) as far as: `user_entry` is reached
+correctly with `CX=0090h`; `SUPIF.SUP`'s own `func1: cmp ch,0 ! je
+userf` should be moot anyway, since `user_entry` *unconditionally*
+does `mov ch,0 ! call func` a few instructions before dispatching
+regardless of what `CH` was on entry (meaning the `INIT.SUP` fix above
+is still a real, independent bug -- confirmed via its own direct
+evidence -- but is not, by itself, sufficient to explain this one);
+`RTM`'s own `creat_proc_entry` (local function 14, where `f_createproc`
+is supposed to land) is *never reached* at all (a probe at its very
+first instruction never fires); `PROC.RTM`'s `proc_creat` itself *is*
+reached a 3rd time, but via the *wrong* path -- the `jmp proc_creat`
+tail-chain-continuation at its own end (from processing `TICK`'s
+static `p_link` chain during `RTM`'s own, unrelated, direct-call
+process creation earlier in boot), not a fresh call from
+`creat_proc_entry`, and with `DX=0000h` (so it just exits immediately,
+`cmp dx,0 ! jne cp_doit` not taken). So somewhere between `user_entry`
+correctly calling `func` with `CX=0090h` and `creat_proc_entry` being
+reached, the dispatch still goes somewhere else entirely, corrupting
+`module_table` along the way. Candidates not yet checked: whether
+`user_entry`'s own UDA-relative stack switch (`ulen`-sized, `mov
+ss,bp ! mov sp,ulen`) is somehow implicated specifically for this call
+site (it has worked correctly for every other syscall this session,
+so this seems unlikely but hasn't been directly ruled out); whether
+`sysent`'s own table entry for function 144 is being misread at
+runtime despite being confirmed correct in the static build image
+(checked directly: `module_table` itself, read straight from
+`build/kernel/MPM.bin.dseg`, is correct in the static image -- segment
+`1000h` in all 6 real slots -- so whatever corrupts it does so at
+runtime, not at build time). This is the next thing to chase, with
+the same proven methodology; a live GDB watchpoint on `rspseg`'s own
+runtime address was attempted but didn't finish executing within a
+reasonable wait (the `ignore N` + single-`continue` pattern that's
+been reliable for breakpoints all session may not transfer cleanly to
+watchpoints -- worth a fresh, patient attempt, or falling back to more
+marker-byte probes, next time).
+
+All of this round's temporary diagnostic probes remain in place in
+`src/kernel/PROC.RTM`, `src/kernel/SYSENT.RTM`, and `src/kernel/
+SUPIF.SUP` (markers `0x19`-`0x1F` as raw, non-printable bytes --
+printable ASCII is now fully exhausted across the tree) alongside the
+two real fixes (`src/kernel/INIT.SUP`, `tools/build_mpmsys.py`) and
+TMP's own one-line fix (`src/rsp/TMP.A86`).
+
 ## Status of the kernel/loader sources
 
 `src/kernel/CIO.A86`, `SYSDAT.A86`, `BDOS.A86`, `MEM.A86`, `RTM.A86`,

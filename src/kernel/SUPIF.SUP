@@ -35,7 +35,7 @@ user_entry:
 ;	u_retseg == user's ES
 
 		;initialize critical areas
-	push ax ! push dx ! mov al,'@' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE:
+	push ax ! push dx ! mov al,'@' ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call zdbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: now also dumps CX (incoming function code)
 								;DX is this entry point's own
 								;documented live input ("DX ->
 								;function parameter", e.g the

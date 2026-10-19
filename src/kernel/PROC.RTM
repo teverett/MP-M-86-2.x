@@ -30,13 +30,16 @@ proc_creat:		; Create Process
 ;==========		================
 ;		DX = pd address in u_wrkseg
 
+	push ax ! push dx ! mov al,1Fh ! mov dx,03f8h ! out dx,al ! pop dx ! push dx ! mov ax,dx ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 1Fh, confirms proc_creat reached, dump incoming dx
 	cmp dx,0 ! jne cp_doit
 	    sub bx,bx ! ret
 cp_doit:
 	call getpdadr		;si->pdaddr in rtm
+	push ax ! push dx ! mov al,19h ! mov dx,03f8h ! out dx,al ! mov ax,si ! call ydbg ! mov ax,cx ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 19h, dump si/cx right after getpdadr
 	jcxz cp_gpd
 	    mov bx,0ffffh ! ret
 cp_gpd:
+	push ax ! push dx ! mov al,1Ah ! mov dx,03f8h ! out dx,al ! mov ax,si ! call ydbg ! mov ax,p_uda[si] ! call ydbg ! mov ax,u_wrkseg ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 1Ah, dump si/p_uda[si]/u_wrkseg right at cp_gpd (after the PD copy, before cp_uda computes the absolute uda seg)
 	mov dx,p_link[si]
 	push dx ! push si
 		; init uda fields

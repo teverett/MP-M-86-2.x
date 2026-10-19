@@ -144,7 +144,7 @@ noclearline:
 	    mov dl,'A' ! add dl,bl
 	    call prchar	
 	    mov dx,offset prompt
-	    call print_string
+	    call printstring
 
 		; Read Command from Console
 	    mov dx,offset read_buf ! call conread

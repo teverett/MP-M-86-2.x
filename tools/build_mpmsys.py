@@ -239,6 +239,28 @@ NFLAGS = 0x20          # SYSTEM.DAT's own static "nflags db 20h" -- the
                        # declared; only the base pointer and the
                        # entries' own contents were never initialized.
 FLGLEN = 3             # flg_pd (word, FLG.DEF) + flg_ignore (byte)
+
+# `rspseg` (SYSTEM.DAT: "dw 0 ;segment of first RSP") is the last
+# GENSYS-era gap: `INIT.SUP`'s own `nrsp:` loop already walks a chain
+# of RSPs starting here (`cl,f_createproc` once per entry, chained via
+# each RSP's own header `LINK` field doubling as "next RSP segment"
+# before `INIT.SUP` overwrites it with sysdat's own segment, as the
+# real MP/M-86 Programmer's Guide describes) and was never exercised
+# because nothing ever set it -- `src/rsp/TMP.A86` (the real MP/M-86
+# Terminal Message Process, i.e. its console command-line shell; see
+# docs/bugs.md #2, now fixed) exists in this tree already but was
+# never wired up to anything (confirmed: `tools/build_disk.py`'s own
+# comments -- "no CCP/process loader exists anywhere in this tree yet
+# to actually read a .CMD/.RSP file and run it"). Baked in here the
+# same way XIOS86Q's private dseg tail is: TMP is an "8080 Model" RSP
+# (its own header comment; the MP/M-86 Programmer's Guide section 5.2
+# describes this as CS=DS=ES=SS all the same segment), so its code and
+# data are appended, back to back, onto this SAME combined `cseg` blob
+# (right after the real kernel modules') rather than loaded as a
+# separate segment -- `tmp_data_seg` is computed as an offset purely
+# *within* that same blob, exactly the way `MPM_CODE_SEG`+`module_base`
+# already works for SUP/RTM/MEM/CIO/BDOS/XIOS.
+RSPSEG_FIELD_OFFSET = 0x42
 QD_POOL_SLOT_SIZE = 0x1c  # qdlen (QD.DEF) -- first word of each slot is
                           # its own q_link, matching getqdaddr's own
                           # free-list convention (QUE2.RTM).
@@ -604,6 +626,64 @@ def main():
     # which `mau_split` treats as an error). `QMAU_SAT_ENTRIES` reserves
     # generous room for that; only the first slot starts non-zero (one
     # real entry covering the whole buffer past the table itself).
+    # Bake in TMP (see RSPSEG_FIELD_OFFSET's own comment for what/why)
+    # -- assembled standalone since it lives in src/rsp/, not src/
+    # kernel/ (run_asm86 hard-codes KERNEL_DIR), and its code+data
+    # appended onto `cseg` *before* `sysdat_segment` is computed below,
+    # not after: `sysdat_segment`'s own formula (and build_disk.py's
+    # independent recomputation of the same value, per its comment
+    # just above) are both driven entirely by `len(cseg)` at the point
+    # each one runs, so TMP's bytes have to already be counted by the
+    # time either one adds up `cseg`'s length, or the two computations
+    # would disagree about where SYSDAT actually loads -- confirmed
+    # the hard way: appending TMP *after* this line (tried first, then
+    # reverted) left `sysdat_segment` here looking only at the
+    # original kernel-only `cseg`, while build_disk.py's own
+    # `build_two_segment_body`, re-deriving the same value from the
+    # *larger*, TMP-inclusive `MPM.bin.cseg` file it reads straight off
+    # disk, placed SYSDAT somewhere else entirely -- the real kernel
+    # code ran with every `module_table`/`qmau`/etc. pointer correct
+    # for one segment while the loader actually put SYSDAT at another,
+    # corrupting everything within the first few dispatches.
+    tmp_src = os.path.join(ROOT, 'src', 'rsp', 'TMP.A86')
+    tmp_out = os.path.join(out_dir, 'TMP')
+    result = subprocess.run(ASM86 + [tmp_src, '-o', tmp_out],
+                             capture_output=True, text=True)
+    if result.returncode != 0:
+        sys.stderr.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        raise SystemExit("asm86 failed assembling src/rsp/TMP.A86")
+    with open(tmp_out + '.cseg.bin', 'rb') as f:
+        tmp_cseg = bytearray(f.read())
+    with open(tmp_out + '.dseg.bin', 'rb') as f:
+        tmp_dseg = bytearray(f.read())
+
+    tmp_code_seg = MPM_CODE_SEG + (len(cseg) + 15) // 16
+    tmp_cseg_paras = (len(tmp_cseg) + 15) // 16
+    tmp_cseg = tmp_cseg.ljust(tmp_cseg_paras * 16, b'\0')
+    tmp_data_seg = tmp_code_seg + tmp_cseg_paras
+
+    # Patch TMP's own dseg: `stack_top`'s 2nd word (its "code seg" slot,
+    # GENSYS-filled in the real build -- TMP.A86's own template leaves
+    # it as the placeholder `unknown` equ, 0) and `u_initcs` (UDA-
+    # relative offset 50h, confirmed via --symbols against a real
+    # kernel file that includes UDA.FMT) both need the real code
+    # segment -- "Small Model" semantics (MP/M-86 Programmer's Guide
+    # 5.3.2): CS set explicitly, DS/ES/SS left 0 so PROC.RTM's own
+    # `cp_uda` auto-fills them from `ax`=`u_wrkseg` (which `INIT.SUP`'s
+    # `nrsp:` loop already sets to `rspseg`, i.e. `tmp_data_seg`, via
+    # `mov ds,cx` right before `int mpmint`).
+    struct.pack_into('<H', tmp_dseg, 0x1DA, tmp_code_seg)  # stack_top+2
+    struct.pack_into('<H', tmp_dseg, 0x90, tmp_code_seg)   # u_initcs
+    tmp_dseg_paras = (len(tmp_dseg) + 15) // 16
+    tmp_dseg = tmp_dseg.ljust(tmp_dseg_paras * 16, b'\0')
+
+    cseg += tmp_cseg
+    cseg += tmp_dseg
+    print(f"build_mpmsys: TMP   code @ {tmp_code_seg:#06x}, "
+          f"data @ {tmp_data_seg:#06x} ({len(tmp_cseg)}+{len(tmp_dseg)} "
+          "bytes)")
+
     sysdat_segment = MPM_CODE_SEG + (len(cseg) + 15) // 16
     qmau_buf_off = (qd_pool_end + 15) & ~0xF
     qmau_buf_end = qmau_buf_off + QMAU_BUF_SIZE
@@ -626,6 +706,7 @@ def main():
                       QMAU_BUF_SIZE, 0)
     struct.pack_into('<H', dseg, QUL_FIELD_OFFSET, qd_pool_start)
     struct.pack_into('<H', dseg, ENDSEG_FIELD_OFFSET, 0xFFFF)
+    struct.pack_into('<H', dseg, RSPSEG_FIELD_OFFSET, tmp_data_seg)
 
     # flag table: real, zero-initialized-then-filled entries right
     # after the qmau buffer -- see FLAGS_FIELD_OFFSET's own comment.

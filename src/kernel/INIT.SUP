@@ -131,14 +131,42 @@ nxiom:
 nrsp:					;loop til done
 	push ax ! mov al,'C' ! mov dx,03f8h ! out dx,al  ! push ax ! push dx ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	mov ds,sysdat			;reset DS
-	mov cx,rspseg ! jcxz rsp_out	;?all done?
+	mov cx,rspseg
+	push ax ! push dx ! mov al,1Bh ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call zdbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 1Bh, dump rspseg at top of each nrsp iteration
+	jcxz rsp_out	;?all done?
 	    mov es,cx			;ES->RSP
 	    mov ax,es:.rsp_link		;save next RSP
 	    mov rspseg,ax
 	    mov es:.rsp_link,ds		;give Sysdat to RSP
 	    mov si,rsp_pd		;get PD
 	    mov ds,cx			;DS = RSP Data Seg
-	    mov cl,f_createproc		;Create RSP Process(s)
+	    mov cx,f_createproc	;Create RSP Process(s) -- was
+					;"mov cl,f_createproc" (an 8-bit
+					;move, CH untouched): CX still held
+					;rspseg from the "mov ds,cx" just
+					;above, so CH survived as rspseg's
+					;own high byte instead of 0, and
+					;func()'s own dispatcher (SUPIF.SUP)
+					;reads a nonzero CH as an *explicit
+					;module number* rather than routing
+					;this as the global function it
+					;actually is -- f_createproc's global
+					;number (144/90h) got misinterpreted
+					;as local function 90h within
+					;whatever bogus "module" CH's leftover
+					;high byte named, landing miles
+					;outside the real 7-slot module_table
+					;and reading/jumping through
+					;essentially random memory. Confirmed
+					;via a serial-trace probe: the very
+					;first real "int mpmint" this path
+					;ever reaches (this call -- nothing
+					;exercised it before now, since
+					;rspseg was always 0 until TMP was
+					;wired up) printed CX as 1790h, i.e.
+					;exactly rspseg's own high byte (17h)
+					;joined with f_createproc's low byte
+					;(90h), not 0090h.
 	    mov dx,si ! int mpmint
 	    jmps nrsp			;Do another...
 rsp_out:

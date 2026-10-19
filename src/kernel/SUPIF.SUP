@@ -35,7 +35,33 @@ user_entry:
 ;	u_retseg == user's ES
 
 		;initialize critical areas
-	push ax ! mov al,'@' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
+	push ax ! push dx ! mov al,'@' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE:
+								;DX is this entry point's own
+								;documented live input ("DX ->
+								;function parameter", e.g the
+								;terminate code passed by INIT.SUP's
+								;"mov dl,0ffh!int mpmint") -- the
+								;original single-register probe
+								;clobbered it, at the very first
+								;instruction of EVERY "int mpmint"
+								;syscall, before the parameter is
+								;ever read. Confirmed via GDB: DL
+								;read back 0F8h (the serial port,
+								;left over from this very probe)
+								;at abt_chk, instead of the real
+								;0FFh, so "cmp dl,0ffh" took the
+								;wrong branch every time termination
+								;was attempted. Internal kernel-to-
+								;kernel calls (through a module's
+								;own "mpmif" trampoline, straight to
+								;SUP's "entry:" label) never hit
+								;this -- only real "int mpmint"
+								;syscalls go through user_entry
+								;first, which is why this went
+								;unnoticed through every earlier,
+								;successful dispatch this session.
+								;Same bug class as MEMIF.MEM's
+								;'a'/'b' and ABORT.RTM's '$' probes.
 	cld ! mov di,ds			;DI=user's DSEG
 	mov ds,sysdat ! mov bx,rlr	;BX=pd address
 	mov ax,es ! mov es,p_uda[bx]	;ES=uda
@@ -75,6 +101,15 @@ func:		; call system function
 ;		CL = function #
 ;		DX = arg
 
+	push ax ! push bx ! push cx ! push dx ! push si	;TEMP DEBUG PROBE: same module_table
+	mov si,0						;integrity check as goodmod's,
+fnchk:	cmp word ptr module_table[si+2],1000h ! je fnchkok	;but at the top of func(), so it
+	    mov al,'#' ! mov dx,03f8h ! out dx,al		;fires on every syscall attempt,
+	    mov ax,si ! call zdbg				;not just ones that reach goodmod
+	    mov al,'#' ! out dx,al
+fnchkok:add si,8
+	cmp si,56 ! jb fnchk
+	pop si ! pop dx ! pop cx ! pop bx ! pop ax	;TEMP DEBUG PROBE
 	push ax ! push cx ! push dx ! mov al,'Y' ! mov dx,03f8h ! out dx,al ! mov ax,es ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop cx ! pop ax	;TEMP DEBUG PROBE
 	mov u_func,cl
 func1:	cmp ch,0 ! je userf
@@ -108,6 +143,15 @@ gofar:	push cx ! mov cx,ax ! dec cl
 	    push ax ! mov al,'U' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	    mov bx,0ffffh ! mov ax,bx ! ret
 goodmod:
+	push ax ! push bx ! push cx ! push dx ! push si	;TEMP DEBUG PROBE: verify every
+	mov si,0						;module_table segment word is
+mtchk:	cmp word ptr module_table[si+2],1000h ! je mtchkok	;still MPM_CODE_SEG (1000h);
+	    mov al,'!' ! mov dx,03f8h ! out dx,al		;print "!<slot offset>!" for
+	    mov ax,si ! call zdbg				;each one that's gone bad
+	    mov al,'!' ! out dx,al
+mtchkok:add si,8
+	cmp si,56 ! jb mtchk
+	pop si ! pop dx ! pop cx ! pop bx ! pop ax	;TEMP DEBUG PROBE
 	push ax ! push dx ! mov al,'S' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	mov ch,0 ! mov si,cx
 	mov cl,3 ! shl si,cl ! pop cx
@@ -116,6 +160,26 @@ goodmod:
 	mov ax,word ptr module_table[si] ! call zdbg ! mov al,':' ! mov dx,03f8h ! out dx,al	;TEMP DEBUG PROBE: target offset
 	mov ax,word ptr module_table[si+2] ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al	;TEMP DEBUG PROBE: target segment
 	pop cx ! pop dx ! pop ax
+	mov ax,cx		;every other module's entry: dispatcher indexes its
+				;own function table with CX (ch=0,cl=local func#,
+				;exactly as set up above) -- XIOS86Q.A86's entry:
+				;is the one exception, indexing with AX instead
+				;("mov ah,0!shl ax,1!call cs:functab[bx]"). Reached
+				;via this general goodmod path (as opposed to the
+				;direct xiosif trampoline, where each caller sets
+				;AX itself before the far call), AX was previously
+				;just whatever stale value happened to be live
+				;(typically the *enclosing* syscall's u_func, left
+				;there by SUPIF.SUP's own mpmif trampoline) --
+				;confirmed via GDB to misroute XIOS dispatches
+				;(e.g. f_setdmab/f_setdma/f_freadseq from LOAD.SUP's
+				;diskread) to the wrong XIOS local function, which
+				;never completes the real disk operation and leaves
+				;a retry loop spinning forever. Setting AX=CX here
+				;costs nothing for RTM/MEM/CIO/BDOS (none of them
+				;read AX for dispatch, and AX is documented as an
+				;*output* -- copy of BX -- not a live input, at this
+				;point in the call).
 	callf dword ptr module_table[si]
 	push ax ! push dx ! mov al,'T' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	ret

@@ -1288,6 +1288,180 @@ command while the target is running" issue already documented
 elsewhere in this file) from well before the hit to nail the exact
 instruction and its real intent.
 
+## 33. `#32`'s `module_table` corruption was never real either -- five
+independent, real bugs found and fixed (one in `tools/asm86` itself);
+`RTM`'s `terminate_entry` now runs real `term_act` cleanup for the first
+time ever; a new, further-in blocking point found, not yet fixed
+
+**Context**: continuing directly from #32's "new blocker" (`module_table`'s
+`RTM` segment field corrupted from `1000h` to `0F00h`, fault site not
+pinned down with confidence). Chased this for a long time with GDB before
+realizing -- the same lesson as #32 all over again -- that several of the
+GDB *techniques* used to chase it were themselves unreliable in this QEMU/
+gdbstub combination, in ways that actively misled the investigation before
+being caught:
+
+- **Repeated `continue` against the same already-hit breakpoint (or set of
+  breakpoints) does not reliably resume real execution** in this QEMU/
+  gdbstub/GDB combination -- it sometimes just re-reports the *same*
+  stopped CPU state over and over (identical `PC`/registers across many
+  "hits"), even with a *fresh* `tbreak` each time, even though the guest
+  demonstrably keeps running to completion in the background regardless
+  (confirmed by the serial log reaching its usual final length while GDB
+  was still "stuck" reporting hit after identical hit). This produced a
+  convincing but entirely false "this function is called thousands of
+  times in a tight retry loop" reading (a `MAU.MEM` entry counter,
+  deliberately added and read back as `0A0Eh` — which turned out to just
+  be `mau_insert`'s own code address, read from the *wrong* segment, not a
+  real call count at all; see below). The one case this session fully
+  cross-checked with an independent, reliable signal (a plain DSEG counter
+  variable, incremented once per real call and watched with a *hardware
+  watchpoint* rather than re-continued breakpoints) showed the call
+  actually happens exactly **once**. Moral, sharpened from #32's UART
+  finding: trust a single fresh breakpoint hit; do not trust a second
+  `continue` against one already hit, and do not trust registers read
+  after it without independent corroboration.
+- **A GDB hardware watchpoint on an address inside the combined `cseg`
+  (code) never fires**, even across many minutes of real continued
+  execution and even though the location demonstrably *does* get written
+  (confirmed by reading its value afterward) -- likely a self-modifying-
+  code/translation-block-invalidation interaction specific to watching
+  *code* pages, as opposed to `dseg`/`SYSDAT` addresses, where every
+  watchpoint this project has ever set (this session and earlier ones)
+  has fired reliably. Moral: always put a throwaway diagnostic counter in
+  `dseg` (e.g. borrowing an unused field of an existing `SYSDAT` structure,
+  as done here with `qmau`'s otherwise-dead `m_link` word), never in a
+  module's own `cseg`, if it needs to be watched rather than just printed.
+
+With those two traps avoided, the real picture: `module_table` itself was
+never actually corrupted by anything *writing* to it out of turn. What
+really happened is five separate, genuine bugs, several of them in the
+exact same call chain (`BDOSIF.BDO`'s `init:` → `f_qmake` → `QUE1.RTM`'s
+`makeq_entry` → `QUE2.RTM`'s `getqdaddr`/`qspace` → `f_maualloc` →
+`MAU.MEM`'s `maualloc_entry`, the system's *first-ever* real memory
+allocation), whose combined, cascading symptoms (a dispatch landing with
+the wrong segment, a lock that never released, a syscall parameter read
+as garbage) collectively looked exactly like the kind of "something wrote
+garbage somewhere" corruption #31/#32 kept finding elsewhere in this
+project, right down to reusing the same `0F00h`/`03F8h`-style tells:
+
+1. **`SUPIF.SUP`'s `goodmod` wasn't setting up `XIOS86Q.A86`'s own calling
+   convention.** Every module's own `entry:` dispatcher (`RTM`, `MEM`,
+   `CIO`, `BDOS`) indexes its local function table with `CX` (`mov ch,0 !
+   shl cx,1`) -- except `XIOS86Q.A86`'s, the one exception, which indexes
+   with `AX` instead (`mov ah,0 ! shl ax,1`). Reached through `goodmod`'s
+   general dispatch path (as opposed to the direct `xiosif` trampoline,
+   where every caller sets `AX` itself before the far call), `AX` was
+   simply whatever was last live -- typically a stale `u_func` left by
+   `SUPIF.SUP`'s own `mpmif` trampoline -- misrouting any such XIOS
+   dispatch to the wrong local function. Fixed with one new instruction,
+   `mov ax,cx`, right before `goodmod`'s `callf dword ptr
+   module_table[si]` -- free for every other module (none of them read
+   `AX` for dispatch) and no longer a documented *output*-only register at
+   that point in the call ("`AX` - Copy of `BX`" per `user_entry`'s own
+   header comment).
+2. **A real `tools/asm86` bug, not specific to this file**, immediately
+   chased down afterward when the above fix only partially helped: a bare
+   (non-bracketed) reference to an EQU defined via arithmetic on *another*
+   EQU that itself carries an explicit `byte ptr`/`word ptr` cast (e.g.
+   `MAU.MEM`'s `satlen equ sat_nall + byte`, where `sat_nall equ byte ptr
+   sat_length + word`) was being classified as a *memory operand*
+   (dereferencing live memory at that numeric address) instead of a plain
+   immediate. `add bx,satlen` assembled as `03 1E 05 00` (`add bx, word
+   ptr [5]` -- read the live word at `DS:5`) instead of `81 C3 05 00`
+   (`add bx, 5`). Confirmed to be systemic, not a MAU.MEM-only quirk, by
+   finding the *identical* mis-assembly in `LOAD.SUP`'s completely
+   unrelated `lt_next: add bx,ldtablen` (`ldtablen equ ldtab_id + word`):
+   `add bx, word ptr [0x11]` instead of `add bx, 0x11`. Root cause in
+   `tools/asm86/expr.py`'s `parse_add`: `"SYMBOL + const"` arithmetic
+   deliberately preserves the left operand's `.symbol`/`.size` so that a
+   true *label* plus a constant offset (its own motivating historical
+   example, `"MOV BYTE PTR ARECORD+2,AH"`, `FILE1.BDO`, where `ARECORD` is
+   a real `dw`-declared label) still classifies as a memory operand --
+   but the same propagation was firing for an *EQU* operand too (even one
+   with a `.size` from its own `ptr`-cast definition), which is wrong:
+   that `.size` only exists so a later *bracketed* reference to the same
+   name (`sat_nall[bx]`) sizes correctly, via a completely separate code
+   path that never looks at `.symbol`/`.size` at all. Confirmed this
+   historical idiom ("stride" EQUs built this exact way) is used
+   identically in the original 1981 source (`orig/mpm862sr/02/MAU.MEM`),
+   so the real DRI `ASM86` must have drawn this exact distinction (label
+   vs. EQU) too, even though nothing in this project's reimplementation
+   previously had reason to notice. Fixed by restricting the propagation
+   to `v.symbol.kind == 'label'` specifically (dropping the `sym.kind ==
+   'equ' and sym.size` half of `parse_operand`'s classification check's
+   matching condition, which no longer has anything to match once `equ`
+   symbols stop propagating through `+`). This is the same bug class
+   already fixed once before, from the *other* direction, in #27 (a bare
+   `BYTE`/`WORD`/`DWORD` *literal* leaking size into an EQU that didn't
+   want it) -- that fix handled the literal side; this one handles the
+   "EQU-of-an-EQU" side of the identical underlying ambiguity. Any other
+   "stride"/"total length" EQU built the same way elsewhere in this tree
+   (there are several similarly-named `*len` EQUs) would have had the
+   identical latent bug; none of the others happen to have been exercised
+   by any code path reached so far.
+3. **Several real `mov ds,sysdat` (bare) vs. `mov ds,cs:sysdat` bugs**,
+   the same mistake #26/`QUE2.RTM`'s own already-fixed `qspace` comment
+   warns about, now found freshly in the routines `qspace`'s `f_maualloc`
+   call actually reaches: `MAU.MEM`'s `maualloc_entry` (`maua_out`) and
+   `maufree_entry` (`mauf_out`), `MEMORY.MEM`'s `mall_ml`, `mall_try_mau`,
+   and `mfree_it`, and `ML.MEM`'s `mlalloc_entry`. Every one of these
+   switches `DS` away from `sysdat` partway through (to a MAU's own data
+   segment via `mov ds,m_start[bx]`, or to `SS` for an on-stack MPB/MAF
+   via `push ss ! pop ds`, or to `u_wrkseg`) and then tries to restore it
+   with a bare `mov ds,sysdat` -- which, like every other instance of this
+   bug in this project, reads `sysdat`'s *cached* segment-number cell
+   through whatever `DS` currently is, not through `CS` (where the cell
+   actually lives, consistently, regardless of module). Confirmed via GDB
+   directly on `MAU.MEM`'s `maua_out`: `DS` read back `0000h` right after
+   this instruction (reading address `0:offset_of_sysdat`, not the real
+   cached value) -- leaving every subsequent `SYSDAT`-relative access in
+   `MEMIF.MEM`'s `entry:` (critically, `dec mxmemcount`) operating against
+   segment `0` instead of the real `SYSDAT` segment. That single `dec`
+   landing in the wrong segment is *why* `mxmemcount` (confirmed
+   separately with its own, correctly-`dseg`-resident hardware watchpoint)
+   never returned to `0` after being incremented to `1` for this call --
+   not a logic bug in the increment/decrement pairing itself, just the
+   decrement hitting the wrong byte in memory. All six fixed the same way,
+   `mov ds,cs:sysdat`.
+4. **`ABORT.RTM`'s own `'$'` probe, at the very top of `terminate_entry`**,
+   clobbering `DX` -- the entry point's own documented live input ("`DX -
+   terminate code`") -- with the by-now-familiar single-register-save
+   style, exactly like #32's `MEMIF.MEM` `'a'`/`'b'` bug. Confirmed via
+   GDB directly on `abt_chk`'s entry: `DX` read back `03F8h` (the serial
+   port, left over from the probe) instead of `INIT.SUP`'s real `0FFh`.
+5. **`SUPIF.SUP`'s own `user_entry` `'@'` probe** -- the literal first
+   instruction executed on *every* `int mpmint` syscall from user-level
+   code -- had the identical bug, clobbering `DX` before this entry
+   point's own documented live input (again, "`DX -> function
+   parameter`") is ever read. This one likely has the widest blast radius
+   of any single fix this session: internal kernel-to-kernel calls
+   (through a module's own `mpmif` trampoline, straight to `SUP`'s
+   `entry:` label) never go through `user_entry` at all, which is exactly
+   why every *earlier*, successful dispatch this whole multi-session
+   effort has shown correct `DX`/`CX` values -- only a genuine software
+   interrupt does, and `INIT.SUP`'s own `"mov dl,0ffh ! int mpmint"`
+   (asking to terminate itself) is the very first one this from-scratch
+   kernel has ever executed. Any future user-level program issuing *any*
+   BDOS/syscall via `int mpmint` with a meaningful byte/word parameter
+   would have hit this identically.
+
+**Net result**: `pf_tempkeep` no longer gets stuck (bug #3 above was its
+real cause all along, not anything in `MEMIF.MEM`'s probes a second time);
+`abt_chk` now correctly returns "OK to abort" (bug #5's fix repaired the
+terminate code it reads); `RTM`'s `terminate_entry` now runs the real
+`terminate:`/`term_act` cleanup path for the first time this project has
+ever reached it -- freeing the init process's memory and devices through
+several more successful dispatches (`f_bdosterm`, another `f_qread` on
+`mxmemqpb`, more) -- before hitting a **new blocking point**: a second,
+apparently-nested call back into `terminate_entry` during that same
+cleanup, where `abt_chk` this time returns `CX=0000h` ("not OK to abort").
+Not yet confirmed whether this second rejection is itself correct MP/M
+behavior (e.g. a child/RSP process legitimately not abortable yet) or
+another bug of the same kind as this entry's -- not investigated this
+session; this is the next thing to chase, with the two GDB caveats above
+firmly in hand this time.
+
 ## Status of the kernel/loader sources
 
 `src/kernel/CIO.A86`, `SYSDAT.A86`, `BDOS.A86`, `MEM.A86`, `RTM.A86`,
@@ -1340,24 +1514,34 @@ calls `abt_chk` to check whether that's allowed right now.
 debugging-instrumentation artifact (`MEMIF.MEM`'s own `'a'`/`'b'`
 probes were clobbering a live `DX` argument, making every
 `f_maualloc` call inside `qmake` fail) -- now fixed. With that fix,
-`abt_chk`'s rejection is gone entirely: `RTM`'s `terminate_entry` now
-proceeds into real `term_act` cleanup (freeing the init process's
-memory, detaching its console/list devices). Boot now hangs a bit
-further in, during that same cleanup, because of a second, unrelated,
-*confirmed* (via a GDB hardware watchpoint directly on the live memory
-address) corruption of `module_table`'s own `RTM` segment field (goes
-from the correct `1000h` to `0F00h`, written from somewhere in
-`SUP.A86`'s `LOAD.SUP`) -- see #32's own writeup for exactly what's
-confirmed and what isn't (the exact faulting instruction wasn't pinned
-down with full confidence this session). This is the current, precise
-blocking point. Debug probes left in place throughout the now-cleared
-path (`INIT.SUP`'s numbered serial markers `'1'`-`'D'` plus `'!'`,
+`abt_chk`'s rejection was gone, briefly, before #33 found the apparent
+`module_table` corruption that followed was *also* never real. #33's
+five fixes (`goodmod`'s own XIOS calling-convention gap, a genuine
+`tools/asm86` assembler bug misclassifying certain bare EQU-arithmetic
+expressions as memory operands, three more `mov ds,sysdat` bare-vs-
+`cs:`-prefixed bugs in `MAU.MEM`/`MEMORY.MEM`/`ML.MEM`, and two more
+instances of the DX-clobbering single-register-probe bug in
+`ABORT.RTM` and -- most consequentially -- `SUPIF.SUP`'s own
+`user_entry`) together mean `RTM`'s `terminate_entry` now runs the real
+`terminate:`/`term_act` cleanup path for the first time this project
+has ever reached it, successfully freeing the init process's memory and
+devices through several more dispatches, before hitting a **new**
+blocking point: a second, apparently-nested call back into
+`terminate_entry` during that same cleanup, where `abt_chk` this time
+returns `CX=0000h` ("not OK to abort") -- not yet confirmed whether
+that's correct MP/M behavior or another bug. See #33's own writeup for
+the full detail, including two GDB/QEMU methodology traps (unreliable
+repeated `continue` against an already-hit breakpoint; `cseg`
+hardware watchpoints that never fire) that cost significant time this
+session before being caught -- avoid both in any future continuation.
+Debug probes left in place throughout the now-cleared path
+(`INIT.SUP`'s numbered serial markers `'1'`-`'D'` plus `'!'`,
 `SUPIF.SUP`'s `'X'`/`'Q'`/`'R'`/`'S'`/`'T'`/`'U'`/`'Y'`/`'Z'`/`'@'`/
 `'#'`, `XIOS86Q.A86`'s `'E'`/`'F'`/`'0'`/`'p'`-`'w'`, `BDOSIF.BDO`'s
 `'q'`/`'r'`/`'s'`/`'t'`/`'?'`/`'['`, `RTMIF.RTM`'s `'V'`/`'W'`,
 `QUE1.RTM`'s `'G'`/`'H'`, `QUE2.RTM`'s `'I'`-`'P'`, `ABORT.RTM`'s
 `'$'`/`'%'`/`'^'`/`'&'`/`'*'`/`'+'`/`'='`, `DSPTCH.RTM`'s `'~'`) are
-harmless to leave as-is, but given #32's finding, any *new* single-
+harmless to leave as-is, but given #32/#33's findings, any *new* single-
 register-save probe added anywhere a call's arguments are live in `DX`
 (or `BX`/`CX`) needs to save/restore that register too -- don't trust
 a probe's absence from a free-run serial trace; verify with GDB

@@ -18,6 +18,9 @@ supervisor	equ	(offset $)
 		db	'COPYRIGHT (C) 1981,'
 		db	' DIGITAL RESEARCH '
 serial		db	'654321'
+mau_entry_counter	dw	0	;TEMP DEBUG: counts real maualloc_entry
+					;invocations, to tell a genuine repeated
+					;call apart from a stale GDB re-report
 
 ;====
 init:

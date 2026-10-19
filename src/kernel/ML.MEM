@@ -159,7 +159,11 @@ mla_initmau:
 	sub cx,(2*satlen) ! add dx,(2*satlen)
 	mov si,satlen ! mov sat_start[si],dx
 	mov sat_length[si],cx ! mov sat_nall[si],0
-	mov ds,sysdat
+	mov ds,cs:sysdat	;DS is the new MAU's own segment here (set
+				;above by "mov ds,dx"), so the bare form is
+				;wrong -- same bug as MAU.MEM's maua_out/
+				;mauf_out and MEMORY.MEM's mall_ml/
+				;mall_try_mau/mfree_it
 	sub cx,cx ! ret
 
 ;============

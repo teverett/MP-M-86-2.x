@@ -119,7 +119,14 @@ mall_ml:		; We must create a new MAU from MFL
 	mov ds,u_wrkseg
 	mov bx,offset mfl ! mov cx,f_mlalloc
 	call mpmif
-	mov ds,sysdat
+	mov ds,cs:sysdat	;bare "mov ds,sysdat" only works when DS is
+				;already sysdat-ish, which isn't guaranteed
+				;here -- DS was just set to u_wrkseg above,
+				;and a caller using the on-stack-MPB trick
+				;(e.g QUE2.RTM's qspace) can leave u_wrkseg
+				;pointing at SS, not sysdat (see MAU.MEM's
+				;maua_out/mauf_out, which had the identical,
+				;confirmed bug)
 		;BX=MAU, (New MD,MPB on stack)
 	jcxz mall_ml0
 	    pop dx ! pop bx ! jmp mall_err
@@ -170,7 +177,8 @@ mall_try_mau:
 
 	mov ds,u_wrkseg
 	mov cx,f_maualloc ! call mpmif
-	mov ds,sysdat ! ret
+	mov ds,cs:sysdat ! ret	;see mall_ml's own comment just above --
+				;same bare-vs-cs:sysdat bug
 
 ;===========
 mfree_entry:		; 130 - Memory Free
@@ -247,7 +255,10 @@ mfree_it:
 	mov dx,sp ! push ss ! pop ds
 	mov cx,f_maufree ! call mpmif
 	mov bp,bx			;if bp=0,MAU not empty
-	mov ds,sysdat
+	mov ds,cs:sysdat		;DS is SS here (the on-stack MAF,
+					;set above by "push ss!pop ds"),
+					;so the bare form is wrong -- same
+					;bug as mall_ml/mall_try_mau above
 		;pop MAF structure
 	pop ax ! pop ax ! pop ax
 	pop dx ! pop si ! pop bx	

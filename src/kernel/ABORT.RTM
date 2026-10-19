@@ -21,7 +21,22 @@ terminate_entry:	; Terminate - DX=terminate code
 ; terminated when it comes back into context, as set up by
 ; abort specified process.
 
-	push ax ! mov al,'$' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
+	push ax ! push dx ! mov al,'$' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE:
+								;DX is the live terminate code
+								;here (this entry point's own
+								;documented input) -- the
+								;original single-register probe
+								;style clobbered it, so abt_chk
+								;(right below) read DL=0F8h (the
+								;serial port, left over from this
+								;very probe) instead of the real
+								;0FFh passed by INIT.SUP's "mov
+								;dl,0ffh!int mpmint", silently
+								;taking abt_chk's "SYS and not FF
+								;=> no abort" branch every time.
+								;Same bug class as MEMIF.MEM's
+								;'a'/'b' probes (see that fix's
+								;own comment).
 	mov bx,rlr
 	call abt_chk
 	push ax ! push bx ! push cx ! push dx ! mov al,'%' ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call ydbg ! mov al,':' ! mov dx,03f8h ! out dx,al ! mov ax,p_flag[bx] ! call ydbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop cx ! pop bx ! pop ax	;TEMP DEBUG PROBE

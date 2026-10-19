@@ -124,7 +124,25 @@ maua_alloc:	mov ax,sat_length[bx]
 		sub bx,bx ! mov cx,bx
 		jmps maua_out
 maua_out:
-	mov ds,sysdat
+	mov ds,cs:sysdat	;bare "mov ds,sysdat" only works when DS is
+				;already sysdat-ish (it reads SYSDAT's own
+				;self-referential cached copy of its own
+				;segment number, at a fixed offset -- not
+				;some per-module cell despite living in each
+				;module's own cseg too); DS is still the
+				;MAU's own segment here (set above, by
+				;"mov ds,m_start[bx]"), so the bare form read
+				;garbage from the MAU buffer instead of the
+				;real sysdat segment, leaving DS wrong for
+				;every caller from here on -- confirmed via a
+				;GDB breakpoint right after this instruction:
+				;DS came back 0000h, and the *real* sysdat-
+				;relative mxmemcount (watched separately via
+				;its own live physical address) never
+				;actually got decremented again, even though
+				;the very next instruction back in MEMIF.MEM's
+				;entry: ("dec mxmemcount") did run -- just
+				;against the wrong (DS=0) segment.
 	pop es ! ret
 
 ;=============
@@ -172,7 +190,10 @@ mauf_c:		call mau_collapse ! jmps mauf_out
 mauf_err:
 	mov bx,0ffffh ! mov cx,e_no_memory
 mauf_out:
-	pop es ! mov ds,sysdat
+	pop es ! mov ds,cs:sysdat	;see maua_out's own comment on why
+					;this can't be the bare form -- DS is
+					;still the MAU's own segment here too
+					;(set above by "mov ds,m_start[bx]")
 	ret
 
 mau_split:		;split SAT into 2

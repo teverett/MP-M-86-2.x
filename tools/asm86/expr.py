@@ -160,12 +160,51 @@ class _Parser:
             op = self.next().kind
             r = self.parse_mul()
             n = v.n + r.n if op == '+' else v.n - r.n
-            # Preserve a label/equ symbol through "SYMBOL + const" offset
-            # arithmetic (e.g. "MOV BYTE PTR ARECORD+2,AH", FILE1.BDO) --
-            # otherwise parse_operand can no longer tell this bare
-            # expression came from a label, and misclassifies it as a
-            # plain immediate instead of a memory operand.
-            v = Value(n, v.size or r.size, v.symbol or r.symbol)
+            # Preserve a *label's* symbol through "SYMBOL + const" offset
+            # arithmetic (e.g. "MOV BYTE PTR ARECORD+2,AH", FILE1.BDO, where
+            # ARECORD is a real `dw`-declared label) -- otherwise
+            # parse_operand can no longer tell this bare expression came
+            # from a label, and misclassifies it as a plain immediate
+            # instead of a memory operand.
+            #
+            # Deliberately NOT done for an EQU symbol (kind=='equ'), even a
+            # "sized" one carrying a byte/word ptr cast from its own
+            # definition (e.g "sat_nall equ byte ptr sat_length+word",
+            # MAU.MEM) -- that size exists so a *bracketed* reference like
+            # "sat_nall[bx]" sizes correctly (handled separately, by the
+            # bracket-operand path a few lines down, which never consults
+            # .symbol at all). Propagating it through further bare "+"
+            # arithmetic used to also make a *derived stride* EQU like
+            # "satlen equ sat_nall+byte" carry that same memory-operand
+            # flavor, even though satlen is only ever used bare, as a pure
+            # byte count (e.g "add bx,satlen", MAU.MEM/mau_split) -- so it
+            # assembled as "add bx,word ptr [5]" (a live memory read of
+            # DS:5) instead of the intended "add bx,5" immediate. Confirmed
+            # by a GDB register trace: bx read back a completely wrong
+            # value right after this exact instruction, derailing
+            # maua_nsat's SAT-table scan and hanging maualloc_entry's very
+            # first real call forever (BDOSIF.BDO's own "create disk mx
+            # queue" -- the same call chain already implicated in bug #31/
+            # #32's pf_tempkeep symptom). LOAD.SUP's "add bx,ldtablen" has
+            # the identical bug for the same reason (`ldtablen equ
+            # ldtab_id+word`); any other EQU chain built this way is
+            # equally affected.
+            # A plain arithmetic size (from a bare byte/word/dword literal,
+            # or from an EQU's own "ptr"-cast size) must NOT ride along
+            # unless it's accompanied by a label -- see this function's
+            # own comment above: it's exactly this leftover .size (not
+            # .symbol) that was still making "satlen"/"ldtablen" carry a
+            # memory-operand flavor even after restricting .symbol
+            # propagation to labels, since parse_operand's classification
+            # only needs a truthy .size on an 'equ' symbol, not .symbol
+            # itself, to misfire.
+            sym = None
+            size = None
+            if v.symbol is not None and v.symbol.kind == 'label':
+                sym, size = v.symbol, v.size
+            elif r.symbol is not None and r.symbol.kind == 'label':
+                sym, size = r.symbol, r.size
+            v = Value(n, size, sym)
         return v
 
     def parse_mul(self):

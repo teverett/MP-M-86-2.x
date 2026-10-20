@@ -5325,3 +5325,141 @@ calls `fdc_send_cmd`/`fdc_wait_seek`/`fdc_pio_in` leading up to this
 read) against what QEMU's emulated NEC765/8272 actually expects --
 this is the first time this investigation has ever reached real disk
 I/O, so there's no earlier finding in this file to build on.
+
+## 66. Followed #65's own next step -- ported the already-solved DMA
+fix from the loader's FDC driver into the kernel's, then found and
+fixed a second, unrelated kernel-only bug (`ccb`'s own "unconfigured
+GENSYS answer" problem, same class as #65's `srchdisk`) blocking the
+very next milestone
+
+Picked up exactly where #65 left off: `XIOS86Q.A86`'s `fib_wait` was
+spinning forever waiting for the FDC to signal "byte ready" for a
+real sector read, having already correctly transferred exactly 7
+bytes (confirmed via `EDI`/`ECX` against `secbuf`'s own symbol
+address) before stalling.
+
+**Recognized this as an already-solved problem, not a new one.**
+`src/loader/LDBIOS86Q.A86`'s own copy of this exact driver has a
+detailed comment (and `docs/bugs.md` #22) describing the identical
+symptom and its fix: pure PIO for the full `fd_secsize` data phase
+genuinely stalls after a handful of bytes on this QEMU target's
+NEC765/82077 emulation (confirmed there via testing, independent of
+timing), fixed by switching to real 8237 DMA-driven transfers for the
+data phase, keeping PIO only for the 7-byte result phase every
+READ/WRITE DATA command ends with regardless of DMA vs PIO. `XIOS86Q.A86`
+(the kernel's own copy of this driver) never received that fix --- it
+still had the old pure-PIO data loop and `specify_parms`'s `ND`
+(non-DMA) bit still set.
+
+**Fixed** by porting the loader's `dma_setup`/`dma_setup_read`/
+`dma_setup_write` into `XIOS86Q.A86` nearly verbatim, clearing
+`specify_parms`'s `ND` bit, collapsing `fdc_pio_in`/`fdc_pio_out` down
+to just the 7-byte result-phase drain (DMA now handles the data
+phase), and removing the trailing `SENSE INTERRUPT STATUS` calls after
+each read/write (the loader's own fix removed these too, for the same
+reason as #16/#22: QEMU hangs on a SIS with no genuine pending
+interrupt to report). **One deliberate, necessary difference from the
+loader's version**: the loader's `secbuf` lives in its own CSEG (no
+separate DSEG), so its physical-address math for arming the DMA
+controller is `CS*16 + offset(secbuf)`. This kernel module's `secbuf`
+lives in the SYSDAT-based combined DSEG instead (`build_mpmsys.py`'s
+"SYSDAT's dseg.bin plus XIOS86Q's own private tail"), so copying the
+loader's `CS`-based formula verbatim would have armed the DMA
+controller with the wrong physical address -- used `DS` instead,
+matching this file's own pre-existing `pmsg` comment, which already
+established the identical DS-not-CS point for `signon`, declared
+right alongside `secbuf` in that same private tail.
+
+**That alone changed observable behavior for the first time across
+all of #65/#66's hangs** (previously: an identical 5434- or
+5445-byte trace, bit-for-bit, every single run) -- but into a new,
+far bigger problem: a 4,958,585-byte trace that turned out, on
+inspection, to be a tight, exactly-periodic loop (period 2,479,025
+bytes, confirmed byte-for-byte identical at two widely separated
+offsets) repeating forever. `TMP`'s own entry marker (`27h`+`"TMP"`)
+appeared exactly once near the start, ruling out repeated process
+creation; `CHARIO.CIO`'s `constat_entry`/`cioattach` markers appeared
+only a handful of times, ruling out the console-status retry loop
+from #64's own speculation. Breakpointing `CONSOLE.CIO`'s
+`conattach_entry`/`cioattach`/`ca_sleep`/`ca_atch` (with the
+established "one `stepi` after each hit" discipline this session has
+learned the hard way is required to avoid GDB's own "stuck re-hitting
+the same breakpoint with zero progress" artifact) caught it directly:
+`TMP.A86`'s own first real console attach (`nextcommand`'s `call
+attach`) hits `conattach_entry`, then immediately `ca_sleep` -- an
+*unconditional* attach request finding the console already (and
+permanently) "attached" to someone else, sleeping forever waiting for
+a detach that can never come.
+
+**Root cause -- `ccb` (SYSDAT.FMT's Console Control Block table
+address) is another unconfigured GENSYS answer, exactly like #65's
+`srchdisk`, just far more damaging.** `SYSTEM.DAT` declares `ccb dw 0`
+-- a placeholder real GENSYS would normally compute and fill in with
+wherever it laid out the real per-console CCB array in memory. With
+`ccb` stuck at 0, `CHARIO.CIO`'s own `getccbadr` (`ccb + console#*12`)
+resolves console 0's CCB to flat address **0** instead of a real,
+dedicated block -- every console attach/detach/status call ever made,
+by any process, reads and writes `c_attach`/`c_queue`/etc at that
+same bogus, never-actually-owned address instead of a real,
+zero-initialized CCB. Confirmed directly: reading `c_attach[si]` live
+via the QEMU monitor at the `ca_sleep` breakpoint showed `SI=0`, and
+whatever garbage already happened to sit at sysdat-segment flat
+address 0 read back non-zero, so `cioattach`'s unconditional-attach
+path treated the console as already (and forever) owned by someone
+else.
+
+**Fixed** by reserving real storage for this build's one CCB
+(`ncondev`+`nlstdev` = 1+0 = 1, this build's own already-patched
+GENSYS answers from #22/#65) in `XIOS86Q.A86`'s own private dseg tail
+-- `ccbtab0 rb 12` (`CCB.DEF`'s own `ccblen`), zero-initialized by
+`rb` the same way `dirbuf0` was in #65 -- and having
+`build_mpmsys.py` patch `ccb` (SYSDAT offset `0x54`) to point at it,
+via the same `get_symbol('XIOS86Q', ...)` mechanism the script
+already uses elsewhere for this exact kind of cross-module pointer
+patch. Also patched `nccb` (SYSDAT offset `0x49`) from `SYSTEM.DAT`'s
+stock `5` (written for the original multi-device target) down to `1`,
+to stay consistent with the real count, though `ccb` itself -- not
+`nccb` -- was what actually caused the hang.
+
+**With all three of #65/#66's fixes in place, booting changes shape
+again**: the free-running trace drops to 93,321 bytes (much shorter
+than the 2.48MB idle-spin loop the `ccb` bug caused, and shorter than
+either of #65's two earlier hangs), `TMP`'s own entry marker still
+fires exactly once, and -- new this round -- `XIOS86Q.A86`'s own init
+signon banner (`"MP/M-86 XIOS86Q -- QEMU target (serial console,
+floppy disk)"`) is readable in the trace with per-character dispatch
+markers interleaved, immediately followed by `INIT.SUP`'s own `nrsp`
+marker (`1Bh`) -- i.e., this is apparently the first run where the
+*entire* module-init phase, XIOS's floppy driver included, completes
+and genuinely hands off into `nrsp`'s real RSP-creation loop, not a
+coincidental repeat.
+
+**Then it hangs again, differently**: confirmed via the same
+monitor-based `info registers` technique (three checks, several
+seconds apart, byte-identical `CS:EIP`) -- `CS:IP = 1000:004A`, `EFLAGS`
+still showing `IF=0`. Mapping that flat address against
+`build/kernel/MPM.bin.cseg` directly (not `asm86 --symbols`, which for
+very low offsets like this returns misleading hits -- `SUP.A86` also
+includes `sysdat.fmt` purely for its own offset alignment, so small
+numeric offsets collide between real SUP code labels and unrelated
+SYSDAT *data* field names sharing the same small numbers) shows `CS:IP`
+sitting **inside `INIT.SUP`'s own literal copyright/signon banner
+text** ("`...2.0 [5 Oct 81]\r\nCopyright (C) ...`"), not real code --
+a wild jump into data, the same *class* of bug as the already-fixed
+`XIOS86Q.A86` init `'w'`-marker bug (an unbalanced `retf`/stack
+mismatch), but a different occurrence: `ESP` is unusually low (`0xDC`
+into its segment), and the stack nearby holds what looks like a
+legitimate, unrelated `CIOIF.CIO` `entry:`-dispatcher return address a
+few words further up (`call cs:[table] ! retf`, confirmed by
+disassembling those exact bytes directly from the built binary) --
+not obviously the source of the corruption itself.
+
+**Next step**: find whatever `call`/`retf` actually lands at
+`1000:004A` -- almost certainly another unbalanced push/pop (or a
+wrong segment popped as part of a `retf`) somewhere in the code that
+runs between `nrsp`'s own marker and this crash, the same bug class
+`INIT.SUP`'s own documented `'w'` fix and this round's `ccb` discovery
+both already belong to. Given how much further this reaches than
+anything in #65 (through the *entire* module-init phase and into real
+RSP creation), this is squarely new territory, not a continuation of
+#65's own mystery.

@@ -144,6 +144,29 @@ dor_ndreset	equ	04h	;NOT reset (1 = not in reset)
 dor_dmaen	equ	08h	;DMA/interrupt enable
 dor_drvsel_a	equ	00h	;drive select bits for drive A
 
+;	8237 DMA controller, channel 2 (the ISA floppy channel) --
+;	needed because pure PIO for the full sector data phase stalls
+;	after a handful of bytes on this QEMU target's NEC765/82077
+;	emulation (confirmed by testing, timing-independent -- see
+;	docs/bugs.md #22, which fixed the identical problem in
+;	src/loader/LDBIOS86Q.A86's own copy of this driver the same
+;	way: DMA for the fd_secsize data phase, PIO only for the
+;	7-byte result phase every READ/WRITE DATA command ends with
+;	regardless of DMA vs non-DMA mode).
+
+dma_addr2	equ	04h	;channel 2 current-address register
+dma_count2	equ	05h	;channel 2 current-count register
+dma_page2	equ	81h	;channel 2 page register (addr bits 16-23)
+dma_mask	equ	0ah	;single-channel mask set/clear register
+dma_mode	equ	0bh	;mode register
+dma_clrff	equ	0ch	;clear first/last flip-flop (write any value)
+dma_mask_set2	equ	06h	;mask channel 2 (bit2=set, bits1-0=channel)
+dma_mask_clr2	equ	02h	;unmask channel 2
+dma_mode_read	equ	46h	;single/increment/no-autoinit/"write to
+				; memory" (FDC->RAM, for a READ DATA cmd)
+dma_mode_write	equ	4ah	;single/increment/no-autoinit/"read from
+				; memory" (RAM->FDC, for a WRITE DATA cmd)
+
 ;	NEC765 command bytes (MFM, drive A, no multitrack)
 
 cmd_specify	equ	03h
@@ -663,6 +686,74 @@ md_loop:
 	ret
 
 ;----------
+dma_setup_read:
+;----------
+	mov	bl,dma_mode_read
+	jmps	dma_setup
+
+;----------
+dma_setup_write:
+;----------
+	mov	bl,dma_mode_write
+
+;----------
+dma_setup:  ; arm 8237 DMA channel 2 for one fd_secsize-byte transfer
+;----------  ; into/out of secbuf, before issuing a READ DATA/WRITE
+	    ; DATA command -- see this file's own dma_* equ block (near
+	    ; the FDC port definitions, above) for why this exists at
+	    ; all. Ported from src/loader/LDBIOS86Q.A86's own identical
+	    ; routine (docs/bugs.md #22), with ONE deliberate difference:
+	    ; that file's secbuf lives in its own CSEG (no separate
+	    ; DSEG -- see its own header comment), so its physical
+	    ; address there is genuinely CS-relative. This module's
+	    ; secbuf lives in the SYSDAT-based combined DSEG instead
+	    ; (build_mpmsys.py's own "SYSDAT's dseg.bin plus XIOS86Q's
+	    ; own private tail" -- see pmsg's own comment just below for
+	    ; the identical DS-not-CS point already established for
+	    ; `signon`, right alongside specify_parms/dpb0/secbuf in
+	    ; that same private tail), so the physical address below is
+	    ; DS-relative, not CS-relative.
+
+	mov	al,dma_mask_set2 ! mov dx,dma_mask ! out dx,al
+				;mask channel 2 off while reprogramming it
+	mov	al,0 ! mov dx,dma_clrff ! out dx,al
+				;clear the address/count byte-pointer
+				; flip-flop -- the next write to either
+				; port below is the LOW byte regardless of
+				; what this channel was left at before
+	mov	al,bl ! mov dx,dma_mode ! out dx,al
+				;single-transfer, address-increment,
+				; no-autoinit, channel 2, direction per
+				; dma_setup_read/_write's own caller
+
+	mov	ax,ds		;secbuf's physical (20-bit) address =
+	mov	bx,ax		; ds*16 + offset(secbuf) -- split into a
+	mov	cl,4		; 16-bit "address" (the low 16 bits) and
+	shl	ax,cl		; an 8-bit "page" (bits 16-23) the 8237
+	mov	cl,12		; wants as two separate registers
+	shr	bx,cl
+	add	ax,offset secbuf
+	adc	bx,0
+
+	mov	dx,dma_addr2
+	out	dx,al		;address low byte
+	mov	al,ah
+	out	dx,al		;address high byte
+	mov	al,bl
+	mov	dx,dma_page2 ! out dx,al
+
+	mov	ax,fd_secsize-1	;8237 count register is (bytes - 1)
+	mov	dx,dma_count2
+	out	dx,al		;count low byte
+	mov	al,ah
+	out	dx,al		;count high byte
+
+	mov	al,dma_mask_clr2 ! mov dx,dma_mask ! out dx,al
+				;unmask channel 2 -- armed and ready for
+				; the FDC command about to be sent
+	ret
+
+;----------
 rw_physical:    ; shared geometry math, called from fdc_do_read/write.
 ;----------	; Everything is left in memory (cur_cyl/cur_head/
 		; cur_psec/cur_bufoff) rather than juggled through
@@ -699,10 +790,23 @@ fdc_do_read:
 	call	rw_physical
 	call	fdc_seek_to
 	call	fdc_fill_rw_parms
+	call	dma_setup_read		;arm the 8237 before the command that
+					; triggers execution phase -- see
+					; dma_setup's own comment
 	mov	bx,offset read_parms
 	call	fdc_send_cmd
-	call	fdc_pio_in		;fill secbuf from the FDC
-	call	fdc_sense_int
+	call	fdc_pio_in		;drains READ DATA's own 7-byte result
+					; phase -- deliberately no separate
+					; SENSE INTERRUPT STATUS call after
+					; this: confirmed via testing (see
+					; docs/bugs.md #22's identical finding
+					; for src/loader/LDBIOS86Q.A86's own
+					; copy of this driver) that QEMU hangs
+					; on one here, since there's no
+					; genuine pending interrupt for it to
+					; report -- the result phase this
+					; command just finished already is
+					; this command's real status
 
 	; copy this logical sector's 128 bytes out of secbuf
 	; into the caller's DMA buffer (ES:dma_adr set by SETDMAB/
@@ -728,10 +832,13 @@ fdc_do_write:
 	; into secbuf so the other 3 logical quarters aren't lost
 
 	call	fdc_fill_rw_parms
+	call	dma_setup_read		;read-modify-write: read the other
+					; 3/4 of this sector first (see
+					; dma_setup's own comment)
 	mov	bx,offset read_parms
 	call	fdc_send_cmd
-	call	fdc_pio_in
-	call	fdc_sense_int
+	call	fdc_pio_in		;no SENSE INTERRUPT STATUS after
+					; this -- see fdc_do_read's own comment
 
 	push	si ! push di ! push ds ! push es
 	mov	di,offset secbuf ! add di,cur_bufoff
@@ -741,10 +848,14 @@ fdc_do_write:
 	pop	es ! pop ds ! pop di ! pop si
 
 	call	fdc_fill_rw_parms
+	call	dma_setup_write		;now the real write, modified
+					; secbuf back out to disk
 	mov	bx,offset write_parms
 	call	fdc_send_cmd
-	call	fdc_pio_out		;drain secbuf to the FDC
-	call	fdc_sense_int
+	call	fdc_pio_out		;drain secbuf to the FDC -- same
+					; routine now, and likewise no SENSE
+					; INTERRUPT STATUS after it -- see
+					; fdc_do_read's own comment
 	xor	al,al
 	ret
 
@@ -852,16 +963,20 @@ fib_wait:
 	ret
 
 ;----------
-fdc_pio_in:     ; transfer one physical sector (fd_secsize bytes)
-;----------	; from the FDC into secbuf (execution phase of a
-		; READ DATA command), then absorb the result bytes
-	mov	di,offset secbuf
-	mov	cx,fd_secsize
-pio_in_loop:
-	    call	fdc_in_byte
-	    mov	cs:[di],al
-	    inc	di
-	    loop	pio_in_loop
+fdc_pio_in:     ; despite the name, the actual fd_secsize data bytes
+;----------	; now move via DMA (dma_setup_read/_write was called
+		; before the command that started this execution phase --
+		; see fdc_do_read/fdc_do_write) -- the CPU only needs to
+		; drain the 7-byte PIO result phase every READ/WRITE DATA
+		; command ends with regardless of DMA vs non-DMA mode.
+		; fdc_do_read/fdc_do_write's own call sites (via
+		; fdc_pio_in/fdc_pio_out, kept as two names so neither
+		; call site had to change) both just drain that result
+		; phase now -- there's nothing left that differs between
+		; them. See docs/bugs.md #22 (same fix, originally made in
+		; src/loader/LDBIOS86Q.A86's own copy of this driver):
+		; pure PIO for the full data phase stalls after a handful
+		; of bytes on this QEMU target's NEC765/82077 emulation.
 	mov	cx,7
 pio_in_res:
 	    call	fdc_in_byte
@@ -869,16 +984,8 @@ pio_in_res:
 	ret
 
 ;----------
-fdc_pio_out:    ; transfer one physical sector from secbuf to the
-;----------	; FDC (execution phase of a WRITE DATA command),
-		; then absorb the result bytes
-	mov	si,offset secbuf
-	mov	cx,fd_secsize
-pio_out_loop:
-	    mov	al,cs:[si]
-	    call	fdc_out_byte
-	    inc	si
-	    loop	pio_out_loop
+fdc_pio_out:    ; see fdc_pio_in's own comment -- same drain, used after
+;----------	; a WRITE DATA command's DMA-driven data phase
 	mov	cx,7
 pio_out_res:
 	    call	fdc_in_byte
@@ -997,17 +1104,44 @@ outbyte_tmp	db	0	;scratch for fdc_out_byte (see comment there)
 
 dtrntbl		db	000h,0ffh,0ffh,0ffh	;logical disk 0 -> drive 0
 
+;	Console Control Block table -- real GENSYS computes where to
+;	place `nccb` (SYSDAT.FMT) 12-byte CCB.DEF entries and writes
+;	that address into SYSDAT's own `ccb` field; this from-scratch
+;	build never runs real GENSYS, so SYSTEM.DAT's stock `ccb` is
+;	still its unconfigured placeholder (`dw 0`). With `ccb`=0,
+;	CHARIO.CIO's own `getccbadr` (ccb + console#*12) resolves
+;	console 0's CCB to flat address 0 instead of a real block, so
+;	every console attach/detach/status call reads and writes
+;	`c_attach`/`c_queue`/etc at that bogus, never-written address
+;	instead of a real, zero-initialized CCB -- `TMP.A86`'s own
+;	first real console attach (`nextcommand`'s `call attach`) reads
+;	whatever garbage happens to sit at offset 0 as `c_attach`,
+;	finds it non-zero, and sleeps forever waiting for a detach that
+;	can never come, since nothing ever really held that attachment.
+;	Reserve real storage for this build's one CCB (`ncondev`=1,
+;	`nlstdev`=0, patched into `nccb` alongside those two in
+;	build_mpmsys.py) here, in XIOS86Q.A86's own private dseg tail --
+;	same pattern as `dirbuf0`'s own fix just above -- and have
+;	build_mpmsys.py patch SYSDAT's `ccb` field to point at it.
+ccbtab0		rb	12	;one CCB (CCB.DEF's ccblen), zero-initialized
+				; (c_attach=0, i.e. "unattached") by `rb`
+
 	;	NEC765 command strings: [length][command byte]...
 
-specify_parms	db	3,cmd_specify,0dfh,03h
-					;byte2 = HLT(bits7-1)=1 | ND(bit0)=1
-					;-- ND=1 is essential: this driver
-					;never programs the 8237 DMA
-					;controller, only PIO, so the FDC
-					;must be told non-DMA mode or it
-					;will wait forever for DMA req/ack
+specify_parms	db	3,cmd_specify,0dfh,02h
+					;byte2 = HLT(bits7-1)=1 | ND(bit0)=0
+					;-- ND=0 (DMA mode) to match this
+					;driver's real 8237-driven sector
+					;data transfers (dma_setup_read/
+					;_write, below) -- same fix as
+					;src/loader/LDBIOS86Q.A86's own copy
+					;of this driver (docs/bugs.md #22):
+					;pure PIO for the full fd_secsize
+					;data phase stalls partway through
+					;on this QEMU target's NEC765/82077
+					;emulation, confirmed independent of
+					;timing
 					;SRT=0dh/HUT=0fh step 2ms
-					;HLT=1(non-DMA)
 recal_parms	db	2,cmd_recal,0
 seek_parms	db	3,cmd_seek,0,0
 

@@ -115,6 +115,8 @@ NLSTDEV_OFFSET = 0x84
 NCIODEV_OFFSET = 0x85
 TICKSPERSEC_OFFSET = 0x51
 SRCHDISK_OFFSET = 0x4b
+NCCB_OFFSET = 0x49
+CCB_OFFSET = 0x54
 
 # SYSDAT.FMT's "pul" (Process Descriptor Unused List head, 0x5c) -- a
 # RUNTIME state variable (the free-PD-slot linked list RTM's own
@@ -610,6 +612,14 @@ def main():
     # build's actual disk configuration.
     dseg[SRCHDISK_OFFSET] = 0
 
+    # nccb ("# character control blocks", SYSDAT.FMT) must match the
+    # number of CCB-backed devices this build actually has --
+    # ncondev+nlstdev = 1+0 = 1, not SYSTEM.DAT's stock 5 (written for
+    # the original multi-device target). See CCB_OFFSET's own patch
+    # below for why `ccb` (where that/those CCB(s) actually live)
+    # matters far more than this count does, but keep them consistent.
+    dseg[NCCB_OFFSET] = 1
+
     # mdul/qlr: reset every stale "unused list"/"queue list root" head
     # to empty -- see PUL_FIELD_OFFSET's own comment for why their
     # inherited DATA.BDO values are actively wrong for a fresh boot, not
@@ -801,6 +811,19 @@ def main():
                           "shared system data area -- its own 'org "
                           f"{SYSDAT_DSEG_SIZE}' must not have taken effect")
     dseg += xios_dseg[SYSDAT_DSEG_SIZE:]
+
+    # ccb ("addr. Console Ctrl Blk Table", SYSDAT.FMT) -- real GENSYS
+    # computes this; SYSTEM.DAT's stock value is the unconfigured
+    # placeholder `0`, which routes every console attach/detach/status
+    # call at CHARIO.CIO's own `getccbadr` (ccb + console#*ccblen) to
+    # flat address 0 instead of a real CCB, with disastrous results
+    # (see `ccbtab0`'s own comment in XIOS86Q.A86 for the exact hang
+    # this caused: TMP.A86's first real console attach reads garbage
+    # at address 0 as `c_attach`, finds it non-zero, and sleeps
+    # forever). Point it at the real, zero-initialized CCB storage
+    # `ccbtab0` reserves in XIOS86Q.A86's own private dseg tail.
+    ccbtab0_off = get_symbol('XIOS86Q', 'ccbtab0')
+    struct.pack_into('<H', dseg, CCB_OFFSET, ccbtab0_off)
 
     out_path = args.output or os.path.join(out_dir, 'MPM.bin')
     with open(out_path + '.cseg', 'wb') as f:

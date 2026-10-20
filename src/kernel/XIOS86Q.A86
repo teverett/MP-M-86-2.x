@@ -1032,6 +1032,33 @@ secbuf		rb	fd_secsize
 
 dph0		dw	0		;translate table (none)
 		rw	3		;scratch area (BDOS owned)
+		dw	offset dirbuf0	;DIRBUF: BDOS's directory-record DMA
+					;buffer -- this word was missing
+					;entirely (dph0 jumped straight from
+					;the 3-word scratch area to DPB),
+					;which shifted every field BDOS reads
+					;back by one word: FILE1.BDO's
+					;selectdisk copies 8 bytes starting
+					;here into buffa/dpbaddr/checka/alloca
+					;(standard CP/M DIRBUF,DPB,CSV,ALV
+					;order), so without this word
+					;"dpbaddr" ended up holding dpb0's OWN
+					;address instead of a real DIRBUF
+					;pointer, "dpbaddr" got csv0's address
+					;instead of dpb0's, and so on one
+					;field late all the way down -- the
+					;15-byte DPB copy FILE1.BDO's
+					;selectdisk does FROM "dpbaddr" then
+					;read csv0's zeroed 16 bytes instead
+					;of dpb0's real contents, leaving
+					;BDOS's own "sectpt" (sectors/track)
+					;at 0 forever, which the very first
+					;real file read's "DIV SECTPT"
+					;(FILE1.BDO's seek) then faults on --
+					;with no divide-error handler
+					;installed, the CPU hangs forever
+					;with interrupts disabled, silently,
+					;well past TMP's last debug probe
 		dw	offset dpb0
 		dw	offset csv0
 		dw	offset alloc0
@@ -1049,6 +1076,8 @@ dpb0		dw	72		;SPT
 
 alloc0		rb	(176/8)+1
 csv0		rb	16
+dirbuf0		rb	128		;directory-record DMA buffer -- see
+					;dph0's own DIRBUF comment above
 
 tick_count_dummy equ 0	;unused, silences "label defined but" style
 			; concerns in future edits -- harmless

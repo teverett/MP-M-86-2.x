@@ -114,6 +114,7 @@ NCONDEV_OFFSET = 0x83
 NLSTDEV_OFFSET = 0x84
 NCIODEV_OFFSET = 0x85
 TICKSPERSEC_OFFSET = 0x51
+SRCHDISK_OFFSET = 0x4b
 
 # SYSDAT.FMT's "pul" (Process Descriptor Unused List head, 0x5c) -- a
 # RUNTIME state variable (the free-PD-slot linked list RTM's own
@@ -594,6 +595,20 @@ def main():
     dseg[NLSTDEV_OFFSET] = 0
     dseg[NCIODEV_OFFSET] = 1
     dseg[TICKSPERSEC_OFFSET] = 60
+
+    # srchdisk ("default search disk", SYSDAT.FMT) is also the disk
+    # TMP.A86's own init code reads (as "s_sysdisk") to pick its initial
+    # default drive -- SYSTEM.DAT's stock value (1 = drive B:) was
+    # written for the original multi-drive Intel SBC target. This
+    # single-floppy QEMU build's XIOS86Q.A86 dtrntbl only has drive 0
+    # (A:) wired up, so leaving srchdisk=1 makes TMP's very first
+    # setdisk() call select a nonexistent drive: BDOS's selectdisk
+    # silently no-ops (seldskf returns bx=0) without ever filling in
+    # sectpt/the rest of the DPB copy, and the first real file read's
+    # "DIV SECTPT" then faults on a divisor of 0 with no handler
+    # installed, hanging forever. Patch it to drive A: to match this
+    # build's actual disk configuration.
+    dseg[SRCHDISK_OFFSET] = 0
 
     # mdul/qlr: reset every stale "unused list"/"queue list root" head
     # to empty -- see PUL_FIELD_OFFSET's own comment for why their

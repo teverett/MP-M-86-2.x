@@ -162,6 +162,7 @@ dispin:	push ax ! push dx ! mov al,8Dh ! mov dx,03f8h ! out dx,al ! pop dx ! pop
 	mov si,rlr
 	push ax ! push dx ! mov al,11 ! mov dx,03f8h ! out dx,al ! mov ax,si ! call ydbg ! mov ax,p_link[si] ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 11 (raw byte), dump si (old rlr) then p_link[si] (new rlr) at the moment it's taken off the ready list
 	mov ax,p_link[si] ! mov rlr,ax
+	push ax ! push bx ! push dx ! mov bx,ax ! mov al,97h ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,rlr ! call ydbg ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE (#62): marker 97h, immediately after "mov rlr,ax" -- dump the value just written (saved into bx FIRST, same fix as marker 0Bh in #56 -- the first version of THIS probe had the identical bug, clobbering AL with the marker byte before dumping it) and read rlr straight back from memory
 	mov p_link[si],0
 		; We are now in NO-MAN's land
 		; From now until the end of the
@@ -268,7 +269,7 @@ term_act:
 
 	push ax ! mov al,'~' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	mov ax,rlr
-	push ax ! push dx ! mov al,95h ! mov dx,03f8h ! out dx,al ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,si ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE (#61): marker 95h, term_act's own top -- dump the OLD rlr (about to be saved into p_link[si]) and si (the terminating PD), to compare against what's read back right before "mov rlr,ax" at the end of term_act's cleanup
+	push ax ! push bx ! push dx ! mov bx,ax ! mov al,95h ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,si ! call ydbg ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE (#61/#62): marker 95h, term_act's own top -- dump the OLD rlr (saved into bx FIRST -- the first version of this probe had the same clobber-before-dump bug as marker 0Bh in #56, which #61's own "rlr=0A95" finding turned out to be an artifact of) and si (the terminating PD)
 	mov p_link[si],ax
 	mov rlr,si
 	mov ch,0 ! mov cl,ncondev

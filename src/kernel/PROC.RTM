@@ -148,7 +148,17 @@ cp_uda4:
 	push ax ! push bx ! push dx ! mov bx,ds ! mov al,8Bh ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,di ! call ydbg ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE (#58): marker 8Bh, dump the NEW DS (just loaded from u_ss) and DI (u_sp, should be stack_top's own offset, 01D8h for TMP) right after the switch -- if DS already reads 0CCCCh here, u_ss itself was already wrong; if DI is wrong instead, the write below lands somewhere unrelated
 	mov ax,u_initcs
 	mov 2[di],ax			;  ->segment
-	mov word ptr 4[di],0200h	;  ->flags
+	mov word ptr 4[di],0000h	;TEMP DIAGNOSTIC (#64): was 0200h (IF set) --
+					;testing whether a freshly-dispatched
+					;process's own first-ever IRET enabling
+					;interrupts with NO delay (unlike "sti",
+					;which this whole session's "sti!cli"
+					;fixes have exploited repeatedly) lets an
+					;already-pending interrupt divert control
+					;before the new process's own first
+					;instruction ever runs -- NOT a real fix,
+					;just a test; a real process obviously
+					;needs IF=1 eventually
 	pop ds ! pop es
 
 		; put on thread list

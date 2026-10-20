@@ -4981,3 +4981,347 @@ breakpoint/probe `flag_act`'s and `swap_act`'s own handling of `rlr`
 directly, the same way #54 isolated `getpdadr` and #60 isolated
 `drltorlr` -- newly reachable code, not yet exercised by any fix or
 probe this session.
+
+## 62. Correction to #61: the "`rlr` already invalid before
+`term_act`" finding was a probe artifact -- the exact same bug class
+as marker `0Bh` in #56, caught this time before it went further
+
+Went to confirm #61's finding directly rather than trust it blindly
+-- added a probe immediately after `dsptch`'s own `mov rlr,ax` (the
+write #61 suspected of disagreeing with what `term_act` read back
+moments later), dumping the written value and an immediate memory
+read-back side by side, no other instruction in between.
+
+**They didn't match even that close -- which was the tell.** Re-read
+both of #61's own probes (`95h`, `97h`) and found they have the
+*identical* bug marker `0Bh` had in #56: `mov al,95h` (the marker
+byte) overwrites `AL` before the probe's own `call ydbg` dumps the
+value it was supposed to be showing, so both were printing `AH` (the
+real value's high byte, genuinely `0Ah`) glued to `95h`/`97h` (the
+marker's own low byte) -- `0A95`/`0A97` was never a real register
+value, just the bug re-manifesting with a different marker number.
+Fixed both the same way as every prior instance: save the real value
+into a scratch register first.
+
+**With the fix in, `rlr` reads `0A20h` consistently at every single
+point checked** -- immediately after `dsptch`'s write, at `term_act`'s
+own top, and right before its final restore. `p_link[si]` also reads
+back exactly what was saved into it, unchanged across all four nested
+cleanup calls. **#61's two claimed findings (`rlr` already invalid
+before `term_act` starts; `p_link[si]` clobbered during cleanup) are
+both retracted.** `term_act`'s entire `rlr`-handling sequence is
+correct, start to finish, with no corruption anywhere in it.
+
+**The actual remaining mystery is unchanged in shape, just not
+explained by this**: the trace still ends with `SUP`'s `init:`
+genuinely re-running (same clean, well-formed re-execution #61 already
+established, not a crash), and this time a *second* process --
+`tick`, not `INIT` -- ends up calling its own `f_terminate` right
+before it happens. Given `term_act` itself is now confirmed clean,
+whatever causes the re-entry into `init:` has to be sought somewhere
+else: either in how `schedule`/`switch` behaves when `rlr` genuinely
+has nothing left to hand off to, or in a completely different
+mechanism this session hasn't looked at yet. #61's suggested next
+step (`flag_act`/`swap_act`, newly reached this round) is still a
+reasonable place to keep looking, but this round's own work doesn't
+point at them specifically anymore -- that lead came from the now-
+retracted finding.
+
+**Standing lesson, worth internalizing rather than re-learning each
+time**: any probe that does `mov al,<marker> ! out dx,al` and then
+immediately dumps a register that includes `AL` without first saving
+it elsewhere is broken, full stop -- this is the second time this
+exact shape of bug has produced a confident-looking wrong conclusion
+(`0Bh` in #56, `95h`/`97h` in #61/#62). Worth a standing rule: *never*
+write `mov al,<marker>` immediately before dumping a value that
+occupies `AL`, even when under time pressure to get a probe placed
+quickly -- save first, always.
+
+## 63. Ruled out two more plausible mechanisms for the `SUP init:`
+re-run -- `tick`'s own dispatch is confirmed clean, down to the exact
+`IRET` frame
+
+With `term_act` cleared (#62), looked for other candidate mechanisms.
+
+**Checked `idle_tos`/`tick_tos` directly against `SYSDAT.FMT` and
+`SYSTEM.DAT`'s own static templates, suspecting they might clobber
+whatever follows them in memory.** They don't -- `idle_tos`/`tick_tos`
+are declared as full 3-word reservations (`rw 3`), and `SYSTEM.DAT`
+confirms each one is a complete, intentional pre-built `IRET` frame
+(start IP, segment placeholder, `0200h` flags) -- the exact same
+pattern as `TMP`'s own `stack_top`, just named differently and
+declared once per built-in system process instead of once per RSP.
+Not a bug; retracting the suspicion before it went any further this
+time.
+
+**Checked whether `tick`'s own first dispatch actually jumps where it
+should, directly via GDB** -- breakpointed `int_disp_exit` (the
+`switch` branch taken for a freshly created process, confirmed in
+#60 to be the one `tick` takes) and read the `IRET` frame right off
+the stack before single-stepping through the rest of it. **It's
+exactly correct**: `IP=033Dh` (`notick`, `tick`'s own real entry),
+`CS=1000h`, `FLAGS=0200h`. `tick` is being dispatched correctly, full
+stop -- this rules out "built-in system process has a broken startup
+frame" as cleanly as #58 ruled out "wild jump with garbage registers"
+and #62 ruled out "`rlr` corruption in termination."
+
+**Also noticed, but couldn't pin down**: right after this exact
+dispatch, `func()`'s own absolute-first-instruction marker fires
+showing `CX=0000` -- immediately followed by the very next marker
+(reading the same live register, unprotected) showing a completely
+different, internally-consistent value (`033Dh` this time) that then
+resolves through `goodmod` to a real, legitimate `MEM` function call.
+This is the *same shape* of artifact that's shown up intermittently
+since #56 (also seen in #60's trace, different value each time) --
+every single occurrence so far has resolved into a real, successful
+call afterward, never an actual crash, so it doesn't look like it's
+breaking anything currently. But it's never been explained, and
+`func()`'s own top marker is about as unambiguous a probe as exists
+in this codebase (non-printable byte, no collision possible) -- it
+genuinely means `func()`'s first instruction ran. Worth its own
+investigation eventually, separate from the `init:` re-run mystery,
+since nothing currently ties the two together.
+
+**Net result of #61-#63**: `term_act`, `tick`'s `IRET` setup, and the
+static `idle_tos`/`tick_tos` templates are all now confirmed clean.
+The `SUP init:` re-run itself is unchanged from #61's finding (a
+clean, well-formed second execution, not a crash) and its actual
+trigger is still not identified. Three plausible mechanisms ruled
+out this session alone is real progress, even without a positive
+finding yet -- the search space for "what legitimately sends control
+back to `init:`" has narrowed to: something in `schedule`'s own poll-
+list handling (never yet probed directly), something in `flag_act`
+specifically (tick's own real next action, `f_flagwait`, which this
+round never actually traced into), or a mechanism entirely outside
+the scheduler this session hasn't considered.
+
+**Next step**: trace `flag_act` and `FLAG.RTM`'s `flag_wait_entry`
+directly for `tick`'s own real `f_flagwait(flag_tick)` call -- the
+one syscall `tick`'s source code actually makes, right after the
+dispatch this round just confirmed is clean. That's the one piece of
+`tick`'s own real behavior no round has traced yet, and it's the very
+next thing that happens after everything just confirmed correct.
+
+## 64. Followed #63's own next step directly into the real bug --
+`TMP`'s own code runs for the first time in this entire multi-session
+investigation
+
+Breakpointed `tick`'s own real entry labels (`notick`/`tick`,
+`0x033D`/`0x350`) directly -- under full-speed `-S`+`continue`
+(preserving real timing, the same technique that's worked throughout
+this session) -- expecting to confirm `flag_wait_entry` is reached.
+**Neither address was ever hit, even once, despite #63's own GDB
+check moments earlier confirming the `IRET` frame pointing there was
+completely correct.** That contradiction -- correct under single-
+step, never reached at full speed -- is exactly this session's
+recurring signature for a hardware-timing race, just not one that had
+been checked in this specific spot yet.
+
+**Found the mechanism directly.** Unlike `sti`, which has a
+documented one-instruction delay before it takes effect (the basis
+for every `sti!cli` fix this session), **`iret` has no such delay** --
+popping `FLAGS` (which every process's own pre-built dispatch frame
+sets to `0200h`, enabling interrupts) takes effect *immediately*, as
+part of the same instruction that also jumps to the new `CS:IP`. If
+an interrupt is already pending at the exact instant `iret` executes,
+it gets serviced **before the newly-dispatched process's own first
+instruction ever runs** -- diverting control away from `tick`'s real
+entry (and, by the same mechanism, away from `TMP`'s).
+
+**Tested directly**: changed the one place that builds this flags
+word (`PROC.RTM`'s `mov word ptr 4[di],0200h`, part of every
+process's pre-built `IRET` frame) to `0000h` -- keeping interrupts
+off through the handoff, as a diagnostic, not a real fix. **Rebuilt,
+and for the first time in this entire multi-session investigation,
+marker `27h` fires -- `TMP`'s own real entry point, printing `"TMP"`
+--** followed by `TMP` making multiple real syscalls of its own
+(`f_setdefcon`-shaped, resolving through `CIO`; a second one
+afterward) that resolve correctly through `goodmod` and return.
+Confirmed reproducible across two different capture lengths (both
+landing on an identical 5434-byte trace). `flag_wait_entry`'s own
+marker also fires for the first time, for the same reason.
+
+**This is very likely the root cause that's been behind both of this
+session's two biggest standing mysteries at once** -- `TMP` never
+reaching its own code, and `SUP`'s `init:` appearing to "re-run" --
+both are exactly what you'd expect from control being diverted, right
+at the handoff into a brand new process, into some other code path
+that eventually loops back to a known, fixed address.
+
+**This diagnostic trades one real problem for another, smaller one,
+and that trade was made deliberately.** Forcing every process's
+initial `FLAGS` to `0000h` means no newly-dispatched process starts
+with interrupts enabled -- the periodic tick-based scheduling this
+system is supposed to have won't function until each process does
+its own `sti` at some point (most don't, since the original design
+assumed `IRET` would do it for them). Given this session's standing
+goal is reaching a working console prompt, and this change is what
+finally gets `TMP` running at all, it's being kept rather than
+reverted -- but it is **not the final fix**, and whatever interrupt
+is actually pending at this exact moment (still not identified --
+tick-interrupt markers remain at zero throughout, so it isn't the
+periodic timer) should still be found and handled properly, probably
+by re-enabling interrupts explicitly, one instruction after the new
+process's real entry, the same way `dispin`'s own `sti` was finally
+made safe in #60 -- rather than leaving them off indefinitely.
+
+**Next step**: now that `TMP` actually runs, trace what it does after
+its first couple of syscalls -- does it reach a real console prompt,
+or hit a new wall? That's now directly reachable and is the most
+valuable thing to chase next, given this session's own standing
+goal. Separately, and lower priority now that the system is making
+real progress: identify the actual pending interrupt source this
+fix is routing around, and restore interrupts properly instead of
+leaving them permanently off.
+
+**Decoded what `TMP` actually does with its new lease on life.**
+After the `f_setdefcon`-shaped call, it makes a second real syscall
+(`CX=000Eh`) resolving to `BDOS` module function 1, then (without a
+fresh `int mpmint` -- internal, from within that same call's own
+processing) a `CIO` call, then **`f_dispatch`** (`CX=008Eh`, matching
+`MODFUNC.DEF` exactly) -- `TMP` voluntarily yielding to the
+scheduler. That unwinds cleanly through the *entire* call chain back
+up to `dret` (not `int_disp_exit` this time -- `u_in_int` correctly
+reads `false`, since this is `TMP`'s second dispatch, not its first)
+and back out through `goodmod`/`gofar`/`func()`/`mpmif`, returning
+control to `TMP`'s own code right after its own `int mpmint`. **A
+complete, successful round-trip through the scheduler and back,
+initiated and consumed entirely by `TMP`'s own real code.**
+
+**Then the trace goes quiet**, ending in a short run of what looks
+like a garbled or incomplete dump (repeating `4600` bytes, interleaved
+with a few single-byte markers not yet matched to any known probe in
+this exact context) rather than a clean termination or a recognizable
+further syscall. Not yet decoded. Given how much further this reaches
+than anything before it, this is squarely the next thing to trace --
+but on its own terms, as new territory, not as a continuation of any
+mystery from earlier in this session.
+
+## 65. Followed #64's own next step -- traced the "4600" silence to a
+real divide-by-zero crash, and found two genuine, independent bugs
+behind it
+
+Picked up exactly where #64 left off: decode the "4600"-repeating
+tail and find out whether `TMP`'s console-attach retry loop (via
+`CHARIO.CIO`'s `constat_entry`/`f_dispatch`) ever actually succeeds.
+
+**First, ruled out byte-level marker archaeology as the way to answer
+this.** The tail region mixes at least four different marker bytes
+that collide across files (`09h` alone is used by both `SUPIF.SUP`'s
+`gofar` and `BDOSIF.BDO`'s own marker 9, with different dump shapes),
+and manually disambiguating which probe fired where, from raw serial
+bytes alone, stopped being reliable. Switched to a much more direct
+method instead: QEMU's own monitor (`info registers`, `xp`), which
+can inspect the *live, truly free-running* machine state without
+GDB's `-S`/`stepi` perturbing timing the way it has all session.
+
+**Confirmed the "trace goes quiet" ending is a real, permanent hang,
+not a clean idle state.** Booted completely free (no `-S` at all),
+waited several seconds past the point the serial trace stops
+growing (confirmed stable at exactly 5434 bytes across repeated
+20-second runs), then queried the QEMU monitor's `info status` / `info
+registers` directly. `VM status: running`, not paused or shut down --
+but `CS:EIP` reads back **identical** (`1000:4D85`) across three
+checks two seconds apart, with `EFLAGS` showing `IF=0` (interrupts
+still off, consistent with #64's `0000h` diagnostic). This is a true
+infinite busy-loop with interrupts permanently disabled, not a HLT,
+not a reboot (double-checked `-d cpu_reset`: the only two "CPU Reset"
+log lines are QEMU's own well-known double-logging of the *single*
+power-on reset, not a second, in-flight one), and not a retry that's
+merely slow.
+
+**Mapped `1000:4D85` to real source.** `build_mpmsys.py`'s own printed
+module bases put this flat offset inside `BDOS` (base `0x447e`, local
+offset `0x907`), and `asm86.py --symbols src/kernel/BDOS.A86` plus a
+direct byte dump of `build/kernel/MPM.bin.cseg` at that exact offset
+(`f7 36 48 0c` = `DIV WORD PTR [0C48h]`) pinned it precisely to
+`FILE1.BDO`'s `seek:` routine -- specifically its `DIV SECTPT`
+instruction (`sectpt`'s own symbol address, `0C48h`, matches exactly).
+`seek` is reached from `FILE3.BDO`'s `diskread`/`sqread` -- a real
+file *read*, further into actual execution than this session has
+ever reached, not disk-select or console-attach. With no
+divide-error (`#DE`/vector 0) handler installed anywhere in this
+kernel, the CPU faulting on `DIV SECTPT` with a zero divisor and
+nothing to catch it is exactly what parks it here forever, silently,
+well past `TMP`'s last debug probe -- explaining the "4600" tail as
+whatever `TMP`/BDOS probes fired right up until this crash, not a
+decode error.
+
+**Root cause #1 -- `XIOS86Q.A86`'s `dph0` was missing its DIRBUF
+word.** `sectpt` is one of several BDOS globals (`sectpt`, `blkshf`,
+`maxall`, ...) that `FILE1.BDO`'s `selectdisk` fills in by copying 15
+bytes starting at whatever `dpbaddr` points to -- and `dpbaddr` itself
+is set, a few lines earlier in the same routine, by walking fixed
+word offsets from the Disk Parameter Header (`seldskf`'s return value)
+assuming the standard CP/M/MP/M-86 layout: `XLT, 3x scratch, DIRBUF,
+DPB, CSV, ALV`. `XIOS86Q.A86`'s own `dph0` only had `XLT, 3x scratch,
+DPB, CSV, ALV` -- the `DIRBUF` word was missing entirely, shifting
+every field BDOS reads back by one word: `dpbaddr` ended up holding
+`csv0`'s address instead of `dpb0`'s, so the later 15-byte DPB copy
+pulled `csv0`'s zero-initialized 16 bytes instead of the real DPB,
+leaving `sectpt` (and everything else in that struct) permanently
+zero. Confirmed this wasn't a design choice but a genuine divergence:
+`src/loader/LDBIOS86Q.A86`'s own DPH (explicitly commented as needing
+to stay identical to this one, same physical disk) *does* have the
+DIRBUF word in the right place (`dw dirbuf,dpb0 ! dw csv0,alv0`).
+Fixed by adding a `dirbuf0 rb 128` buffer and wiring it into `dph0` at
+the correct position in `XIOS86Q.A86`.
+
+**This fix alone didn't change anything observable** (rebuilt, same
+5434-byte trace, same hang at the same instruction) -- which was
+itself a useful, confusing signal. Chased it with a non-perturbing-ish
+GDB check (set-and-continue, not single-step, to minimize the
+timing-race risk this session has hit repeatedly): breakpoints on
+`selectdisk`, `retselect`, and `ret4` showed `ret4` (the *early-exit,
+"illegal disk" error* path) hit 20+ times in a row, `retselect` (the
+success path, where the DIV-feeding fields actually get filled in)
+never hit at all. So the DIRBUF fix was necessary but not sufficient:
+`selectdisk` was failing before ever reaching the code it fixed.
+
+**Root cause #2 -- `SYSTEM.DAT`'s `srchdisk` defaults to drive B:, but
+this build only has drive A:.** A follow-up breakpoint on
+`BDOSIF.BDO`'s `seldskf` (disk# in `CL`, read before anything inside
+it can clobber it) showed every single one of those 20+ calls
+requesting disk **1**, not 0. `XIOS86Q.A86`'s `dtrntbl` (the logical
+disk) : physical drive) only has slot 0 wired up (`db 000h,0ffh,0ffh,
+0ffh`), so disk 1 is correctly rejected as illegal every time --
+`seldsk` returns `AX=0`, `selectdisk` takes its `cmp bx,0 / jz ret4`
+bailout, and `sectpt` never gets touched by anything, DIRBUF fix or
+not. Traced the `1` back to `TMP.A86`'s own init code: `tmp:` reads
+`sysdatseg:.s_sysdisk` (a hardcoded `byte ptr 04bh` offset) as the
+disk to pass to `setdisk`. That exact offset is `SYSDAT.A86`'s
+`srchdisk` ("default search disk"), and `SYSTEM.DAT` initializes it to
+`1` -- almost certainly a stock GENSYS answer left over from the
+original multi-drive Intel SBC target, exactly the kind of
+unconverted "answers to GENSYS questions" field `build_mpmsys.py`'s
+own `KNOWN LIMITATIONS` section already flagged as a risk ("written
+for the real XIOS.A86/BDOS configuration, not necessarily this one").
+Fixed by having `build_mpmsys.py` patch `srchdisk` to `0` alongside
+its existing `ncondev`/`nlstdev`/`nciodev`/`tickspersec` patches,
+rather than hand-editing `SYSTEM.DAT`'s own stock value -- consistent
+with how this script already adapts GENSYS answers for this specific
+QEMU/single-floppy target.
+
+**Both fixes together move the hang forward, for the first time ever
+this session, into genuinely new territory: real floppy controller
+I/O.** Rebuilt with both fixes; the free-running trace length changed
+(5445 bytes, not 5434, the first time this exact number has moved in
+this whole investigation) and the new stable hang point (confirmed
+via the same monitor-based `info registers` technique, identical
+`CS:EIP` across three 2-second-apart checks) is `1000:71FE`, inside
+`XIOS86Q.A86` at `fib_wait` -- `fdc_in_byte`'s own tight polling loop
+on the FDC Main Status Register (`in al,dx ! and al,msr_rqm+msr_dio !
+cmp al,msr_rqm+msr_dio ! jne fib_wait`), waiting for the controller to
+signal "byte ready" for a disk read that `selectdisk`'s DPB fields can
+now, for the first time, actually support. This is pure PIO polling,
+not interrupt-driven, so `IF=0` isn't the cause this time -- QEMU's
+emulated FDC itself is apparently never setting `RQM+DIO`, which
+points at an actual FDC command/protocol issue (wrong command bytes,
+missing drive-select/motor-on step, or a timing assumption this PIO
+driver doesn't account for).
+
+**Next step**: debug `XIOS86Q.A86`'s FDC command sequence (whatever
+calls `fdc_send_cmd`/`fdc_wait_seek`/`fdc_pio_in` leading up to this
+read) against what QEMU's emulated NEC765/8272 actually expects --
+this is the first time this investigation has ever reached real disk
+I/O, so there's no earlier finding in this file to build on.

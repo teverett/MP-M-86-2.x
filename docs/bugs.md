@@ -2185,6 +2185,108 @@ a probe's absence from a free-run serial trace; verify with GDB
 single-stepping (not `continue`, which has its own batch-mode
 reporting quirks against this QEMU gdbstub) instead.
 
+## 37. Two more real bugs found and fixed past #36's checkpoint --
+`user_entry`'s own bare `sysdat` read, and `pul` (PD free-list head)
+left permanently empty -- TMP's process now actually gets created and
+switched to; one further interrupt-reentrancy bug now blocking it,
+not yet root-caused
+
+**Bug A (fixed): `SUPIF.SUP`'s `user_entry` read `sysdat` bare.**
+`#33`/`#34`/`mpmif`'s own comment already found and fixed this exact
+bug class (`mov ds,sysdat` defaults to a DS-relative read, which only
+finds the real SYSDAT segment if DS already happens to be sysdat-ish)
+at `mpmif`. `user_entry` itself -- every real `int mpmint` syscall's
+entry point, reached *before* DS gets reset to sysdat -- had the exact
+same bare read at its very first instructions (`cld ! mov di,ds /
+mov ds,sysdat ! mov bx,rlr`), missed previously because every syscall
+exercised so far happened to arrive with the caller's DS already
+sysdat-ish. `INIT.SUP`'s `nrsp:` loop breaks that assumption on
+purpose: it sets `DS=rspseg` (the RSP's own data segment) right before
+`int mpmint`, specifically so `user_entry`'s own `mov di,ds` captures
+the RSP's segment into `u_wrkseg`. With the bare read, `user_entry`
+instead loaded "sysdat" through the RSP's own data segment, picking up
+whatever garbage sat at that offset in TMP's dseg -- and used *that*
+as the sysdat segment for the rest of the dispatch, corrupting every
+`module_table`/`p_uda` lookup downstream (`func:`'s own `fnchk`
+integrity check, which had been quietly printing false corruption
+since #33 for this exact reason). Fixed the same way as `mpmif`:
+`mov ds,sysdat` -> `mov ds,cs:sysdat`.
+
+**Bug B (fixed): `pul` (PROC.RTM's PD free-list head) had no real pool
+behind it.** `#35`'s own fix zeroed `pul` (along with `mdul`/`qlr`) to
+stop a *different*, now-historical wild-write (a stale non-zero
+DATA.BDO value being trusted as a real PD-table slot). But zeroing it
+only moved the failure, not fixed it: `getpdadr`'s `gpd_bad` path --
+taken for *any* PD that doesn't already live sysdat-resident, which is
+every RSP's own PD (TMP's included, since TMP's PD lives in TMP's own
+dseg) -- checks `pul` and returns `e_no_pd` immediately if it's empty.
+With `pul` permanently 0 and nothing ever adding to it before
+something needs it, `f_createproc` for TMP (or any dynamic process
+creation) failed outright, every single boot, silently -- `nrsp:`
+never checks the return code, so `INIT.SUP` sailed on to `rsp_out:`
+and terminated anyway, and the serial trace's only visible symptom was
+the dispatcher looping forever on `INIT`'s own already-terminating PD
+(chased down with a GDB hardware watchpoint on `thrdrt`/`p_thread`,
+which is how Bug A above was also found -- the watchpoint caught
+`PROC.RTM`'s thread-list insert for `tick` correctly writing `idlepd`,
+then immediately being overwritten with garbage by a later, unrelated
+write while `CX` still read `f_createproc` -- i.e. mid-dispatch for
+TMP's own creation, confirming the corruption path was inside this
+exact syscall). Fixed the same way `#35` already fixed `qul`/the QD
+pool: a real `PD_POOL_SLOTS`-slot (4) free-PD pool is carved out of
+SYSDAT's own slack space (right after the flag table) and linked
+through `pul` as a standard singly-linked free list (each slot's own
+`p_link`, offset 0, pointing to the next; last points to 0) -- see
+`tools/build_mpmsys.py`'s `PUL_FIELD_OFFSET`/`PD_POOL_SLOT_SIZE`/
+`PD_POOL_SLOTS`.
+
+**Result of both fixes together:** TMP's `f_createproc` call now
+succeeds (confirmed via the serial trace: two new PD-pool slot
+addresses, e.g. `0E40`/`0E70`, get allocated and inserted onto the
+dispatcher's ready list alongside `idle`/`tick`, and the `switch:`
+probe shows the dispatcher actually switching *to* one of them,
+`<0E70>`, instead of looping on `INIT`'s PD forever). Two new PD-pool
+slots get consumed per TMP creation rather than one -- not yet
+explained; worth checking whether `proc_creat`'s own tail-chain
+mechanism (`pop dx ! jmp proc_creat`) is firing a second time
+unexpectedly for TMP, or whether this is legitimate (e.g. TMP's own
+password-inheritance/shared-memory setup triggering a second
+allocation) before spending more time on it.
+
+**Still open, not yet root-caused:** right after the dispatcher's
+`switch:` probe fires for the new PD (`<0E70>`), the very next debug
+output is `DSPTCH.RTM`'s `int_disp_exit` probe (`']'`, dumping `DS`)
+showing a clearly bogus `DS=F555` -- `int_disp_exit` is only reached
+when `u_in_int=true`, i.e. this dispatch was entered via `fdisp`
+("entry point used by interrupt routines in XIOS", per its own
+comment), not a normal `int mpmint` syscall. `fdisp` cuts in with no
+protection against firing *during* `switch:`'s own non-atomic
+restore sequence (DS/SS/SP get reloaded for the newly-switched-to
+process across several unprotected instructions) -- if the interrupt
+source (not yet identified; the timer ISR's own `'"'` probe never
+once appears in any trace this session, so it's something else in
+XIOS86Q, most likely the serial console's own RX/TX interrupt) fires
+mid-restore, `fdisp`'s assumptions about the current DS/stack are
+violated. The trace goes silent immediately after (confirmed hung,
+not just slow, via a 25-second free-run that produced zero additional
+bytes past this point) -- next step is identifying XIOS86Q's actual
+interrupt source here and whether `switch:`/`dsptch` needs explicit
+`cli` protection across the restore that it's currently missing.
+
+Debug probes from #33 onward remain in place and were relied on
+throughout (`SUPIF.SUP`'s existing `'#'`/`'Y'`/`'Q'`/`'('`/`'Z'`/`'d'`/
+`'R'`/`'U'`/`'!'`/`'S'`/`'T'` dispatch-trace chain; `PROC.RTM`'s
+`0x1F`/`0x19`/`0x1A`; `SYSENT.RTM`'s `0x1E`/`0x1D`; `INIT.SUP`'s
+`0x1B`; `DSPTCH.RTM`'s `'<'`/`'>'`/`'['`/`'z'`/`'\'`/`']'`) -- no new
+probes were added this round; the GDB hardware-watchpoint technique
+(`watch *(unsigned short*)<physical address>`, no competing
+breakpoint active, physical/linear addressing throughout since CS is
+always `MPM_CODE_SEG`) proved far more reliable than marker-byte
+probes for this kind of "who corrupts this cell" question and should
+be preferred over adding new probes when the question is "which
+instruction wrote here" rather than "was this code path reached at
+all".
+
 
 
 The RSP sources (`CLOCK.A86`, `ECHO.A86`, `TMP.A86`, `SUBMIT.A86`) and

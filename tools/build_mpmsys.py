@@ -180,6 +180,29 @@ QLR_FIELD_OFFSET = 0x74
 PUL_FIELD_OFFSET = 0x5c
 QUL_FIELD_OFFSET = 0x5e
 
+# `pul` (like `qul` above) needs more than zeroing: zeroing it only
+# stops the old DATA.BDO-template wild-write bug (confirmed via a QEMU
+# watchpoint on SYSDAT's p_thread[tickpd]: `getpdadr`'s `gpd_bad` path,
+# taken for *any* PD that doesn't already live sysdat-resident --
+# i.e. every RSP's own PD, such as TMP's, which lives in TMP's own
+# dseg -- reached `gpd_have` and `rep movsw`'d a 48-byte PD copy
+# straight over live kernel state once `pul` held a stale non-zero
+# DATA.BDO value) -- but with `pul` left at a permanent 0 (empty),
+# every *non*-sysdat-resident PD allocation (any RSP's `f_createproc`,
+# any CLI program load via COMMAND.SUP's `cli_fload`) fails outright
+# with `e_no_pd`, forever: nothing ever adds slots to `pul` except
+# `freepd`, and nothing is ever freed before something needs to be
+# allocated. GENSYS would have built a real PD pool sized to the
+# configured max process count and linked it through `pul`; this tree
+# has no GENSYS equivalent, so (exactly like `qul`'s own QD pool fix
+# above) a real pool is carved out of SYSDAT's own slack space and
+# chained through `pul` as a standard singly-linked free list (each
+# slot's own `p_link`, offset 0, points to the next slot; the last
+# points to 0) -- matching exactly what `getpdadr`'s `gpd_have` path
+# (PROC.RTM) already expects to find there.
+PD_POOL_SLOT_SIZE = 0x30  # pdlen (PD.DEF)
+PD_POOL_SLOTS = 4
+
 # `endseg` (SYSTEM.DAT: "dw 0 ;1st parag. outside of MP/M") is GENSYS-
 # computed data in the original 1981 build -- this tree's own
 # SYSTEM.DAT just declares it statically as 0 and nothing in src/
@@ -572,11 +595,11 @@ def main():
     dseg[NCIODEV_OFFSET] = 1
     dseg[TICKSPERSEC_OFFSET] = 60
 
-    # pul/mdul/qlr: reset every stale "unused list"/"queue list root"
-    # head to empty -- see PUL_FIELD_OFFSET's own comment for why their
+    # mdul/qlr: reset every stale "unused list"/"queue list root" head
+    # to empty -- see PUL_FIELD_OFFSET's own comment for why their
     # inherited DATA.BDO values are actively wrong for a fresh boot, not
-    # just unused.
-    struct.pack_into('<H', dseg, PUL_FIELD_OFFSET, 0)
+    # just unused. `pul` itself is linked to a real PD pool further
+    # down (see PUL_FIELD_OFFSET's own comment) instead of just zeroed.
     struct.pack_into('<H', dseg, MDUL_FIELD_OFFSET, 0)
     struct.pack_into('<H', dseg, QLR_FIELD_OFFSET, 0)
 
@@ -721,6 +744,23 @@ def main():
         off = flagtab_start + i * FLGLEN
         struct.pack_into('<HB', dseg, off, 0xFFFF, 0xFF)  # flag_off, flag_zig
     struct.pack_into('<H', dseg, FLAGS_FIELD_OFFSET, flagtab_start)
+
+    # PD pool: real free PD slots right after the flag table -- see
+    # PUL_FIELD_OFFSET's own comment for why zeroing `pul` alone isn't
+    # enough.
+    pd_pool_start = flagtab_end
+    pd_pool_end = pd_pool_start + PD_POOL_SLOTS * PD_POOL_SLOT_SIZE
+    if pd_pool_end > SYSDAT_DSEG_SIZE:
+        raise SystemExit(
+            f"PD pool (offset {pd_pool_start:#x}..{pd_pool_end:#x}) no "
+            f"longer fits in SYSDAT's {SYSDAT_DSEG_SIZE}-byte dseg -- "
+            "SYSDAT.FMT grew too close to the end")
+    for slot in range(PD_POOL_SLOTS):
+        slot_off = pd_pool_start + slot * PD_POOL_SLOT_SIZE
+        next_off = (slot_off + PD_POOL_SLOT_SIZE
+                    if slot < PD_POOL_SLOTS - 1 else 0)
+        struct.pack_into('<H', dseg, slot_off, next_off)  # p_link
+    struct.pack_into('<H', dseg, PUL_FIELD_OFFSET, pd_pool_start)
 
     # XIOS86Q's own private tail: the bytes from SYSDAT_DSEG_SIZE
     # onward in its own dseg.bin (see its own comment on why its

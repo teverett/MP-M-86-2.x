@@ -681,7 +681,20 @@ def main():
     with open(tmp_out + '.dseg.bin', 'rb') as f:
         tmp_dseg = bytearray(f.read())
 
-    tmp_code_seg = MPM_CODE_SEG + (len(cseg) + 15) // 16
+    # Pad `cseg` itself up to the next paragraph boundary *before*
+    # appending TMP -- `tmp_code_seg` below rounds `len(cseg)` UP to
+    # compute TMP's own segment, but without this padding the actual
+    # `cseg += tmp_cseg` a few lines down still appends at the
+    # *unrounded* current length, leaving every byte of TMP's own
+    # code+data physically offset from where `tmp_code_seg` (and every
+    # address computed relative to it -- "offset tmp" in TMP.A86's own
+    # dseg, the two build-time patches just below, etc.) claims it
+    # starts. Confirmed directly this session: the combined kernel
+    # cseg's real length (29023 bytes) isn't itself a multiple of 16,
+    # a 1-byte gap that silently shifted every single address inside
+    # TMP by one byte.
+    cseg += b'\0' * ((-len(cseg)) % 16)
+    tmp_code_seg = MPM_CODE_SEG + len(cseg) // 16
     tmp_cseg_paras = (len(tmp_cseg) + 15) // 16
     tmp_cseg = tmp_cseg.ljust(tmp_cseg_paras * 16, b'\0')
     tmp_data_seg = tmp_code_seg + tmp_cseg_paras

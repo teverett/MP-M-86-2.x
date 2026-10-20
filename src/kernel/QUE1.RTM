@@ -20,7 +20,11 @@ makeq_entry:		; Create a System Queue
 	    mov bx,0ffffh ! ret
 		;Make sure this queue doesn't already exist
 qm_chk:	pushf ! cli
-	push es ! mov es,sysdat
+	push es ! mov es,cs:sysdat	;bare form wrong, same bug class/fix as
+					;PROC.RTM's getpdadr (see its comment) --
+					;reads SYSDAT's own offset 6
+					;(module_table[sup].init_seg) instead of
+					;this module's own cseg cell
 	mov si,(offset qlr)-q_link
 qm_nxt:	mov si,q_link[si]
 	cmp si,0 ! je qm_go

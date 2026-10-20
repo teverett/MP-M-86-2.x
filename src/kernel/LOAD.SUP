@@ -50,7 +50,8 @@ ld_read:
 	mov bx,load_fcb
 	mov fcb_nxtrec[bx],0		;read 1st record
 	mov dx,offset load_dma
-	mov cx,sysdat
+	mov cx,cs:sysdat	;bare form wrong, same bug class/fix as
+				;INIT.SUP's nrsp (see its comment)
 	call diskread ! jcxz have_header
 	    jmp load_exit
 have_header:
@@ -61,7 +62,7 @@ have_header:
 			; Zero ldtab
 	mov cx,ldtabsiz/2 ! sub ax,ax
 	mov di,offset ldtab
-	push es ! mov es,sysdat
+	push es ! mov es,cs:sysdat	;bare form wrong, same bug class/fix
 	rep stos ax ! pop es
 			; 1st ldtab entry is UDA and LSTK
 			; if a PD was specified...
@@ -92,7 +93,7 @@ ld_freeit:	push ax ! mov cl,0ffh ! push cx
 		mov dx,sp ! mov cx,ss ! mov ds,cx
 		mov cx,f_freemem ! call mpmif
 		pop cx ! pop cx ! pop cx
-		mov ds,sysdat ! pop ax
+		mov ds,cs:sysdat ! pop ax	;bare form wrong, same bug class/fix
 
 			; free load memory except uda,ldstack
 
@@ -102,7 +103,7 @@ ld_freeit:	push ax ! mov cl,0ffh ! push cx
 		mov dx,sp ! mov ax,ss ! mov ds,ax
 		mov cx,f_memfree ! call mpmif
 		pop ax ! pop ax
-		mov ds,sysdat
+		mov ds,cs:sysdat	;bare form wrong, same bug class/fix
 
 			;transfer memory to new pd
 
@@ -305,7 +306,7 @@ lip_1:	mov si,offset ldtab
 	mov cx,(ulen + lstklen)/2
 	rep stos ax ! pop es
 		; setup p_uda for creat_proc
-	mov ax,sysdat
+	mov ax,cs:sysdat	;bare form wrong, same bug class/fix
 	sub p_uda[bx],ax
 	mov p_stat[bx],ps_run
 	mov p_prior[bx],200
@@ -396,7 +397,7 @@ read_first:
 read_1st:
 	cmp ldtab_flen[bx],8 ! jae xfer_direct
 	    push bx ! mov dx,offset load_dma
-	    mov cx,sysdat
+	    mov cx,cs:sysdat	;bare form wrong, same bug class/fix
 	    call diskread ! pop bx
 	    jcxz read_again
 		ret

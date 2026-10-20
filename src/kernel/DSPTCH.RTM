@@ -103,12 +103,26 @@ dsptch:
 	push ax ! push dx ! mov al,'.' ! mov dx,03f8h ! out dx,al ! mov ax,ds ! call ydbg ! mov al,':' ! mov dx,03f8h ! out dx,al ! mov al,indisp ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE: dump DS and indisp at every dsptch entry
 	cmp indisp,true ! jne dispin
 	    popf ! ret
-dispin:	mov indisp,true
+dispin:	push ax ! push dx ! mov al,8Dh ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 8Dh, dispin's own literal first instruction -- confirms whether control genuinely reaches here after the "." marker's "jne dispin", or jumps somewhere else entirely (chasing the func(CX=0000) seen appearing right after "." in recent traces)
+	mov indisp,true
 	pop u_flag_sav
 		; store and switch stack
 	mov u_ss,ss ! mov u_sp,sp
-	mov ss,sysdat ! mov sp,offset dsptchtos
-	sti
+	mov ss,cs:sysdat ! mov sp,offset dsptchtos	;bare "sysdat" is wrong,
+					;same bug class/fix as this file's other
+					;already-fixed "cs:sysdat" reads above --
+					;reads SYSDAT's own offset 6
+					;(module_table[sup].init_seg) instead of
+					;this module's own cseg cell
+	sti ! cli	;same fix as SUPIF.SUP's user_entry (#56): "sti" has a
+			;one-instruction delay before it takes effect, so an
+			;interrupt already pending at this exact moment isn't
+			;recognized until after the NEXT instruction -- "cli"
+			;right after closes that window before anything can
+			;land mid-register-save. Confirmed via probe (#59):
+			;marker right after this "sti" never fired until this
+			;fix was added.
+	push ax ! push dx ! mov al,8Eh ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 8Eh, right after dispin's own stack-switch+sti -- confirms execution now survives it
 		; save registers
 		; NOTE: We will use DS instead of ES
 		;  No segment overrides...
@@ -254,6 +268,7 @@ term_act:
 
 	push ax ! mov al,'~' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	mov ax,rlr
+	push ax ! push dx ! mov al,95h ! mov dx,03f8h ! out dx,al ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,si ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE (#61): marker 95h, term_act's own top -- dump the OLD rlr (about to be saved into p_link[si]) and si (the terminating PD), to compare against what's read back right before "mov rlr,ax" at the end of term_act's cleanup
 	mov p_link[si],ax
 	mov rlr,si
 	mov ch,0 ! mov cl,ncondev
@@ -284,7 +299,8 @@ end_free:
 	mov mxmemowner,0
 	mov dx,offset mxmemqpb ! mov cx,f_qwrite
 	call mpmif
-        pop si 
+        pop si
+	push ax ! push dx ! mov al,96h ! mov dx,03f8h ! out dx,al ! mov ax,si ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,p_link[si] ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE (#61): marker 96h, right before "mov rlr,ax" at the end of term_act's cleanup -- dump si (terminating PD) and p_link[si] (should still be the OLD rlr value saved by marker 95h, if nothing clobbered it during the four nested mpmif calls in between)
 	mov ax,p_link[si]
 	mov rlr,ax
 	mov p_link[si],0
@@ -308,6 +324,7 @@ insert_process:
 ; put PD# in list ordered by priority
 ;
 ; input:	BX = list root
+	push ax ! push bx ! push dx ! mov al,8Fh ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,si ! call ydbg ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE (#60): marker 8Fh, insert_process's own absolute top -- dump BX(list root offset) and SI(pd being inserted) on EVERY call, to see whether it's even reached a second time for TMP's own insert (drltorlr's own "call insert_process" after pulling TMP off drl)
 ;		SI = pd number
 
 	 mov cx,p_flag[si] ! and cx,pf_resource
@@ -320,10 +337,12 @@ ins_npd: mov di,p_link[bx]
 		    cmp cx,0 ! jz ins_nxt
 			jmps ins_out
 ins_nxt:	mov bx,di ! jmp ins_npd
-ins_out: cmp cx,0 ! jz ins_exit
+ins_out: push ax ! push dx ! mov al,90h ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,di ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,cx ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE (#60): marker 90h, insert_process's own ins_out -- dump BX(final list position),DI(next-in-list),CX(resource flag) right before the ins_exit splice, to see exactly where TMP's own insert lands
+	cmp cx,0 ! jz ins_exit
 	    mov cx,pf_resource
 	    not cx ! and p_flag[si],cx
 ins_exit:
+	 push ax ! push dx ! mov al,91h ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,di ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,si ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE (#60): marker 91h, ins_exit right before the splice writes -- dump BX,DI,SI, the three values about to be spliced together
 	 mov p_link[si],di ! mov p_link[bx],si ! ret
 
 ;=========
@@ -335,7 +354,13 @@ schedule:
 		;we can enable interrupts now.
 		;there MUST be a process on the RLR
 		;at this point, ie. IDLE...
-	sti
+	sti ! cli	;TEMP/precautionary (#59): same one-instruction-delay
+			;guard as the two confirmed instances of this bug --
+			;applied here on the same pattern (bare "sti" followed
+			;by a real instruction, not an immediate "cli"), but
+			;NOT yet confirmed via its own probe the way the other
+			;two were. Strictly narrows the interrupt-enabled
+			;window, never widens it, so low-risk either way.
 		;go through the Poll List
 	mov di,(offset plr)-p_link
 		;get the next PD on list.
@@ -370,13 +395,29 @@ drltorlr:
 		;playing with DRL since interrupts
 		;doing a Flag_set may also.
 	cli ! mov si,drl
+	sti ! cli	;#60: this is NOT the same as the original "sti !
+			;jmps drltorlr" below (which this replaces) -- a
+			;"sti" immediately followed by a JUMP is unsafe: the
+			;one-instruction delay means an interrupt already
+			;pending becomes eligible to fire right as the CPU
+			;lands on the jump *target*'s own first instruction,
+			;one instruction too early for that target's own
+			;"cli" (if any) to matter. Confirmed via GDB
+			;single-step trace: this exact "sti!jmps drltorlr"
+			;pattern, at full speed, is where TMP's own PD
+			;disappears from the ready list without a trace --
+			;moving the brief re-enable to right here, followed
+			;immediately by "cli" (no jump in between), keeps the
+			;same "briefly let a pending Flag_set's interrupt
+			;through between drl entries" intent from the
+			;original comment above, but safely.
 	push ax ! push dx ! mov al,12 ! mov dx,03f8h ! out dx,al ! mov ax,si ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 12 (raw byte), dump drl at every drltorlr check
 	cmp si,0 ! jz switch
 	    mov ax,p_link[si] ! mov drl,ax
 	    mov p_stat[si],ps_run
 	    mov bx,(offset rlr)-p_link
 	    call insert_process
-	    sti ! jmps drltorlr
+	    jmps drltorlr
 
 switch:
 ;------
@@ -410,6 +451,7 @@ switch:
 				;here (set above via "mov ds,dx" from
 				;p_uda[bx]), not sysdat-ish (same bug class
 				;as the two fixes above)
+	push ax ! push bx ! push dx ! mov al,8Ch ! mov dx,03f8h ! out dx,al ! mov al,u_in_int ! mov ah,0 ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,u_ds_sav ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,u_es_sav ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,ds ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,es ! call ydbg ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE (#58): marker 8Ch, right before "cmp u_in_int,true" in switch -- dump u_in_int, u_ds_sav, u_es_sav, DS, ES for whichever process is about to be switched to, to see which exit path gets taken and whether u_ds_sav/u_es_sav are really sane
 	cmp u_in_int,true ! jne dret
 	    jmp int_disp_exit
 dret:	push u_flag_sav ! popf

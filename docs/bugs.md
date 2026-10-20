@@ -2455,24 +2455,511 @@ conditional breakpoint over a watchpoint's reported register state
 when they disagree; use the watchpoint only to find *where* execution
 is, not to trust *what it reports mid-transition*.
 
-**Still open:** the system now hangs at the same point as before
-(serial trace confirmed identical length/content across multiple
-fresh 25-second runs) -- but a *different* probe this time
-(`PROC.RTM`'s own existing `0x1A` marker, a direct serial print, not
-a GDB artifact) shows `u_wrkseg=0xC000` for what appears to be the
-exact same `si=0x0E40` PD slot right after the real creation
-succeeds, alongside a transient `DS=0000h` seen in the dispatch trace
-moments earlier (`fnchk`'s own module-table check flagging most
-slots as bad -- consistent with reading `module_table` through
-`DS=0`). Given the conditional-breakpoint check above proves `DS` is
-correct at the *real* `f_createproc` syscall entry, this looks like
-`proc_creat`'s own internal tail-chain (`pop dx ! jmp proc_creat`, see
-#38) firing again for a *second*, bogus PD -- same symptom as #38,
-now with a corrected #37/#38 foundation underneath it, so the next
-step is re-investigating *why* the chain continues at all (TMP's own
-static PD data declares `p_link=0`, which should prevent this) with
-a single-shot conditional breakpoint on `cp_gpd`'s `mov dx,p_link[si]`
-read, rather than a watchpoint.
+**Still open, narrowed further this round:** the system hangs at the
+same point as before. Found a **third** GDB reliability gotcha this
+session, worse than the first two: `condition`/`ignore N`/
+`continue N` on this QEMU gdbstub are **silently no-ops** -- a
+breakpoint with any of these set still stops on the very first actual
+hit, as if the qualifier were never given (confirmed directly: `break
+*addr if $si==0x0e40`, `ignore 1 2`, and `continue 3` all three
+stopped on the *first* hit of a breakpoint known to fire multiple
+times with different `si` values). The only technique that reliably
+reaches a *specific later* occurrence of an address that's hit
+multiple times: stage through an *intermediate*, known-singular
+landmark first (e.g. `nrsp`'s own entry, which by construction is
+only reached once, after idle/tick already exist) with its own
+breakpoint, `continue` once, `delete` it, *then* set the breakpoint
+or watchpoint of actual interest and `continue` once more -- this
+"two-stage" approach was used for everything below and gave
+consistent, cross-checked results.
+
+Using that technique: `cp_gpd`'s `mov dx,p_link[si]` (staged past
+`nrsp`) now correctly reads `si=0xE40` (TMP's real PD-pool slot,
+confirmed = TMP's own creation, not idle/tick's), `dx=0` -- the
+tail-chain does **not** continue spuriously anymore; #38's `dx=0x04CF`
+second-chain symptom is gone, fully explained as fallout from #39's
+root cause, not a separate bug. Good -- but at that exact same
+breakpoint hit, `es=0x17C8` (correct) and yet reading `u_wrkseg`
+(`ES:0x2E`) gives `0xC000`, not the expected `0x172B`. Cross-checked
+two independent ways: `PROC.RTM`'s own existing `0x1A` serial probe
+(not a GDB artifact) agrees, and a staged watchpoint on that exact
+physical cell also agrees. Yet staging up to `user_entry`'s own very
+first instruction for this same call (confirmed via `dx=0x10,
+cx=0x90`) shows `DS=0x172B` correctly, and nothing between there and
+`cp_gpd` -- traced through `func`/`fnchk`/`userf`/`nonet`/`inmod`/
+`gofar`/`goodmod`/`callf`/`creat_proc_entry`/`proc_creat`/`cp_doit`/
+`getpdadr` -- appears to touch `ES` or write to `u_wrkseg`'s address.
+A staged watchpoint on `u_wrkseg`'s cell shows it written *twice* in
+quick succession for what looks like the same call: once correctly
+(`di=0x172B`) and once wrong (`di=0xC000`, same instruction address
+both times) -- not yet determined whether that's a second, real write
+(something else legitimately overwriting it a moment later) or
+another watchpoint-reporting quirk layered on top of the three
+already found. This is exactly where the investigation stands;
+next step is a byte-level disassembly walk of `getpdadr`'s actual
+compiled "bad path" (the `rep movsw` and its surrounding `push/pop
+es/ds` dance) against the live register state at each instruction,
+rather than trusting any single breakpoint or watchpoint report in
+isolation.
+
+## 40. Abandoned GDB for this round in favor of pure serial-trace
+probes (deterministic, immune to every gdbstub quirk in #38/#39) --
+resolved #39's `u_wrkseg=0xC000` mystery as stale cross-build data,
+confirmed TMP's own process creation (plus its 4 child processes) now
+works end to end, and found the *next* real hang: an apparent
+infinite loop (or crash) in `ABORT.RTM`'s `terminate_entry`, walking
+the `p_thread` list, when `INIT` terminates itself.
+
+Given #39's closing methodology note (don't trust GDB breakpoint/
+watchpoint register state in isolation), this round switched entirely
+to new `TEMP DEBUG PROBE` serial prints (`out dx,al` to the UART,
+decoded offline from a raw QEMU `-serial file:...` capture with a
+small Python byte-level decoder) -- genuinely immune to every
+GDB/gdbstub quirk found in #38/#39, since nothing is asked to
+`continue`/stage/re-hit anything; the trace is one continuous,
+uninterrupted run.
+
+**Picking a free marker byte is harder than it looks.** Every
+printable ASCII character from `' '` (0x20) through `'~'` (0x7E) is
+*already* claimed by some existing probe somewhere in the tree (there
+are now dozens). Worse, control-byte markers collide too, silently:
+a new `1Eh`/`1Dh` marker added to `PROC.RTM` turned out to already be
+used by `SYSENT.RTM`'s `creat_proc_entry` probe, and `21h` collides
+with the plain ASCII `'!'` used throughout `SUPIF.SUP`'s `fnchk`/
+`mtchk` integrity checks -- `grep -rn "mov al,.*h" | sort -u` silently
+hides exactly this kind of collision (dedup makes two independent
+uses of the same byte look like one line). The reliable check is
+`grep -c`/no-dedup across every `mov al,'X'` *and* `mov al,XXh` site
+before picking a new marker.
+
+**A genuinely new, reproducible finding: inserting probe bytes at
+one specific point in `SUPIF.SUP`'s `user_entry` -- right before
+`mov u_wrkseg,di` (between it and the preceding `mov u_retseg,ax`) --
+made the system hang specifically on TMP's own real `f_createproc`
+call (the very first `int mpmint` call that reaches that point;
+idle/tick's direct `call proc_creat` never goes through
+`user_entry` at all, so they were unaffected).** Moving the *exact
+same* probe to *after* the write instead (reading `u_wrkseg` back
+rather than `di` beforehand) made the hang disappear entirely, and
+boot proceeded much further. This is **not** an `asm86` short-jump-
+range bug -- confirmed by reading `tools/asm86/isa.py`: both the
+`JMPS` short-jump and conditional/loop-branch encoders explicitly
+range-check `rel8` and call `ctx.err(...)` (a hard build failure) if
+out of range, and every build here succeeded with no errors. So this
+is a **real**, timing/layout-sensitive runtime bug whose symptom
+(hang or not, and *where*) shifts with small changes to total code
+size elsewhere in the combined `cseg` -- the same family of
+"coincidentally works only because of exact address alignment" bug
+this whole investigation keeps finding, just not yet pinned to a
+specific cause. Flagging this as its own open issue: something is
+sensitive to *exact* code placement around that one instruction in a
+way nothing else in the tree has shown before. Needs a non-probe
+(static layout analysis, or careful single-step) approach to pin
+down, since adding *any* further probe bytes near it risks moving --
+not fixing -- the symptom.
+
+**With the probe relocated to avoid that hang, the trace shows
+`u_wrkseg` is written and read back *consistently* throughout TMP's
+entire real `f_createproc` call** -- at the write (`user_entry`),
+at `cp_gpd`, and at `cp_nm` (`PROC.RTM`), all agreeing (e.g.
+`0xB9E8` in one build, `0x1767` for idle/tick in the same build --
+the exact numeric value drifts between builds purely from layout,
+as expected). **No corruption was observed this round.** This
+strongly suggests #39's closing `u_wrkseg=0xC000` "second write"
+finding was contaminated by exactly the GDB/watchpoint
+unreliability #39 itself flagged as unresolved (comparing a GDB
+session's register state against a *different build's* serial
+probe output, which was never a like-for-like comparison to begin
+with) -- not a real bug. Marking it **superseded/not reproducing**;
+revisit only if the same symptom reappears in a pure serial trace.
+
+**New result: TMP itself, plus 4 child processes it spawns (its
+console-scanner workers, one per console), all get created
+successfully** with correct, mutually-consistent `p_uda`/`u_wrkseg`
+values -- confirmed via the `1A`/`1C`/`05` probes across all 5
+creations in one continuous trace. This is real forward progress:
+boot now gets well past the point of every previous symptom in
+#36-#39 (the `CS=0x20E9` wild jump, the chain-corruption symptom,
+etc. — none of those reproduce anymore).
+
+**The new, current blocker:** once all processes are created, `INIT`
+terminates itself (`mov cl,f_terminate ! mov dl,0ffh ! int mpmint`,
+as designed). `ABORT.RTM`'s `terminate_entry` is reached correctly
+(confirmed via its own `'$'`/`'%'` probes: `BX=initpd`, `CX=1` i.e.
+not the error path, `p_flag=5`, `DX=0x03FF` -- the `0x3F` high byte
+of `DX` is simply leftover/don't-care, since `INIT.SUP` only ever
+sets `DL` with a byte move; **not** a bug, matches the documented
+byte-only interface). Execution reaches the `terminate:` label's own
+`'^'` probe (confirmed, it's the last byte in every trace) and then
+**nothing ever follows it again, even after 60+ seconds** -- genuinely
+stuck, not just slow. The very next real code is the `nchld:` loop
+(walking `p_thread` from `thrdrt`, reparenting any of `INIT`'s own
+children to `0`) immediately followed by `rlsmx`/`f_bdosterm`/the
+`'&'` probe, none of which ever fire.
+
+Ruled out so far (static reasoning, not yet proven at runtime):
+- `thrdrt`/`rlr`'s raw template values in `build/kernel/MPM.bin.dseg`
+  are `0x9C0` -- exactly `initpd`'s real, current offset (confirmed
+  via direct byte read of the built `.dseg`) -- so unlike `pul`/
+  `mdul`/`qlr`/`qul` (see `tools/build_mpmsys.py`'s own long comments
+  on each), this pair's stale DATA.BDO-template value happens to
+  still be correct for this tree's current layout. Not the cause.
+- `PROC.RTM`'s own thread-list insert (`cp_uda`'s tail: `pop si !
+  pushf ! cli ! mov dx,thrdrt ! mov p_thread[si],dx ! mov thrdrt,si`)
+  reads structurally correct in isolation: `si` is explicitly
+  restored from the stack (pushed back at `cp_gpd`) specifically
+  *because* the two preceding `rep movs ax,ax` blocks (copying
+  `u_ivectors` and `i_mpm_ip`/`i_mpm_cs`) clobber `si` as a source
+  index; the push/pop nesting with the matching `dx` save (from
+  `cp_gpd`'s own `mov dx,p_link[si]`) is balanced correctly across
+  the whole function. Nothing jumped out as wrong on inspection
+  alone -- needs runtime confirmation, not just a read-through.
+- Tried adding one more probe directly inside `nchld:` (dump `BX`
+  each iteration) to settle whether it's a real infinite loop versus
+  a crash/fault -- this *itself* reintroduced a hang, further
+  upstream (during tick's creation), reinforcing the "any code-size
+  change moves the symptom" pattern above. Reverted immediately
+  (`ABORT.RTM` is back to no new probe in `nchld:`); do **not** just
+  retry a bigger/smaller probe there next time -- it will likely just
+  relocate the symptom again rather than reveal it.
+
+**Recommended next step (not yet attempted):** avoid adding any more
+assembly bytes near the suspect regions, since every attempt so far
+has moved the bug rather than exposed it. Options that don't touch
+code size: (a) have `tools/build_mpmsys.py` print every dynamically-
+computed pool offset/size (`qd_pool_*`, `qmau_buf_*`, `flagtab_*`,
+`pd_pool_*`) alongside the static `SYSDAT.FMT` offsets for
+`p_thread`/`thrdrt`/the PD table, purely to check for an overlap by
+arithmetic rather than by observed symptom; (b) a single, carefully
+isolated GDB session that only ever sets *one* breakpoint and issues
+*one* `continue` (the only pattern confirmed reliable across #38-#40)
+at the `nchld:` loop body itself, to catch `BX` on its first and
+(if reachable) second iteration without perturbing layout at all.
+
+## 41. Pinned down *which* write corrupts the thread list from #40 --
+`idlepd` gets run through `proc_creat` a **second, spurious time**,
+overwriting its own `p_thread` field and creating the `idle<->tick`
+cycle that hangs `nchld:`. The *mechanism* behind that second pass is
+still open, and a new, more severe GDB reliability failure showed up
+while chasing it.
+
+Followed #40's own recommendation (b) first -- single breakpoint,
+single `continue`, at `nchld:`'s loop body (`*0x12706` in that build),
+stepping forward with pure `stepi` (never `continue` again) for 60
+iterations. Confirmed definitively: `BX` cycles `0xED0 -> 0xEA0 ->
+0xE70 -> 0xE40 -> 0x9F0 -> 0xA20 -> 0x9F0 -> 0xA20 -> ...` forever --
+a genuine infinite loop (not a crash), caused by `p_thread[idlepd]`
+holding `0xA20` (`tickpd`) instead of the correct terminator-chain
+value. Cross-checked against a direct physical-memory read at a
+*different*, known-safe single-breakpoint landmark (`nrsp`'s own
+entry, reached exactly once) that `p_thread[idlepd]=0x9C0` (`initpd`,
+correct) and `p_thread[tickpd]=0x9F0` (`idlepd`, correct) **at that
+point** -- so the corruption happens later, during `nrsp`'s own RSP
+creation, not during RTM's original idle/tick setup.
+
+A hardware watchpoint on `p_thread[idlepd]`'s physical cell, `continue`
+*twice* in one session (accepted as risky, but the resulting register
+state was internally consistent both times, and a direct physical-
+memory read after each hit corroborated it independently of any
+register report) showed two real writes: first `0->0x9C0`
+(`initpd`, idle's own correct creation), second `0x9C0->0x0A20`
+(`tickpd`) -- both writes with `SI=0x9F0` (`idlepd`) as the operand,
+confirming the corrupting write really does target `p_thread[idlepd]`
+specifically (not a different cell that merely looks similar).
+
+**A completely new serial-probe technique, not needing GDB at all**:
+added a probe at `proc_creat`'s very entry (`PROC.RTM`) that reads the
+near-call return address directly off the stack (`push bp ! mov
+bp,sp ! ... ! mov ax,[bp+2]`, since 8086 doesn't allow `sp` as a base
+register for memory addressing -- `asm86` correctly rejects that with
+`'sp' is not a valid base register for 8086 memory addressing`,
+confirmed by trying it first) and dumps it via `ydbg`. This identified
+the caller for every `proc_creat` invocation without GDB: idle, tick,
+*and* the mystery second idle call all show the **identical** return
+address (`0x1830`, disassembled and confirmed to be the single `call
+proc_creat` byte in `RTMIF.RTM`'s own `init:`, right after its own
+`mov dx,bx` -- there is only one `call proc_creat` site in the whole
+tree outside `creat_proc_entry`, confirmed by `grep`). Since idle and
+tick are chained via `jmp proc_creat` (not `call`), reusing the one
+outer return address for every chain link is *expected* for them --
+but the mystery call reuses that *exact same* value much later in
+boot, well after that chain already returned (confirmed via a `dx=0`
+exit in the trace in between). That means either (a) something
+genuinely re-enters the chain without a fresh call (unresolved how),
+or (b) this is a stale leftover stack word being misread as a "return
+address" by a wild jump that lands directly on `proc_creat`'s address
+with whatever `DX`/stack content happened to be lying around (which
+would also explain `DX=0x9F0` arriving as if it were a deliberate
+"create `idlepd`" request). Leaning toward (b) given this investigation's
+whole history of wild-jump symptoms, but not confirmed either way.
+
+**New, more severe GDB/QEMU reliability failure, distinct from every
+one found in #38-#40**: starting QEMU halted (`-s -S`), setting a
+single breakpoint on `proc_creat`'s address, and issuing a single
+`continue` **never returned**, even after 100+ seconds, across
+multiple independent attempts -- despite the exact same address being
+reachable within about a second of normal (non-GDB) execution (and
+despite a near-identical single-breakpoint/single-continue pattern
+working fine minutes earlier for `nchld:` and `nrsp`). Disassembling
+the target address directly from the built `.cseg.bin` confirmed the
+address itself was correct. Starting QEMU *without* `-S` and
+attaching a moment later also failed, but for an understood reason:
+by the time GDB connects, the guest has already run far enough,
+unsupervised, to be stuck in #40's infinite loop, so the early
+`proc_creat` code never executes again. Root cause of the `-s -S`
+case specifically is **not understood** -- flagging it rather than
+burning more time on it. Given how good the serial-probe return-
+address technique above turned out to be, **prefer it over GDB
+breakpoints entirely for "who calls X" questions going forward**;
+it has none of the staging/repeat-`continue`/watchpoint caveats this
+whole investigation keeps running into.
+
+**Still open:** the exact mechanism that re-enters `proc_creat` (or
+jumps directly onto it) with `DX=0x9F0` a second time, after idle and
+tick's own chain has already correctly finished and returned. This
+happens somewhere between `XIOS86Q.A86`'s own init (confirmed via its
+banner text appearing in the trace -- initially and wrongly suspected
+as a mid-boot *reboot*, since the kernel's `XIOS86Q.A86` prints the
+exact same banner string as the standalone loader's
+`LDBIOS86Q.A86`; ruled out once both files were found to independently
+declare the same banner text) and `nrsp`'s own first iteration. A
+`CL=0`/`sysreset_entry` dispatch (falling through to
+`terminate_entry`, taking the harmless `term_err` branch since
+`abt_chk` returns `CX<=0`) also happens in this same narrow window,
+immediately *after* the mystery `proc_creat` call, not before --
+tempting to connect the two, but not yet shown to be cause and effect
+rather than two independent, adjacent events. Next step: use the same
+return-address-probe technique at `entry:`'s own dispatch point
+(`RTMIF.RTM`) to log every `CX` value reaching it in this window, and
+check whether any of them could misindex `function[]` out of bounds
+onto `proc_creat`'s own address.
+
+## 42. #41's "mystery second `proc_creat` call" theory doesn't survive
+a byte-by-byte re-derivation of a fresh trace -- the real finding is
+narrower and stranger: `idlepd` really does get a *second* insertion
+onto `drl` (the Dispatch Ready List), but not via `proc_creat` at all,
+and the whole thing is genuinely non-deterministic run-to-run on the
+identical binary.
+
+Re-ran the current (clean) build with no new probes -- everything
+needed was already in place from `#40`/`#41` plus `DSPTCH.RTM`'s own
+pre-existing probes (not previously catalogued in this doc): `'z'`
+(`fdisp` entry), `'.'`  (`dsptch` entry, dumps DS/indisp), raw byte
+`11`=`0x0B` (`switch`-off-rlr, dumps SI then `p_link[si]`), `'{'`/`'}'`
+(dsp_table dispatch index), `'~'` (`term_act`), `'['` (`disp_act`,
+dumps `rlr`), raw byte `12`=`0x0C` (**`drltorlr`'s own drain loop**,
+dumps `drl` on every iteration), `'<'`/`'>'` (`switch`, dumps `rlr`).
+That `0x0C` probe is the one that matters here -- it had been
+misread in-session as an unrecognized/undocumented marker before
+tracing it to `DSPTCH.RTM:373`.
+
+This run happened to get much further than #41's hang point before
+stalling (confirmed via the usual stable-wait pattern, same final
+byte count across 3 repeats *of this exact build*): `TMP` and all 4
+children created successfully (`creat_proc_entry`'s `1Eh`/`1Dh`
+markers each firing 4 times via real `int mpmint` syscalls, all with
+return address `0x1957`, correctly distinct from the static
+`0x1830` RTM-`init:` call site), `nrsp`'s loop draining fully to
+`rspseg=0`, `rsp_out` reached, and `INIT`'s own `f_terminate` call
+in progress -- i.e. dramatically past where #40/#41 were stuck. The
+`0x0C` (`drltorlr`) probe's trace, read off byte-by-byte, is:
+`0xED0, 0xEA0, 0xE70, 0xE40` (the dynamic PD-pool entries, newest
+first -- expected, since each is head-inserted onto `drl` later than
+idle/tick), then `0x9F0` (`idlepd`), `0xA20` (`tickpd`), `0x9F0`
+(`idlepd` *again*), `0` (terminator).
+
+Worked through what a *correct* single idle->tick chain predicts for
+`drl`'s layout (head-insert each time: idle inserted first with
+`drl` empty gives `p_link[idle]=0`; tick inserted second on top gives
+`p_link[tick]=idle`, `drl=tick` -- so the tail of the chain should
+read `..., tick, idle, 0`, idle appearing *once*, last). The actual
+trace instead shows idle appearing *before* tick, pointing at tick
+(`p_link[idle]=0xA20` at the point the drain reads it) -- a value
+that could only get there if something re-inserted `idlepd` onto
+`drl` *after* tick's own legitimate insertion (when `drl` genuinely
+was `tickpd`), overwriting idle's original terminator-value `p_link`.
+The second, *later* appearance of idle in the same walk is not a real
+second list node, though -- it's `drltorlr`'s own call to
+`insert_process(SI=idle)` (made right after reading `p_link[idle]`
+for the drain) **reusing that same `p_link[idle]` cell** for the
+Ready List instead, so the next read of it (triggered by the earlier,
+already-consumed `p_link[tick]=idle` pointer) picks up
+`insert_process`'s freshly written value (`0`) instead of the stale
+`tick` value read moments before. In other words: **one** spurious
+extra `drl` insertion of `idlepd`, not an inherently-infinite 2-cycle
+-- #41's hardware-watchpoint finding (`p_thread[idlepd]` written
+twice, `0->0x9C0` then `0x9C0->0xA20`) is a *different* field
+(`p_thread`, offset 2) than this one (`p_link`, offset 0) and from a
+*different* build/run, so the two may well be two independent
+instances of the same underlying "idle gets touched an extra time"
+bug rather than the same event described two ways.
+
+Ruled out via direct, static inspection of the live built image
+(`build/kernel/MPM.bin.dseg`, no probes needed): the real baked-in
+`p_link`/`p_thread` template data for `idlepd`/`tickpd`/`initpd` is
+completely clean (`idlepd.p_link=0xA20`, `tickpd.p_link=0`, all
+`p_thread` fields `0`, `thrdrt=rlr=initpd` correct) -- so this is not
+a GENSYS-style stale-static-data bug like `pul`/`mdul`/`qlr`/`endseg`/
+`flags` (all already fixed in `tools/build_mpmsys.py`); it is a live,
+runtime write. Also ruled out: the "real QD pool" `build_mpmsys.py`
+carves out of SYSDAT's slack space (`mxdiskqd`'s backing storage) --
+every `q_dq`/`q_nq` field in all 4 slots reads back `0`, so
+`SYSENT.RTM`'s `wakeup_entry` (which does `mov bx,dx ! mov si,[bx]`
+then, if `si<>0`, inserts `si` onto `drl` -- a real, direct `drl`
+writer, called from `QUE1.RTM`'s `qr_finish`/`qw_fin` with
+`DX=&q_dq[queue]`/`&q_nq[queue]`) can't currently be firing with a
+nonzero, garbage `si` from that source.
+
+Found a second real, direct `drl`-writer worth checking:
+`ABORT.RTM`'s `abt_putdrl` (called only from `abort_spec_entry`,
+RTM function 17 -- "set up the specified PD for termination when it
+is next in context" -- `mov p_link[bx],drl ! mov drl,bx` with
+arbitrary caller-supplied `BX`). This is an exact structural match
+for the symptom: if `abort_spec_entry` ever got invoked with its APB
+resolving to `idlepd` (e.g. by name/console match, or by a stale/
+garbage parameter -- this investigation's single most common bug
+class all along), it would explain a genuine extra `drl` insertion of
+idle with no `proc_creat` involvement at all, matching this round's
+re-derivation far better than #41's "second `proc_creat` call"
+framing did. Added one minimal, `0Eh`-probe-style check -- a single
+marker (raw byte `0x15`, confirmed unused via a non-deduped grep
+across the whole `src/kernel/` tree first) right at `abort_spec_entry`'s
+own entry, dumping the incoming `DX` (APB address) via `ydbg`. Result,
+repeated 3 times for stability: the marker **never fired**, and
+-- unlike every other probe added successfully this session --
+it also **shifted the hang point earlier and made it deterministic**
+(1391 bytes every time, vs. 2140 bytes for the unmodified build,
+stalling right after the idle/tick chain's own terminator step)
+instead of leaving the known-good stopping point alone. Reverted
+immediately (confirmed via `git diff`/`git status` back to a clean
+`ABORT.RTM`, and the unmodified build back to reaching 2140 bytes).
+Since the probe never fired even though it also never got to see
+most of boot in those runs, this neither confirms nor rules out
+`abort_spec_entry` -- it's just inconclusive, and `ABORT.RTM` joins
+`RTMIF.RTM`'s `entry:` as a second region where even a single-
+instruction, zero-side-effect probe measurably perturbs timing.
+
+Also newly confirmed: **this symptom is genuinely run-to-run
+non-deterministic on one unchanged binary**. The very first test this
+round (unmodified build, no probe changes at all) landed on 2140
+bytes with the rich `drl`-corruption trace described above; three
+back-to-back repeats of that *exact same* image all landed on exactly
+2140 bytes too (not re-checked byte-for-byte identical, only
+length-identical) -- but that still doesn't make this a simple "every
+run behaves identically" situation, since changing *any* unrelated
+instruction count anywhere nearby (even in a cold, rarely-run function
+like `abort_spec_entry`) reliably moves the stall point. Consistent
+with a real-time-clock/timer-interrupt race (this whole investigation
+already established that `dsptch`'s critical sections genuinely
+re-enable interrupts briefly between list operations), not a pure
+instruction-sequencing bug -- which would explain both the
+determinism-within-one-binary (same code, same timer-interrupt
+cadence relative to instruction count, every run) and the extreme
+sensitivity to any instruction-count change anywhere in the hot path
+(shifts exactly where in that cadence each critical section lands).
+
+**Still open:** which code actually performs the extra `drl`
+insertion of `idlepd`. `abort_spec_entry`/`abt_putdrl` is the leading,
+structurally-plausible candidate but unconfirmed; `FLAG.RTM`'s
+`fs_noff` (flag-wait wakeup, also a direct unguarded `drl` writer) and
+`TICK.SUP`'s `enddelay` (delay-list-expiry wakeup, ditto) haven't been
+checked at all yet. Given how disruptive probing near `ABORT.RTM` and
+`RTMIF.RTM`'s `entry:` has both turned out to be, the next attempt at
+any of these should budget for the strong possibility that the probe
+itself will relocate the symptom, and should re-verify the known-good
+2140-byte stopping point immediately after, exactly as done here.
+
+## 43. Correction to #42: the "second `proc_creat(idle)` call" from
+#41 is real after all -- #42's "debunking" of it was wrong, caused by
+only checking the *first three* `0Eh` markers in the trace instead of
+all of them. Found the second occurrence, and a sharp, reproducible
+anomaly immediately preceding it that's now the leading clue.
+
+Re-decoding the exact same 2140-byte trace from #42 byte-by-byte
+(writing a proper offset-exact decoder instead of eyeballing
+concatenated marker text -- the earlier mis-reads this session, like
+the trailing-space confusion and the `0x0C`-vs-ASCII-`'n'` mixup, kept
+coming from exactly this kind of hand-transcription error) turned up
+**two more `0Eh`/`1Fh` pairs**, around offset 1311-1385, well after
+the ones already accounted for at offsets 177-313. They show the
+unmistakable idle-creation signature again: `0Eh`=`1830` (the same
+static `RTIF.RTM` `init:` return address), `1Fh`=`09F0` (`idlepd`),
+followed by the usual `19h`/`1Ah`/`1Ch`/`05h` steps and a second
+`0Eh`=`1830`/`1Fh`=`0000` chain-terminator. #42 missed these because
+it only looked at the first three `0Eh` occurrences near the start of
+the trace and treated that as the complete set.
+
+**Independent, conclusive proof this is a real second pass, not a
+stale-read artifact**: the `1Ah` (`cp_gpd`) probe's second occurrence
+shows `p_uda[idlepd]=0x17E3`, where the *first* occurrence showed
+`p_uda[idlepd]=0x007C` (the correct static relative value,
+`idleuda>>4`). `cp_nm`'s own code (`PROC.RTM`) does `mov ax,u_wrkseg !
+mov dx,p_uda[si] ! add dx,ax ! mov p_uda[si],dx` -- it *adds*
+`u_wrkseg` onto whatever is *currently* in `p_uda[si]` and writes the
+result back, every single time it runs. `0x007C + 0x1767`
+(`u_wrkseg` during idle's first, legitimate creation) `= 0x17E3`
+exactly. The second pass's `1Ah` probe reads this *already-converted*
+absolute value back out via `cp_gpd` (which runs *before* `cp_nm` on
+each pass) -- direct, arithmetic proof that a full second pass through
+idle's creation genuinely executed, independent of anything to do with
+`drl`/`p_link`. (It also means a *third* pass would silently corrupt
+`p_uda[idlepd]` into nonsense, doubly offset -- this bug has more than
+one way to do damage if it ever triggers more than twice.)
+
+**Found the trigger moment, and it's new and sharp**: immediately
+*before* the first of these two 0Eh markers, `INIT.SUP`'s `nrsp` loop
+makes its very first real `int mpmint` (`@`=`0090`, i.e.
+`f_createproc` for TMP itself -- confirmed via the already-existing
+`1Bh` probe showing `rspseg=0x1736`, TMP's own data segment per
+`build_mpmsys`'s own printed log). That call **fails with
+`not_implemented`**, and -- this is the sharp part -- it does so
+*without ever printing `SUPIF.SUP`'s `'Y'` marker or running `func()`'s
+own `fnchk` integrity loop*, both of which are unconditional, right at
+the top of `func()`, for *every* call that reaches it. The trace goes
+straight from `'@'0090` to `'Q'`/`'('` (`nonet`, deep inside `func1`)
+with no `'Y'` in between -- confirmed by searching the raw bytes for
+every `'Y'` in the whole surrounding region; the next one doesn't
+appear until the *following* (successful) `f_createproc` call, 150+
+bytes later. The `'('` dump itself shows `CX=0000`/module`=0000`
+where the live image's own static `sysent` table (checked directly:
+`sysent[144].ent_mod=0x02`, `.ent_func=0x0E`, correct) says it should
+read `000E`/module 2 (RTM) -- i.e. `func()`'s dispatch read *zeroed*
+table data, not the real data, for this one call only (the very next
+`f_createproc` call, moments later, reads the table correctly and
+succeeds normally).
+
+**Not yet explained**: how execution reaches `'Q'`/`nonet` without
+passing through `func()`'s own top (where `'Y'` lives), and how that
+connects to a static-return-address re-entry into `RTIF.RTM`'s
+`init:`'s `call proc_creat` moments later. Checked and ruled out as an
+explanation: `INIT`'s own `u_insys` (checked directly against the
+built image: `0`, clean, not a stale-GENSYS-leftover like `pul`/`mdul`/
+`qlr` before they were fixed) and idle actually running its own
+`f_dispatch` loop for real (RTM function 12 never appears anywhere in
+the whole trace's exhaustive `'S'`-marker sweep, which does catch
+every other RTM dispatch that happens in this window: `0`
+(`sysreset_entry`, also unexplained but harmless -- see #41),
+`4`/`5`/`9` (`makeq`/`openq`/`writeq`, BDOS's own queue setup, read
+and re-checked in full -- `QUE1.RTM`/`QUE2.RTM` don't touch `drl` or
+any PD list), `13`/`14` (terminate/creat_proc, both legitimate). Also
+re-confirmed via direct inspection of the built image that the real
+`drl`/`p_link`/`p_thread` static template data for idle/tick/init is
+completely clean, and that the real "QD pool" `getqdaddr` carves out
+of SYSDAT (and the `mxdiskqd` template it copies from, in
+`DATA.BDO`) both have their `q_dq`/`q_nq` fields explicitly zeroed,
+so neither can be quietly handing back `idlepd`'s address as a stale
+"process waiting on this queue."
+
+**Next step**: instrument right at this specific failure, since it's
+now by far the most concrete, reproducible anchor point found this
+session -- a single marker at `func()`'s own very first instruction
+(after the `fnchk` prologue, so it doesn't interfere with `'Y'`) would
+confirm whether `func()` is entered at all for the failing call, or
+whether something jumps in lower down. Given this session's track
+record, budget for the strong chance that even this minimal probe
+relocates the whole symptom (as happened with the `abort_spec_entry`
+probe above), and re-verify the known-good 2140-byte stopping point
+immediately after adding it, before trusting anything it reports.
 
 The RSP sources (`CLOCK.A86`, `ECHO.A86`, `TMP.A86`, `SUBMIT.A86`) and
 all 22 `.PLM` utilities in `src/utils/`/`src/toolchain/` compile and
@@ -2482,3 +2969,2015 @@ assemble cleanly end-to-end (`ECHO.A86` and every `.PLM` file — see
 assembler/compiler yourself, and the top-level `Makefile`/
 `.github/workflows/build.yml` for the automated, continuously-validated
 build of everything confirmed to work.
+
+## 44. Executed #43's recommended next step (a marker at `func()`'s
+*literal* first instruction, marker `16h`, before even the `fnchk`
+prologue, in `SUPIF.SUP`). It did exactly what #43 warned it might --
+relocated the whole symptom -- but this time the relocation was a huge
+step forward: instead of hanging, the system now runs for real, all the
+way into a live, legitimate steady-state loop. Confirmed via a real
+keystroke-injection test that no console/shell process is actually
+alive yet, and found fresh, sharper evidence for the "`func()` entered
+through its middle, not its top" theory from #43.
+
+**The `16h` probe's effect, confirmed by A/B test**: with it in place,
+a stable-wait capture that used to settle quickly now grows to 43MB+ in
+20 seconds and never stops on its own (had to be killed). Stashing just
+this one-line edit back out and rebuilding reproduces a *different*,
+*earlier* silent hang, stable at 1607 bytes (not #42/#43's 2140 --
+`PROC.RTM`'s own probes from earlier this session shift it too); popping
+the stash back and rebuilding reproduces the 43MB runaway again,
+confirming this one new probe -- not anything else -- is what pushes
+execution past the old hang point. Consistent with this whole session's
+running finding that this kernel's boot sequence is extremely sensitive
+to absolute code layout (any size change anywhere in the combined `cseg`
+retimes every subsequent label against the hardware timer interrupt).
+
+**What the 43MB steady-state loop actually is**: decoded it against
+`TICK.SUP` and `FLAG.RTM` directly, not just by eyeballing markers. It's
+`TICK.SUP`'s `notick:`/`tick:` loop running for real and correctly, over
+and over: `io_stopclk` (since nothing is on the delay list) followed by
+`mov cx,f_flagwait ! int mpmint` waiting on `flag_tick`. `FLAG.RTM`'s
+`flag_wait_entry` has two outcomes: if the flag is already
+`flag_on`, it consumes it and returns *immediately* (no real block); if
+`flag_off`, it actually parks the process (`ps_flagwait`) and calls
+`dsptch`. The repeating trace shows the immediate-return path every
+single time, which is exactly what you'd expect if the real hardware
+timer interrupt handler calls `flag_set_entry(flag_tick)` on every
+genuine timer tick -- i.e. this is architecturally correct MP/M
+behavior for a quiescent system with nothing on the delay list, not a
+busy-spin bug by itself. `TICK`'s own code never touches console I/O,
+queues, or anything RSP-related, so none of this loop says anything
+either way about whether a real shell is running.
+
+**Confirmed, via a live test, that nothing is actually listening on
+the console**: ran QEMU with a Unix-socket `chardev` backing the serial
+port (`-chardev socket,...,server=on,wait=off -serial chardev:com1`)
+instead of a write-only `file:` backend, connected with a plain Python
+socket, captured 20 seconds of boot output (43,182,033 bytes), then
+sent a single `\r` byte and captured 5 more seconds (11,412,586 bytes).
+The output pattern across the keystroke boundary is **byte-for-byte
+identical** -- the exact same `TICK` cycle, with no interruption, no new
+marker, nothing. Searched the whole 43MB capture for every marker that
+would fire if *any* console output, queue operation, or other
+RSP-level activity ever happened (`conout`'s `'['`/`']'`/`'{'`/`'}'`
+probes in `XIOS86Q.A86`, `QUE1.RTM`'s `'G'`-`'P'`/`'u'`-`'y'` probes):
+**zero occurrences of any of them, anywhere in the capture.** `TMP.A86`
+(confirmed by reading its own header comment: "The TMP determines the
+user interface to MPM" -- this *is* the shell/console driver, not a
+throwaway test program) never produces a single byte of output and
+never does anything queue-related in this entire window. Whatever is
+running, it is not the console-facing process.
+
+**Re-examined the *earlier* part of the very same trace -- the nrsp
+loop's real `f_createproc(TMP)` call that #43 showed failing with
+`not_implemented` -- now with three independent "top of `func()`"
+markers instead of one**: `'03h'`/`'#'` (both already in `user_entry`,
+unconditional, straight-line code with no branch between them and
+`call func`) and the brand-new `'16h'` (literally `func()`'s first
+instruction, before even the `fnchk` loop `'Y'` sits behind). For this
+exact call, **all three are missing** -- not just `'Y'` as in #43 --
+yet the trace still reaches `'Q'`/`'('` (`nonet`, deep inside `func1`)
+moments later, with register contents (`AX=1700`, `CX=0001`,
+`AL`-as-word`=0000` at the `'('` dump) that don't match sysent's real,
+confirmed-correct data for function 144 (`ent_mod=2`,`ent_func=0x0E`).
+This rules out every explanation that pins the skip on something
+*inside* `func()` (the `fnchk` loop itself, or the `'Y'` probe's own
+code) -- `'03h'`/`'#'` sit in `user_entry`, *before* `call func` is
+even reached, with no conditional branch between them and the call.
+The only way to skip three unconditional, straight-line markers like
+this while still reaching code deep inside the same function is for
+control to never pass through `call func`'s target address at all.
+
+**New working hypothesis for the mechanism**: `user_entry` does `cmp
+intflag,0 ! je noints` / `sti` *before* `call func` (`SUPIF.SUP` line
+~101-108), and `INIT.SUP` sets `intflag` to `0FFh` (so `sti` really
+does run, interrupts really are live) before ever reaching `nrsp`. A
+real hardware timer interrupt landing in that window would not, by
+itself, skip instructions in the interrupted code -- `iret` resumes
+exactly where it left off. But if `DSPTCH.RTM`'s timer-ISR path has a
+bug in how it saves/restores the *interrupted* process's own context
+(as opposed to the process it switches *to*), it could resume that
+`iret` at the wrong saved IP, which would look exactly like "skipped
+three straight-line probes, landed inside `func()`'s body." Not yet
+checked directly.
+
+**Next step**: instrument `DSPTCH.RTM`'s timer-interrupt entry/exit --
+specifically wherever it saves/restores the *interrupted* process's own
+IP/CS/SP (as distinct from the process being switched *to*) -- to check
+whether the saved return address for this one specific interrupted
+`user_entry` call is the correct one. Budget, as always this session,
+for the strong chance that adding even one more probe shifts the
+symptom yet again; re-verify behavior immediately after.
+
+## 45. Followed #44's next step into `DSPTCH.RTM`, found and ruled out
+a plausible-looking segment-mismatch theory with hard evidence (a true
+negative, not just abandoned), and then found a **third**, independent
+instance of #43/#44's "dispatch computes the right target and is about
+to call it, but the target's own first instruction never visibly
+executes" anomaly -- this time in `RTM.RTM`'s *local* function-table
+call, a completely different dispatch layer from `SUPIF.SUP`'s `func()`.
+
+**Important toolchain fact, confirmed directly, worth recording so it
+doesn't have to be re-derived**: `tools/asm86/assembler.py` tracks which
+segment (`CSEG`/`DSEG`/`ESEG`) each `DB`/`DW`/`RB`/`RW`-declared label
+was declared under, and a *bare* reference to an `ESEG` label gets an
+**automatic `ES:` prefix**, not `DS:`, with no override needed in
+source. `UDA.FMT` declares its whole field list (`u_ss`, `u_sp`,
+`u_in_int`, `u_ax`..`u_bp`, `u_dparam`, etc.) under `eseg` (line 15) --
+so every bare `u_*` reference anywhere in the kernel is really
+`es:[...]`, automatically, regardless of what `DS` currently holds.
+This invalidated an entire manual trace this round that assumed "bare
+= DS" (true for plain `DSEG` labels like `SYSDAT.FMT`'s `flags`/
+`module_table`, **not** true for `UDA.FMT` fields) -- flagging this
+explicitly for next time, since the same wrong assumption is an easy
+trap to fall into again.
+
+**The segment-mismatch theory and how it was tested, cleanly, to a
+negative result**: hypothesized that `DSPTCH.RTM`'s `dsptch` (saves
+`u_ss`/`u_sp`/`u_flag_sav`/`u_in_int` around line 107-122) and `switch`
+(restores them around line 385-413) might use *different* segments for
+the save vs. the restore, corrupting the dispatcher's "was this process
+interrupted or did it block voluntarily" distinction and its saved
+stack pointer. Added two probes (`17h` explicit `ds:u_in_int`, `18h`
+bare/auto-`ES:` `u_in_int`, both in `switch`, a few lines apart) to
+compare directly. Both read back `00FF` (`true`) identically, in the
+one `switch` call this trace captured (`rlr=0A20h`, decoded as idle's
+first-ever activation) -- `ES` and `DS` genuinely do agree at both
+points, because `fdisp`'s `do_dispatch` (interrupt path) and `switch`'s
+own `pop es` (line 405, direct-call path) both correctly re-point `ES`
+at the relevant process's real UDA before any `ESEG`-field access.
+**Theory debunked, cleanly, by direct measurement** -- no segment
+mismatch here. (Along the way, caught and fixed my own mistake in the
+first version of these two probes: `mov al,13`/`mov al,14` are *decimal*
+13/14 = `0Dh`/`0Eh` in this assembler -- bare numeric literals are
+decimal unless suffixed `h` -- colliding with `'\r'` and with
+`PROC.RTM`'s own existing `0Eh` marker. Fixed by using explicit `17h`/
+`18h`. Worth remembering for any future probe: always suffix hex
+literals with `h`, and grep for the *decimal* interpretation too, not
+just the hex one, when checking a candidate marker byte for collisions.)
+
+**The real new finding -- a third instance of the "call site computes
+the right target, callee's own top never visibly runs" anomaly**:
+while testing the above, found that the 1.3-1.5MB/6-second steady-state
+loop from #44 (`TICK.SUP`'s `notick`/`tick` cycle) decodes, every single
+iteration, as reaching `SUPIF.SUP`'s `goodmod` with the exactly correct
+register state for a dispatch to `flag_wait_entry` (RTM local function
+2): the `'('` dump shows `CX=0002` (`ch=0,cl=2`), the mtchk/`'S'` block
+dumps `CX=0002`/offset`=18B0`/segment`=1000` (confirmed via
+`--symbols` and direct disassembly of the built `RTM.cseg.bin`: `18B0`
+*is* `RTMIF.RTM`'s own `entry:` label, and its `function` table's 3rd
+`dw` entry, index `cx<<1=4`, *is* `flag_wait_entry`'s own address,
+`0A0Fh` -- both checked directly against the actual built binary, not
+just the source). `RTMIF.RTM`'s `entry:` is reached (`'V'` fires every
+time). Then **nothing** -- not even a brand-new probe (marker `0Fh`)
+placed as `flag_wait_entry`'s own literal first instruction (confirmed,
+again by direct disassembly of the built binary, correctly assembled
+at exactly `flag_wait_entry`'s labeled address) -- fires even once, in
+two full captures (1.4MB and 1.5MB). The very next thing printed after
+`'V'` is `rtm_ret`'s own `'W'`, with zero bytes between them. This is
+structurally the *same* symptom as #43/#44 (a dispatch chain computes
+every register correctly, right up to the call/callf instruction, and
+the callee's own unconditional first instruction still never visibly
+executes) but at a *different* dispatch layer: `RTMIF.RTM`'s *local*
+`function[]` table lookup (a plain near `call cs:function[si]`), not
+`SUPIF.SUP`'s `sysent`/`module_table` machinery. Finding the same shape
+of anomaly at a second, structurally unrelated dispatch site is a
+meaningful new data point: whatever's doing this isn't specific to one
+table or one piece of lookup logic, which argues against a data
+corruption theory (wrong table contents) and further in favor of a
+control-flow-level cause common to *any* `call`/`callf` executed in
+this general vicinity -- e.g. a timer-interrupt race that corrupts a
+return address generically, independent of which particular call it
+lands on.
+
+**Also newly noticed, likely benign but previously undocumented**:
+every single iteration of this loop's `mtchk` integrity check
+(`SUPIF.SUP` `goodmod`) prints `!0030!` -- i.e. `module_table`'s 7th
+slot (byte offset `0x30`, index 6) has a segment word that isn't
+`1000h`. With only `sup`/`rtm`/`mem`/`cio`/`bdos`/`xios` wired up and
+networking excluded (`module_map` was built as `3Fh` -- see
+`tools/build_mpmsys.py`), slot 6 is almost certainly the unused
+"network" module slot, so this is very likely harmless noise rather
+than a new bug, but it was never called out explicitly before and is
+now a known, constant, unexplained feature of every single dispatch's
+diagnostic output -- worth remembering so a future session doesn't
+mistake it for something new.
+
+**Not yet explained**: the actual mechanism causing a callee's own
+first instruction to be skipped while the caller's own dispatch
+reaches the call site with provably correct data, now confirmed at two
+independent dispatch layers. Given the segment-mismatch theory is
+cleanly ruled out, the leading remaining candidate is still a
+timer/interrupt race corrupting a return address or a call target in a
+way that isn't specific to any one table.
+
+**Next step**: given probes keep confirming "the call site is right,
+the callee's top is never reached," the next most informative probe is
+on the *caller's own* immediate post-call state -- e.g. instrument
+`rtm_ret` (right where `'W'` already sits) to dump `SS:SP` and compare
+against what they *should* be immediately after a normal near `call`
+return, to see whether the stack itself is consistent, or already
+textually dump the actual bytes at `[sp]` right before the `call
+cs:function[si]` executes (to see whether the pushed return address
+even matches the instruction immediately following the call, as it
+must for a `call` to behave normally) -- that would directly show
+whether the `call` instruction's own mechanics are intact here, rather
+than adding yet another probe on the far side of a call and hoping it
+lights up.
+
+## 46. Followed #45's own next step into `FLAG.RTM`, caught a real bug
+in my *own* probes (same class #45 already warned about), and -- once
+that was fixed and the symptom re-tested -- landed on what looks like
+the **furthest this system has ever gotten**: a real dispatch all the
+way through to the point of actually switching control to `TMP` (the
+real MP/M-86 shell process), for the first time this tree has ever
+exercised that path, with a new, sharp, reproducible lead on exactly
+what stops it one step short.
+
+**Self-correction first, so it doesn't get mistaken for a real kernel
+finding**: added probes at `flag_wait_entry`'s and `flag_valid`'s own
+absolute first instructions (markers `11h`/`13h`) to see whether
+`flag_valid` was ever actually returning to its caller (it looked like
+it wasn't -- #45 ended on exactly this question). Both fired every
+time, immediately adjacent, but the very next byte in the trace showed
+`DX=03F8h` where the real input (`flag_tick`=1) belonged -- at first
+this looked like a real corruption, until re-reading my own two new
+probes: `mov al,11h ! mov dx,03f8h ! out dx,al ! pop ax` saves/restores
+`AX` but never saved `DX` before clobbering it with the port address,
+and `DX` is this function's own live input (`DL` = flag number) --
+**the exact same bug class `SUPIF.SUP`'s historical `'03h'`/`'2Ah'`
+probes already hit once**, this time self-inflicted instead of
+inherited. Fixed by adding `push dx`/`pop dx` around both. After the
+fix, the *same* exact scenario (the `TICK.SUP` busy-loop from #44)
+could not be reproduced again -- the extra instruction bytes shifted
+the layout once more, and the run that followed never reached that
+loop at all. **Conclusion: #45's "`flag_valid` never returns to its
+caller" finding should be treated as unconfirmed, most likely caused
+entirely by this probe bug, not a real kernel issue** -- noted here so
+it isn't cited as established in a future session. Lesson reinforced
+yet again: *any* new probe using `mov dx,03f8h` must save/restore `DX`
+if `DX` is a live value at that point, no exceptions, even for a
+"just checking one bit" probe.
+
+**What happened instead, once the fix was in**: the very next rebuild
+produced a short (1666-byte), *perfectly deterministic* trace (byte-
+identical across two separate runs, and again -- shifted only by the
+expected few bytes from unrelated code-size changes -- after a third,
+unrelated probe was added later) that decodes much further than any
+previous capture this session:
+
+- `INIT.SUP`'s `nrsp` loop's `f_createproc(TMP)` call (`CX=0090`,
+  `DX=0010`=`rsp_pd`) this time dispatches with **completely correct**
+  `sysent` data (`(000E0002)` = RTM function 14/`creat_proc_entry`,
+  module 2) -- unlike #43/#44's capture of this *same* call, where the
+  table read came back zeroed. Yet another confirmation that the
+  earlier corruption there is purely a timing/layout artifact, not a
+  fixed, reproducible data problem.
+- `creat_proc_entry`/`proc_creat` create TMP's real PD (copied by
+  `getpdadr` into sysdat slot `si=0E40`) correctly, matching `rsp_pd`'s
+  own offset (`0x10`) and reading back the right `p_uda`/`p_mem`
+  values for a first-time creation.
+- `proc_creat`'s own `cp_uda`/thread-list tail (`pop dx ! jmp
+  proc_creat`, `PROC.RTM` line 164) then **recurses a second time**,
+  this time with `DX=2BAB`-ish (shifts slightly between rebuilds --
+  `29CB`/`29DB` for the resulting PD slot) -- the value it read out of
+  `p_link[si]` for TMP's freshly-copied PD right after the first pass.
+  Checked `build/kernel/TMP.dseg.bin` directly: the *static* template
+  has `p_link[rsp_pd]` (word at offset `0x10`) as a clean `0000` --
+  so this second pass is reading a value that cannot have come from
+  TMP's own on-disk template. Something writes into `p_link[si]` for
+  this freshly-allocated PD slot between `getpdadr`'s copy and
+  `proc_creat`'s very next instruction reading it back (`mov dx,
+  p_link[si]`, `PROC.RTM` line 44 -- nothing but one already-verified-
+  safe probe sits in between).
+- Both passes (`si=0E40` and the second, bogus `si=29CB`/`29DB` slot)
+  end up correctly inserted onto `drl` and drained onto `rlr` by the
+  scheduler (`drltorlr`'s drain this time pulls *four* entries:
+  `29CB`/`0E40`/`0A20`(idle)/`09F0`(tick) -- confirmed via the existing
+  raw-`0x0C` marker). `switch` then picks the bogus second slot
+  (`rlr=29CB`/`29DB`) to run **first**, and -- since it's a freshly
+  created process (`u_in_int=TRUE`, confirmed again via #45's own
+  `17h`/`18h` probes, which still agree with each other, consistent
+  with #45's negative result standing) -- takes the `int_disp_exit`/
+  `iret` path to actually start running it.
+- Added a brand-new probe (marker `27h`, `src/rsp/TMP.A86`) at `tmp:`,
+  `TMP`'s own real program-entry label (as opposed to `mpm:`, its
+  internal `int mpmint!ret` trampoline) -- **it never fires**, in three
+  separate rebuilds. The trace goes completely and permanently silent
+  immediately after `int_disp_exit`'s own `']'` marker (which does
+  fire, dumping `DS=sysdat` right before the final `iret`) -- no
+  further bytes at all for the remaining ~5-6 seconds of every capture.
+
+**So the system now gets further than ever recorded before**: past
+loader, past kernel init, past `nrsp`'s `TMP`-creation syscall (with
+correct dispatch data this time), through a real scheduler pass, and
+all the way to actually `iret`-ing into what the dispatcher believes is
+a legitimate, freshly-created, ready-to-run process -- the first time
+any trace in this project's history has reached that exact point. It
+just turns out to be the *wrong* process: a second, spurious PD that
+was never really part of TMP's design, created because `p_link` for
+TMP's real PD read back nonzero when the static template says it
+should be zero.
+
+**Working hypothesis, now the strongest unifying one across multiple
+sections of this doc**: this is structurally the *same* mechanism as
+#41/#43's "mystery second `proc_creat(idle)` call" -- in both cases, a
+PD that a static template (confirmed directly, byte-for-byte, to be
+clean/zeroed) says should terminate a chain instead reads back a
+nonzero `p_link` moments after being freshly copied into its sysdat
+table slot, triggering an unintended second creation pass. Two
+independent instances of "a freshly-copied PD's `p_link` doesn't match
+its own known-clean template" is a strong signal this is one bug, not
+two, and that it's specifically about freshly-allocated PD slots
+racing against *something else* that also touches `p_link` around the
+same moment (the obvious candidate, given this whole session's
+findings, is the real hardware timer interrupt's own `drltorlr`/
+`insert_process` activity, which *also* reads and rewrites `p_link`
+for whatever's currently on `drl`, and could plausibly collide with a
+PD slot `pul` just handed out if the free-list and the dispatch-ready
+list ever briefly overlap).
+
+**Not yet explained**: the exact write that corrupts `p_link[si]`
+between `getpdadr`'s copy and `proc_creat`'s very next read of it (only
+one already-audited, stack-balanced probe sits in that gap -- the
+corruption is not coming from debug instrumentation this time), and
+why the dispatcher ends up running the bogus second PD *before* TMP's
+real one (`si=0E40`) even though `0E40` should have been inserted onto
+`drl` first and `insert_process` is priority-ordered, not just FIFO --
+worth checking both PDs' `p_prior` values directly.
+
+**Next step**: re-read `getpdadr` (`PROC.RTM`) and `freepd`/`pul`'s own
+free-list bookkeeping once more with this specific lens -- whether the
+PD slot `pul` hands out for `si=0E40` could already be live on *another*
+list (most likely `drl`, given this session's running theory about the
+timer ISR) at the exact moment it's handed out, so that the real
+hardware timer interrupt's own `insert_process`/`drltorlr` work writes
+into the same `p_link[si]` slot moments after `getpdadr`'s `rep movsw`
+copy finishes but before `proc_creat`'s own very next instruction reads
+it back. A direct, decisive test: dump `pul`'s own linked-list contents
+(walk it fully) immediately before `getpdadr` hands out `si=0E40`, to
+see whether that slot is actually, legitimately free at that moment.
+
+## 47. Followed #46's own lead into `getpdadr` directly, caught and
+fixed a second instance of my own DX-clobber probe bug (same class as
+#46's own `11h`/`13h` fix, this time self-inflicted on a brand-new
+probe before it ever got a chance to mislead anyone), and then got a
+**direct, non-inferred confirmation** of the `p_link` corruption --
+while also exhausting every plausible *logic* explanation for it,
+which strengthens the case that this is a genuine interrupt race
+rather than a bug reachable by reading the code.
+
+**Another self-caught probe bug, fixed before it cost a detour this
+time**: added marker `2Dh` right after `PROC.RTM`'s `mov dx,p_link[si]`
+(`cp_gpd`) to directly dump the value instead of inferring it from the
+later recursive `0Eh`/`1Fh` markers. First version saved `DX` into `BX`
+to survive the `mov dx,03f8h` port-address overwrite, dumped it, but
+never copied it back from `BX` into `DX` before falling through into
+the real `push dx` two lines later -- so the real code immediately
+pushed `03F8h` (the leftover port address) instead of the real value,
+and the whole recursion chain used `03F8h`-derived garbage for one
+rebuild (visible as a 76KB/6-second runaway with `\x1f03F8` all over
+it). Caught by comparing the probe's own freshly-dumped value against
+what the very next `0Eh`/`1Fh` pair showed and finding `03F8h` instead
+of a sane-looking flag/PD value. Fixed with an explicit `mov dx,bx`
+before falling through. **Lesson reinforced a second time, now
+numbered precisely because it kept recurring**: when a probe's whole
+point is "peek at a live register via the serial port without
+disturbing it," the one line that's easiest to forget is restoring
+that register's *original* value (not just the scratch copy) before
+the probe's final instruction -- a `pop`/`mov` back into the real
+register, not just into the register the value was borrowed into.
+
+**Direct confirmation, with the fix in place**: marker `2Dh` now
+reads `-0E40  2BEF` -- i.e. `p_link[0E40]` (TMP's freshly-copied PD
+slot) really is `2BEFh` *immediately* after `mov dx,p_link[si]` itself,
+confirmed by direct read, not inference, and self-consistent with the
+following `0Eh`/`1Fh` recursion pair showing the identical `2BEF`.
+This is now about as solid as a serial-trace finding can be: not a
+probe artifact, not mis-attributed to the wrong call.
+
+**Then tried to catch the actual corruption in the act, and came up
+empty-handed in the best possible way**: added marker `2Fh` right at
+the very top of `getpdadr`'s `gpd_have` (before `mov ds,u_wrkseg` and
+the `rep movsw` that's supposed to write a clean `0` into this same
+`p_link[0E40]`), dumping `DI` (the slot about to be overwritten),
+`DX` (the source offset within `u_wrkseg`), and `u_wrkseg` itself. All
+three read back exactly as they should: `DI=0E40`, `DX=0010` (`rsp_pd`),
+`u_wrkseg=1777`. Checked `build/kernel/TMP.dseg.bin` directly (again):
+its own byte 0x10-0x11 (`p_link[rsp_pd]`) is a clean `0000`. So every
+single input to the copy that's supposed to clear `p_link[0E40]` is
+individually correct, confirmed by direct measurement, immediately
+before the copy -- and `p_link[0E40]` still doesn't end up `0`
+afterward. Re-read `getpdadr`'s *entire* `gpd_bad`/`gpd_have` body and
+`cp_uda`'s full push/pop discipline instruction-by-instruction (every
+register, every stack slot, from `cp_gpd`'s own `push dx ! push si`
+all the way to the final `pop dx ! jmp proc_creat`) looking for an
+unbalanced push/pop or a wrong segment on *any* instruction that
+touches `p_link[si]` for this slot -- found none. The `cli`/`popf`
+bracket around `gpd_bad`'s whole body (including the `rep movsw`)
+looks intact and correctly scoped.
+
+**Also, separately, directly confirmed `u_wrkseg`'s own very first
+capture is correct** (new marker `3Bh`, `SUPIF.SUP`, literally
+`user_entry`'s first real instruction, before `cld!mov di,ds` even
+runs): `DS` reads back `1747`, matching that same run's `rspseg`
+(`TMP`'s own data segment, confirmed via the existing `1Bh` probe) --
+not `sysdat`. So the one other theory worth naming and ruling out --
+that `u_wrkseg` is *always* wrong, capturing `sysdat` instead of the
+caller's real segment -- doesn't hold up either, at least not at this
+earliest possible checkpoint. (This same rebuild, true to the whole
+session's running theme, landed on a completely different downstream
+symptom -- back to #43/#44's `not_implemented`/`func()`-entered-via-
+its-middle anomaly instead of ever reaching `nrsp`'s `TMP` creation at
+all, reconfirming yet again how violently one more instruction
+anywhere in the combined image can retime everything downstream of
+it.)
+
+**Where this leaves the investigation**: every individual piece of
+`getpdadr`/`cp_uda`'s logic, traced by hand all the way through, is
+provably correct in isolation, and every input to the one copy that's
+supposed to zero `p_link[0E40]` is independently confirmed correct
+immediately beforehand -- yet the field still reads back nonzero
+right after. Static-logic explanations are now thoroughly exhausted
+for this specific step; what's left standing is a *dynamic* one: a
+hardware timer interrupt landing somewhere inside this nominally
+`cli`-protected window and doing the actual damage, either by writing
+into `p_link[0E40]` directly (if the real ready-list `drl` happens to
+briefly alias this exact slot during the same window, continuing
+#46's own hypothesis) or by corrupting the `rep movsw`'s own operation
+mid-flight in some way that doesn't show up in any register dumped
+before or after it.
+
+**Next step**: the one thing not yet directly tested is whether the
+`cli`/`pushf...popf` bracket around `gpd_bad` is *actually* keeping
+`IF` clear for the bracket's full duration at runtime, as opposed to
+being correct source that nonetheless gets undermined by something
+else (e.g. a nested call that does its own `sti`, or an `iret` deep in
+a probe's own call chain inadvertently re-enabling interrupts). A
+direct test: sample the flags register (`pushf`, peek the saved word)
+immediately before the `rep movsw` and again immediately after, and
+confirm `IF` (bit 9) reads `0` at both points, bracketing the exact
+instruction most under suspicion instead of still-correct-looking
+code around it.
+
+## 48. Followed #47's own next step (sample FLAGS around the `rep
+movsw`), never got a clean read on it because the layout shifted yet
+again, but tripped over something more important along the way: a
+**third and fourth** instance of this session's own recurring DX-
+clobber probe bug -- this time in two *old* probes (`16h`, two rounds
+old, and `3Bh`, one round old) that had been silently live through
+every single capture in #46 and #47. This likely retracts #46/#47's
+specific "`DX=03F8h` at `flag_valid`"/"`flag_valid` never returns"
+finding back to "probably just this," though the evidence for that
+retraction isn't as clean as it should be -- see below.
+
+**The new probes (`7Fh`/`81h`, sampling FLAGS before/after `rep
+movsw`) never got to fire**: the next two rebuilds landed back in
+#43/#44's `not_implemented`/`func()`-entered-via-its-middle territory
+instead of ever reaching `getpdadr`'s copy, and a third rebuild (after
+fixing the bug described below) landed there too. Still unresolved;
+not contradicted either.
+
+**Re-discovered the `DX=03F8h` symptom from #46/#47 one more time**
+(a `TICK.SUP` flag-wait loop, same as before, with `flag_valid` taking
+the `e_ill_flag` branch every iteration) and, instead of adding yet
+another probe to chase it, went back and actually re-read every probe
+added so far this session for the one specific defect that kept
+recurring (DX not saved/restored around `mov dx,03f8h`). Found two
+that had been missed:
+
+- `SUPIF.SUP` line 130, marker `16h` -- `func()`'s own literal first
+  instruction, added at the very start of this multi-turn session (the
+  original #43/#44 investigation), **two full rounds before** the
+  `11h`/`13h`/`2Dh`/`2Fh` fixes in #46/#47. `func()`'s own documented
+  input is `DX = arg`; this probe never saved it.
+- `SUPIF.SUP` line 65, marker `3Bh` -- `user_entry`'s own literal
+  first real instruction, added in #47 to chase `u_wrkseg`. Same
+  defect, same documented live input (`"DX -> function parameter"`,
+  spelled out in `user_entry`'s own header comment, the *exact* same
+  one the historical `'03h'`/`'2Ah'` bug already quotes).
+
+Both fixed the same way as every previous instance: save the real
+`DX` into a register untouched by the rest of the probe, dump it, and
+explicitly move it back into `DX` before falling through -- not just
+into the scratch register, into `DX` itself.
+
+**Why this almost certainly explains #46/#47's finding, but the
+confirmation is messier than it should be**: marker `16h` has been
+live, broken, since section #43 -- present in *every single trace*
+captured in #44 through #47, including the ones that showed
+`creat_proc_entry`/`proc_creat` correctly receiving `DX=0010` (the
+`1Eh`/`1Fh` markers, multiple captures). If `16h` unconditionally
+destroyed `DX` on every call, `f_createproc(TMP)`'s own `DX` should
+have read wrong just as often as `f_flagwait`'s did -- it didn't, in
+every capture checked. So `16h` (and probably `3Bh`, added later) does
+not corrupt `DX` *unconditionally* the way the first-version `11h`/
+`13h`/`2Dh`/`2Fh` probes clearly did (confirmed instantly, every time,
+in #46/#47) -- something about exactly which call, or exactly how the
+timer-interrupt race lands relative to these two probes' extra
+instructions, determines whether the corruption actually reaches the
+function that needed `DX`. Both are fixed now regardless, since
+leaving a function's own documented live input unsaved around a port
+write is wrong on its own merits, independent of whether it's *the*
+explanation here. But this means **the retraction of #46/#47's
+finding is not as clean as the retraction in #46 itself was** (that
+one, `11h`/`13h`, really did reproduce the exact symptom and then
+really did make it disappear on the very next direct test). This one
+is "the obvious, confirmed-broken code was sitting right there for two
+rounds" rather than "fixed it and watched the symptom vanish
+cleanly" -- worth remembering as a *weaker* form of self-correction
+than #46's.
+
+**Taking stock**: by this point there are 17 TEMP DEBUG PROBE markers
+added just this session (`08h,0Fh,11h,13h,14h,15h,16h,17h,18h,
+1Eh(pre-existing)...,2Dh,2Fh,27h,3Bh,7Fh,81h`, plus the earlier-session
+`@`/`03h`/`2Ah` fixes), each one adding real instruction bytes to the
+combined image, and this whole session's own running finding is that
+*any* instruction-count change retimes the real, independent interrupt
+race this investigation is actually trying to find. At this density,
+every single new probe is now close to guaranteed to relocate the
+symptom before it can be cleanly observed twice. Worth considering,
+before adding more: whether some of the now-answered probes (`@`'s
+original CX-only question, `03h`/`2Ah`'s ES/DS questions, `17h`/`18h`'s
+now-settled ES-vs-DS question) could be removed to free up some of
+that margin rather than only ever adding more.
+
+**Next step, unchanged from #47**: still want a clean FLAGS sample
+around `getpdadr`'s `rep movsw` (`7Fh`/`81h`, now in place and DX-safe
+by construction since they never use `DX` as anything but the port
+address, which nothing after `mov si,dx` still needs) -- just need a
+rebuild that actually reaches it. Given the note above, consider
+reverting one or two fully-answered old probes first to buy back some
+margin before adding anything new.
+
+## 49. Acted on #48's own "buy back margin" recommendation -- found
+something new instead of the thing being chased
+
+Removed the two fully-answered, dx-safe probes `03h` (`SUPIF.SUP`,
+`user_entry`'s ES/`u_wrkseg` check, answered since #44) and `2Ah`
+(`SUPIF.SUP`, `mpmif`'s ES/DS-on-entry check, answered since #45).
+Rebuilt, captured a trace (`/tmp/mpm_trace21.txt`) -- and hit something
+new: a clean, byte-for-byte **reproducible hang** (confirmed via two
+runs, 20s and 40s timeouts, identical output both times) right at
+marker `3Bh` (`user_entry`'s own first instruction), for what the
+trace shows is the *first ever `int mpmint` syscall this session has
+captured* -- `f_createproc(TMP)` (`CX=0090h,DX=0010h`), dispatched from
+`INIT.SUP`'s `nrsp` loop. Every earlier PD creation this session
+(idle, tick) went through `proc_creat` via a **direct call**, bypassing
+`user_entry`/`int mpmint` entirely -- so this is genuinely new
+territory, not a re-run of an old path.
+
+**Added two new, narrowly-targeted, dx-safe probes** right after the
+hang point, reusing the two just-freed marker bytes (`03h`, `2Ah`) --
+not for the same questions as before, but to directly inspect
+`user_entry`'s own stack-switch logic (the exact code right after
+marker `3Bh`):
+
+- `03h`, right after `mov es,p_uda[bx]` (`SUPIF.SUP` line 92-93) --
+  dumps `BX` (`=rlr`) and the resulting `ES` (`=p_uda[rlr]`).
+- `2Ah`, at `uecont:` (line 101), right after the conditional
+  stack-switch branch -- dumps `SS` and `ES`, to see whether the
+  switch (`mov ss,es-derived-bp ! mov sp,ulen`) landed on a sane
+  segment.
+
+Rebuilt again (`/tmp/mpm_trace22.txt`). **The hang is gone** -- these
+two probes' extra instruction bytes retimed things enough that
+`f_createproc(TMP)` now runs to completion instead of stopping dead.
+`03h` read back `BX=09C0` (matches `rlr`'s documented cold-boot value,
+`initpd`), `ES=17E4`; `2Ah` read back `SS=ES=17E4` both times the
+switch branch was taken -- so the stack switch itself lands on a sane
+segment every time it was observed. **This particular hang is not
+explained yet** (the two probes that made it go away don't, by
+themselves, show what was wrong) -- it's simply gone, same as every
+other "fixed by retiming" symptom this whole session.
+
+**What showed up instead, once the call could finally run to
+completion, is a much more precise version of #43/#44's long-standing
+"`func()` entered via its middle" finding.** Walking the new trace
+marker-by-marker against `build_mpmsys.py`'s own printed module base
+table (`RTM code @ 0x17aa ... entry=0x133` &rarr; RTM's `entry:` =
+`0x18DD`; `XIOS code @ 0x6aef ... entry=0x13b` &rarr; XIOS's `entry:` =
+`0x6C2A` -- both exact, not approximate, confirmed by direct
+arithmetic against the build log):
+
+1. For this call, `func()`'s own top-of-function markers (`16h`) and
+   `nonet`'s own `Y`/`Q`/`(` markers -- which *always* fire first for
+   every normal dispatch, including every other call in this same
+   trace -- **never fire**. Execution is not entering `func()` at its
+   top for this call.
+2. `gofar`'s own markers (`Z`/`d`/`R`/`!`/`S`) fire directly, and
+   `goodmod`'s `callf dword ptr module_table[si]` correctly reaches
+   RTM's `entry:` trampoline (`S` dumps `18DD:1000` immediately before
+   `V` -- RTMIF.RTM's own, RTM-exclusive marker -- fires). So far this
+   matches a legitimate dispatch, just missing its own front door.
+3. RTM's `entry:` does its own internal near-dispatch (`mov
+   ch,0!shl cx,1!mov si,cx!call cs:function[si]`) -- which should land
+   on `creat_proc_entry` (table index 14, `SYSENT.RTM`, marked `1Eh`).
+   **`1Eh` never fires anywhere in this trace.** Instead, execution
+   winds up straight back in `SUPIF.SUP`'s `gofar`/`goodmod` **a
+   second time** (`Z`/`d`/`R`/`!`/`S` fire again, right after `V`, with
+   no `Y`/`Q`/`(` in between either) -- and this second `goodmod` call
+   resolves to **module 6 (`xios`)**, landing on XIOS's `entry:`
+   trampoline at `6C2A:1000` (confirmed: the `S` marker's own
+   `module_table[si]`/`[si+2]` dump reads `6C2A:1000` directly out of
+   memory, and `0x6AEF (XIOS base) + 0x13B (XIOS entry local offset) =
+   0x6C2A` exactly).
+4. Immediately after that, `proc_creat` runs again (`0Eh` return
+   address `186E` -- the same single call site as every other
+   `proc_creat` invocation this trace, nothing new there) with
+   `DX=09F0` -- **the same absolute address as idle's own,
+   already-created PD** -- and re-runs `cp_uda`/`cp_nm` on it, which
+   re-triggers the entire init-time module-init sequence a second
+   time, including the `XIOS86Q` "target (serial console, floppy
+   disk)" prompt text appearing **twice**, byte-for-byte identical,
+   in the one trace. (Earlier in this same session a very similar
+   repeat had been provisionally misread as a full MPMLDR reboot --
+   it isn't: `MPMLDR`'s own loader banner, `Code Paragraph
+   Address`/etc., appears only once at the very start of
+   `/tmp/mpm_trace22.txt`. Only the inner XIOS console-select prompt
+   repeats.)
+
+**So, stated precisely rather than approximately for the first time**:
+`f_createproc(TMP)`'s dispatch chain reaches RTM's `entry:` correctly,
+then (skipping RTM's own `creat_proc_entry` handler entirely) ends up
+back inside `SUPIF.SUP`'s generic cross-module dispatcher a second
+time, which this time resolves the target module to XIOS instead of
+RTM, and from there ends up re-running `proc_creat` against idle's own
+PD address instead of TMP's. This is almost certainly the same
+underlying defect as #43/#44's "`func()` entered via its middle" and
+#46/#47's "bogus second PD" findings, just caught with much sharper
+instrumentation this time -- but *why* RTM's own internal `call
+cs:function[si]` never reaches `creat_proc_entry`, and why the stray
+second dispatch resolves to module 6 specifically, is still open.
+
+**Also still open, smaller**: a short, unexplained `0010` appears in
+the raw byte stream exactly where `func()`'s own `#`/`16h` CX-dump
+probes should be (between marker `2Ah`'s output and the first `#`) --
+consistent with CX genuinely holding `0010h` (`DX`'s own value) at
+that point rather than `0090h` (the real function code), which would
+itself help explain why `func()`'s top/`nonet` never fire (a bad `CX`
+would misdirect `fnchk` long before `nonet` prints anything) -- but
+this hasn't been directly confirmed with its own probe yet.
+
+**Next step**: add two narrow probes to pin down the actual control
+flow precisely -- one right at `gofar`'s own top (`SUPIF.SUP` line
+162) dumping `CX`/`AX` on *every* entry (to catch the second,
+unexplained visit and see exactly what it's carrying), and one right
+at RTM's `entry:` dispatch (`RTMIF.RTM` line 108-109) dumping `CX`/`SI`
+right before `call cs:function[si]` (to see whether RTM's own table
+lookup is already wrong at that point, or whether `creat_proc_entry`
+itself does something that bounces back out). Given this round's own
+lesson (two cheap, unrelated probes completely changed which bug
+surfaced), expect another retiming on the next rebuild regardless.
+
+## 50. Added #49's own next-step probes (`09h`/`0Bh` at `gofar`'s top,
+`10h` at RTM's `entry:` dispatch) -- caught `gofar` red-handed with a
+bogus register pair
+
+As predicted, the rebuild (`/tmp/mpm_trace23.txt`) retimed things yet
+again: the hang from #49 is gone, replaced by the *original*
+`not_implemented` symptom from #43/#44 -- but this time `09h`/`0Bh`
+were sitting right at `gofar`'s own top to catch it directly, instead
+of having to infer it.
+
+For the call immediately following marker `3Bh` (i.e. the one and
+only `int mpmint` syscall in this trace, still `f_createproc(TMP)`,
+`CX=0090h,DX=0010h` at `user_entry`'s absolute top) -- `gofar`'s own
+markers read:
+
+```
+09:CX=0086  0B:AX=000B  (so AL=0Bh)  Z(cl after dec)=000A
+d(DS)=177C  (module_map)=003F  R(shifted bit)=0000  -> U (not_implemented)
+```
+
+**`AL=0Bh` is module 11 -- there is no module 11** (`sup..net` only
+go 1-7, `MODFUNC.DEF`). `0Bh` shifted into `module_map` (`003F`,
+correctly showing modules 1-6 present) by `CL=0Ah` necessarily lands
+on 0 -- `not_implemented` isn't a secondary symptom here, it's the
+*correct, honest* response to a module number that was never valid in
+the first place.
+
+**And `CX=0086h` at `gofar`'s top is not `f_createproc`'s own function
+code (`0090h`) at all -- it's the exact `CX` value from one of
+*idle's own* internal calls earlier in this same trace** (the first of
+the three `16:0086 / 0087 / 008B` calls idle's own init code made,
+confirmed identical down to all four hex digits). This is the
+clearest, most literal confirmation yet that this whole symptom family
+(`#43` onward) is a **stale/leftover-register problem, not a
+dispatch-logic problem**: `gofar` is running off a `CX`/`AX` pair left
+over from a previous, unrelated call, not off `f_createproc(TMP)`'s
+own `CX=0090h`. Consistent with #49's still-open "`0010` where `func`'s
+own CX-dump should be" oddity -- different stale value this time
+(`0086h` instead of `0010h`), same shape of bug: whatever this call
+path is, it reaches `gofar` without ever loading `CX`/`AX` itself.
+
+**Downstream of the `not_implemented` return (`bx=0ffffh`, `ret`)**,
+control does *not* make it back to `INIT.SUP`'s `nrsp` loop at all --
+the trace instead shows `INIT.SUP`'s own early-boot markers (`2`/`3`,
+printed in pairs) firing again, immediately followed by **another
+full `idle`-PD creation round at the same address (`09F0`) and via a
+*different* `proc_creat` return address (`1898h`, not the `186Eh` used
+by every direct, intentional call this session)** -- i.e. whatever
+unwound from the bogus `gofar` call landed back somewhere in `INIT`'s
+own early sequence, not at the real caller. This matches (and sharpens)
+#46/#47's "bogus second PD" observation yet again, from a different
+angle.
+
+**Open**: `10h` (RTM's own `entry:` dispatch, dumping `SI` right before
+`call cs:function[si]`) never fired, and neither did `1Eh`
+(`creat_proc_entry`) -- meaning for *this* trace, control never even
+reached RTM's `entry:` on the way to `gofar`'s bogus visit; the stale
+`CX=0086h`/`AX=000Bh` pair must be arriving some other way. Where
+exactly `gofar` gets called from on this particular path (i.e. what's
+on the stack right above it, or equivalently -- given this was reached
+without `nonet`'s own `Y`/`Q`/`(` -- which `jmp`/`call` actually targets
+`gofar` directly) is the next concrete thing to pin down. A probe
+dumping the near-call return address right at `gofar`'s own top (same
+`[bp+2]`-off-the-stack trick `proc_creat`'s `0Eh` marker already uses)
+would answer this directly without needing to guess at the caller.
+
+## 51. Followed #50's own next step into `func1` -- partial correction,
+plus a sharper read on the recurring `0010` artifact
+
+Added marker `17h` at `func1`'s own absolute top (`SUPIF.SUP`), dumping
+`CH` (the module# `func1` is about to test) and the real top-of-stack
+word underneath the probe's own two pushes (same idea as `proc_creat`'s
+`0Eh` caller-address trick, just without a `bp` frame to lean on).
+First version had a bug of its own -- `mov ax,ch` isn't a real 8086
+encoding (can't move an 8-bit register into a 16-bit one); fixed to
+`sub ax,ax!mov al,ch` and rebuilt before trusting any of its output.
+
+**Correction to #50**: with the bug fixed, `func1`'s own `CH` reads
+back as `0002` (module `rtm` -- a perfectly valid module number) for
+the call immediately after marker `3Bh`, **not** the `0Bh`/module-11
+value #50 reported. #50's own value came from the broken `mov ax,ch`
+probe and should not have been trusted -- retracting that specific
+number, though not the broader finding (`gofar` still reads `AL=0Bh`
+immediately afterward, confirmed again this trace, byte-for-byte
+unchanged: `09:CX=0086 0B:AX=000B Z=000A ... R=0000 -> U`). So
+`func1` itself starts out looking completely sane (`CH=2`, a real
+module), and the corruption to `AL=0Bh` happens strictly *between*
+`func1`'s own `mov al,ch` and `gofar`'s top -- i.e. in the two-instruction
+gap `mov al,ch ! mov ch,0 ! jmps inmod ! (inmod:) cmp al,sup ! jne gofar`.
+Nothing in that gap should be able to change `AL` from `2` to `0Bh` on
+its own.
+
+**The stack-top half of the same probe reads `0014`** -- too small to
+be a plausible return address for either of `func1`'s two real
+callers (`func()`'s own fallthrough, or `entry:`'s `call func1 ! mov
+ax,bx ! retf` at line ~225, both deep enough into `SUPIF.SUP`'s module
+to have a much larger offset than `0014h`). Not yet explained.
+
+**Sharper read on the recurring `0010` artifact** (first seen in #49,
+still present in every trace since): it sits exactly where
+`user_entry`'s own `#` probe (dumping `CX` right before `mov ch,0!call
+func`) ought to print `CX` -- but the marker byte itself (`#`, `0x23`)
+is *also* missing every time, which a register corruption alone can't
+explain (the `out dx,al` that writes the marker character doesn't
+depend on `CX` at all). That rules out "probe fired, just read a
+corrupted `CX`" and points instead at **output interleaving from the
+real hardware timer interrupt** -- interrupts are enabled a few
+instructions earlier (`noints: ... sti`), and if the timer fires in
+that exact window, `DSPTCH.RTM`/`TICK.SUP`'s own handler could run and
+write its own bytes to the same serial port mid-stream, without
+needing to corrupt anything in `user_entry`'s own registers at all.
+This is a materially different (and more mundane) explanation than
+"`CX` is corrupted" -- worth testing directly next by temporarily
+masking the timer IRQ around this exact window (or by giving the
+interrupt handler's own likely culprits -- `DSPTCH.RTM`'s `switch`,
+`FLAG.RTM`'s `flag_wait_entry` -- one more marker each) rather than by
+continuing to treat `0010` as evidence about `user_entry`'s own
+registers.
+
+**Taking stock again**: this round went three rebuilds deep chasing
+one register value and ended up *retracting* its own prior
+conclusion partway through (the `0Bh`→module-11 read), while the
+actual, load-bearing mystery (`AL` changing between two adjacent
+instructions with nothing in between that could do it, in source) is
+still open. Given how reliably every probe this session retimes the
+underlying race, the next session should treat "single-register,
+single-visit" probes like `09h`/`0Bh`/`17h` as already answered (the
+gap exists, is real, and is too narrow in source for the current
+theories to explain) and shift toward testing the *interrupt
+interleaving* theory specifically, since it's the first new
+explanation this session that doesn't depend on another coincidental
+retiming to confirm.
+
+## 52. Tested #51's interrupt-interleaving theory directly -- retracted
+it -- then switched tools entirely (GDB over QEMU's gdbstub) and got
+the first non-serial, non-ambiguous confirmation of this whole bug
+family
+
+**#51's theory, tested and retracted.** Added one more narrow, DX-safe
+probe (`18h`, at the real, literal last instruction of `user_entry`
+before `mov ch,0!call func` -- as close to the "ghost value" window as
+an instruction can get) and checked the already-existing, pre-built-in
+timer-interrupt marker (`XIOS86Q.A86`'s `tickint:`, marker `"`
+(`0x22`), which fires on *every single* real IRQ0 tick, no exceptions)
+across two separate rebuilds. **Zero timer interrupts fired in either
+trace, start to finish.** That rules out #51's interrupt-interleaving
+theory outright -- there is no interrupt activity anywhere near this
+window to interleave with. Retracted.
+
+With that ruled out, and three rounds of single-register serial
+probes each producing a plausible-looking but mutually-inconsistent
+story (#49's "stale CX from an earlier call", #50's "bogus module
+11", #51's own retraction of #50's specific number), serial-trace
+decoding had clearly hit its limit for this particular question.
+Switched tools: QEMU was already running with `-serial file:...`
+every time, but nothing had used its GDB stub (`-s -S`, port 1234) at
+all this session for live inspection, despite plenty of old `/tmp/gdb*.py`
+scripts from earlier sessions proving the workflow exists and works.
+
+**Set a real breakpoint at `func`'s absolute address** (`0x104CB` --
+computed from `asm86.py --symbols` on `SUP.A86`, cross-checked against
+`build_mpmsys.py`'s own module-base printout, both giving `func` at
+local offset `0x4CB` with SUP's `module_base=0`) and let it run,
+dumping `CS:IP`/`AX`/`BX`/`CX`/`DX`/stack on every hit. Four hits came
+back, completely unambiguous, no serial-byte guessing involved:
+
+```
+hit1: CX=0086 DX=0f92  stack=[0743,1000,1780]
+hit2: CX=0087 DX=0fae  (AX/BX differ too: ax=ff00,bx=ffff)
+hit3: CX=008b DX=0fae  (same ax/bx as hit2)
+hit4: CX=0086 DX=0f92  stack=[0743,1000,1780]  -- byte-for-byte IDENTICAL to hit1
+```
+
+**Hit1 and hit4 are not just "the same function code" -- every single
+register and all three stack words captured are bit-for-bit identical
+between them**, including the return address (`0743h`, the same call
+site both times). This is the cleanest possible confirmation of
+#49/#50's "the whole idle/tick-creation-and-exercise sequence runs
+twice" finding -- not inferred from a confusing serial byte stream
+this time, but read directly out of the CPU's own registers by an
+independent tool. It settles, for good, that this is a genuine
+**re-execution of the identical call**, not a corrupted-register
+illusion.
+
+**Also surfaced a tooling trap worth recording so the next round
+doesn't lose time to it**: tried to catch the *call site* doing this
+(RTM's own `init` label, `0x11851`) the same way, and `continue`
+reported **49 consecutive hits at that address with completely
+identical register state every time** -- both with a software
+breakpoint and with a hardware one (`hbreak`). That looked at first
+like a genuine runaway loop. It wasn't: deleting the repeated
+`continue`s and single-stepping (`stepi`) from the same starting
+point instead showed completely normal, real, forward-progressing
+execution (`BX` advancing `0000` -> `0038` -> `003c`, `AX` changing
+`1733` -> `0718` -> `1000` across a dozen real instructions). **GDB's
+`continue` against this specific QEMU real-mode target does not
+reliably resume guest execution at some addresses** -- it can report
+the exact same trap over and over with zero actual progress, while
+`stepi` from an identical starting state works correctly every time.
+Given this session's prior GDB scripts (`/tmp/gdb*.py`) also mostly
+used single continues or short step sequences rather than long chains
+of blind repeated `continue`s, this may be why the trap wasn't noticed
+before. **Lesson for next time**: don't trust a loop of blind
+`continue` calls to count real hits at an arbitrary address in this
+setup -- re-arm the breakpoint fresh per hit (delete + re-break, or
+disconnect/reconnect) instead, or confirm forward progress with
+`stepi` before trusting a `continue`-based hit count.
+
+**Next step**: now that GDB access is confirmed to work (for
+single-hit-then-inspect, if not for long continue chains), use it to
+directly answer the one question three rounds of serial probes
+couldn't pin down cleanly: break on `func` a *fifth* time (or
+re-arm after hit4) and watch for `CX=0090h` specifically -- if it
+never arrives within a reasonable number of real hits, that's now
+GDB-confirmed (not serial-trace-inferred) proof that `f_createproc(TMP)`
+never reaches `func()`'s own top at all, settling #49's original
+question directly instead of through another retimed serial capture.
+
+**Did exactly that (re-arm per hit, `stepi` once after each delete to
+guarantee real forward progress before re-breaking) and ran it to
+completion.** Seven real hits, then the whole program exited:
+
+```
+#1 CX=0086 DX=0f92   #2 CX=0087 DX=0fae   #3 CX=008b DX=0fae
+#4 CX=0086 DX=0f92   #5 CX=0087 DX=0fae   #6 CX=008b DX=0fae   (1-3 repeat, byte for byte)
+#7 CX=008f DX=03ff    -- matches f_terminate's call signature exactly
+[Inferior 1 (process 1) exited normally]
+```
+
+**`CX=0090h` (`f_createproc`) never appears at all.** Under this run's
+(GDB-slowed) timing, `INIT.SUP`'s `nrsp` loop evidently finds
+`rspseg=0` and goes straight to `f_terminate` without ever attempting
+`TMP`'s creation through `func()`'s own top -- a *third*, independently
+timed outcome for the exact same binary (the first two being #49's
+"hangs, then succeeds with `03h`/`2Ah` added" and #50/#51's "reaches
+`gofar` with a stale/bogus register pair"). This is consistent with,
+and reinforces, this whole session's central finding: literally
+*any* change in execution speed -- not just probe byte-count, running
+under GDB too -- retimes which of several latent outcomes this system
+lands on for `TMP`'s creation.
+
+**`0086h`/`0087h`/`008Bh` identified, by the way** (`MODFUNC.DEF`):
+these are `f_qmake`(134)/`f_qopen`(135)/`f_qwrite`(139) -- RTM's own
+queue-management calls, not raw debug noise. Something in `INIT.SUP`'s
+own early sequence makes, opens, and writes a queue once per round --
+twice, identically, in every trace that reaches this far (serial or
+GDB). Not yet traced to its exact call site; worth doing before
+chasing anything else, since it's the one part of this whole
+investigation that reproduces identically regardless of timing.
+
+**One more finding, orthogonal to all of the above but important for
+trusting *any* future serial-trace reading in this codebase**: this
+session's marker-collision checks (going back to the start) only ever
+scanned for hex-coded markers (`mov al,0NNh`). A full scan for the
+other convention used throughout -- quoted-character markers
+(`mov al,'X'`) -- turns up real, **previously unchecked collisions**:
+`'3'`/`'4'`/`'5'`/`'6'` are each used by *both* `INIT.SUP` (module-init
+step markers) *and* `XIOS86Q.A86` (`rtm_poll`'s own markers), and
+`'q'`/`'r'`/`'s'` similarly collide between `BDOSIF.BDO` and
+`XIOS86Q.A86`, among several others (`'Y'`, `'('`/`')'`, `'!'`, `'$'`,
+single-letter matches in `QUE1.RTM`/`QUE2.RTM`/`TMP.A86`/`SUBMIT.A86`).
+Checked the specific case that mattered for this round --
+`XIOS86Q.A86`'s `'3'`-`'6'` live inside `rtm_poll`, a runtime
+device-poll routine that has no business running during `INIT.SUP`'s
+single-threaded, pre-dispatch module-init sequence -- so this round's
+own `'4'`/`'5'` readings are very likely still `INIT.SUP`'s, not a
+misattribution. But the collision is real and unaudited everywhere
+else, and every quoted-character marker reading from earlier in this
+session (back through #43) should be treated as provisional until
+checked against where else that same character is used. **For any
+new probe going forward, check both conventions** (the existing
+hex-scan plus a `mov al,'.'` scan) before picking a marker byte.
+
+## 53. Followed #52's own next step (trace the queue-call repeat to
+its call site) straight to a real, confirmed, five-instance bug --
+fixed it, and it changes the symptom
+
+Traced `f_qmake`/`f_qopen`/`f_qwrite` (`0086h`/`0087h`/`008Bh`) to
+their real source: `BDOSIF.BDO`'s own `init:` routine (BDOS's
+cold-boot "create the mx disk queue" sequence, markers `q`/`[`/`r`/
+`s`/`t`). Set a GDB breakpoint directly on `BDOSIF.BDO`'s `init:`
+address (computed from `build_mpmsys.py`'s own module-base printout)
+using the safe delete-and-rearm pattern from #52. **Two hits, byte for
+byte identical** -- `AX=1035 BX=0004 CX=0000 DX=03f8`, same stack,
+same return address (`017Ah`, confirmed via `asm86 --symbols` to be
+the single instruction right after `INIT.SUP`'s one and only `callf
+dword ptr bdosmod[bx]`). BDOS's `init:` really does run twice, called
+from the exact same, single call site both times.
+
+**Followed the same logic one level up**: is `SUP`'s own top-level
+`init:` (the very first code the boot loader jumps to) *also* entered
+twice? Breakpointed it directly. **Yes -- but the two hits are NOT
+identical this time**, which turned out to be the key clue:
+
+```
+hit1: SS=0800 SP=03ee retaddr=[0000,0000]   -- the real, legitimate boot-time jump
+hit2: SS=17ec SP=0102 retaddr=[0000,1780]   -- a UDA-shaped stack, mid-syscall-looking
+```
+
+Dumped `module_table[sup]`'s own 8 bytes (`entry_off,entry_seg,
+init_off,init_seg`) at each hit:
+
+```
+hit1: 0718 1000 007a 1000   -- correct
+hit2: 0718 1000 007a 1780   -- init_seg corrupted to 1780h (sysdat's own segment)
+```
+
+**`init_seg` reads back `1780h` instead of `1000h` (`MPM_CODE_SEG`) by
+hit2.** `1780h` is exactly this build's `sysdat` segment value, and
+SYSDAT's own offset 6 is precisely `module_table[sup]`'s `init_seg`
+field. That is *the exact same bug class* `SUPIF.SUP`'s own
+`user_entry`/`mpmif` comments already document and already fix (a
+bare `mov sysdat,ax`/`ds` lands on SYSDAT's own offset 6 instead of
+the writer's own local cseg cell, whenever the writer's `DS` is
+already sysdat-ish) -- except this time it's not in `SUPIF.SUP` at
+all. **Every one of the other five kernel modules' own `init:`
+routines opens with a bare `mov sysdat,ds`**, each one's own local
+`sysdat` cache variable sitting at a small fixed offset (module_base
++ 6, right after that module's own `jmp init!jmp entry` header) --
+and `init:`'s own documented precondition is "assume DS = Sysdat
+Segment", so this bare write reliably lands on `DS:0006` = **SYSDAT's
+own offset 6** every single time one of these routines runs. Checked
+all six modules directly:
+
+- `RTMIF.RTM` line 25, `MEMIF.MEM` line 29, `CIOIF.CIO` line 25,
+  `BDOSIF.BDO` line 34, `XIOS86Q.A86` line 206 -- all five had the
+  identical bare `mov sysdat,ds`/`mov sysdat,ds`. (`SUPIF.SUP`'s own
+  two instances of this exact bug class were already found and fixed
+  earlier this session.)
+
+**Fixed all five** the same way as every previous instance of this
+bug class this session: `mov sysdat,ds` -> `mov cs:sysdat,ds`.
+Rebuilt, re-ran the same GDB check on `SUP`'s `init:` -- `module_table
+[sup].init_seg` now reads `1000h` correctly, and (more directly) `SUP`'s
+`init:` was **not re-entered at all** within the test window this
+time, where it reliably had been before. The fix works as intended.
+
+**This still doesn't fully explain *how* the corrupted `1780h`
+segment would have caused hit2's actual observed `CS:IP=1000:007A`**
+(a far call using the corrupted `init_seg` directly would target
+`1780:007A`, not `1000:007A`) -- so the exact mechanical link between
+this corruption and the specific double-entry into `SUP`'s `init:` is
+still open. But the corruption itself is real, directly observed via
+memory reads (not inferred from serial bytes), matches an
+already-established defect pattern in this exact codebase, and is
+worth having fixed regardless of whether it's the full explanation.
+
+**The fix changes the symptom yet again (expected, per this entire
+session's own running finding)** -- but this time into something
+new and, encouragingly, *deterministic*: two consecutive free-running
+boots (no GDB, no added probes beyond what's already in place)
+produced **byte-for-byte identical 271-byte traces**, both stopping
+at `getpdadr`'s own `19h` marker showing `SI=81F0h` for idle's very
+first PD lookup -- `81F0h` has the high bit set and is nowhere near
+the small, sysdat-relative values (`09F0h`, `0A20h`, etc.) every
+previous trace this session has shown at this exact point. Not
+explained yet, but -- unlike almost everything else chased this
+session -- it doesn't require fighting the timing to reproduce; it
+just happens, the same way, every time so far.
+
+**Next step**: pin down where `SI=81F0h` comes from at this first
+`getpdadr` call -- check `pul` (the free-PD-pool head) directly via
+GDB at this exact point, since `getpdadr`'s own documented "pop di"
+trick (returning the pool slot address through a stack-juggling
+pop rather than a separate variable, see the `gpd_have` code in
+`PROC.RTM`) means a corrupted `pul` would show up exactly like this.
+
+## 54. Followed #53's own next step into `getpdadr` -- found the
+*mirror-image* of the bug just fixed, then found it's actually
+**system-wide** (19 instances across every kernel module) -- fixed
+all of them -- `f_createproc(TMP)` reaches `func()`'s own top for the
+first time this entire session
+
+Single-stepped `getpdadr` via GDB from its own top, instruction by
+instruction, watching `AX`/`DX` through the exact fast-path arithmetic
+(`PROC.RTM`'s `cmp ax,sysdat`/`mov cx,sysdat`/`sub ax,sysdat`
+sequence). Confirmed `u_wrkseg` reads correctly (`1780h`, matching
+`sysdat` itself -- correct for idle's PD, which really is
+sysdat-resident) and the arithmetic proceeds exactly as hand-derived
+*until* `sub ax,sysdat` at step16: `AX` goes from `1780h` to `0780h`,
+meaning the bare `sysdat` read there evaluated to `1000h`, not the
+real `1780h`. **Same bug class as #53 -- just the read side instead
+of the write side, and in a different file.**
+
+`PROC.RTM`'s `getpdadr` is assembled together with `RTMIF.RTM` as one
+unit (`RTM.A86`), sharing one symbol table -- so a *bare* `sysdat`
+reference in `PROC.RTM` resolves to `RTMIF.RTM`'s own local `sysdat`
+cache (a `cseg`-declared variable, module-base-relative), the exact
+same symbol #53 just fixed the *write* side of. Reading it bare (no
+`cs:` prefix) means the CPU reads from `DS:<that variable's own small
+offset>` instead -- and since `DS` is genuinely `sysdat` itself at
+this point (by design, this routine's whole job depends on it), that
+lands on **`SYSDAT`'s own offset 6 -- `module_table[sup].init_seg`**,
+the exact same corrupted cell #53 found and fixed. Before #53's fix,
+that cell happened to hold something close to the real `sysdat` value
+(by the coincidence of the corruption itself writing a plausible
+near-match there), so this read "mostly worked" by accident. After
+#53's fix, it correctly holds `1000h` (`module_table[sup]`'s own,
+correct `init_seg`) -- which is *correct for that cell*, and *wrong*
+for what this unrelated read actually needed. **Fixing one bug
+unmasked a second, previously-hidden one at the exact same memory
+location.**
+
+**Given that, searched the entire kernel for every bare (non-`cs:`)
+reference to `sysdat`, since the cache-shadowing pattern (`sysdat dw
+0` declared locally in every module's own header, shadowing nothing
+global since there never was a global `SYSDAT.FMT` field by that
+name) means *any* bare reference anywhere in the tree has the same
+exposure.** Found and fixed **19 separate instances**, across both
+the read and write sides, well beyond the one `getpdadr` call that
+started this:
+
+- `RTMIF.RTM`: the `add ax,sysdat` x2 in `init:` (computing tick's and
+  idle's own UDA segments -- these run *before* `proc_creat` is ever
+  called, so this one alone could have been corrupting idle/tick's
+  own `u_initcs` from the very first process this kernel ever
+  creates).
+- `PROC.RTM`: `getpdadr`'s remaining two bare reads (`mov cx,sysdat`,
+  the `cmp ax,sysdat` bounds check).
+- `DSPTCH.RTM`: `mov ss,sysdat` in `dsptch`'s own stack-switch (this
+  file already had three *other* occurrences fixed earlier this
+  session -- this fourth one had been missed).
+- `QUE1.RTM`: `mov es,sysdat` in `makeq_entry` -- `f_qmake`'s own real
+  implementation, directly in the path of the queue-create/open/write
+  triplet #52/#53 have been chasing all along.
+- `QUE2.RTM`: `getqdaddr`, the queue-address equivalent of
+  `getpdadr`, with the identical three-instruction bug.
+- `BDOSIF.BDO`: `mov ss,sysdat` in BDOS's own `entry:` stack-switch.
+- `INIT.SUP`: `mov ds,sysdat` at the literal top of the `nrsp:` loop
+  (**"reset DS"** -- executed at the start of *every single nrsp
+  iteration, including the one that processes `TMP`'s own RSP**).
+- `IDLE.SUP`: the idle process's own `mov ds,sysdat`.
+- `COMMAND.SUP`: four instances (command-tail copy, FCB setup, chained
+  UDA copy x2).
+- `LOAD.SUP`: six instances (disk-read segment setup, UDA
+  zero-init, two memory-free segment restores, UDA-vs-sysdat
+  subtraction, second disk-read call).
+- `RPL.SUP`: one instance (RPL queue-flag check).
+- (`XIOS.A86`'s own four instances were found but are dead code --
+  confirmed via `Makefile`/`build_mpmsys.py` that this build uses
+  `XIOS86Q.A86` exclusively, `XIOS.A86` is never assembled.)
+
+Every one fixed the same way as #53's own fixes: `sysdat` -> `cs:sysdat`.
+
+**Rebuilt and tested. Two results, in order:**
+
+1. **A regression, briefly**: with only #53's fix in place (before
+   this round's full sweep), `getpdadr`'s own un-fixed bare reads
+   (still reading the now-*correctly*-`1000h` `init_seg` cell) made
+   idle's PD lookup compute `SI=81F0h` and the system crashed almost
+   immediately (a clean, deterministic 271-byte trace, confirmed
+   twice) -- worth recording since it's a reminder that this bug
+   class has *two* sides, and fixing only the write side of one
+   instance can,  by removing the accidental "close enough" value the
+   write-side bug had been leaving behind, make a *different*,
+   previously-masked read-side bug actively wrong instead of
+   accidentally tolerable.
+
+2. **With the full sweep (all 19 instances) applied**: that crash is
+   gone, and -- for the first time in this entire multi-session
+   investigation -- **`f_createproc(TMP)`'s own real `int mpmint`
+   syscall reaches `func()`'s own absolute top, marker `16h`, with
+   the correct `CX=0090h`.** Every previous trace this whole session,
+   without exception, either hung, crashed, or landed partway through
+   `func()`'s body having skipped its own top entirely. This is new,
+   confirmed ground.
+
+**It still doesn't finish cleanly.** A few instructions later, right
+between marker `16h` (func's top, `CX=0090h`, `CH=0`) and marker `17h`
+(`func1`'s own top, a few straight-line instructions later with
+nothing in between that touches `CX` in the source), `CH` reads back
+as `10h` instead of `0`, and by the next marker (`09h`, `gofar`'s own
+top) `CL` has *also* changed, to `00h` (from the original `90h`) --
+taking the "system function, module 10h" branch (invalid -- there is
+no module 10h) and landing on `not_implemented` again. Tick-interrupt
+markers are still at zero for this entire trace, so it isn't
+interrupt interleaving. Not explained yet -- this is squarely #53's
+own "next step" now, just one level further in than before.
+
+**Also notable, same trace**: the previously-untouchable tail-end
+`f_terminate` call (`CX=008Fh`) now correctly fires *every* probe
+in its path for the first time too -- including the brand-new `18h`
+marker (user_entry's literal last instruction) that had never fired
+even once in any earlier trace this session, for *any* call. Real,
+broad improvement, even though the createproc-specific `CH`/`CL`
+mystery above is still open.
+
+**Next step**: add one narrow probe between marker `16h` and marker
+`17h` (e.g. right after `fnchk`'s loop, right after `mov u_func,cl`,
+and right at `func1`'s own very first instruction, before this
+probe's own pushes) to bisect exactly which of the handful of
+straight-line instructions in between is where `CX` actually changes
+-- it's a short enough span now that two or three well-placed probes
+should pin it down directly, the same way #53's GDB single-step did
+for `getpdadr`.
+
+## 55. Bisected #54's own next step all the way down -- found the
+corruption happens inside marker `16h`'s *own* probe code, and found
+a real methodological gap along the way: every CX-reading probe this
+entire session has been silently immune to exactly this class of bug
+
+Added markers `84h` (SP/SS at `func`'s top), `88h` (CX right before
+the `fnchk` loop's first iteration), `86h`/`87h` (CX immediately
+before/after the mismatch branch's own digit-printing `zdbg` call),
+and `85h` (CX right after the mismatch's closing `#`) -- walking
+backward from #54's own `17h` reading. Every one of them showed
+`CX=1000h` (`=CS`) for `f_createproc(TMP)`'s call, all the way back to
+`88h`, *before the loop's first iteration even runs*. Bisected as far
+back as physically possible inside `fnchk` -- the corruption isn't in
+the loop at all.
+
+**Added one more marker, `89h`, directly after marker `16h` --
+deliberately *without* `89h`'s own `push cx`/`pop cx` wrapper, reading
+the live `CX` register bare instead of restoring it from a
+self-saved copy first.** This is the one thing genuinely different
+about it: every single CX-reading probe added this entire
+session -- `16h`, `Y`, `17h`, `82h`, `83h`, and now `84h`-`88h` --
+wraps its read in its own `push cx ! ... ! pop cx`, which means each
+one *always* shows the value it saved for itself, regardless of
+whatever the live register ends up holding afterward. `89h` is the
+first one that doesn't. **It shows `CX=1000h`, immediately after
+marker `16h` -- which itself correctly showed `CX=0090h` just moments
+before, via its own protected read.**
+
+So the live `CX` register is already wrong by the time marker `16h`
+finishes -- specifically, sometime during its own `mov ax,cx!call
+zdbg` or its own trailing `pop dx!pop cx!pop ax`. Every one of #54's
+later markers (`88h` onward) was just re-observing the same already-
+corrupted value, not catching it fresh each time.
+
+**This exposes something that should have been caught much earlier
+this session**: because every prior CX-reading probe protected itself
+with its own save/restore, *none of them could ever have revealed a
+case where the live register was wrong independent of what got
+pushed and popped around it*. This specific corruption could
+plausibly have been present (silently) in earlier rounds too, masked
+the same way, and nothing in the probe methodology used until now
+would have caught it.
+
+**Tested the two most obvious theories directly, both negative:**
+
+- **Stack exhaustion**: `84h` shows `SP=00FCh`, `SS`=the UDA segment,
+  right at `func`'s own top -- meaning essentially the *entire*
+  256-byte (`ulen`) UDA stack is still free at this point. Ruled out.
+- **An interrupt landing mid-probe**: added a `pushf!cli`/`popf`
+  diagnostic bracket around the whole `fnchk` block -- corruption
+  persisted identically. Moved it earlier, to `func`'s own absolute
+  first instruction (before marker `16h` even runs) -- the corrupted
+  value *changed* (from `1000h` to a different garbage, `0455h`, on
+  one run, then correct on an immediate retry) but did not go away.
+  Since this changes real control flow without fixing anything, and
+  since #54 already established zero tick-interrupt markers fire
+  anywhere in these traces, both `cli` diagnostics were reverted
+  rather than left in the tree -- inconclusive, and not worth the
+  risk of a silent behavior change for an unproven theory. The honest
+  state: not interrupt-explained in any way found so far, but the one
+  timing-sensitive wrinkle (the value changing when `cli` was added
+  earlier) means the underlying race, whatever it is, is still live.
+
+**Still open, now about as narrowly bisected as source-level
+reasoning can get it**: the corruption occurs between marker `16h`'s
+`mov ax,cx!call zdbg` and the moment marker `89h` reads `CX`
+immediately afterward -- i.e. either inside `zdbg` itself (despite
+multiple careful readings finding its own push/pop entirely balanced)
+or in marker `16h`'s own `pop dx!pop cx!pop ax`. It happens *only* for
+calls that reach `func()` via the small, UDA-based stack-switch
+convention (confirmed: idle's own three queue calls, which run on the
+original/large boot stack and never switch, show `CX` correctly at
+every one of these same markers, every time). `CX` consistently lands
+on `1000h`, exactly `CS` -- consistent with some kind of stack
+misalignment that leaves a stray segment value sitting where `CX`'s
+saved copy should be, but nothing in `zdbg`'s own structure (checked
+multiple times, push/pop counts match exactly: 4 in, 4 out at the
+outer level, 1 in/1 out per digit at the inner level) explains how
+that could happen.
+
+**Next step**: this needs a cleaner tool than one more serial probe.
+Since GDB's `continue`-based breakpoints reliably miss this exact
+call under its own timing (confirmed repeatedly this session -- GDB
+never seems to reach `f_createproc(TMP)`'s own call to `func()` within
+a reasonable number of continues), the next productive move is
+probably a **memory watchpoint** on the exact stack address marker
+`16h`'s own `push cx` writes to (computable directly from `SP` at
+`84h`'s own reading), set *before* GDB's own timing has a chance to
+avoid the call -- i.e. let the free-running serial trace establish
+that the call happens at all, then attach GDB and step from a
+breakpoint placed earlier in `user_entry` (which GDB *does* reliably
+reach) forward instruction-by-instruction into `func()`, watching
+that one stack slot the whole way, rather than trying to land a
+breakpoint on `func` itself and hope the timing cooperates.
+
+## 56. Followed #55's own next step with GDB -- proved the corruption
+is a genuine timing race, found and fixed a real, previously-pending
+interrupt, caught and fixed a self-inflicted probe bug in the same
+sweep, and reached further than this entire session ever has: TMP's
+own PD gets created cleanly and a real queue function succeeds
+
+**Breaking on `func` directly under GDB never once caught
+`f_createproc(TMP)`'s own call** (confirmed again this round, many
+tries) -- but breaking on `user_entry` instead (the real `int mpmint`
+syscall gate, reached for both of the two true syscalls this trace
+ever issues) **caught it reliably, every time.** From that reliable
+breakpoint, single-stepped (`stepi`, not `continue`) all the way
+through `user_entry`'s own prologue, into `func()`, through the
+entire `fnchk` loop, past `Y`/`func1`/`nonet`, and out the other side
+-- roughly 1600 real instructions -- watching `CX` continuously.
+**It never corrupts.** Every single step shows the correct `CX=0090h`.
+
+This proves #55's bisection conclusively: the corruption is a **real,
+genuine hardware-timing race**, not a static logic bug anywhere in
+`zdbg`, marker `16h`, or the `fnchk` block -- identical code,
+single-stepped, behaves perfectly every time; the same code, free-
+running, corrupts reliably. Single-stepping changes real-world timing
+enough (GDB's own per-instruction round-trip overhead) that whatever
+asynchronous event causes this never gets the chance to land in the
+same place.
+
+**Found it directly.** Real x86 `sti` has a well-known one-instruction
+delay before it actually takes effect -- an interrupt that's already
+pending at the moment `sti` runs will not be recognized until *after*
+the very next instruction. `SUPIF.SUP`'s `uecont:` does `sti` to
+re-enable interrupts for the very first time this syscall (`cmp
+intflag,0 ! je noints ! sti`). Changed it to `sti ! cli` -- enable for
+exactly one instruction's worth of time, then immediately disable
+again, using the delay as a trap door that lets nothing through.
+**The `CX` corruption disappeared completely** -- confirmed via
+marker `89h`'s own unprotected read, clean `CX=0090h` at every single
+marker from there through the entire `fnchk`/`Y`/`func1` sequence,
+reproduced twice. This is about as direct a confirmation as this kind
+of bug ever gets: something was genuinely pending, right at that
+exact instant, on every single `f_createproc(TMP)` call this whole
+session, and giving it even one instruction's window to fire was
+enough to corrupt the stack-based register save/restore discipline
+`zdbg`'s callers all depend on. (Kept the `sti!cli` fix in the tree --
+it's clearly net-positive and well-understood in its own right, even
+though *which* interrupt source was pending, and why, is still open.
+Tick-interrupt markers remain at zero throughout, so it isn't the
+periodic timer specifically; some other, not yet identified source.)
+
+**With that fixed, dispatch now reaches `gofar` correctly for the
+first time -- and immediately ran into what looked like the exact
+same corruption again, one register over.** Marker `0Bh` (dumping the
+incoming `AX`/target-module at `gofar`'s own top) kept reading back
+`000Bh` no matter what -- tried the same `sti`-delay theory at
+`gofar`'s own top, then at `nonet`'s, with plain `cli` this time
+(not the one-instruction trick, just blocking interrupts outright
+across the whole span) -- **no effect either way.** That ruled out
+interrupts for this specific one and forced a re-read of the probe's
+own source:
+
+```
+push dx ! mov al,0Bh ! mov dx,03f8h ! out dx,al ! call zdbg ! pop dx
+```
+
+**`mov al,0Bh` -- the marker byte itself -- overwrites `AL` before
+`call zdbg` ever reads it.** This probe was never dumping the real
+`AX`; it's been dumping its own marker byte back at itself since the
+moment it was added, in #50. Every "`0B:000B`" reading in this entire
+session's logs, across every earlier round, was this bug, not a
+kernel finding -- retracting whatever conclusions leaned on it.
+Fixed the same way marker `09h`, right next to it, already did it
+correctly: save the real value into a scratch register (`BX`) before
+clobbering `AL` with the marker, restore it before the real dump.
+Reverted the now-answered `cli` experiments at `gofar`/`nonet` (they
+were chasing a probe artifact, not a real race -- no reason to leave
+an unexplained behavior change in the tree for a bug that turned out
+not to exist).
+
+**Rebuilt with both fixes in place. The result is the furthest this
+entire multi-session investigation has ever gotten, by a wide
+margin:**
+
+- `gofar`'s own `S` marker now correctly resolves `CX=000Eh` (local
+  function 14) against module 2 (`rtm`), target `19F5:1000` --
+  `RTMIF.RTM`'s own `entry:` address, exactly as it should.
+- `V` fires (RTM's `entry:` reached), then marker `10h` shows
+  `SI=001Ch` (`14 * 2` -- `creat_proc_entry`'s own function-table
+  slot, exactly matching).
+- **Marker `1Eh` fires -- `creat_proc_entry` itself, reached for the
+  first time in this entire session**, with `DX=0010h`, exactly
+  `TMP`'s own `rsp_pd` offset.
+- `proc_creat` is entered from a brand new return address (`1ABCh`,
+  `creat_proc_entry`'s own call site -- not the old `186Eh`/`18DEh`
+  used by every direct, bootstrap-time call), confirming this is
+  genuinely `TMP`'s own creation, not a repeat of idle/tick's.
+- `getpdadr` correctly takes the *slow* path this time (marker `2Fh`
+  fires, `DI=0E40h` -- a real, clean `pul` slot), copies `TMP`'s PD
+  template from its own RSP data segment into that slot, and markers
+  `7Fh`/`81h` (added back in #48, never fired until now) both read
+  `FLAGS=0046h` -- **answering #47's original open question
+  directly: `IF` genuinely does stay clear through the whole `rep
+  movsw` critical section.**
+- `p_link[0E40h]` reads back **`0000h` -- clean** -- no bogus second
+  PD this time. The `cp_uda` recursion checks it, finds zero, and
+  stops immediately. `TMP`'s PD creation completes with no corruption
+  at all.
+- Shortly after, a **real RTM function call succeeds end to end**:
+  `f_qread`-equivalent (`CX=0089h`, local func 7) resolves correctly,
+  reaches `RTMIF.RTM`'s own `entry:` dispatch (marker `10h`,
+  `SI=000Eh`), and returns cleanly via marker `T` -- no `U`.
+
+**Not clean yet.** One call in between (`CX=0000h`, right after
+`creat_proc_entry` returns through `pdisp`) still resolves to
+`not_implemented` -- not yet investigated, could be anything from a
+genuinely-invalid function code in this exact path to another
+instance of this same probe-artifact family; given today's lesson,
+it gets checked by hand before being trusted. And after the
+successful queue call, the trace shows `INIT.SUP`'s own cold-boot
+markers (`1`, the `SS:SP` dump, `2`, `3`) firing *again* -- the same
+literal signature every trace this session has shown exactly once,
+at the very start, right after the boot banner -- strongly suggesting
+`SUP`'s own `init:` is somehow being re-entered a second time, deep
+into what should be steady-state operation. The trace then goes
+completely silent (zero further bytes in 40 seconds, confirmed twice)
+with no termination markers (`$`/`%`/`^`) -- a real hang, not a
+graceful stop. `TMP`'s own real entry point (marker `27h`) still
+never fires.
+
+**Taking stock**: this round turned up two more instances of exactly
+the lesson #52 and #55 already taught -- a marker byte silently
+clobbering the very thing it was meant to display (`0Bh`, since #50),
+and a corruption that only a genuinely different *tool* (GDB
+single-stepping, not another serial probe) could distinguish from a
+static bug. Both lessons paid for themselves immediately this round.
+Worth treating as standing practice: before trusting any "always
+reads back X" probe finding, check whether the probe's own marker
+byte could have landed on the register being dumped; before spending
+another round bisecting a "corruption" with more probes, check first
+whether it reproduces identically under single-stepping.
+
+**Next step**: two independent threads, either one reasonable to pick
+up first --
+
+1. Chase the new hang: is `SUP`'s `init:` genuinely being re-entered
+   (same technique as #53 -- breakpoint on `init:`'s own address,
+   confirm hit count and register state), or is this another marker
+   collision/probe artifact given today's track record (`1`/`2`/`3`
+   are bare digit characters, extremely collision-prone per #52's own
+   audit)?
+2. Identify the actual interrupt source the `sti!cli` trick is
+   papering over, so it can be fixed at its root (masked/acknowledged
+   properly) instead of narrowly dodged for one instruction on every
+   syscall entry.
+
+## 57. Chased #56's "SUP `init:` re-entered" thread -- found and fixed
+a real, independent alignment bug in `build_mpmsys.py` along the way,
+though it turned out not to be this particular symptom's explanation
+
+**Confirmed the re-entry directly via GDB** (same technique as #53):
+breakpointed `SUP`'s own `init:` label (`0x7A`). Hit twice -- the
+first, at boot, with the expected fresh `SS:SP=0800:03ee`; the
+second, much later (after the successful queue-read call from #56),
+with `SS:SP=178B:0F76` and the three words above it on the stack all
+reading `0xCCCC` -- i.e. genuinely uninitialized memory, not a real
+return frame. `init:` really is being re-entered, with `CS:IP`
+landing exactly on `1000:007Ah` from a context that looks nothing
+like a legitimate call or the original boot jump.
+
+**Went looking for a plausible mechanism and found a real bug, just
+not (as far as tested) this one.** `TMP`'s own PD template bakes in
+its initial dispatch target (`stack_top`'s two words: `offset tmp` --
+TMP's own code-relative IP, assembled directly -- and a segment slot
+that `build_mpmsys.py` patches at combine time with TMP's real,
+computed code segment). Checked the patch logic itself and found:
+
+```python
+tmp_code_seg = MPM_CODE_SEG + (len(cseg) + 15) // 16   # rounds UP
+...
+cseg += tmp_cseg                                        # appends at the
+                                                         # CURRENT (un-
+                                                         # rounded) length
+```
+
+**`len(cseg)` (the six kernel modules' combined code, before `TMP` is
+appended) is 29023 bytes -- not itself a multiple of 16.**
+`tmp_code_seg` rounds that up to the next paragraph boundary (byte
+29024) and uses *that* as TMP's segment, but the actual `cseg +=
+tmp_cseg` three lines later appends TMP's real bytes starting at the
+unrounded 29023. A 1-byte gap, confirmed by direct computation against
+this build's own module sizes -- meaning every single address inside
+TMP (`offset tmp` included) was being read from one byte off from
+where its own code and data actually live. This is a correctness bug
+in our own from-scratch tooling, not DRI-original source, and has
+apparently been there since `TMP` was first baked in.
+
+**Fixed**: pad `cseg` itself up to the next paragraph boundary before
+computing `tmp_code_seg`, so the segment and the actual append agree:
+
+```python
+cseg += b'\0' * ((-len(cseg)) % 16)
+tmp_code_seg = MPM_CODE_SEG + len(cseg) // 16
+```
+
+(`build_disk.py`'s own independent recomputation of `sysdat_segment`,
+which this exact kind of mismatch broke once before per this script's
+own comments, still agrees afterward -- the total combined length is
+still paragraph-aligned either way, so nothing downstream of TMP
+shifts.)
+
+**Rebuilt and retested. The `init:` double-hit and the hang after it
+are unchanged** -- same signature, same point in the trace, just
+different incidental garbage values (expected, per this whole
+session's "every byte change retimes everything" finding). So this
+specific 1-byte misalignment, while real and now fixed, wasn't (at
+least on its own) *this* symptom's cause. Kept the fix regardless --
+it's independently correct and was never going to do anything but
+help.
+
+**Status**: `#56`'s two threads (identify the re-entry's real trigger;
+identify the interrupt source the `sti!cli` trick dodges) are both
+still open. This round's main achievement stands on its own:
+`f_createproc(TMP)` now completes cleanly end-to-end for the first
+time, including a verified-clean `p_link` and a confirmed-clear `IF`
+through `getpdadr`'s critical section -- the hang now happens
+*after* that success, during whatever runs next (the dispatcher
+picking a process to run, and that process's own early behavior),
+which is new territory for this entire investigation.
+
+## 58. Reframed #56/#57's "`SUP init:` re-entered" finding entirely --
+it isn't `init:` running again, it's a crash landing that happens to
+execute `init:`'s own bytes
+
+Tried to find the actual jump/call responsible via GDB. Breaking on
+`func`/`gofar` directly never catches anything useful here (same old
+timing-sensitivity), and a GDB single-step walk of ~12000 instructions
+from `user_entry` only made it back to `user_entry`'s own early `zdbg`
+loop -- nowhere near far enough to reach this point, confirming (again)
+that this entire region of execution is too deep to single-step
+through in a reasonable number of steps. Tried attaching GDB to an
+*already-running*, unpaused QEMU instead (hoping to keep full-speed
+timing up to the breakpoint) -- by the time the script finished
+connecting, the entire sequence (boot through the hang) had already
+played out at full TCG speed; the breakpoint never fired, and the
+captured serial trace was byte-identical to a free-running capture.
+Confirms the interesting window here is a handful of real seconds at
+most.
+
+**Went back to the reliable `-S` + breakpoint + `continue` pattern
+(not single-stepping) and read much deeper into the stack and
+registers at the second `init:` hit than before.** The result
+reframes the whole finding:
+
+```
+DS=ES=0xCCCC   AX=0xFFFF   BX=1   CX=9   SI=0x0E40   DI=0x01D8
+stack: cccc cccc cccc cccc ... (long run) ... 0001 584D 6964 6B73 2020 0000 ...
+```
+
+**`SI=0x0E40` is `pul`'s own real free-PD-pool slot address** (the
+exact one `getpdadr` allocated for `TMP`'s PD, confirmed clean back
+in #56). **`DI=0x01D8` is `stack_top`'s own offset within `TMP`'s
+dseg** -- the literal field `proc_creat`'s "setup user stack for
+iret" code (`PROC.RTM`, `mov di,u_sp ! mov ax,u_initcs ! mov
+2[di],ax ! mov word ptr 4[di],0200h`) writes the new process's
+initial `CS`/flags into. **`584D 6964 6B73 2020`, read as bytes, spells
+"MXdisk  "** -- the literal name of `BDOS`'s own disk multiplexer
+queue, created back in `BDOSIF.BDO`'s `init:` (the very `f_qmake`/
+`f_qopen`/`f_qwrite` triplet #52/#53 chased originally). **`DS`/`ES`
+both reading exactly `0xCCCC`** matches `TMP.A86`'s own declared
+canary pattern (`stack dw 0CCCCh,0CCCCh,0CCCCh`) -- a value that
+should never legitimately end up in a segment register.
+
+**None of this is `SUP`'s `init:` logic running again.** It's the
+CPU executing `init:`'s own bytes with completely unrelated register
+state left over from somewhere entirely different -- a wild jump (or
+a bad `ret`/`retf` popping garbage) that happens to land on `CS:IP
+=1000:007Ah` coincidentally, not a genuine re-entry into the cold-boot
+routine. The actual crash is almost certainly happening during or
+right after `proc_creat`'s own IRET-frame setup for `TMP`'s very
+first dispatch -- `DI` sitting exactly on `stack_top`'s offset is too
+specific to be unrelated -- with `DS`/`ES` ending up pointing at
+`TMP`'s own uninitialized canary area instead of its real UDA/stack
+segment, and a reference to `BDOS`'s queue name somehow also live on
+the same stack.
+
+**Traced the segment-defaulting logic this would need to go through**
+(`PROC.RTM`'s `cp_uda`: `u_initss`/`u_initds`/`u_inites` all read `0`
+in `TMP`'s own un-patched template, confirmed by direct inspection of
+`build/kernel/TMP.dseg.bin`, so they should correctly default-fill
+from `AX`=`u_wrkseg` at that point -- which should be `TMP`'s own
+real RSP data segment, not `0xCCCCh`) and didn't find an obvious
+static defect in it -- the path *should* produce a sane segment.
+Given this round's own repeated lesson (every clean static read-
+through this session has eventually needed either a timing tool or a
+direct memory read to find the real defect), this needs the same
+treatment rather than more hand-tracing: a GDB breakpoint on
+`proc_creat`'s own "setup user stack for iret" block specifically
+(not on `func`/`gofar`, which are too far upstream and too timing-
+sensitive to reliably reach), watching `u_ss`/`u_initss`/`DI` at that
+exact point, the same way #54's step-by-step `getpdadr` walk found
+the `sysdat` bug.
+
+**Next step**: breakpoint directly on `PROC.RTM`'s `mov ds,ds:u_ss`
+line (the one right before the `stack_top` write) and read `u_ss`/
+`u_initss`/`u_wrkseg` from memory at that exact point, for `TMP`'s
+own creation specifically -- this is a single, well-aimed breakpoint
+rather than a long step-walk, and should show directly whether the
+`0xCCCC` enters via a bad default-fill, a bad `DI`, or something
+else neither reading has considered yet.
+
+**Did exactly that -- result is negative, but cleanly so.** Added two
+probes directly in `PROC.RTM`, right before and right after `mov
+ds,ds:u_ss`, dumping `DS`/`u_ss`/`u_initss`/`u_stack_sp` and then the
+post-switch `DS`/`DI`. For `TMP`'s own creation specifically:
+
+```
+before: DS=1764  u_ss=1760  u_initss=1760  u_stack_sp=01D8
+after:  DS=1760  DI=01D8
+```
+
+(`build_mpmsys.py` confirms this build's real values: `TMP code @
+0x171C, data @ 0x1760` -- so `u_ss`/`u_initss` read back exactly
+`tmp_data_seg`, and `u_stack_sp` reads back exactly `stack_top`'s
+own offset.)
+
+**This is all internally consistent and correct, not a bug.** `DS`
+reads `1764` beforehand because that's the UDA struct's own real
+absolute segment (`tmp_data_seg` plus `TMP`'s own `p_uda`-relative
+offset, a few paragraphs in) -- genuinely different from
+`tmp_data_seg` itself, by design, since the UDA sub-structure doesn't
+start at offset 0 of `TMP`'s dseg. `mov ds,ds:u_ss` deliberately
+*switches* `DS` from the UDA's own segment to `tmp_data_seg`, because
+`stack_top` (unlike the UDA fields) was assembled relative to the
+dseg's own base, not the UDA's. Every value lines up with where it
+should: `DS` correctly becomes `1760` after the switch, `DI` correctly
+lands on `01D8h`, and the write that follows (`mov 2[di],ax`) is
+reading/writing exactly where it should be. My working theory from
+earlier in this section -- that this exact block was where
+`0xCCCC` enters -- is retracted; this specific stretch is clean.
+
+**So the crash happens later than this** -- somewhere after `pop
+ds!pop es` (line 150), through the thread-list linking, and
+(most likely, given how specific `DI`/`SI`'s values were at the
+crash) during the dispatcher's own first `IRET` into `TMP`. Given
+this round's pattern of needing several wrong guesses to narrow
+things down, the next probe should go *after* this block rather than
+inside it -- specifically wherever `switch`/`dsptch` loads a
+process's saved registers and `ES`/`DS` back out before `iret`,
+since that's the next (and likely last) place `ES`/`DS` get set from
+UDA-stored values before `TMP` actually starts running.
+
+**Found `switch` (`DSPTCH.RTM`), read it closely, and found a
+genuinely suspicious branch -- though not yet confirmed as the real
+cause.** `switch` restores the picked process's registers from its
+UDA, sets `SS:SP` from `u_ss`/`u_sp` (which, for `TMP`, correctly
+point at `stack_top`'s own pre-built IRET frame per the previous
+negative result), then:
+
+```
+cmp u_in_int,true ! jne dret
+    jmp int_disp_exit     ; <- ends in "iret", using u_ds_sav/u_es_sav
+dret: ...ret               ; <- ends in a plain "ret", not iret
+```
+
+`proc_creat`'s own `cp_uda` **unconditionally** sets `u_in_int,true`
+for every newly created process (`PROC.RTM`, "set other uda values").
+That means `TMP`'s *very first ever* trip through `switch` takes the
+`int_disp_exit` branch -- the path meant for resuming a process that
+was suspended *mid-syscall*, which restores `DS`/`ES` from that
+process's own `u_ds_sav`/`u_es_sav` and performs the real `iret` --
+rather than `dret`'s plain `ret` (used for anything else, including,
+presumably, a process's first-ever dispatch). Checked whether
+`u_ds_sav`/`u_es_sav` could plausibly be the `0xCCCC` source: no --
+`cp_uda` initializes both from `u_initds`/`u_inites`, which
+default-fill from `u_wrkseg` exactly like `u_initss` already did
+(confirmed clean), so they should read back `1760h` too, not
+garbage. This narrows but doesn't fully resolve it: `u_in_int=true`
+for a never-yet-run process looks like a real, independent defect
+either way (taking the interrupt-resume exit path for a process that
+was never interrupted), but on its own it doesn't yet explain the
+exact `0xCCCC` reading.
+
+**Added a probe to confirm this empirically for `TMP`'s own case
+(`u_in_int`/`u_ds_sav`/`u_es_sav`/`DS`/`ES` right before the `cmp`)
+and it never fired** -- this run's retiming (one more probe, one more
+byte) skipped `switch` for `TMP`'s dispatch entirely, landing back on
+the same `func(CX=0000)`-fails-then-hangs shape from #56/#57 instead,
+by a different route. The underlying hang's *overall shape*
+(successful PD creation, then a failure a short distance later, then
+the same `1`/`SS:SP`/`2`/`3` tail) keeps reproducing; the exact
+path to it keeps shifting probe to probe, consistent with everything
+else this session has found about retiming.
+
+**Next step, concretely queued for the next round**: re-run with the
+`8Ch` probe already in place (no further edits needed) until a trace
+reaches `switch` for `TMP`'s own dispatch, and read back `u_in_int`/
+`u_ds_sav`/`u_es_sav`/`DS`/`ES` directly -- if `u_in_int` reads `true`
+and the branch goes to `int_disp_exit` as the source now shows it
+must, that's confirmation enough to justify fixing the real, likely
+bug underneath all of this: `cp_uda` should probably set
+`u_in_int,false` for a freshly created process, not `true` --
+matching every other kernel's convention that `true` means
+"currently suspended mid-syscall," which a process that has never
+run cannot be.
+
+**Deliberately held off on actually changing `u_in_int`'s default.**
+Re-checked the reasoning first and found it cuts both ways: `switch`'s
+`int_disp_exit` branch (restore `DS`/`ES` from `u_ds_sav`/`u_es_sav`,
+then `iret`) is *also* plausibly the intended, correct way to perform
+*any* dispatch via `switch`, new process or not -- its `DS`/`ES`
+restore would correctly land on `TMP`'s own `1760h` (matching
+`u_ss`, confirmed sane) right before the `iret`, which is exactly
+what a fresh "Small Model" process should see. `dret`'s plain `ret`
+(no `iret` at all) looks more like it's for some *other* caller of
+`switch` that doesn't need a context switch, not a counterpart to
+`int_disp_exit` for "first dispatch vs. resumed dispatch". Changing
+`u_in_int`'s default without first confirming which of these two
+readings is right would risk trading a real bug for a different one
+on pure guesswork -- left it alone and documented the open question
+instead of acting on an unconfirmed theory.
+
+**Re-ran the same build three times to retry marker `8Ch` -- byte-
+identical output every time (2049 bytes), and it never fires.** This
+build's race has stabilized on a *different* path than the one that
+reaches `switch`: `creat_proc_entry`'s own PD-creation chain still
+completes cleanly, but the subsequent `func(CX=0000)` failure (same
+one flagged as unexplained in #56/#57) shows the **exact same kind
+of corruption the `sti!cli` fix addressed for the first syscall** --
+marker `16h` reads `CX=0000` and the very next marker, `89h` (bare,
+unprotected), reads back `CX=1FC4h` instead, for this later call.
+**The `sti!cli` fix only closes the one specific window it was
+placed at** (`user_entry`'s own `sti`) -- whatever's pending here is
+either the same interrupt source landing at a second, later `sti` (or
+equivalent re-enable point) elsewhere in this exact call path, or a
+genuinely different source. Not yet traced to its own enable point;
+flagging it explicitly rather than let it blend into the general
+"timing is messy" background noise, since it's the same *shape* of
+bug #56 already solved once.
+
+**Taking stock for next time**: three real, open items now, in
+rough priority order --
+
+1. Confirm (don't guess) whether `switch`'s `dret` vs
+   `int_disp_exit` branch is actually wrong for a fresh process, by
+   actually catching marker `8Ch` in a trace (may need a fresh probe
+   placement or a deliberate small retime to get there, since this
+   exact build's race currently avoids it).
+2. Find and close the *second* `sti`-delay-shaped window exposed by
+   marker `16h`/`89h`'s mismatch on the `CX=0000` call, the same way
+   #56 closed the first one.
+3. Only once both of those are resolved, re-examine whether the
+   `CS:IP=1000:007Ah` crash landing (confirmed via GDB, #58) still
+   happens, or was itself just a downstream symptom of one of these
+   two.
+
+## 59. Followed #58's item 2 first -- found and fixed a second
+instance of the `sti`-delay bug, this time in `dsptch` itself, and a
+new, previously-undetected marker collision along the way
+
+**Confirmed `switch` genuinely never runs in this entire trace**,
+via a direct GDB breakpoint at its own address under `-S`+`continue`
+(preserves full-speed timing, same technique that worked cleanly in
+#56): a single `continue` ran straight to program exit without ever
+stopping there. `dsptch` itself, though, *does* run at least once --
+its own entry marker (`.`, confirmed real this time, not a false
+positive off the boot banner's progress dots) fires with a sane
+`DS`/`indisp=false`, takes the `dispin` branch correctly.
+
+**Caught a real, previously-undetected marker collision while
+narrowing this down**: `DSPTCH.RTM`'s own `mov al,11` (decimal
+literal, byte `0x0B`) collides with `SUPIF.SUP`'s `mov al,0Bh` (hex,
+same byte) -- the exact decimal/hex-literal gotcha this session
+already hit once before (documented early on), but this session's
+own collision-scanning regex only ever matched the `NNh` hex form,
+never a bare decimal literal, so it was never caught. Readings of
+`0x0B` deep inside `dsptch`'s own scheduling logic are real
+(`DSPTCH.RTM`'s own marker, "old rlr / new rlr"), not `SUPIF.SUP`'s
+`gofar` probe misfiring somewhere it has no business running --
+worth remembering for any future scan of this kind.
+
+**Added a probe at `dispin`'s own first instruction (confirmed hit)
+and another right after its own `sti` (never fired).** Same shape,
+same fix as #56: `dispin`'s stack-switch-then-`sti` (re-enabling
+interrupts on the brand-new `dsptchtos` scheduler stack, right before
+saving the current process's registers into its UDA) has the exact
+same one-instruction-pending-interrupt vulnerability `user_entry`
+had. Changed `sti` to `sti ! cli` the same way. **The probe right
+after it now fires reliably.**
+
+**With this fixed, tracing deeper**: `dsptch`'s own
+"take current process off the ready list, dispatch by status" tail
+now runs cleanly and visibly for the first time -- `rlr`/`p_link`
+read sanely (old `rlr=initpd`, taken off, `dsp_table[0]` ="run" status
+correctly selected, `insert_process` puts `initpd` back as the new
+`rlr` since nothing else is ready yet), and `dsptch` returns normally
+(`dret`, not a crash). **The race has simply moved one step further
+downstream again** -- right after `dsptch` returns to its caller, a
+`func()` call with a now-corrupted `CX` appears, the same
+adjacent-marker-mismatch shape #56 fixed once and #58 found a second
+instance of. Not yet traced to its own `sti` (or equivalent) -- this
+is squarely the next thing to find, using the exact same technique
+that worked twice now (bisect with paired probes until the exact
+instruction is caught, then check whether a `sti` sits right before
+it).
+
+**Pattern now clear across three confirmed instances**: every
+"adjacent probe shows a different, wrong register value" finding
+this entire investigation has traced back to a bare `sti` with
+nothing guarding its one-instruction delay. Worth checking
+systematically next time instead of one at a time: grep every bare
+`sti` in the combined kernel (not just the two found so far) and
+decide, for each one, whether it needs the same `! cli` guard, rather
+than waiting for probes to find each one by accident.
+
+**Did exactly that.** Grepped every bare `sti` in the whole kernel
+(`src/kernel/*.*` and `src/rsp/*.*`). Only three exist in total,
+all in `DSPTCH.RTM`: the one in `dispin` (just fixed above),
+`schedule:`'s own (`"we can enable interrupts now... there MUST be a
+process on the RLR at this point"`), and `drltorlr`'s loop-tail
+(`sti ! jmps drltorlr`). The third is already self-protected by
+construction: the very next instruction after the jump it's attached
+to is `drltorlr`'s own `cli`, so the one-instruction delay never
+actually gives an interrupt a window -- no fix needed. Applied the
+same `sti ! cli` guard to `schedule:`'s, since it has the same shape
+as the two confirmed bugs (a real instruction follows, not an
+immediate `cli`) -- flagged in its own comment as precautionary,
+since there's no probe confirming it was actually causing a problem
+the way the other two were (the fix only narrows the already-enabled
+window, never widens it, so the downside of being wrong here is
+low).
+
+**Rebuilt and retested. New ground, again**: `drltorlr`'s own loop
+(never once reached before this round) now runs and shows **`drl`
+holding `0E40h` -- `TMP`'s own just-created PD address**, sitting on
+the dispatcher's ready list for the first time ever. The scheduler
+is genuinely getting close to actually running it. The same
+adjacent-marker `CX` corruption shows up again immediately
+afterward, but this time **not** explained by a bare `sti` --
+confirmed by the same whole-kernel grep coming back empty after the
+three already found. Whatever this fourth instance is, it's a
+different mechanism, not another case of the same bug.
+
+**Status at the end of this round**: three real `sti`-delay bugs
+found this session (two directly confirmed via probes, one applied
+as a reasoned precaution), `TMP`'s PD now visibly reaches the
+dispatcher's own ready list, and the investigation has moved
+decisively past where it's ever been before. The remaining
+corruption -- right where `drltorlr` is about to pull `TMP` off `drl`
+and call `insert_process` to make it the running process -- is the
+clear next target, and it's a *new* kind of corruption, not a repeat
+of the `sti` family.
+
+## 60. Found it -- a fourth `sti`-delay bug, this one hiding behind a
+jump instead of a straight-line instruction, and fixing it produced
+the biggest jump forward this entire investigation has seen
+
+Added probes at `insert_process`'s own top and at both its exit
+branches (`ins_out`/`ins_exit`), confirming it's correctly called
+*twice* -- once for `initpd` (from `disp_act`), once for `TMP` (from
+`drltorlr`, `SI=0E40h`) -- and that **both calls produce entirely
+correct linked-list results**: `initpd` stays at the head of `rlr`,
+`TMP` gets spliced in right after it. No bug in `insert_process`
+itself, for either call.
+
+**Went to GDB for a direct answer rather than more probes.**
+Breakpointed `ins_exit` (full-speed `-S`+`continue`, not single-
+stepping, preserving real timing), reached `TMP`'s own call reliably,
+then single-stepped forward from there -- interrupts are provably
+off this whole stretch (`drltorlr`'s own `cli`, nothing re-enables
+until the tail), so stepping here can't itself dodge a hardware race
+the way it did in earlier rounds. Watched `insert_process` return
+correctly via `ret`, landing exactly back at `drltorlr`'s own `sti !
+jmps drltorlr` -- then watched the actual fault line:
+
+```
+sti ! jmps drltorlr      ; sti's one-instruction delay applies to
+drltorlr: cli ! mov si,drl  ; the NEXT instruction retiring, which is
+                              ; the JUMP -- so a pending interrupt
+                              ; becomes eligible to fire the instant
+                              ; the CPU lands on drltorlr's own first
+                              ; instruction, one full instruction
+                              ; before THAT "cli" can matter
+```
+
+Every other `sti`-delay fix this session guarded a *straight-line*
+instruction (`sti` immediately followed by real code, then an
+explicit `cli`). This one is different in shape: `sti` is immediately
+followed by a *jump*, and the delay's "next instruction" is the jump
+itself -- which means the interrupt becomes eligible to fire right as
+execution arrives at the jump *target*, before that target's own
+`cli` (if any) has actually run. The original code's own structure
+(loop back to the top of `drltorlr`, which starts with `cli`) looked
+safe on a first read -- it isn't, by exactly one instruction. This
+had been sitting unnoticed since the very first `sti`-delay fix in
+#56, mis-assessed (by me) as self-protecting in #59.
+
+**Fixed by relocating the brief re-enable, not removing it**:
+`cli ! mov si,drl ! sti ! cli` at `drltorlr`'s own top (replacing
+the jump-adjacent `sti`), so the one-instruction window lands inside
+a straight-line pair with no jump between `sti` and the guarding
+`cli` -- same intent as the original comment ("we can enable
+interrupts... since interrupts doing a Flag_set may also"), same
+net effect (one brief window per loop iteration), just relocated to
+where it's actually safe.
+
+**The result is the single biggest jump forward this entire
+investigation has produced.** The trace nearly tripled in length
+(2092 -> 5818 bytes) and stayed exactly that length across a second,
+longer capture (confirmed deterministic, not a timeout artifact).
+In order:
+
+- `drltorlr` now correctly processes **all four PDs** waiting on
+  `drl` in one pass -- `TMP` (`0E40h`), `tick` (`0A20h`), and `idle`
+  (`09F0h`), each spliced into `rlr`'s list by `insert_process`
+  without a single wrong value anywhere.
+- **`switch` is reached for the first time this entire session** --
+  confirmed via its own entry marker (`bx=rlr=09C0h`, `initpd`) and
+  marker `8Ch`'s own direct read: `u_in_int=false`, correctly taking
+  the plain `dret` exit (not `int_disp_exit`) -- so a part of #59's
+  still-open question about that branch is now moot for this call,
+  since it's not the branch taken.
+- `dret`'s `ret` correctly unwinds the entire original call chain
+  back up through `RTMIF.RTM`'s `entry:`, `goodmod`, `gofar`,
+  `func()`, and `mpmif` -- `f_createproc(TMP)` completes **cleanly,
+  end to end, for the first time ever** in this whole multi-session
+  investigation.
+- `INIT.SUP`'s `nrsp` loop correctly finds no more RSPs and issues
+  its own `f_terminate` -- and *that* syscall also completes with
+  **zero register corruption anywhere in its own trace** (every
+  marker pair that used to disagree now agrees), reaching
+  `terminate_entry` and `abt_chk` and continuing into real cleanup
+  work (multiple further `RTM` queue calls, all resolving correctly
+  through `goodmod`/`V`/`T`).
+- Deeper still: `rlr` later reads `0A20h` (`tick`) rather than
+  `09C0h`, meaning a real process switch away from `INIT` happened at
+  some point in this trace -- genuinely new territory no prior round
+  has ever reached a description of.
+
+**Still open**: `TMP`'s own real entry point (marker `27h`) has not
+fired yet in this trace. The capture settles at a stable 5818 bytes
+with no further output (confirmed across two different capture
+lengths) -- either a graceful idle wait or a new, not-yet-identified
+stopping point, not yet distinguished. Given how much new ground
+just opened up, decoding this fully is squarely next round's task
+rather than something to rush through now.
+
+**Methodological note for next time**: this makes four confirmed
+`sti`-delay bugs this session, each mis-identified as safe at least
+once before being confirmed otherwise. Any bare `sti` followed by a
+jump (not a straight-line instruction) deserves the same suspicion
+as one followed by real code -- "the jump target starts with `cli`"
+is not the same protection as "the very next instruction is
+`cli`."
+
+## 61. Followed #60's own open thread -- the `SUP init:` re-entry is
+still happening, but it's a different, more clarifying problem than
+#58 first found
+
+Decoded the full 5818-byte trace from #60's fix. Beyond `f_createproc
+(TMP)` and `INIT`'s own `f_terminate` both completing cleanly, the
+scheduler goes on to genuinely dispatch **`tick`** as well (`switch`
+runs a third time with `rlr=0A20`, `u_in_int` correctly reads `true`,
+`u_ds_sav`/`u_es_sav` both read back sane `179D` -- not corrupted),
+and several more real `RTM`/`MEM` calls resolve correctly afterward.
+Real, further progress beyond what #60 itself decoded.
+
+**The trace still ends with what reads as `SUP`'s `init:` running a
+second time** -- same unambiguous `1`/`2`/`3` markers as before.
+Re-checked via GDB (`-S`+`continue`, same technique as #58) to see
+whether this is still the same "crash landing with garbage registers"
+#58 found. **It isn't, anymore.** `DS`/`ES` both read back sane
+(`179Dh`, real `sysdat`) instead of `0xCCCC`, and single-stepping
+forward from the hit shows `init:`'s own code -- the `'1'` marker,
+then a real call into `zdbg` to dump `SS:SP` -- executing completely
+normally, byte for byte matching what `init:`'s own source actually
+says to do. **This is a clean, well-formed second execution of
+`init:`'s entire body, not a wild jump landing on its bytes by
+coincidence.** The `sti`-delay fixes evidently cleaned up the
+`0xCCCC`-flavored corruption along with everything else they fixed;
+what's left is a more fundamental question than "what's corrupting
+registers" -- it's "what legitimately causes `SUP`'s cold-boot
+routine to run twice."
+
+**Ruled out the two most obvious mechanisms directly**: `dispatcher`
+(the far-pointer `RTMIF.RTM`'s `init:` sets to `fdisp`, later copied
+into `XIOS86Q.A86`'s own `mydispatch`) lives at `SYSDAT` offset
+`0x38`, nowhere near `module_table[sup]`'s own offset range -- no
+plausible aliasing there. Checked every real label near `init:`'s own
+address (`0x7Ah`) for a coincidental match (`idle`, `tick`, `notick`
+all live far away, offsets `0x329`+) -- nothing lines up. `CX` reads
+exactly `0x7Ah` (matching `IP`) at the moment of the hit, which may
+be meaningful or may just be unrelated leftover state; not yet
+resolved either way.
+
+**Context for why this is now a lower-stakes mystery than #58 made
+it look**: `INIT` is the process calling its own `f_terminate` right
+before this happens -- i.e., this isn't a bug corrupting some
+*other* process's execution, it's `INIT` itself, at the natural end
+of its own job (every RSP created, nothing left to do), ending up
+back at its own starting point instead of just idling. Still wrong,
+but a much narrower, more specific question than "something is
+smashing registers somewhere" -- most likely either a genuine logic
+gap in how `f_terminate`/`abt_chk` hands off to the scheduler when no
+other process is left ready, or one more wrong-field/stale-pointer
+read in that handoff path, in the same family as the ones #53/#54
+already found and fixed for `module_table[sup]` -- just not yet
+isolated to a specific instruction the way those were.
+
+**Next step**: trace `abt_chk`/`terminate_entry`'s own tail
+(`ABORT.RTM`) the same way #54 traced `getpdadr` -- a GDB breakpoint
+at its very last few instructions, checking exactly what it calls or
+jumps to once cleanup is done, rather than working backward from the
+`init:` landing site as this round did.
+
+**Did exactly that, and found the real bug is one step further back
+than expected.** `ABORT.RTM`'s `terminate_entry` ends with `jmp
+dsptch`, which (correctly) routes to `DSPTCH.RTM`'s `term_act` for a
+`ps_term` process. `term_act` has its own, independently interesting
+pattern: it temporarily stores the *old* `rlr` into the terminating
+process's own `p_link[si]` (`mov p_link[si],ax`), sets `rlr=si` so
+the several nested `mpmif` calls it makes during cleanup
+(`f_condetach`/`f_lstdetach`/`f_memfree`/`f_qwrite`, freeing the
+terminating process's own resources) have a valid "current process"
+to operate against, then restores it at the very end (`mov
+ax,p_link[si] ! mov rlr,ax`).
+
+Added two probes -- one at `term_act`'s own top (dumping the real
+`rlr` being saved, plus `si`), one right before the final restore
+(dumping `si` and `p_link[si]` again) -- to check whether that
+temporary storage survives the four nested calls intact.
+
+**It doesn't, but the more interesting finding is what it started
+as.** The *saved* `rlr` value, at `term_act`'s own very first
+instruction -- before any of `term_act`'s own code has touched
+anything -- read back as `0A95h`. That's not a valid PD address at
+all: every real PD slot this session has ever seen is paragraph-
+aligned to `PD_POOL_SLOT_SIZE` (`0x30`), and `0A95h` isn't (`0A95h mod
+30h` isn't `0`). **`rlr` was already invalid by the time `INIT` called
+its own `f_terminate`, in this specific (longer, further-reaching)
+trace** -- this is upstream of everything in `ABORT.RTM`/`DSPTCH.RTM`'s
+own termination path, not caused by it.
+
+(For completeness: `p_link[si]` *does* separately get clobbered
+during the four nested cleanup calls too, read back as `0A20h`
+--`tick`'s own, valid address -- instead of the `0A95h` that was
+saved into it. Coincidentally more plausible-looking than what was
+saved, but still an uncontrolled overwrite of state `term_act` is
+relying on staying put across calls it doesn't own -- worth fixing on
+its own merits once the real, upstream `rlr` corruption is found,
+but not itself the root cause here.)
+
+**Next step**: this round's own longer trace is the first one ever
+to exercise `flag_act`/`swap_act` (dispatch table entries this
+investigation has never reached before -- confirmed via the `{...}`
+dispatch-table-index marker showing index `8`, `flag_act`, earlier in
+this same trace) -- that's the most likely place `rlr` first goes
+bad, not anything in the termination path itself. Next round should
+breakpoint/probe `flag_act`'s and `swap_act`'s own handling of `rlr`
+directly, the same way #54 isolated `getpdadr` and #60 isolated
+`drltorlr` -- newly reachable code, not yet exercised by any fix or
+probe this session.

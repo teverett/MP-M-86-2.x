@@ -157,7 +157,13 @@ nxiom:
 		; Start RSPs
 nrsp:					;loop til done
 	push ax ! mov al,'C' ! mov dx,03f8h ! out dx,al  ! push ax ! push dx ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
-	mov ds,sysdat			;reset DS
+	mov ds,cs:sysdat		;reset DS -- bare form is wrong, same bug
+					;class/fix as this file's own already-fixed
+					;"mov cs:sysdat,ax" above: a bare read here
+					;lands on SYSDAT's own offset 6
+					;(module_table[sup].init_seg) instead of
+					;this module's own cseg cell -- hit on
+					;*every* nrsp iteration, including TMP's own
 	mov cx,rspseg
 	push ax ! push dx ! mov al,1Bh ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call zdbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 1Bh, dump rspseg at top of each nrsp iteration
 	jcxz rsp_out	;?all done?

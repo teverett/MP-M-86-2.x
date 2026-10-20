@@ -89,7 +89,8 @@ nodf:	mov bx,rlr
 
 	cmp cli_chain,true ! jne cli_copy
 	    push es ! push ds
-	    mov es,sysdat
+	    mov es,cs:sysdat	;bare form wrong, same bug class/fix as
+				;INIT.SUP's nrsp (see its comment)
 	    mov si,cli_dma_ofst
 	    mov di,offset cli_cmdtail
 	    mov ds,cli_dma_seg
@@ -230,7 +231,7 @@ cli_gpd:
 
 	mov si,(offset cli_fcb)+fcb_dskmap
 	mov di,offset cli_dma
-	push es ! mov es,sysdat
+	push es ! mov es,cs:sysdat	;bare form wrong, same bug class/fix
 	mov cx,4 ! rep movsw
 	pop es
 	mov u_dma_ofst,offset cli_dma
@@ -303,14 +304,14 @@ cli_ld1:
 	    mov p_uda[bx],es
 	    mov ax,offset inituda
 	    mov cl,4 ! shr ax,cl
-	    add ax,sysdat
+	    add ax,cs:sysdat	;bare form wrong, same bug class/fix
 	    mov bx,es ! mov es,ax ! mov di,0
 	    mov ds,bx ! mov si,di
 	    mov cx,ulen/2
 	    rep movsw
 	    pushf ! cli ! pop dx
 	    mov ax,es
-	    mov ds,sysdat
+	    mov ds,cs:sysdat	;bare form wrong, same bug class/fix
 	    mov ss,ax
 	    mov bx,rlr
 	    mov p_uda[bx],ax

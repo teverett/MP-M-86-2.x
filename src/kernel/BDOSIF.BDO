@@ -31,7 +31,11 @@ init:
 ;	assume ds=system data area 
 
 		; save sysdat segment
-	mov sysdat,ds
+	mov cs:sysdat,ds		;bare write is wrong here, same bug
+					;class/fix as RTMIF.RTM's "init:" (see its
+					;own comment) -- lands on SYSDAT's own
+					;offset 6 (module_table[sup].init_seg)
+					;instead of this module's own cseg cell
 	mov bx,offset supmod ! mov si,offset supervisor
 	mov ax,[bx] ! mov cs:[si],ax
 	mov ax,2[bx] ! mov cs:2[si],ax
@@ -198,7 +202,8 @@ getdiskmx:
 	pushf ! pop ax  ! cli
 	mov sssave,ss
 	mov spsave,sp
-	mov ss,sysdat
+	mov ss,cs:sysdat	;bare form wrong, same bug class/fix as
+				;this file's own "init:" (see its comment)
 	mov sp,offset bdosstack
 	push ax ! popf
 

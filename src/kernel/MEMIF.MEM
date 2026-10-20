@@ -26,7 +26,11 @@ mau_entry_counter	dw	0	;TEMP DEBUG: counts real maualloc_entry
 init:
 ;====
 
-	mov sysdat,ds
+	mov cs:sysdat,ds		;save sysdat -- bare write is wrong here,
+					;same bug class/fix as RTMIF.RTM's "init:"
+					;(see its own comment) -- lands on SYSDAT's
+					;own offset 6 (module_table[sup].init_seg)
+					;instead of this module's own cseg cell
 	mov bx,offset supmod ! mov si,offset supervisor
 	mov ax,[bx]
 	mov cs:[si],ax

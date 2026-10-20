@@ -31,14 +31,15 @@ getqdaddr:
 	add ax,dx
 		;must be above SYSDAT
 	push ax ! mov al,'I' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
-	cmp ax,sysdat ! jb gqd_bad
+	cmp ax,cs:sysdat ! jb gqd_bad	;bare form wrong, same bug class/fix as
+					;PROC.RTM's getpdadr (see its comment)
 		;must be below end of system
 	    cmp ax,endseg  ! jae gqd_bad
 			;must be within 64K of SYSDAT
 			; 64K=1000h memory paragraphs
-		mov cx,sysdat ! add cx,1000h
+		mov cx,cs:sysdat ! add cx,1000h	;bare form wrong, same bug class/fix
 		cmp ax,cx ! jae gqd_bad
-		    pop ax ! sub ax,sysdat
+		    pop ax ! sub ax,cs:sysdat	;bare form wrong, same bug class/fix
 		    mov cl,4 ! shl ax,cl
 		    pop dx ! add dx,ax
 		    mov si,dx ! sub cx,cx

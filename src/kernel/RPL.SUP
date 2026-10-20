@@ -57,7 +57,8 @@ rpl_entry:	; Call Resident Procedure Library
 	pop di ! pop si
 	cmp cx,0 ! jne rpl_err
 	    mov bx,qpb_qaddr[di]
-	    push ds ! mov ds,sysdat
+	    push ds ! mov ds,cs:sysdat	;bare form wrong, same bug class/fix as
+					;INIT.SUP's nrsp (see its comment)
 	    test q_flags[bx],qf_rpl ! pop ds
 	    jz rpl_err
 		mov cx,f_qread ! mov dx,di

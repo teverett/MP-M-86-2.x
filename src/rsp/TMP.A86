@@ -90,6 +90,7 @@ mpm:	; INTERFACE ROUTINE FOR SYSTEM ENTRY POINTS
 tmp:	; PROGRAM MAIN - INITIALIZATION
 ;===
 
+	push ax ! push dx ! mov al,27h ! mov dx,03f8h ! out dx,al ! mov al,'T' ! out dx,al ! mov al,'M' ! out dx,al ! mov al,'P' ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 27h+"TMP", confirms TMP's own real entry point (not mpm:) is ever reached after the kernel's dispatcher first switches to it
 		; set default console # = TMP#
 	mov dl,defconsole ! call setconsole
 

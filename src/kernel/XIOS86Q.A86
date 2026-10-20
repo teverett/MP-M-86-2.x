@@ -203,7 +203,11 @@ mydispatch	equ	(offset $)
 
 init:
 	push ax ! mov al,'0' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
-	mov	sysdat,ds
+	mov	cs:sysdat,ds		;bare write is wrong here, same bug
+					;class/fix as RTMIF.RTM's "init:" (see its
+					;own comment) -- lands on SYSDAT's own
+					;offset 6 (module_table[sup].init_seg)
+					;instead of this module's own cseg cell
 
 	;	copy this module's own "entry" far pointer out of
 	;	SYSDAT's module table (supmod) into a local copy, the

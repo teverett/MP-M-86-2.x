@@ -10,7 +10,8 @@ idle:		;Idle Process
 ;====
 ; Jump to the XIOS idle routine
 
-	mov ds,sysdat
+	mov ds,cs:sysdat	;bare form wrong, same bug class/fix as
+				;INIT.SUP's nrsp (see its comment)
 	mov bx,rlr
 	mov es,p_uda[bx]
 	mov ax,io_idle

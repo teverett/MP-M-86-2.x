@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+    #!/usr/bin/env python3
 """Combine the kernel modules into one loadable MPM.SYS-equivalent image.
 
 This is the kernel-side counterpart to tools/build_mpmldr.py's loader

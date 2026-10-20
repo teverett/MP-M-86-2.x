@@ -2289,6 +2289,104 @@ all".
 
 
 
+## 38. Past #37's checkpoint: `proc_creat`'s own tail-chain mechanism
+fires a *second*, bogus PD creation for TMP that corrupts `rspseg`
+(and neighboring SYSDAT fields) via a wild `getpdadr` translation --
+root cause narrowed but not yet nailed down
+
+With #37's two fixes in place, TMP's `f_createproc` call genuinely
+succeeds (confirmed: a real PD-pool slot gets allocated and the
+dispatcher switches to it) -- but the system still hangs shortly
+after, and this time the failure mode is a wild far jump (`CS`
+observed as `0x20E9`, nowhere near any real module/RSP segment,
+wandering through different `IP` values rather than looping, i.e.
+executing whatever garbage happens to live there) once TMP starts
+actually running.
+
+**What's confirmed, via GDB hardware watchpoints (the only reliable
+technique found this session for this question -- see the
+methodology note below):**
+
+- TMP's `f_createproc` call reaches `proc_creat` correctly with
+  `dx=rsp_pd(0x10)`, and `getpdadr` correctly allocates a real PD-pool
+  slot for it (confirmed earlier, #37).
+- `proc_creat`'s own tail-chain mechanism (`cp_gpd: mov dx,p_link[si] /
+  push dx ! push si / ... / pop dx ! jmp proc_creat` at the very end)
+  fires a *second* time for TMP specifically, with a nonzero `dx`
+  (observed as `0x04CF` via the existing `0x1F` probe) -- even though
+  TMP's own static PD data (`src/rsp/TMP.A86`'s `pd: dw 0,0 ;link
+  fields`) declares `p_link=0`, which should make this chain
+  terminate immediately after the one real creation. This means
+  either the copied-in PD's `p_link` field isn't really 0 by the time
+  `cp_gpd` reads it, or something else is driving this second
+  iteration -- not yet isolated which.
+- This second iteration's own `getpdadr` call for `dx=0x04CF` returns
+  a *PD address far too small to be valid* -- not a real PD-pool slot,
+  not any legitimate sysdat-resident PD. The exact value wasn't read
+  directly (register-only arithmetic inside `getpdadr`'s "good path"
+  leaves no memory write to watch), but it's pinned down indirectly
+  and precisely: `cp_uda`'s `p_lst[si]` write (`cp_slst: add
+  al,ncondev ! mov p_lst[si],al`, with `al` ending up `1` given
+  `ncondev=1` and TMP's own `p_lst` starting at 0) landed exactly on
+  `rspseg` (confirmed via watchpoint: `rspseg` flips from the correct
+  `0` to `1` mid-chain, and `p_lst`'s own PD.DEF offset is `0x24`,
+  `0x24 + si = 0x42 = rspseg`'s own SYSDAT offset exactly if and only
+  if `si = 0x1Eh` for this second, bogus PD) -- i.e. `getpdadr`
+  computed `si≈0x1E` for this call, squarely inside SYSDAT's own early
+  fields (overlapping `rspseg`/`endseg`/`module_map`/version info),
+  not anywhere a real PD belongs.
+- This corrupts `rspseg` from `0` (correctly "chain empty" after
+  TMP) to `1`. `nrsp`'s own loop then re-reads `rspseg` as `1`,
+  `jcxz` doesn't fire, and it treats segment `1:0000` (the bottom of
+  real memory) as if it were an RSP, reading garbage
+  (`es:.rsp_link` from segment 1 came back `0xFF53`) and firing a
+  *third*, totally wild `f_createproc` with `DS=1` -- this is also
+  where the earlier `u_wrkseg=1`/`p_uda=0xD445` garbage (misattributed
+  to TMP's own creation in #37's writeup; it's actually this third,
+  wild call) comes from. This cascades into the `CS=0x20E9` wild jump
+  once something tries to actually run whatever "process" this
+  produced.
+- Attempting to pin down `getpdadr`'s exact arithmetic for the
+  `dx=0x04CF` call by hand (assuming the "good path": `si = dx +
+  ((u_wrkseg - sysdat) << 4)`) gives `si=0x01BF`, not `0x1E` --
+  these don't match, so either the hand arithmetic has an error, the
+  "bad" (free-list) path is actually being taken instead (with `pul`
+  itself already corrupted or exhausted after only one real
+  allocation), or `u_wrkseg` isn't what it's assumed to be at this
+  specific point in the chain. Not yet resolved -- this is the
+  concrete next step: trace `getpdadr` itself (not just its
+  before/after effects) for this specific second call, ideally via a
+  watchpoint on `pul` and on `u_wrkseg` simultaneously, single-shot
+  each time (see methodology note).
+
+**Methodology note, confirmed the hard way this round:** GDB software
+breakpoints on this QEMU gdbstub, hit repeatedly via a loop of
+`continue` calls in one script, are **not reliable past the first
+hit** -- every subsequent `continue` can report back the exact same
+register/PC state as the first hit, never actually progressing,
+even though the serial trace and watchpoint-based checks confirm the
+program really did keep running. (Confirmed directly: a breakpoint on
+`PROC.RTM`'s `cp_uda`'s own `mov cx,[0x42]` read reported identical
+`cx=0x172b`, same stack, across 6 consecutive hits -- while a hardware
+*watchpoint* on the exact same memory cell, run the same way, showed
+three genuinely different values across three hits.) Hardware
+watchpoints (`watch *(unsigned short*)<physical address>`, one per
+GDB session, read registers immediately after each `continue`)
+remained reliable throughout and should be preferred exclusively over
+breakpoint-loop polling for any further "who wrote/read this and with
+what register state" question on this target.
+
+Checked `orig/asm80/ASM.ASM` and `orig/mac-b/` (both suggested as
+possible references) -- neither applies: `asm80/ASM.ASM` is DRI's
+original 8080-only assembler (no `ESEG`/`JCXZ`/segment-override
+concepts exist in 8080 at all, predates the 8086 port entirely), and
+`orig/mac-b/` is DRI's MAC macro-assembler, also 8080/Z80/8085-only
+(`.LIB` macro files like `DOWHILE`/`WHEN`/`STACK`, `.COM` binaries, no
+8086 source). This bug is a kernel runtime logic error (a live
+register/address-computation bug in `getpdadr`'s own arithmetic or in
+what reaches it), not an assembler syntax or encoding question, so
+historical assembler sources don't bear on it.
+
 The RSP sources (`CLOCK.A86`, `ECHO.A86`, `TMP.A86`, `SUBMIT.A86`) and
 all 22 `.PLM` utilities in `src/utils/`/`src/toolchain/` compile and
 assemble cleanly end-to-end (`ECHO.A86` and every `.PLM` file — see

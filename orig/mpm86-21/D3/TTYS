@@ -1,0 +1,15 @@
+0:0:0:82N:console:System console device
+1:0:0:82N:tty1:Interfacer 3 port 7
+2:0:0:82N:tty2:Interfacer 3 port 6
+3:0:0:82N:tty3:Interfacer 3 port 3
+4:0:0:82N:tty4:Interfacer 3 port 2
+5:0:0:82N:tty5:Interfacer 3 port 1
+6:0:0:82N:tty6:Interfacer 3 port 0
+7:0:0:82N:tty7:Interfacer 3 port 9
+8:0:0:82N:tty8:Interfacer 3 port 10
+9:0:0:82N:tty9:Interfacer 3 port 11
+10:0:0:82N:tty10:Interfacer 3 port 12
+11:0:0:82N:tty11:Interfacer 3 port 13
+12:0:0:82N:tty12:Interfacer 3 port 14
+13:0:0:82N:tty13:Interfacer 3 port 15
+

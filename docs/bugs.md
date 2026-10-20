@@ -2387,6 +2387,93 @@ register/address-computation bug in `getpdadr`'s own arithmetic or in
 what reaches it), not an assembler syntax or encoding question, so
 historical assembler sources don't bear on it.
 
+## 39. Found and fixed the TRUE root cause behind most of #38's
+confusion: `INIT.SUP`'s own `inituda`-segment computation used a bare
+`sysdat` read -- the same bug class, a sixth instance, now fixed.
+Boot progresses substantially further; one more, still-open issue
+remains in `proc_creat`'s chain for TMP specifically.
+
+Chasing #38's "`si≈0x1E`, lands in SYSDAT's own early fields" lead
+with a GDB hardware watchpoint on `p_uda[initpd]` led straight to the
+real root cause: `INIT.SUP`'s own very early setup --
+
+```
+	mov bx,offset initpd
+	mov ax,offset inituda
+	mov cl,4 ! shr ax,cl
+	add ax,sysdat ! mov p_uda[bx],ax
+```
+
+-- has a **bare** `add ax,sysdat` (no `cs:` override), the exact same
+bug class as `mpmif`'s and `user_entry`'s own already-fixed `sysdat`
+reads (#33/#37). At this point in `init:`, DS is correctly
+sysdat-ish, so the bare read doesn't fail outright -- it silently
+reads *SYSDAT's own offset 6* instead of this module's own cseg cell.
+Offset 6 is the back half of the module table's SUP entry (its
+"initialize" far pointer's segment word), which `build_mpmsys.py`
+bakes as `MPM_CODE_SEG` (`1000h`) -- and since SUP's own
+`module_base` is 0, that's indistinguishable from a plausible-looking
+value, which is exactly why this one went unnoticed through every
+earlier working syscall this whole session: `p_uda[initpd]` silently
+computed to `106Ch` (`inituda`'s own paragraph count `6Ch` + the
+wrong `1000h`) instead of the real `17C8h` (`6Ch` + the real sysdat
+segment `175Ch`) -- landing INIT's *entire own UDA* (`u_insys`,
+`u_wrkseg`, every other `u_*` field any of INIT's own `int mpmint`
+calls ever touch) squarely inside SUP's own live code bytes instead
+of SYSDAT's reserved `inituda` area. Confirmed directly: `u_insys`
+read back `8Bh` live (a stray opcode byte, not a small nesting count)
+right before this fix; every earlier syscall this session tolerated
+the corruption only because it never hit a case where `u_insys`
+being garbage, or any other misplaced `u_*` field, mattered enough to
+visibly break something -- RSP creation via `nrsp` was the first path
+sensitive enough to expose it, which is why this whole investigation
+(all of #36-#38) kept finding downstream symptoms (`rspseg`
+corruption, wild PD addresses, the `CS=0x20E9` jump) without ever
+reaching this upstream cause. Fixed the same way as every other
+instance: `add ax,sysdat` -> `add ax,cs:sysdat`.
+
+**Confirmed via GDB immediately after the fix:** `p_uda[initpd]` now
+reads `17C8h` correctly (exactly matching the hand-computed correct
+value), and every `ES` dump throughout the dispatch trace now shows
+`17C8` consistently (previously `106C`). A conditional breakpoint
+(`break *user_entry+1 if $cx==0x90`, single-shot, no repeated
+`continue` -- see #38's methodology note, still holds) confirms `DS`
+is correctly `172Bh` (TMP's own data segment) for the real
+`f_createproc` call.
+
+**Methodology correction, found the hard way (again) this round:** a
+*second* GDB watchpoint quirk, distinct from #38's breakpoint-reuse
+one -- a hardware watchpoint on a freshly-growing/shrinking address
+range can report a stale-then-corrected pair of hits for what is
+actually a *single* underlying write, with the first report showing
+plausible-but-wrong register state. (Concretely: a watchpoint on the
+relocated `u_wrkseg` cell showed `di=0xC000` for what looked like the
+real `f_createproc` call -- directly contradicted moments later by a
+clean, single-shot conditional breakpoint showing `DS=172Bh`, the
+correct value, for the exact same call.) Trust a single-shot
+conditional breakpoint over a watchpoint's reported register state
+when they disagree; use the watchpoint only to find *where* execution
+is, not to trust *what it reports mid-transition*.
+
+**Still open:** the system now hangs at the same point as before
+(serial trace confirmed identical length/content across multiple
+fresh 25-second runs) -- but a *different* probe this time
+(`PROC.RTM`'s own existing `0x1A` marker, a direct serial print, not
+a GDB artifact) shows `u_wrkseg=0xC000` for what appears to be the
+exact same `si=0x0E40` PD slot right after the real creation
+succeeds, alongside a transient `DS=0000h` seen in the dispatch trace
+moments earlier (`fnchk`'s own module-table check flagging most
+slots as bad -- consistent with reading `module_table` through
+`DS=0`). Given the conditional-breakpoint check above proves `DS` is
+correct at the *real* `f_createproc` syscall entry, this looks like
+`proc_creat`'s own internal tail-chain (`pop dx ! jmp proc_creat`, see
+#38) firing again for a *second*, bogus PD -- same symptom as #38,
+now with a corrected #37/#38 foundation underneath it, so the next
+step is re-investigating *why* the chain continues at all (TMP's own
+static PD data declares `p_link=0`, which should prevent this) with
+a single-shot conditional breakpoint on `cp_gpd`'s `mov dx,p_link[si]`
+read, rather than a watchpoint.
+
 The RSP sources (`CLOCK.A86`, `ECHO.A86`, `TMP.A86`, `SUBMIT.A86`) and
 all 22 `.PLM` utilities in `src/utils/`/`src/toolchain/` compile and
 assemble cleanly end-to-end (`ECHO.A86` and every `.PLM` file — see

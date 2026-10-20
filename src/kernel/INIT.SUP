@@ -80,7 +80,34 @@ init:
 	mov bx,offset initpd
 	mov ax,offset inituda
 	mov cl,4 ! shr ax,cl
-	add ax,sysdat ! mov p_uda[bx],ax
+	add ax,cs:sysdat ! mov p_uda[bx],ax	;bare "add ax,sysdat" is wrong --
+				;DS is sysdat-ish here (correctly, per the
+				;cold-boot assumption), so a bare read of
+				;"sysdat" lands on SYSDAT's own offset 6
+				;instead of this module's own cseg cell at
+				;that same bare offset -- SYSDAT's own
+				;offset 6 is the back half of the module
+				;table's SUP entry (its "initialize" far
+				;pointer's segment word), which happens to
+				;equal MPM_CODE_SEG (1000h) since SUP's own
+				;module_base is 0. That silently computed
+				;p_uda[initpd] = 106Ch instead of the real
+				;sysdat-relative uda segment (175Ch-based),
+				;landing INIT's own entire UDA (u_insys,
+				;u_wrkseg, every other u_* field INIT's own
+				;"int mpmint" calls ever touch) squarely
+				;inside SUP's own live code bytes instead of
+				;in SYSDAT's reserved inituda area --
+				;confirmed via GDB: u_insys read back 8Bh (a
+				;stray opcode byte, not a small nesting
+				;count) at the very first syscall this path
+				;ever makes with a non-sysdat-resident PD
+				;(RSP creation via nrsp -- every earlier
+				;syscall this session happened to tolerate
+				;the corruption since it only ever created
+				;sysdat-resident PDs). Same bug class, same
+				;fix, as mpmif/user_entry's own "sysdat"
+				;reads.
 	mov es,ax
 	mov u_wrkseg,ds
 

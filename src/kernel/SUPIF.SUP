@@ -63,7 +63,31 @@ user_entry:
 								;Same bug class as MEMIF.MEM's
 								;'a'/'b' and ABORT.RTM's '$' probes.
 	cld ! mov di,ds			;DI=user's DSEG
-	mov ds,sysdat ! mov bx,rlr	;BX=pd address
+	mov ds,cs:sysdat ! mov bx,rlr	;BX=pd address -- bare "mov ds,sysdat"
+					;only works when the *caller's* DS
+					;(just saved above into DI) already
+					;happens to be sysdat-ish, which is
+					;true for every syscall except
+					;INIT.SUP's nrsp loop: it deliberately
+					;sets DS=rspseg (the RSP's own data
+					;segment, needed so DI/u_wrkseg
+					;capture the RSP's segment) right
+					;before "int mpmint" for
+					;f_createproc. A bare read then pulls
+					;"sysdat" through rspseg instead of
+					;through SUP's own code segment,
+					;yielding whatever garbage happens to
+					;sit at that offset in the RSP's
+					;dseg -- which is then used as the
+					;sysdat segment for the rest of this
+					;dispatch, corrupting every
+					;module_table/p_uda/etc lookup
+					;(including func:'s own fnchk loop).
+					;Same bug class, and same fix
+					;("cs:sysdat"), as mpmif's below --
+					;SUP's module_base is 0, so cs:sysdat
+					;reliably addresses the same combined
+					;location regardless of DS.
 	mov ax,es ! mov es,p_uda[bx]	;ES=uda
 	cmp u_insys,0 ! jne noswt
 	    mov u_stack_ss,ss		;switch stacks

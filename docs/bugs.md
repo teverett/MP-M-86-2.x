@@ -5463,3 +5463,78 @@ both already belong to. Given how much further this reaches than
 anything in #65 (through the *entire* module-init phase and into real
 RSP creation), this is squarely new territory, not a continuation of
 #65's own mystery.
+
+## 67. Followed #66's own next step -- narrowed the `1000:004A` wild
+jump to `INIT.SUP`'s own self-termination call, found a real,
+concrete suspect, but did not nail down the exact mechanism (left
+for the next round)
+
+Picked up `INIT.SUP`'s own source right after `nrsp`'s loop exits
+(`rsp_out:`): it dumps `p_flag[rlr]` (marker `'!'`), then
+unconditionally does `mov cl,f_terminate ! mov dl,0ffh ! int mpmint`
+to terminate itself -- with **nothing after that call**. The very
+next thing in the file is `zdbg:`'s own subroutine body, and the file
+right after `INIT.SUP` in `SUP.A86`'s own `include` list is
+`IDLE.SUP` (`idle:` -- jumps into XIOS's real idle loop). If this
+termination call ever *returns* instead of transferring control away
+(`ABORT.RTM`'s `terminate_entry`, on success, ends in `jmp dsptch` --
+on failure, a plain `ret`), execution falls straight through into
+`zdbg`'s own prologue with no call frame set up for it, and past that
+into `idle:` -- not obviously a crash by itself, but entirely at the
+mercy of whatever garbage happens to be on the stack by the time
+`zdbg`'s own trailing `ret` (or anything else downstream) tries to pop
+a return address.
+
+**Confirmed, via a breakpoint on `rsp_out` itself** (`SUP.A86`'s own
+`asm86 --symbols`, `rsp_out` at local offset `0x2BC`), reading `rlr`
+directly from memory at that exact point: `rlr = initpd` (`0x9C0`),
+exactly as it should be -- `INIT` itself is still the running process
+right up to the termination call. Single-stepping forward from there
+confirms the marker `'!'` probe's own `call zdbg` executes completely
+normally (lands exactly on `zdbg`'s real label, `0x2FA`, confirmed via
+symbols, loops through its real 4-hex-digit dump body, `zdbg1`
+(`0x302`) through `zdbg3` (`0x317`), exactly as designed) -- this
+specific call is not the bug.
+
+**Separately, breakpointing `ABORT.RTM`'s own `terminate_entry`/
+`abt_chk` path directly** (its `'$'`/`'%'` markers) caught something
+that doesn't fit cleanly with the above: at the exact moment the
+`'%'` marker dumps `BX(=rlr)`/`CX(=abt_chk's result)`/`p_flag[bx]`/
+`DX`, `BX` reads `0E40` (`TMP`'s own PD, confirmed via this entire
+session's own long-standing identification of that address) with
+`p_flag=0x0211` (`pf_sys`+`pf_table`+`pf_tempkeep`) and `CX=0FFFFh`
+(`abt_chk`'s own documented "tempkeep" return value) -- not `INIT`'s
+own PD (`0x9C0`) at all. `terminate_entry`'s own `cmp cx,0 ! jle
+term_err` (original, unmodified 1981 logic: correctly routes both the
+"no abort" case, `cx=0`, and the "tempkeep" case, `cx=0FFFFh` treated
+as signed `-1`, to the error return) then returns an error --
+`bx=0ffffh`, `cx=e_pd_noterm` -- via a plain `ret`, not `jmp dsptch`.
+
+**This is the real, concrete suspect, but not yet a confirmed root
+cause**: somewhere between `rsp_out` (`rlr=INIT`, confirmed) and
+whichever call actually reached `terminate_entry`/`abt_chk` with
+`rlr=TMP`, `rlr` changes -- and `TMP` itself does have real,
+documented reasons to carry `pf_tempkeep` (every `BDOSIF.BDO`
+`getdiskmx` call sets it for the call's own duration, clearing it
+again on return). Two read as consistent with each other only if
+either (a) this specific `'%'`-marker hit belongs to a *different*
+termination attempt than `INIT`'s own line-210 call (plausible:
+`RETMONX`'s own `pf_ctlc` check, `BDOSIF.BDO` line 321-323, also calls
+`f_terminate` under some conditions), or (b) `rlr` itself changes
+between `rsp_out` and the real `int mpmint` dispatch in a way this
+round's single-stepping didn't catch cleanly (budget ran out mid-trace,
+still inside `zdbg`'s own loop, short of reaching the `int` instruction
+itself). Not resolved either way this round -- genuinely two different
+GDB sessions, not one continuous trace, so the two findings haven't
+been tied together with full confidence yet.
+
+**Next step**: single-step `INIT.SUP`'s own code continuously,
+without interruption, from `rsp_out` all the way through the real
+`int mpmint ! retf`-or-fallthrough at line 210 (budget for this: a
+few hundred steps should comfortably cover it, not the ~140 this
+round used), watching specifically for (1) whether `rlr` changes
+*before* that `int` executes, and if so what instruction does it, and
+(2) whether `terminate_entry` takes the `jmp dsptch` success path or
+the plain-`ret` failure path this exact time, to settle definitively
+whether `INIT`'s own termination is what's failing, or whether this
+round's two findings describe two unrelated moments.

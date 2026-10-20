@@ -5538,3 +5538,144 @@ round used), watching specifically for (1) whether `rlr` changes
 the plain-`ret` failure path this exact time, to settle definitively
 whether `INIT`'s own termination is what's failing, or whether this
 round's two findings describe two unrelated moments.
+
+## 68. Followed #67's own next step -- settled it: `INIT`'s own
+termination is clean, `rlr` tracks correctly throughout; the `1000:
+004A` crash happens much later, deep in `TMP`'s own idle console-read
+retry loop, and its timing is sensitive enough to GDB's own
+perturbation that it could not be pinned to one exact instruction
+this round
+
+Did the continuous single-step `#67` asked for, from `rsp_out`
+through the real `int mpmint` dispatch, watching `rlr` the whole way
+(reading it from memory every step, not just at breakpoints): it
+**never changes from `initpd` (`0x9C0`)** across the full call.
+Confirmed with a second, breakpoint-based pass (`rsp_out` /
+`terminate_entry` / `dsptch` / the `1000:004A` crash site, each as
+its own breakpoint, `continue`d between hits rather than single-
+stepped): `terminate_entry` is reached exactly once with `rlr=INIT`,
+and the *very next* hits are `dsptch` -- `INIT` really did take the
+`jmp dsptch` **success** path, not the error `ret` #67 worried about.
+`rlr` then updates correctly, `initpd` (`0x9C0`) -> `tickpd`
+(`0x0A20`) -> `TMP`'s own PD (`0x0E40`) -- exactly the ready-list
+handoff this should look like. **#67's own `BX=0E40`/`pf_tempkeep`
+finding at `terminate_entry` was, as its own write-up already
+hedged, a different, later moment -- not `INIT`'s own termination at
+all.** `INIT`'s side of this is fully exonerated.
+
+**From there, `rlr=TMP` for a long run of repeated `dsptch` calls --
+confirmed stable at the identical caller stack depth (`SS:SP` pinned
+to `1779:00D0`, unchanged, ruling out a per-iteration stack leak) for
+well over 100 consecutive hits before the same session eventually
+reached the `1000:004A` crash site, still with `rlr=TMP`.** Identified
+what's actually looping, via `SUPIF.SUP`'s own `user_entry` (dumps the
+incoming `CX`, i.e. the real function code, directly): `TMP`'s own
+real sequence -- `setconsole` (`CX=94h`), `setdisk` (`CX=0Eh`),
+`attach` (`CX=92h`) -- followed by many repeats of `CX=96h`
+(`mpm_clicmd`, `TMP.A86`'s own CLI-dispatch call, `nextcommand`'s
+`clicall:`). So `TMP` is not stuck in `attach` or `conread` itself --
+it's genuinely completing full passes of its own shell-prompt loop,
+repeatedly, submitting something to `mpm_clicmd` each time. Peeked at
+`clicb`/`read_blen` (`TMP.A86`'s own symbols, `clicb`=`0x1DF`, same
+address as `read_blen`) at one such call: **all zero** -- i.e., an
+empty command line is apparently what's being submitted each pass,
+which doesn't obviously square with `nextcommand`'s own `cmp
+read_blen,0 ! je gonextcmd` short-circuit (own source, read directly)
+that should skip `mpm_clicmd` entirely for an empty line. Not
+resolved: either this specific snapshot caught `clicb` after some
+later code already cleared it back to zero, or there's a real,
+separate bug in how `conread`'s own result reaches this check.
+
+**Likely explanation for *why* this loops at all with no real
+terminal attached**: `CHARIO.CIO`'s `conin`/`rtm_poll`/`polldev`
+chain waits on the UART's own RX-ready status bit
+(`XIOS86Q.A86`'s `polldev`, `uart_lsr`+`uart_lsr_rxrdy`) before ever
+reading a character -- with this run's `-serial file:...` backend
+(write-only, nothing ever feeds the UART), that bit should never be
+set, so this should block forever, not cycle every pass. The fact
+that it visibly *does* complete full prompt-loop passes, over and
+over, suggests QEMU's emulated UART occasionally reports RX-ready
+with no real input behind it, letting `conin` through to read stale/
+default data (very plausibly all zero bytes, matching the all-zero
+`clicb` snapshot above) -- not confirmed directly this round (would
+need instrumenting `polldev`'s own read, not just downstream
+symptoms), but consistent with everything observed.
+
+**Timing-sensitive, could not pin to one exact repro**: re-running
+the identical breakpoint sequence a second time (to catch the precise
+`CX` value immediately *after* one of these `mpm_clicmd` calls, right
+before the crash) landed on a run where the crash was never reached
+at all within the same step budget that reliably reached it moments
+earlier -- GDB's own single-stepping measurably changes how many
+loop passes it takes (or whether it's reached at all), the same
+"single-stepping dodges a timing-sensitive race" pattern this session
+has hit many times before (most dramatically, the `sti`/`IRET` delay
+discoveries). This makes the exact failing instruction materially
+harder to pin down than #65's/#66's hangs, which were perfectly
+deterministic (bit-identical trace length every run).
+
+**Next step**: instrument `XIOS86Q.A86`'s own `polldev` directly (a
+debug probe dumping the raw `uart_lsr` byte on every single poll,
+kept only long enough to confirm or rule out the "false RX-ready"
+theory) rather than continuing to infer it from `TMP`-side symptoms --
+that's the one piece of direct evidence every other finding this
+round rests on without yet having confirmed it. Separately, worth
+checking independently of the UART theory: why `nextcommand`'s own
+`cmp read_blen,0 ! je gonextcmd` doesn't appear to be short-circuiting
+the empty-command case the way its source reads it should.
+
+## 69. Did #68's own next step -- confirmed the false-RX-ready theory
+directly, fixed it as real, defensible hardening -- but it is **not**
+the `1000:004A` crash's cause: the free-running trace is
+byte-for-byte identical with the fix in place, crash included
+
+Added the probe #68 asked for: `polldev`'s `c0indev` branch now dumps
+the raw `uart_lsr` byte (no hex conversion needed -- fed straight to
+the serial port, decoded offline) on every single console-input poll.
+
+**Confirmed directly, not just inferred**: 1924 polls across one
+20-second run, 1898 correctly read `0x60` (not ready, no error bits).
+The other 26 are the real finding: `0x5D`, `0x7D`, `0x5B` (8/8/4
+times), `0x46`, `0x30`, `0x67` -- **every one of the four distinct
+"rxrdy bit set" values also has at least one of overrun/parity/
+framing/break (bits 1-4) set alongside it.** QEMU's emulated UART,
+backed by this build's write-only `-serial file:...` (nothing ever
+really transmits to it), genuinely does spuriously report "data
+ready" roughly 1% of the time, always paired with an error condition
+a real driver would treat as "discard this, it's not real data."
+`XIOS86Q.A86`'s own `polldev` wasn't checking for that -- it trusted
+the rxrdy bit alone.
+
+**Fixed**: added `uart_lsr_errmask` (`1Eh`, the four error bits) and
+a check in `polldev`'s `c0indev` branch -- if any error bit
+accompanies a "ready" reading, treat it as not-ready (`AL=0`)
+instead of handing `TMP` a stale/garbage byte from the data register
+as if it were a real keystroke. This is real, defensible hardening
+against a genuine, now-confirmed QEMU/UART quirk, independent of
+whatever else is going on -- kept regardless of the result below.
+
+**Result: no effect on the crash.** Rebuilt, re-ran: the free-running
+trace is **byte-for-byct identical** to the pre-fix run, all 97,117
+bytes, including every one of the 26 error-bit occurrences at the
+same positions with the same values (meaning the fix's own new
+branch is being compiled correctly and reached -- confirmed directly
+in the assembled bytes, `TEST AL,1Eh ! JNZ polldev_notrdy` sitting
+right where it should -- but produces a control-flow outcome that
+makes no observable difference), and the same `1000:004A` wild jump
+at the same point. **This rules out the "garbage input from a false-
+ready UART poll" theory as the crash's cause** -- #68's own
+`CX=0096h`/all-zero-`clicb` observation at `mpm_clicmd` must be
+either coincidental or caused some other way, not by this mechanism.
+
+**Status**: the `1000:004A` wild jump inside `SUP`'s own banner text,
+reached from deep within `TMP`'s own repeated-`dispatch` idle loop,
+remains open. Three concrete leads from #67/#68 are now each
+individually ruled out or unconfirmed: `INIT`'s own termination
+(#68, exonerated), the false-RX-ready UART theory (this entry,
+exonerated), and the `read_blen`/`clicb` empty-command-short-circuit
+question (#68, still genuinely open -- not yet investigated on its
+own terms, independent of the now-discarded UART angle). That's
+the most promising remaining thread: find out directly (not inferred
+from a now-disproven theory) why `mpm_clicmd` is reached at all with
+`clicb`/`read_blen` reading zero, when `nextcommand`'s own source
+should skip it for an empty line.

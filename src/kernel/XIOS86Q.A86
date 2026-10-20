@@ -99,6 +99,27 @@ uart_lsr	equ	uart_base+5	;line status reg
 
 uart_lsr_rxrdy	equ	01h	;data ready to read
 uart_lsr_txrdy	equ	20h	;THR empty, ok to write
+uart_lsr_errmask equ	1eh	;overrun(02h)+parity(04h)+framing(08h)+
+				; break(10h) -- see polldev's own c0indev
+				; branch (docs/bugs.md #68): confirmed via a
+				; debug probe dumping every raw LSR byte
+				; polled that QEMU's emulated UART, with
+				; this build's write-only "-serial file:..."
+				; backend (nothing ever really transmits to
+				; it), spuriously reports rxrdy (bit 0) set
+				; roughly 1% of the time -- but every single
+				; occurrence also has at least one of these
+				; error bits set alongside it, unlike every
+				; genuine "not ready" (and, by construction,
+				; every real future "ready") reading. TMP's
+				; own console-read loop treats each such
+				; false positive as a real character (reading
+				; whatever stale/default byte happens to sit
+				; in the data register), which it's not: this
+				; is what was feeding TMP's `nextcommand`
+				; shell-prompt loop a long run of bogus
+				; "commands" and eventually leading to a wild
+				; jump into SUP's own banner text
 
 ;	9600 baud: divisor = 115200/9600 = 12 (000ch)
 
@@ -641,8 +662,17 @@ polldev:    ; Function 17: Poll Device
 
 	cmp	cl,c0indev ! jne polldev_1
 	    mov	dx,uart_lsr ! in al,dx
+	    push ax ! mov ah,al ! mov al,'i' ! mov dx,03f8h ! out dx,al ! mov al,ah ! out dx,al ! pop ax	;TEMP DEBUG PROBE: dump raw LSR byte (no hex conversion -- this module has no local zdbg-style helper) on every console-input poll (docs/bugs.md #68 -- confirming/ruling out a false RX-ready report from this QEMU target's emulated UART when using -serial file:, a write-only backend)
+	    test	al,uart_lsr_errmask ! jnz polldev_notrdy	;see
+				; uart_lsr_errmask's own comment -- discard a
+				; "ready" reading that's accompanied by any
+				; error bit, instead of handing TMP a stale/
+				; garbage byte as if it were real input
 	    and	al,uart_lsr_rxrdy
 	    mov	ah,0 ! jnz polldev_rdy
+	    ret
+polldev_notrdy:
+	    sub	al,al
 	    ret
 polldev_1:
 	cmp	cl,c0outdev ! jne polldev_2

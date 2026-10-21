@@ -115,6 +115,7 @@ NLSTDEV_OFFSET = 0x84
 NCIODEV_OFFSET = 0x85
 TICKSPERSEC_OFFSET = 0x51
 SRCHDISK_OFFSET = 0x4b
+MPMSEG_OFFSET = 0x40
 NCCB_OFFSET = 0x49
 CCB_OFFSET = 0x54
 
@@ -488,6 +489,41 @@ def main():
                 struct.pack_into('<H', code, idx + 2,
                                   (module_base + off) & 0xFFFF)
 
+        if name == 'XIOS':
+            # XIOS86Q.A86's own init: hooks the real IVT entry 8 (IRQ0,
+            # the 60Hz timer) directly: `mov word ptr .020h,offset
+            # tickint`. Same unrelocated-immediate bug as RTM's
+            # fdisp/farpdisp above -- `offset tickint` is tickint's own
+            # *standalone* XIOS86Q.A86 offset, assembled with no
+            # knowledge of this module's final module_base, so the real
+            # runtime write puts tickint's bare offset (0x468) into the
+            # live IVT instead of (module_base + 0x468) -- i.e. every
+            # single timer tick vectors into the *middle of SUP*
+            # (module_base is always larger than this module's own small
+            # standalone offsets) instead of into tickint, executing
+            # whatever unrelated bytes happen to sit there as if they
+            # were an interrupt handler. Confirmed live via GDB: IVT[8]
+            # read back 1000:0468 (tickint's bare offset) instead of the
+            # real 1000:61cb, and single-stepping from there landed in
+            # SeaBIOS's own default/unclaimed-interrupt stub
+            # (F000:FF53) a few instructions later -- this is the actual,
+            # direct cause of the project's whole "1000:004A"-class wild
+            # jump, not any of the earlier theories chased in docs/bugs.md.
+            off = get_symbol(stem, 'tickint')
+            needle = b'\xc7\x06\x20\x00' + struct.pack('<H', off)
+            idx = code.find(needle)
+            if idx == -1:
+                raise SystemExit(
+                    "XIOS86Q.A86: couldn't find the "
+                    "'mov word ptr .020h,offset tickint' immediate "
+                    f"to relocate (expected {needle.hex()})")
+            if code.find(needle, idx + 1) != -1:
+                raise SystemExit(
+                    "XIOS86Q.A86: 'tickint' immediate pattern isn't "
+                    "unique -- relocation would be ambiguous")
+            struct.pack_into('<H', code, idx + 4,
+                              (module_base + off) & 0xFFFF)
+
         cseg += code
         init_off, entry_off = get_init_entry_offsets(stem)
         module_offsets[name] = module_base
@@ -611,6 +647,22 @@ def main():
     # installed, hanging forever. Patch it to drive A: to match this
     # build's actual disk configuration.
     dseg[SRCHDISK_OFFSET] = 0
+
+    # mpmseg ("begin MPM segment", SYSDAT.FMT offset 0x40) -- never set
+    # by GENSYS here either (same unconfigured-field bug class as
+    # srchdisk/ccb/pul/qul above), but TMP.A86's own init code reads it
+    # directly as the *segment* half of the version-string far pointer
+    # it prints at startup ("mov ds,sysdatseg ! mov dx,.s_version ! mov
+    # ds,.s_mpmseg ! call print_ds_string"): `.s_version` correctly
+    # reads SYSDAT's own "version" field (INIT.SUP's `ver` string's
+    # *offset*, within the shared code segment), but with `mpmseg` left
+    # at its stock 0, `print_ds_string` then reads that offset through
+    # DS=0 -- the IVT/BIOS data area -- instead of the real code
+    # segment, printing whatever garbage sits there as if it were the
+    # version banner. Confirmed live: this is exactly the unreadable
+    # text every boot prints immediately after XIOS86Q's own signon,
+    # before TMP otherwise runs and idles normally.
+    struct.pack_into('<H', dseg, MPMSEG_OFFSET, MPM_CODE_SEG)
 
     # nccb ("# character control blocks", SYSDAT.FMT) must match the
     # number of CCB-backed devices this build actually has --
@@ -824,6 +876,24 @@ def main():
     # `ccbtab0` reserves in XIOS86Q.A86's own private dseg tail.
     ccbtab0_off = get_symbol('XIOS86Q', 'ccbtab0')
     struct.pack_into('<H', dseg, CCB_OFFSET, ccbtab0_off)
+
+    # ccbtab0's own bytes are all zero (XIOS86Q.A86 just reserves them
+    # with `rb 12`), but CCB.DEF's own layout comment says byte offset
+    # 8 (`c_mimic`, "cio dev that mimics us") uses 0 as a perfectly
+    # valid *real* device number, not a sentinel -- "0ffh means no
+    # mimic device" is the actual no-op value, same GENSYS-answer-never-
+    # configured bug class as `pul`/`qul`/this file's own CCB_OFFSET
+    # fix just above. Left at the zero default, CHARIO.CIO's own
+    # `conout` (`cmp c_mimic[si],0ffh ! je compout`) always takes the
+    # *mimic* branch -- for this build's single console, device 0
+    # mimicking device 0 -- so every character written to the console
+    # gets a second, redundant `stdout`/`conoutf` call to the exact
+    # same device, printing itself twice. Confirmed live: XIOS86Q's own
+    # low-level `conout:` (the one real `out dx,al` to the UART) fires
+    # twice per character, back-to-back, both returns landing on the
+    # identical caller address -- not wild execution, just this one
+    # mis-defaulted byte.
+    struct.pack_into('<B', dseg, ccbtab0_off + 8, 0xFF)  # c_mimic
 
     out_path = args.output or os.path.join(out_dir, 'MPM.bin')
     with open(out_path + '.cseg', 'wb') as f:

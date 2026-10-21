@@ -53,9 +53,7 @@ flag_wait_entry: ; Wait for Logical Interrupt Flag
 ;		BX = 0ffffh if Error
 ;		CX = Error Code:0,e_flag_underrun
 
-	push ax ! push dx ! mov al,11h ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 11h, flag_wait_entry's own absolute first instruction, before "call flag_valid" even runs -- disambiguates whether RTM's "call cs:function[si]" reaches flag_wait_entry at all. MUST preserve DX here (incoming flag# in DL) -- an earlier version of this probe didn't, and clobbered DX to 03F8h before flag_valid's own "cmp dl,nflags" ever ran, same bug class as SUPIF.SUP's historical '03h'/'2Ah' DX-clobber (see that fix's own comment)
 	call flag_valid
-	push ax ! push dx ! mov al,0fh ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call ydbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! mov ax,dx ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 0Fh, dump BX (flg_pd[si] contents flag_wait_entry is about to branch on) and DX (incoming flag#, still intact) -- distinguishes the three flag_wait_entry outcomes: flag_on (immediate consume), flag_off (genuine block via dsptch), anything else (error, e_flag_underrun, ALSO an immediate return with no real block)
 	cmp bx,flag_on ! jne fw_non
 	    mov flg_pd[si],flag_off
 	    jmp flag_exit
@@ -64,8 +62,7 @@ fw_non:	cmp bx,flag_off ! jne fw_noff
 	    mov p_stat[bx],ps_flagwait
 	    mov u_dparam,si
 	    call dsptch ! jmp flag_exit
-fw_noff:push ax ! push dx ! mov al,08h ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 08h, confirms the e_flag_underrun error path fired (BX was neither flag_on nor flag_off -- some other PD# already waiting)
-	mov cx,e_flag_underrun ! jmp flag_bexit
+fw_noff:mov cx,e_flag_underrun ! jmp flag_bexit
 
 flag_valid:	; Check validity of flag number
 ;----------       -----------------------------
@@ -73,13 +70,10 @@ flag_valid:	; Check validity of flag number
 ;		BX = contents of flag entry
 ;		clear interrupt flag - Flags on stack
 
-	push ax ! push dx ! mov al,13h ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 13h, flag_valid's own absolute first instruction, before its own "pop ax" return-address trick runs. MUST preserve DX (incoming flag#, "cmp dl,nflags" runs two instructions later) -- see marker 11h's own comment, same bug
 	pop ax ! pushf
 	cmp dl,nflags ! jb flag_good
-	    push ax ! push dx ! mov al,14h ! mov dx,03f8h ! out dx,al ! mov ax,dx ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 14h, flag_valid took the e_ill_flag error branch -- dumps the incoming DL/DX that failed "cmp dl,nflags". NOTE this branch jumps to flag_bexit WITHOUT ever re-pushing the real return address (AX) that the earlier "pop ax" removed -- if this fires, flag_bexit's "ret" pops the wrong thing.
 	    mov cx,e_ill_flag ! jmp flag_bexit
 flag_good:
-	push ax ! push dx ! mov al,15h ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 15h, flag_valid took the normal/valid-flag-number path
 	mov dh,0 ! push ax ! cli
 	mov ax,dx ! mov bx,flglen ! mul bx
 	mov si,flags ! add si,ax
@@ -92,4 +86,3 @@ flag_exit:	; Successful Exit
 flag_bexit:	; Exit with Error
 ;----------       ---------------
 	mov bx,0ffffh ! popf ! ret
-

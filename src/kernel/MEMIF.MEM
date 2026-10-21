@@ -1,4 +1,3 @@
-
 ;*****************************************************
 ;*
 ;*	Memory Management Module Interface
@@ -18,19 +17,12 @@ supervisor	equ	(offset $)
 		db	'COPYRIGHT (C) 1981,'
 		db	' DIGITAL RESEARCH '
 serial		db	'654321'
-mau_entry_counter	dw	0	;TEMP DEBUG: counts real maualloc_entry
-					;invocations, to tell a genuine repeated
-					;call apart from a stale GDB re-report
 
 ;====
 init:
 ;====
 
-	mov cs:sysdat,ds		;save sysdat -- bare write is wrong here,
-					;same bug class/fix as RTMIF.RTM's "init:"
-					;(see its own comment) -- lands on SYSDAT's
-					;own offset 6 (module_table[sup].init_seg)
-					;instead of this module's own cseg cell
+	mov cs:sysdat,ds
 	mov bx,offset supmod ! mov si,offset supervisor
 	mov ax,[bx]
 	mov cs:[si],ax
@@ -63,16 +55,6 @@ entry:		; MEM entry point
 ;=====		=================
 	mov ax,rlr
 	cmp ax,mxmemowner
-	pushf ! push ax ! push bx ! push cx ! push dx ! mov al,2 ! mov dx,03f8h ! out dx,al	;TEMP DEBUG PROBE: marker byte 2, dump mxmemowner before the havemx/fresh-acquire branch decision -- pushf/popf around it since the cmp's flags feed the je right below and this probe's own instructions (dec/cmp/and) would otherwise clobber them
-	mov ax,mxmemowner ! mov cx,0404h
-mdbg1:	rol ax,cl
-	mov bl,al ! and bl,0fh ! cmp bl,9 ! ja mdbg2
-	    add bl,'0' ! jmps mdbg3
-mdbg2:	add bl,'A'-10
-mdbg3:	mov al,bl ! out dx,al
-	dec ch ! jnz mdbg1
-	mov al,' ' ! out dx,al
-	pop dx ! pop cx ! pop bx ! pop ax ! popf
 	je havemx
 	    push bx ! push cx ! push dx
 	    mov dx,offset mxmemqpb ! mov cx,f_qread
@@ -81,115 +63,21 @@ mdbg3:	mov al,bl ! out dx,al
 	    mov mxmemcount,0
 	    push p_flag[si]
 	    or p_flag[si],pf_tempkeep
-havemx:	push ax ! push bx ! push cx ! push dx	;TEMP DEBUG PROBE: dump mxmemcount as 2 hex nibbles
-	mov al,mxmemcount ! mov cl,4
-	mov bl,al ! shr bl,cl ! and bl,0fh ! cmp bl,9 ! ja mcd5
-	    add bl,'0' ! jmps mcd6
-mcd5:	add bl,'A'-10
-mcd6:	mov dx,03f8h ! mov al,bl ! out dx,al
-	mov bl,mxmemcount ! and bl,0fh ! cmp bl,9 ! ja mcd7
-	    add bl,'0' ! jmps mcd8
-mcd7:	add bl,'A'-10
-mcd8:	mov al,bl ! out dx,al
-	mov al,' ' ! out dx,al
-	pop dx ! pop cx ! pop bx ! pop ax	;TEMP DEBUG PROBE
-	push ax ! push dx ! mov al,'a' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE:
-										;DX is a live caller argument here
-										;(e.g. QUE2.RTM's qspace passes its
-										;MPB pointer through to
-										;maualloc_entry in DX) -- the
-										;original single-register ("push
-										;ax ... pop ax") probe style used
-										;throughout this file treats DX as
-										;pure scratch, which is safe at
-										;most call sites but silently
-										;clobbered the MPB pointer here,
-										;making every maualloc_entry call
-										;through this path read garbage
-										;and fail. Confirmed via a GDB
-										;hardware watchpoint/breakpoint
-										;session: DX read 03f8h (the
-										;serial port, left over from this
-										;very probe) instead of the real
-										;MPB offset at maualloc_entry's
-										;entry.
-	inc mxmemcount
+havemx:	inc mxmemcount
 	mov ch,0 ! shl cx,1
 	mov si,cx
-	push ax ! push dx ! mov al,'b' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE: see 'a' above
 	call cs:functab[si]
-	push ax ! mov al,'c' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	dec mxmemcount
-	push ax ! mov al,'j' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
-	push ax ! push bx ! push cx ! push dx	;TEMP DEBUG PROBE: dump mxmemcount as 2 hex nibbles
-	mov al,mxmemcount ! mov cl,4
-	mov bl,al ! shr bl,cl ! and bl,0fh ! cmp bl,9 ! ja mcd1
-	    add bl,'0' ! jmps mcd2
-mcd1:	add bl,'A'-10
-mcd2:	mov dx,03f8h ! mov al,bl ! out dx,al
-	mov bl,mxmemcount ! and bl,0fh ! cmp bl,9 ! ja mcd3
-	    add bl,'0' ! jmps mcd4
-mcd3:	add bl,'A'-10
-mcd4:	mov al,bl ! out dx,al
-	mov al,' ' ! out dx,al
-	pop dx ! pop cx ! pop bx ! pop ax	;TEMP DEBUG PROBE
 	cmp mxmemcount,0
 	jne entry_out
-	    push ax ! mov al,'k' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	    mov mxmemowner,0
-	    push ax ! mov al,'l' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
-	    pop ax
-	    push ax ! mov al,'m' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
-	    and ax,pf_tempkeep ! jnz tkon
+	    pop ax ! and ax,pf_tempkeep ! jnz tkon
 		mov si,rlr
 		and p_flag[si],not pf_tempkeep
-tkon:	    push ax ! push bx ! push cx ! push dx ! mov al,'n' ! mov dx,03f8h ! out dx,al	;TEMP DEBUG PROBE
-	    mov bx,rlr ! mov ax,p_flag[bx] ! mov ch,al
-	    mov cl,4 ! mov bl,ah ! shr bl,cl ! and bl,0fh ! cmp bl,9 ! ja nd1
-		add bl,'0' ! jmps nd2
-nd1:	    add bl,'A'-10
-nd2:	    mov al,bl ! out dx,al
-	    mov bl,ah ! and bl,0fh ! cmp bl,9 ! ja nd3
-		add bl,'0' ! jmps nd4
-nd3:	    add bl,'A'-10
-nd4:	    mov al,bl ! out dx,al
-	    mov al,ch ! mov cl,4 ! mov bl,al ! shr bl,cl ! and bl,0fh ! cmp bl,9 ! ja nd5
-		add bl,'0' ! jmps nd6
-nd5:	    add bl,'A'-10
-nd6:	    mov al,bl ! out dx,al
-	    mov al,ch ! mov bl,al ! and bl,0fh ! cmp bl,9 ! ja nd7
-		add bl,'0' ! jmps nd8
-nd7:	    add bl,'A'-10
-nd8:	    mov al,bl ! out dx,al
-	    mov al,' ' ! out dx,al
-	    pop dx ! pop cx ! pop bx ! pop ax	;TEMP DEBUG PROBE
-	    push cx ! push bx
+tkon:	    push cx ! push bx
 	    mov dx,offset mxmemqpb ! mov cx,f_qwrite
-	    push ax ! push cx ! push dx ! mov al,'f' ! mov dx,03f8h ! out dx,al ! pop dx ! pop cx ! pop ax	;TEMP DEBUG PROBE
-	    call mpmif
-	    push ax ! mov al,'g' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
-	    pop bx ! pop cx
+	    call mpmif ! pop bx ! pop cx
 	    mov si,rlr
-	    push ax ! push bx ! push cx ! push dx ! mov al,'o' ! mov dx,03f8h ! out dx,al	;TEMP DEBUG PROBE
-	    mov ax,p_flag[si] ! mov ch,al
-	    mov cl,4 ! mov bl,ah ! shr bl,cl ! and bl,0fh ! cmp bl,9 ! ja od1
-		add bl,'0' ! jmps od2
-od1:	    add bl,'A'-10
-od2:	    mov al,bl ! out dx,al
-	    mov bl,ah ! and bl,0fh ! cmp bl,9 ! ja od3
-		add bl,'0' ! jmps od4
-od3:	    add bl,'A'-10
-od4:	    mov al,bl ! out dx,al
-	    mov al,ch ! mov cl,4 ! mov bl,al ! shr bl,cl ! and bl,0fh ! cmp bl,9 ! ja od5
-		add bl,'0' ! jmps od6
-od5:	    add bl,'A'-10
-od6:	    mov al,bl ! out dx,al
-	    mov al,ch ! mov bl,al ! and bl,0fh ! cmp bl,9 ! ja od7
-		add bl,'0' ! jmps od8
-od7:	    add bl,'A'-10
-od8:	    mov al,bl ! out dx,al
-	    mov al,' ' ! out dx,al
-	    pop dx ! pop cx ! pop bx ! pop ax	;TEMP DEBUG PROBE
 	    test p_flag[si],pf_ctlc ! jz entry_out
 		push bx ! push cx
 		sub dx,dx
@@ -200,12 +88,8 @@ entry_out:
 ;=====		===============
 mpmif:		; MPM interface
 ;=====		===============
-	push ax ! push cx ! push dx ! mov al,'h' ! mov dx,03f8h ! out dx,al ! pop dx ! pop cx ! pop ax	;TEMP DEBUG PROBE
-	callf cs:dword ptr .supervisor
-	push ax ! mov al,'i' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
-	ret
+	callf cs:dword ptr .supervisor ! ret
 ;======		================
 xiosif:		; XIOS interface
 ;======		================
 	callf dword ptr .xiosmod ! ret
-

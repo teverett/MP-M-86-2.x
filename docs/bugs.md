@@ -6542,3 +6542,764 @@ finally settle which of the two is `INIT`'s own call and what PD it
 actually sees -- not reached this round (usage ran out immediately
 after confirming `gdb` itself is available at `/opt/homebrew/bin/gdb`,
 before a session could be started).
+
+## 77. Followed #76's own next step with exactly the GDB session it
+specified -- and the result **corrects #75/#76's own causal claim**:
+`INIT`'s self-termination genuinely succeeds, every time checked; the
+`zdbg` fallthrough is caused by a *different*, later call, which does
+need a real stack-corruption explanation after all
+
+**Ran the single-breakpoint/re-arm-once session #76 specified**:
+`break *0x12A49` (`terminate_entry`'s real flat address, confirmed
+again this round the same way as #75/#76 -- `RTM`'s module base is
+exactly `SUP.cseg.bin`'s own 6335-byte length, no inter-module
+padding), `continue` to hit 1, read `rlr` (`sysdat_segment*16+0x68`,
+with `sysdat_segment` recomputed directly from `build_mpmsys.py`'s own
+output as `0x17A8` -- flat `0x17AE8`), delete, re-arm, `continue` to
+hit 2, read `rlr` again. **Hit 1: `rlr=0x9C0` (`initpd`, confirmed) --
+followed up immediately with two more fresh breakpoints (`term_err`/
+`dsptch`) to see which this call reaches: `dsptch`, the *success*
+path.** **Hit 2: `rlr=0xE40` (`TMP`'s own PD, confirmed) -- same
+follow-up shows `term_err`, the *failure* path.**
+
+This finally settles #67's own long-open (a)-vs-(b) question: **(a)
+was right** -- these are two genuinely separate termination attempts,
+not one call's `rlr` drifting mid-dispatch. `INIT`'s own call
+(`rsp_out`'s `int mpmint`) is hit 1, and it succeeds, cleanly, via
+`jmp dsptch`, exactly as the 1981 source assumed. Hit 2 is some other,
+later caller (per #67, almost certainly `RETMONX`'s own `pf_ctlc`
+check) failing on `TMP`'s `pf_tempkeep`, exactly as before.
+
+**Checked immediately whether a successful `INIT` termination this
+run still produces the crash, since #75/#76's entire causal chain
+assumed it had to fail to reach `zdbg` at all: it does.** Detached
+(not killed) after reading hit 2, let the same guest run freely to
+completion, and it still parks at `CS:IP=1000:0x4A`, same
+`console.log` length (`97,117` bytes) as every other run this whole
+saga. **#75/#76's attribution of the `zdbg` fallthrough to `rsp_out`'s
+own call is wrong** -- that call succeeds and genuinely never returns
+here at all (`jmp dsptch` abandons this context for good); whatever
+actually reaches `zdbg` has to be something else.
+
+**Re-ran the same zero-GDB passive trace from #75 fresh (to rule out
+this GDB session's own 3-breakpoint perturbation, per #74's own
+standing warning) and confirmed all of the above independently, with
+no debugger involved at all**: `terminate_entry` is hit exactly
+twice; `dsptch` is reached shortly after hit 1 (confirming `INIT`'s
+own call succeeds in the *un-perturbed* baseline too, not just under
+GDB); `term_err` is hit exactly once, immediately after hit 2.
+**Critically, searched for every occurrence of `user_entry`'s own
+nested-return `iret` (`0x104CD`) in this clean trace: it fires 18
+times over the course of the run -- a perfectly ordinary, frequent
+event for any nested syscall -- and only the *very last* one, firing
+immediately after hit 2's own `term_err` return (98 trace lines
+later), is the one that lands on `0x102FA` (`zdbg`).** The other 17
+all return correctly to wherever they should. This is the real
+trigger: **`TMP`'s own failed termination attempt (hit 2, `rlr=TMP`,
+`term_err`), not `INIT`'s self-termination.**
+
+**What this means for #75/#76's mechanism**: #75's byte-level
+decode (the exact `ret`/wrong-target chain from `zdbg` through the
+banner text to `0x004A`, and the alternation with SeaBIOS's `INT1`
+handler) is still accurate as a description of *what happens once
+`user_entry`'s epilogue lands on `zdbg`*. #76's identification of
+`user_entry`'s nested-path epilogue (`nstk`/`ueout`/`iret` at
+`0x4A2`-`0x4CD`) as the mechanism is also still accurate. What's
+retracted is *why* it lands on `0x02FA` specifically: it is **not**
+`rsp_out`'s own documented "nothing coded after this call" fallthrough
+(that call never gets here -- it succeeds and jumps away via
+`dsptch`). `TMP`'s own calling code lives nowhere near `zdbg` (a
+completely different module, segment `0x1733`), so a correct,
+uncorrupted return for *this* call cannot legitimately land on
+`0x02FA` at all -- this one genuinely does need a real stack
+corruption, not a documented design gap. The path between `term_err`
+and `user_entry`'s epilogue (`func`/`gofar`/the dispatch back up
+through `terminate_entry`) is, per #67's own source excerpts, saturated
+with `push.../call zdbg-or-ydbg/pop...`-style TEMP DEBUG PROBEs at
+nearly every instruction -- `0x02FA` being exactly `zdbg`'s own entry
+address is almost certainly a stale copy of one of *those* probes' own
+real return addresses, left one slot deeper than it should be by
+some specific unbalanced probe along that exact path, rather than a
+coincidence.
+
+**Next step**: walk the real instruction sequence from `term_err`'s
+own `ret` (flat `0x12B88`) through to `user_entry`'s epilogue
+(`0x4A2`) byte-for-byte against `RTM.A86`/`SUPIF.SUP`'s source,
+accounting for every single `push`/`pop` around every debug probe on
+that specific path (there are many), to find the one that's short or
+long by exactly one word -- the same technique #66 already named for
+this whole bug class, just not yet actually walked end-to-end for
+*this* specific call path.
+
+## 78. Followed #77's own next step byte-for-byte with a live GDB
+session, instead of the planned pure source read -- and found there
+is **no** push/pop imbalance anywhere in the path. The real cause is
+`TMP`'s UDA physically reusing `INIT`'s own freed UDA memory, which
+still holds `INIT`'s last, never-unwound `int mpmint` return frame
+
+**Corrected a self-inflicted false lead first.** Early this round,
+reading memory at `$sp` directly (not `$ss*16+$sp`) at the `ueout`
+breakpoint appeared to show a stale `F000:FF53` (SeaBIOS's `INT1`
+handler) pattern already sitting on the stack *before* the call's own
+code could have written it -- briefly looked like independent
+evidence of an `INT1`/trap-flag-storm leaving debris behind. That was
+wrong: `$sp` alone is just the 16-bit offset, not a linear address;
+`0xC8`-`0xD2` as a *bare* address lands in the low-memory IVT/BIOS
+data area, not anywhere near this process's real stack. No such
+pre-existing BIOS pattern was ever actually on `TMP`'s stack. Noted
+here so this round's real finding isn't confused with that discarded
+one.
+
+**Set up the exact single-breakpoint/re-arm-once chain #77 itself
+used (`terminate_entry`/`term_err`/`rtm_ret`/`ueout`, `-fda` floppy
+boot this time -- a `-drive ...,format=raw` hard-disk boot was tried
+first and silently stalls forever at BIOS/bootloader level, 36 CPU-
+minutes with zero console output and not one breakpoint hit; `make
+run`'s own `-fda $(DISK_IMG)` is the only boot method that actually
+reaches the kernel).** At `term_err` (flat `0x12B88`, the one and
+only hit, per #77): `SS=0x177B`, `SP=0xC8`. Read `TMP`'s own UDA
+fields directly (`p_uda[TMP]` off the PD table, `rlr=0xE40` confirmed
+live): `u_insys=2`, `u_stack_ss=0x1777`, `u_stack_sp=0x1D6`,
+`u_wrkseg=0x17A8`. **`u_insys=2`, not `1`, going into this call is
+the first real finding**: `user_entry`'s own prologue only reaches 2
+by `inc`-ing an already-`1` value, meaning this termination attempt
+is itself nested one level inside some other, still-open `int mpmint`
+call for `TMP` -- not the fresh top-level call #75/#76 implicitly
+assumed. That by itself already explains why the epilogue takes the
+`nstk: pop u_wrkseg` branch (never restores `u_stack_ss`/`u_stack_sp`)
+instead of the stack-switch-back branch.
+
+**Walked the SP delta hop by hop, live, instead of by eye on the
+source**: `term_err`'s own `ret` (`SP:0xC8->0xCA`, +2, a clean near
+return) -> `rtm_ret` (confirmed) -> `retf` (+4) -> back in `SUP`'s
+`goodmod`, past the `'T'` probe, `func`'s own `ret` (+2) ->
+`user_entry`'s `nstk: pop u_wrkseg` (+2) -> `ueout`, `SP=0xD2`. Total
++10 bytes from `term_err` to `ueout`, which is *exactly* what a
+perfectly balanced near-ret/retf/near-ret/pop chain predicts, with
+nothing left over and nothing missing. **This directly disproves
+#77's own "needs a real stack corruption" framing of the problem**:
+there is no unbalanced probe anywhere between `term_err` and
+`user_entry`'s epilogue for this call. The corruption, if there is
+one, has to already be sitting on the stack *before* this call even
+starts touching it.
+
+**Read the real stack contents at the correct linear address
+(`$ss*16+$sp`, not bare `$sp` -- see the correction above) at
+`term_err`, six words up from `SP=0xC8` (flat `0x17878`)**: `0x1a1c
+0x079f 0x1000 0x04a2 0x17a8 0x02fa`. Decoded against the call chain
+just walked, outermost (highest address/oldest push) to innermost: `
+0x02fa` is where `SP` will land right after this call's own `nstk:
+pop u_wrkseg` consumes `0x17a8` (confirmed as exactly `u_wrkseg`'s own
+live value) -- i.e. `0x02fa` is the *next* word `ueout`'s `iret` is
+going to pop as `IP`. `0x04a2` one slot below that is `user_entry`'s
+own `call func` return address (matching #76's own identified
+epilogue entry point exactly). `0x1000`/`0x079f` below that is the
+far-call return frame for `goodmod`'s `callf dword ptr
+module_table[si]`. `0x1a1c` is the near-call return address for
+`entry:`'s own `call cs:function[si]` (`rtm_ret`, matching #77's own
+cited address). Every single word on this stack accounts for a real,
+live frame from the call chain just walked -- **except `0x02fa`
+itself**, which sits one slot *deeper* than anything this call's own
+execution ever pushed.
+
+**Confirmed directly (not inferred) that `0x02fa` is exactly what the
+real `iret` consumes**: re-ran the same chain to `ueout`, `stepi`'d
+through `mov es,u_retseg` then the `iret` itself, and read `$cs`/`$pc`
+live afterward: `CS=0x1000 PC=0x2fa`. Matches #75's original
+passive-trace finding exactly, this time with every intermediate
+stack word in hand to explain *why*.
+
+**`0x02fa`, with `CS=0x1000`, is not an arbitrary stale value -- it
+is precisely `INIT.SUP`'s own `rsp_out` `int mpmint` instruction's
+real, hardware-pushed return address** (`rsp_out`'s `int mpmint` ends
+at flat `0x2F8`-`0x2F9`, so its own pushed return `IP` is `0x2FA`,
+immediately followed by nothing but `zdbg` -- #75's own already-
+confirmed fact about that exact instruction). For *this* word to be
+sitting at this exact depth in `TMP`'s own UDA-dedicated stack, with
+nothing in `TMP`'s own call chain having written it, the simplest
+explanation fits every byte observed: **`TMP`'s own UDA (`p_uda[TMP]
+= SS = 0x177B`, confirmed live off the PD table) is physically the
+same memory `INIT`'s own UDA/dedicated-stack occupied.** `INIT`'s own
+self-termination succeeds (#77) via `jmp dsptch`, which abandons that
+stack wholesale -- it is never unwound, never zeroed, just left
+exactly as it was at the moment of success, with `rsp_out`'s own
+`int mpmint` return frame (`IP=0x2FA,CS=0x1000`, pushed by the CPU
+itself, no `zdbg` call frame involved) still sitting in it. Once
+`INIT` terminates, its PD/UDA memory is freed (`p_uda[initpd]` reads
+back `0` now, confirming `freepd` already cleared the PD fields) and
+is legitimately reassigned -- to `TMP`'s own newly-created PD. `TMP`'s
+own, much later, nested termination call happens to reach the exact
+same stack depth `INIT`'s own call once did, and its epilogue's
+`nstk` path (never restores `SS`/`SP`, just pops one word and falls
+into `iret`) reads straight through to that same never-cleared slot.
+
+**What this means for the whole `1000:004A` saga**: no push/pop
+imbalance, in this call or any other, is the cause. It is UDA/stack
+memory being reused across processes (`INIT` -> `TMP`, same physical
+segment `0x177B`) without clearing the previous occupant's own
+abandoned dedicated-stack contents, combined with `INIT`'s own
+termination path (`jmp dsptch`) never unwinding that stack on its way
+out. `TMP`'s own call is a genuinely ordinary nested syscall, pushing
+and popping correctly throughout -- it just inherits one stale word
+left over from a completely different process's completely
+successful exit, many instructions and one full process-creation
+earlier.
+
+**Next step**: confirm the UDA-reuse claim from the other end -- catch
+`INIT`'s own termination call *before* `freepd` clears its PD (a
+breakpoint on `dsptch` right after `INIT`'s own `terminate_entry` hit,
+per #77's own two-breakpoint pattern, reading `p_uda[initpd]` at that
+moment, before anything zeroes it) and confirm it reads back
+`0x177B` -- the one link in this chain not yet directly observed
+(this round inferred it from the freed-and-now-zeroed PD field plus
+the exact byte-level stack match, not from a direct before-and-after
+read of the same segment value). If confirmed, the actual fix is in
+whatever allocates PD/UDA memory for a newly-created process: either
+zero a freed UDA's dedicated stack area before handing it to a new
+owner, or have a successfully-terminating process's own `dsptch` path
+pop/invalidate its last `int mpmint` frame before abandoning the
+stack, rather than relying on nothing downstream ever reaching that
+exact depth again.
+
+## 79. Followed #78's own next step and instead **falsified #78's
+whole theory directly**, by live-measuring `proc_creat`'s actual UDA
+computation for every process this boot creates, including `TMP`
+itself -- `TMP`'s UDA is not reused `INIT` memory at all, it is
+correctly, freshly computed from `TMP`'s own load segment. Found a
+new, reproducible, unexplained fourth `proc_creat` call in its place.
+
+**Chronology alone already contradicts #78, before any live check**:
+re-reading `INIT.SUP` straight through shows the `nrsp:` loop (lines
+157-204, which creates `TMP` via `f_createproc`) runs to completion
+*before* `rsp_out`'s own `f_terminate` call (lines 208-210). `TMP`'s
+PD/UDA address is therefore nailed down at `TMP`'s own creation time,
+chronologically *before* `INIT` ever terminates -- it cannot be
+"reusing `INIT`'s freed memory" via any free-then-reassign path,
+because nothing has been freed yet when `TMP`'s own UDA segment gets
+computed. #78 had the sequence backwards.
+
+**Also, directly from source, not inference**: `freepd` (`PROC.RTM`
+lines 9-26) never touches `p_uda` or any other UDA-area byte -- it
+only relinks `p_thread`/`p_link` for the free-PD list (`pul`). #78's
+"`p_uda[initpd]` reads back `0` now, confirming `freepd` already
+cleared the PD fields" has no mechanism behind it in the source as
+written; whatever actually produced that `0` (if it was genuinely
+`0` and not a stale/misattributed read), it wasn't `freepd`.
+
+**Live-measured `proc_creat`'s actual UDA arithmetic (`cp_nm`, flat
+`0x11C82`: `mov ax,u_wrkseg ! mov dx,p_uda[si] ! add dx,ax ! mov
+p_uda[si],dx`) end to end, catching both the *before* value (at
+`cp_nm`) and the *after* value (at the next label, `cp_uda1`, flat
+`0x11CD2`) for every call this boot makes, via the established
+single-use-breakpoint/delete/re-break discipline (an interleaved
+`cp_nm`/`cp_uda1` pair per call -- letting `cp_nm` alone free-run
+across multiple hits, as tried first, reproduced the exact same
+frozen register snapshot every time, which turned out to be a GDB
+artifact of this remote target, not real repeated execution; the
+interleaved form reliably advances)**:
+
+- **Call 1 (idle)**: `SI=0x9F0` (`idlepd`), `before=0x7C`,
+  `after=0x1824`. `0x1824` = `sysdat_seg(0x17A8) + idleuda's own
+  template offset (0x7C0>>4)` exactly. Correct.
+- **Call 2 (tick)**: `SI=0xA20` (`tickpd`), `before=0x8C`,
+  `after=0x1834` = `sysdat_seg + tickuda's own offset (0x8C0>>4)`.
+  Correct.
+- **Call 3 (`TMP`, via `nrsp`)**: `SI=0xE40` (matching every prior
+  entry's own cited `rlr` for `TMP`), `before=0x4`, `after=0x177B`.
+  `0x177B` is exactly `0x1777 (TMP`'s own `rspseg`/load segment,
+  matching #78's own cited `u_stack_ss=0x1777`) + 0x4` (`TMP`'s own
+  on-disk template's tiny UDA offset, 4 paragraphs/64 bytes into its
+  own data area). **This is `TMP`'s own, legitimately-computed UDA,
+  built entirely from `TMP`'s own load segment -- not a byte of it
+  comes from anything `INIT` ever owned.** #78's central claim is
+  directly falsified, not just chronologically implausible.
+- **Call 4 (unidentified, unexpected)**: `SI=0x9F0` again -- `idlepd`'s
+  own slot, *reused* a second time -- `before=0x1824` (not a fresh
+  template value: this is exactly idle's own real, final, already-
+  in-use UDA segment from Call 1, read back unchanged), `after=
+  0x2FCC` (`0x1824 + 0x17A8`, i.e. idle's own old UDA segment plus
+  `sysdat_seg` again, landing on pure nonsense -- not `idleuda`,
+  not any real process's UDA, just garbage one call's own leftover
+  state plus another call's own `u_wrkseg`).
+
+**Call 4 should not exist at all under the build's own stated
+configuration**: `build_mpmsys.py`'s `NCONDEV_OFFSET` write
+(`dseg[NCONDEV_OFFSET] = 1`) hard-codes exactly one console, so
+`nrsp`'s own RSP chain should hold exactly one entry (`TMP`) and
+`nrsp:` should loop exactly once -- ruling out "a second `TMP`
+instance for a second console" as the source of Call 4. Checked the
+other obvious explanation directly too: `TMP.dseg.bin`'s own on-disk
+`rsp_link` field (offset `0`, per `rsp_link equ 0`) reads back a clean
+`0x0000`, so `nrsp`'s own loop-termination condition isn't bad data on
+disk either -- `nrsp:` really should only iterate once for `TMP`.
+
+**Leading hypothesis, not yet confirmed**: Call 4 is `TMP` itself,
+once dispatched and running, making its *own* `f_createproc` call (a
+command processor routinely spawns child processes for whatever a
+user/script runs), and *that* call is the one that trips the
+already-documented `getpdadr` "already recognized as sysdat-resident"
+branch bug (the `bare sysdat` reads at `gpd_bad`'s own comparison,
+flagged in `PROC.RTM`'s own comments and chased at length back in
+entries in the 40s, e.g. around line 2219 and line 3362 of this file)
+-- except this time for a *different* caller than those entries ever
+traced, misrouting it onto `idlepd`'s already-used slot instead of
+pulling a genuinely free one off `pul`. This is offered as the
+leading explanation, not a confirmed one -- nothing this round
+actually caught Call 4's own caller red-handed.
+
+**What this means for the whole `1000:004A` saga**: #78 is retracted.
+The stale `0x02FA`/`0x1000` word found on `TMP`'s stack in #78 is real
+and still unexplained, but it cannot be explained by UDA-memory reuse
+across `INIT`→`TMP`, since `TMP`'s UDA was never `INIT`'s to begin
+with. What *is* newly confirmed, and far more promising, is a second,
+independent, live-reproducible process-descriptor collision (Call 4
+onto `idlepd`) in the exact same `getpdadr`/`proc_creat` machinery
+this whole saga keeps circling back to -- just triggered by a
+different, not-yet-identified caller than any previous entry caught.
+
+**Next step**: identify Call 4's real caller. `proc_creat` already
+carries its own `0Eh` marker probe (`PROC.RTM` line 33, dumping the
+near-call return address off the stack) -- re-arm a breakpoint there
+for this specific (fourth) hit and read that return address directly,
+instead of guessing. If it confirms `TMP` as the caller, the next
+question is why *this* call reaches `getpdadr`'s "already resident"
+branch at all (what address it's checking, and why `0x17A8`-relative
+arithmetic there mistakes it for one), the same unresolved thread
+entries in the 40s left open for a different caller.
+
+## 80. Told to continue until successful boot. Found and fixed **two
+real, confirmed source bugs** (same missing-parens operator-precedence
+mistake, in two different routines) while chasing #78/#79's open
+thread, directly confirmed the system's actual final resting state for
+the first time via a proper live interrupt, and narrowed -- but did
+not yet close -- the mystery of what actually calls the fatal
+`f_terminate`
+
+**Fix #1, `COMMAND.SUP`'s `clirls` (the normal "command finished,
+return to the TMP prompt" exit)**: `and cx,not pf_tempkeep+pf_keep`
+parses as `(not pf_tempkeep)+pf_keep` (confirmed directly against
+`tools/asm86/expr.py`'s own `parse_unary`: `not` binds only to the
+single following term, same precedence as unary `-`), giving a mask
+(`0FE01h`) that leaves bit 9/`pf_tempkeep` *set* instead of clearing
+it -- `clicmd_entry`'s own top (`and ax,not pf_keep!or ax,pf_tempkeep`)
+sets `pf_tempkeep` unconditionally on every command run, so any run
+that falls through to this exit (every normal, non-chaining command)
+left it stuck on permanently. Fixed by parenthesizing, matching the
+already-correct `and p_flag[bx],not (pf_keep+pf_sys+pf_tempkeep+
+pf_ctlc)` two lines above it (the "chain and terminate" exit), which
+never had this bug.
+
+**Fix #2, `COMMAND.SUP`'s `user_retf` (the "an RSP fell off the end of
+its own code via a bare `retf`" cleanup -- the *normal*, expected way
+`TMP` itself finishes running, not an error path)**: the exact same
+missing-parens mistake, `and p_flag[bx],not pf_keep+pf_tempkeep+
+pf_ctlc+pf_sys`, evaluates to mask `027Eh` (bit 9 still set) instead of
+the intended `not (pf_keep+pf_tempkeep+pf_ctlc+pf_sys)` = `0FD7Ch`.
+Fixed the same way.
+
+**Rebuilt and re-ran after each fix -- the crash is byte-for-byte
+identical both times** (same 97117-byte serial trace, same final
+state). Chased *why* directly rather than assuming the fixes were
+wrong: a live hardware watchpoint on `p_flag[TMP]`'s own memory
+(`0x188C6` this run) shows the exact sequence of every write to it for
+the whole boot: created at `0x13` (`pf_sys+pf_table`); two clean
+`getdiskmx`/`RETMONX` critical-section cycles (`BDOSIF.BDO`, correctly
+sets then restores `pf_tempkeep` both times); then `clicmd_entry`'s own
+top sets it (`0x13`->`0x211`, confirmed live at flat `0x10949`,
+matching `COMMAND.SUP` line 50 exactly); then **nothing else ever
+writes `p_flag[TMP]` again** until `abt_chk`'s own `ac_tk` branch adds
+`pf_ctlc` (`0x211`->`0x291`, at flat `0x102DA9`, inside `abt_chk`) right
+before `term_err`. Neither `clirls` nor `user_retf` -- the two sites
+just fixed -- ever runs in between: there is no third write to
+`p_flag[TMP]` for either of them to have made, fixed or not. Both
+fixes are real, confirmed bugs (verified against the assembler's own
+expression-parsing rules, not just read by eye), and both will matter
+once execution ever reaches them cleanly -- they just are not what's
+firing on *this* specific path.
+
+**Walked back from `u_insys[TMP]`'s own live watchpoint instead,
+across the whole boot, to see exactly which `int mpmint` call is still
+open when the fatal one fires**: `u_insys` toggles `0<->1` dozens of
+times as `TMP` makes ordinary syscalls (`conattach`, `conout`,
+`usercode`, `condetach`, `conassign`, `parsefilename`, ...), each one
+cleanly opening and closing. The *last* `0->1` transition before
+everything goes wrong is `CX=96h` (`mpm_clicmd` -- `TMP.A86`'s own
+`lea dx,clicb!mov cl,mpm_clicmd!call mpm`, i.e. "run the command line
+the user typed/the boot-time default") -- and it never closes (no
+matching `1->0`). Instead, **while still inside it**, `u_insys` goes
+`1->2` with `CX=8Fh` (`f_terminate`), `DX=3FFh` (`DL=0FFh`) -- this is
+the exact nested call #78 already found (`u_insys=2`, `SS=177Bh`,
+`SP=C8h`), now caught at the moment it's issued rather than inferred
+from its aftermath.
+
+**That nested `f_terminate` call does not match any real call site in
+the source.** Checked every `f_terminate` reference in the whole tree
+(`COMMAND.SUP` x2 -- the two just fixed, both via direct `mpmif`/`jmp
+mpmif` except `user_retf`; `SYSFUNC.SUP`, `BDOSIF.BDO` x2, `CPMMEM.MEM`
+-- all `jmp mpmif`/`call mpmif`, which never touch `u_insys` at all)
+against `user_retf`, the one real `int mpmint` site: it does `sub
+dx,dx!int mpmint`, i.e. `DX` must be `0000h` -- the observed `DX=3FFh`
+rules it out directly, no ambiguity. `clicmd_entry`'s own body (`cp_doit`'s
+400+ lines) contains zero `int mpmint` instructions of its own (grepped
+directly) -- everything it does, including its own `f_createproc` at
+line 429 and both of its own `f_terminate`s, goes through `mpmif`. So
+whatever actually executes `int mpmint` with `CX=8Fh`/`DX=3FFh` while
+`clicmd_entry`'s own request is still open is not a deliberate,
+named call site at all.
+
+**Directly confirmed the system's real final resting state for the
+first time, properly** (not inferred from a stack read): launched
+QEMU `-s -S`, let it run to the known 97117-byte plateau, then sent
+GDB's own `continue` followed by a real `SIGINT` to the `gdb` process
+itself (not a stale/wrong-address stack peek) and read `$cs:$pc`
+directly off the genuinely-running target. Result: **`CS:IP =
+F000:FF53`, `SS:SP = 177B:D6`** -- i.e. the CPU is permanently spinning
+inside SeaBIOS's own ROM (the exact address #78's own now-retracted
+false lead named, but this is an independent, correctly-obtained
+confirmation of the real final state, not a repeat of that mistake),
+on `TMP`'s own stack. This is consistent with -- and now directly
+confirms -- the cascade #78/#79 already traced partway (`term_err`'s
+`nstk` epilogue landing on `zdbg`'s own address via a stale stack
+word): `zdbg` is real, executable code, so its own `ret` pops whatever
+garbage is sitting one level further down, and the chain apparently
+bottoms out in SeaBIOS's own trap handler, which just loops forever
+once entered this way.
+
+**What this means**: there are now two independently real, fixed bugs
+(both real for *some* future boot path, once one is ever reached) and
+one correctly-pinpointed-but-not-yet-source-located remaining mystery:
+something, while `TMP`'s `clicmd_entry` request is still open, executes
+a genuine `int mpmint` with `CX=8Fh`/`DX=3FFh` that corresponds to no
+actual `call`/`jmp` in the source. The two leading explanations,
+neither yet confirmed: (a) wild/corrupted execution lands on the raw
+`0CDh 0E0h` ("int mpmint") opcode bytes somewhere mid-`clicmd_entry`
+(e.g. inside `fileopen`/the BDOS critical section) with whatever `CX`/
+`DX` happen to be live at that instant -- which would make the
+`8Fh`/`3FFh` values coincidental, not meaningful; or (b) there is a
+real, not-yet-found call site that *does* intentionally call
+`f_terminate` via a genuine nested `int mpmint` (matching `INIT.SUP`'s
+own convention, `dl=0FFh`) that this round's greps missed because it's
+generated differently (e.g. emitted by `tools/plmc.py` for a `.PLM`
+source, not a literal `.SUP`/`.RTM` text match).
+
+**Next step**: single-step (or watchpoint-bisect, the technique that
+worked cleanly this round) through `clicmd_entry`'s own execution from
+its own top (flat `0x10949`'s containing routine, entered at local
+`SUP` offset `0x92C`) forward, instruction by instruction through
+`fileopen`/the file-open-failure path specifically (the likeliest
+place for this QEMU build's limited disk image to produce the error
+this headless, non-interactive run is actually hitting), watching for
+the exact point execution diverges from clean source-level control
+flow -- rather than continuing to work backward from the already-
+confirmed nested-call symptom.
+
+## 81. Followed #80's own next step and got the real answer immediately
+-- the mystery nested `f_terminate` call is not wild execution landing
+on a coincidental opcode at all. It is `INIT.SUP`'s own, long-finished
+`rsp_out: mov cl,f_terminate ! mov dl,0ffh ! int mpmint` instruction,
+executing a **second time**, with `rlr` now pointing at `TMP` instead
+of `INIT`
+
+**Found by verifying the stack-frame arithmetic byte-for-byte instead
+of continuing to hand-derive it** (hand-derivation had already
+produced one implausible result this round -- `CS=0042h`,
+`FLAGS=0000h` -- a sign the offset count was off by something, rather
+than evidence of real corruption): at the exact instant `u_insys[TMP]`
+flips `1->2` (same live watchpoint technique as #80), scanned every
+adjacent word-pair in the 40 bytes above `SP` and, for each one
+read as a candidate `IP:CS`, checked whether the **two bytes
+immediately before that computed flat address are literally `0CDh
+0E0h`** (`int mpmint`'s own real opcode encoding) -- i.e. confirmed by
+disassembly, not by a plausibility guess. Exactly one match in the
+whole window: `IP=02FAh, CS=1000h` (stack offset `+2` from `SP`),
+confirming the two bytes at flat `0x102F8`-`0x102F9` really are `CD
+E0`, and the hardware's own pushed return `IP` really is `02FAh`.
+
+**`flat 0x102F8` is not a coincidence -- it is `INIT.SUP`'s own
+`rsp_out` label's `int mpmint` instruction, byte-for-byte** (confirmed
+directly against the source: `rsp_out:`'s own two probes, then `mov
+cl,f_terminate ! mov dl,0ffh ! int mpmint`, with the `int mpmint`
+opcode landing exactly at `0x102F8`-`0x102F9` and its own pushed return
+`IP` therefore exactly `0x2FA` -- the same fact #75 already
+established about this one instruction, now reached from the opposite
+direction: not "what does TMP's stale stack word point at", but "what
+code just genuinely executed"). `CL=f_terminate` matches the observed
+`CX=8Fh` exactly; `DL=0ffh` matches the observed `DX=3FFh`'s own low
+byte exactly (`DH=03h` is just whatever was left over in the high byte
+-- `rsp_out` never sets it, same as it never did for `INIT`'s own
+original, legitimate call).
+
+**So this was never a corrupted/coincidental `int mpmint` -- it is
+`INIT`'s own 1-line self-termination sequence, genuinely re-executing,
+long after `INIT` itself finished.** Everything downstream that #74-80
+already traced (`abt_chk`'s `ac_tk` branch, `term_err`, the `nstk`
+epilogue landing back on this exact same `0x2FAh/CS=1000h` pair via a
+stale stack word) is real and correctly explained -- but the
+*ultimate* trigger for all of it is simpler than any of the "wild
+execution" or "UDA reuse" theories floated so far: **something causes
+control to flow into `rsp_out`'s own code a second time, with `TMP`
+now sitting at `rlr` instead of `INIT`.** This also plausibly explains
+the project's own original, title-level `1000:004A` crash address:
+`004A` sits within `INIT.SUP`'s own very early data (the copyright/
+version strings, before `init:`'s own real label even starts) --
+i.e. the *same small module*, strongly suggesting this is not the
+first time something has jumped into a stale `INIT.SUP` address.
+
+**What's still open**: *why* control reaches `rsp_out` a second time.
+`rsp_out` is reached legitimately exactly once, via `nrsp:`'s own
+`jcxz rsp_out` -- nothing else in the source jumps or calls there, so
+this has to be an indirect jump through a stale pointer rather than a
+literal second `jmp`/`call` anywhere in the text. The leading
+candidates, in order of how cheaply each can be checked next: (a) a
+per-process saved copy of the `i_mpm_ip`/`i_mpm_cs` interrupt vector
+(`u_mpm_ip`/`u_mpm_cs`, copied in/out of the real vector on every
+`dsptch`/`switch`) that still holds an `INIT`-era value for some
+process and gets written back into the *real*, global vector at the
+wrong moment; (b) a saved `CS:IP` return frame (not necessarily
+`TMP`'s own) that was supposed to point at `TMP`'s own code but still
+holds this stale kernel address, invoked via a `callf`/`retf`/`iret`
+rather than a `jmp`; (c) something is treating a leftover value, still
+sitting in some register or memory cell since `INIT`'s own run, as a
+jump target, the same general bug class (stale pointer, correct value
+for an earlier owner, never refreshed for the new one) as nearly every
+other fix already applied to this codebase, just not yet pinned to
+its specific carrier.
+
+**Next step**: watch `i_mpm_ip`/`i_mpm_cs` (the real, low-memory
+interrupt-vector cells `DSPTCH.RTM`'s own `switch`/context-save logic
+reads from and writes to on every dispatch) with the same live
+watchpoint technique, across the whole boot, and confirm they hold
+`user_entry`'s own address throughout (ruling out (a) directly) --
+if they do, watch whatever `CS:IP` cell is read immediately before the
+jump that lands at `0x102F5`ish (one GDB session back from where this
+round stopped) to catch the *write* that put `rsp_out`'s address there
+in the first place, the same cheap, decisive technique that resolved
+this exact mystery already.
+
+**(a) is already ruled out, this same round**: watched `i_mpm_ip`/
+`i_mpm_cs` (flat `0x380`/`0x382`, the real `int 0E0h` vector) across
+the *entire* boot, past the point of the mystery jump and on into the
+final stall. After the loader's own early, expected churn and
+`INIT.SUP`'s own two (already-known, correct) writes (`0x39D:1000`,
+matching `user_entry` exactly), it never changes again -- confirmed
+stable for 30+ CPU-seconds, well past where the mystery call fires.
+The real vector was never the problem; `int mpmint` genuinely,
+correctly vectors to `user_entry` every single time, including for
+the mystery call itself (confirmed earlier in this same entry). The
+bug is purely about *what gets jumped to before* the `int` instruction
+ever executes.
+
+**Also checked, this round, whether `rsp_out` is reached via a wild
+jump into the middle of its own code (skipping its own two probes) or
+a clean (re-)entry at its own top label**: broke at `rsp_out`'s own
+very first byte (flat `0x102BC`, before either probe) and it fired
+*twice* -- once for `INIT`'s own real, original call, and once more
+later, still running on `TMP`'s own stack (`SS=177Bh`) the whole time.
+Whatever causes this is landing exactly on `rsp_out`'s own label, not
+on some offset into its body -- consistent with a *stored address*
+(a saved pointer, vector, or table entry) rather than raw corrupted
+execution landing by chance on the right byte.
+
+**Also checked and ruled out: a stale/misbuilt `sysent` table entry**
+(the `userf:`/`nonet:` global-function-number lookup `SUPIF.SUP` uses
+to dispatch `TMP`'s own `CL=150`/`mpm_clicmd` call that's already
+open when the mystery call fires) -- `sysent` (`SYSDAT.FMT` offset
+`0xA0`, `256*3` bytes, 3 bytes/entry: `ent_mod`,`ent_func`,`ent_flag`)
+is exactly the kind of GENSYS-era table every other similarly-shaped
+field in this file (`pul`/`qul`/`module_map`/`endseg`/`flags`/
+`rspseg`) turned out to need a `build_mpmsys.py` patch for -- and
+`build_mpmsys.py` never references `sysent` at all, so it's worth
+real suspicion. Read entry 150 directly out of the real built
+`build/kernel/SYSDAT.dseg.bin` (offset `0xA0+150*3`): `ent_mod=1`
+(`sup`), `ent_func=5` -- exactly `clicmd_entry`'s own correct index in
+`SUPIF.SUP`'s `supfunc` table (`not_implemented`=0,`bad_entry`=1,
+`version_entry`=2,`callbios_entry`=3,`load_entry`=4,`clicmd_entry`=5).
+Checked a dozen neighboring entries (144-155, plus several of `TMP`'s
+other own call numbers) too -- all land on sensible, correctly
+incrementing `(mod,func)` pairs. This specific table is correctly
+populated; the dispatch into `clicmd_entry` itself is not where this
+goes wrong -- it has to be *during* `clicmd_entry`'s own subsequent
+execution (matching #80's own original "trace `fileopen`/the BDOS
+critical section forward" next step, which this round's detour through
+`rsp_out` answered a different question instead of).
+
+## 82. Still told to continue until successful boot. **It boots now.**
+Root cause of the whole `1000:004A`/`F000:FF53` crash family was never
+a corrupted stack or a wild jump at all -- it was `XIOS86Q.A86`'s own
+`mov word ptr .020h,offset tickint` hooking the real hardware timer
+interrupt (IRQ0) with `tickint`'s **unrelocated, standalone offset**
+instead of its real combined-image address, so every single 60Hz tick
+vectored into the middle of `SUP` instead of into `tickint`. Two more
+real, confirmed, independently-fatal-to-a-clean-boot bugs found and
+fixed alongside it (`c_mimic` and `mpmseg`, both "GENSYS question
+never answered" defaults, same bug class as `pul`/`qul`/`ccb`/`srchdisk`
+above). All three are fixed in `tools/build_mpmsys.py`, plus a large
+mechanical cleanup (described below) of every `TEMP DEBUG PROBE`/`TEMP
+DIAGNOSTIC` instruction this whole investigation has accumulated across
+#43-81, in `src/kernel/*` and `src/rsp/TMP.A86`.
+
+**Starting point this round**: entry #81 left off suspecting the
+mystery nested `f_terminate` was `rsp_out` itself re-executing a second
+time, reached via some unidentified stale pointer. Chasing that
+further (a fresh, very close live single-step trace of the exact
+transition) surfaced something entry #81's own opcode-scan technique
+had no way to catch: **`0x2FA` -- the address #81 verified as "the two
+bytes before it are `CD E0`, so this must be `rsp_out`'s own `int
+mpmint` return" -- is *also*, completely coincidentally, `zdbg`'s own
+entry label** (`INIT.SUP`'s shared hex-digit-printing subroutine,
+called from dozens of `TEMP DEBUG PROBE` lines throughout `SUPIF.SUP`
+alone). `rsp_out`'s real `int mpmint` sits immediately before `zdbg`'s
+own code in the source (nothing else separates them), so the two
+addresses are adjacent, and *any* ordinary `call zdbg` from one of
+those probes also produces `CS:IP=1000:2FAh` the instant it's entered
+-- indistinguishable from #81's own signature by address alone. #81's
+breakpoint-based confirmation (`rsp_out`'s own *top label*, `0x2BC`,
+firing twice, and `nrsp`'s own top *also* firing twice) is unaffected
+by this and remains real and correctly explained -- but the opcode-scan
+"second independent proof" wasn't actually independent, and should be
+read as retracted. This is also, in hindsight, exactly why removing
+the probes mattered: with them gone, the real trigger became
+observable directly instead of through a coincidental alias.
+
+**The actual cleanup, done first**: every file this investigation has
+ever added a `TEMP DEBUG PROBE`/`TEMP DIAGNOSTIC` instruction to --
+`ABORT.RTM`, `BDOSIF.BDO`, `CIOIF.CIO`, `CHARIO.CIO`, `DSPTCH.RTM`,
+`FILE3.BDO`, `MEMIF.MEM`, `FLAG.RTM`, `QUE1.RTM`, `MAU.MEM`, `PROC.RTM`,
+`QUE2.RTM`, `RTMIF.RTM`, `SYSENT.RTM`, `SUPIF.SUP`, `INIT.SUP`,
+`XIOS86Q.A86`, `TMP.A86` -- was diffed against `7e1cad8` (the original,
+pre-investigation import commit) with comments stripped, to separate
+every hunk into exactly two kinds: a narrow, single-token *replace*
+(a real fix: a missing `cs:` prefix, a typo'd label, a missing paren)
+versus a pure *insert* with no corresponding original line (a probe).
+Every pure insert matching the serial port or a `zdbg`/`xdbg`/`ydbg`/
+`mdbg`/`bdbg`/`cdbg` call was removed; every replace was kept. Two
+replaces were deliberately **not** kept, because their own comments
+already flagged them as live, unresolved experiments rather than
+confirmed fixes: `SUPIF.SUP`'s and `DSPTCH.RTM`'s `sti ! cli` (reverted
+to plain `sti` -- the trailing `cli` permanently defeats the `sti` it
+follows, read literally, and the comment that introduced it says so
+itself) and `PROC.RTM`'s freshly-dispatched-process flags word
+(`0000h`, reverted back to the original `0200h`/IF-set -- same thing,
+its own comment calls it "NOT a real fix, just a test"). This was all
+mechanical, file-by-file, cross-checked against the original import
+for every single hunk; `COMMAND.SUP` turned out to have never had any
+probes in it at all (only the two already-documented `not (...)`
+parenthesization fixes from #80), confirmed by the exact same diff.
+
+**Root cause #1 (the fatal one) -- `tickint`'s unrelocated IVT
+hookup**: traced via the exact same "live single-step, watch for the
+transfer that changes `CS`" technique #80-81 already relied on, now
+clean of probe noise: continuing from `terminate_entry`'s own tempkeep
+no-op return, through several correct `ret`/`retf` unwinds back up
+through `RTM`'s `entry`/`SUP`'s `goodmod`/`func`/`mpmif`, the trace
+lands on a completely unremarkable `ABORT.RTM` `rlsmx` tail (`popf !
+ret`) -- and the **next** single-step is `CS:IP=F000:FF53` (confirmed
+directly, not inferred: printed both registers together), with `SP`
+having moved by exactly `-4` (a near `ret`'s own `+2`, net against a
+hardware interrupt entry's `-6`). That is a hardware interrupt firing
+asmid-instruction, not a corrupted jump. `info pic` (via a short-lived
+QEMU monitor socket) confirms only IRQ0 is ever unmasked on this build
+(`imr=0FEh`) and that IRQ0 is in service (`isr=01h`) at the moment of
+the freeze -- so this has to be the 60Hz timer tick itself vectoring
+somewhere wrong. Read the live IVT entry 8 (`int 08h`, physical
+`0x20`-`0x23`) directly: `1000:0468`. `0468h` is **`tickint`'s own
+bare, standalone `XIOS86Q.A86` offset** (confirmed via `asm86
+--symbols`) -- not `tickint`'s real address in the combined image
+(`module_base + 0468h = 61CBh`). `XIOS86Q.A86`'s own `init:` writes
+this vector with `mov word ptr .020h,offset tickint`, and `offset
+tickint` bakes in the *standalone* value at assemble time, same as
+every other "`offset <local-label>` used as cross-module data" bug
+this tree has already found and fixed in `RTM.A86` (`fdisp`/
+`farpdisp`, #entries much earlier) -- just never extended to
+`XIOS86Q.A86`, since that file didn't exist yet when the earlier fixes
+were written. Every single tick (60/sec) was vectoring into the middle
+of `SUP`'s own code and running whatever bytes happened to sit at
+combined offset `0468h` as if they were an interrupt handler, with no
+stack-switch, no `cld`, nothing -- eventually wandering into SeaBIOS's
+own catch-all "unclaimed interrupt" stub (`F000:FF53`, confirmed: *every
+single one* of the 256 real IVT entries not explicitly claimed by this
+kernel points at that exact same address) and getting stuck there,
+since nothing about reaching it via a corrupted vector ever produces a
+clean `iret` back. **Fixed** in `tools/build_mpmsys.py`: the exact
+same find-the-immediate/verify-uniqueness/patch-in-`module_base`
+pattern already used for `RTM.A86`'s `fdisp`/`farpdisp`, now also
+applied to `XIOS86Q.A86`'s own `offset tickint` immediate.
+
+**Root cause #2 -- `c_mimic` defaults to a real device number instead
+of "no mimic"**: with root cause #1 fixed, the boot got dramatically
+further (past the crash entirely, `TMP` genuinely dispatched and
+running, confirmed via `CS=1623h` -- its own real, separate code
+segment -- making dozens of real syscalls) but the console printed
+every character of `XIOS86Q`'s own signon and `TMP`'s own version
+banner **twice**, back-to-back, byte for byte. A live breakpoint on
+`XIOS86Q`'s own lowest-level `conout:` (the one real `out dx,al` to the
+UART) confirmed it, firing twice per character with *the same return
+address* both times. `CHARIO.CIO`'s own `conout` (the kernel-level
+routine, distinct from `XIOS86Q`'s) explains why: after the real
+output, it checks `c_mimic[si]` (`CCB.DEF`: "mimic - cio dev that
+mimics us. 0ffh means no mimic device") and, if it isn't `0FFh`, sends
+the *same character again* to whatever device number `c_mimic` holds
+-- a deliberate feature (echo console output to a second device, e.g.
+a printer) with `0FFh` as its "disabled" sentinel. The CCB storage
+backing it (`ccbtab0`, `XIOS86Q.A86`'s own private dseg tail) is
+reserved with a bare `rb 12` -- all-zero -- so `c_mimic` defaults to
+`0`, a *real* device number (this build's own, only console!), not the
+sentinel. Every character mimics itself. Same "GENSYS question never
+answered, and 0 isn't a safe default" bug class as `pul`/`qul`/`ccb`
+itself earlier in this file. **Fixed** in `build_mpmsys.py`, right next
+to the existing `ccb`/`CCB_OFFSET` patch: `ccbtab0[8]` (`c_mimic`'s own
+byte offset within the CCB, per `CCB.DEF`) explicitly set to `0FFh`.
+
+**Root cause #3 -- `mpmseg` never set, so the version banner reads
+through a null segment**: fixing #2 removed the *doubling* but not the
+garbage itself -- still unreadable noise, now appearing once instead
+of twice, between the signon line and the `0A>` prompt. `TMP.A86`'s
+own startup ("print version") does `mov ds,sysdatseg ! mov
+dx,.s_version ! mov ds,.s_mpmseg ! call print_ds_string`: `.s_version`
+(`TMP.A86`'s own local `equ word ptr 78h`) correctly reads `SYSDAT`'s
+`version` field (confirmed via `asm86 --symbols` against the real,
+current `SYSDAT.FMT` layout: `version` really is at offset `0x78`,
+holding `INIT.SUP`'s own `ver` string's *offset* within the shared code
+segment) -- but `.s_mpmseg` (`equ word ptr 40h`, "begin MPM segment",
+also confirmed at the right real offset, `0x40`/`mpmseg`) is the
+*segment* half of that same far pointer, and nothing in
+`build_mpmsys.py` ever writes it. Left at its stock all-zero default,
+`print_ds_string` reads the version string through `DS=0` -- the
+IVT/BIOS data area at the bottom of memory -- instead of `DS=1000h`,
+printing whatever bytes happen to live there as if they were "MP/M-86
+2.0 [5 Oct 81]". Same bug class as #2, a third time. **Fixed** in
+`build_mpmsys.py`: `mpmseg` (`SYSDAT.FMT` offset `0x40`) explicitly set
+to `MPM_CODE_SEG` (`1000h`), right next to the other "answers to
+GENSYS questions" field writes.
+
+**Result, confirmed via QEMU serial console, byte for byte**:
+
+    MP/M-86 XIOS86Q -- QEMU target (serial console, floppy disk)
+
+
+    MP/M-86 2.0 [5 Oct 81]
+    Copyright (C) 1981, Digital Research
+
+    0A>
+
+No crash, no garbage, no probes left anywhere in the tree. `idle`/
+`tick` cycle cleanly in the background (confirmed live: `f_dispatch`
+calls repeating with completely stable register state, not a GDB
+artifact -- verified by removing the breakpoint and single-stepping
+raw) and the system sits at a genuine CP/M-style `0A>` prompt rather
+than hanging or crashing.
+
+**Still open, next step**: typed input against this same `0A>` prompt
+(tested over a QEMU `-serial unix:...` socket, both a bare Enter and a
+real command line) produced no visible response within several
+seconds, across more than one attempt. Not yet root-caused -- candidates
+include the test harness itself (a `unix:` chardev's own buffering/
+framing with this QEMU version, not yet cross-checked against a
+known-good interactive target), and a genuine remaining bug somewhere
+in the `conin`/`rtm_poll`/UART-RX-ready path (`CHARIO.CIO`'s
+`rconin_entry`/`conin:`, `XIOS86Q.A86`'s own `conin:`/`polldev`). The
+next step is to confirm or rule out the harness first (e.g. a real
+interactive terminal, or `-serial stdio` without redirection), since
+every fix this entry documents was found by trusting a *direct*,
+two-register-confirmed observation over an inferred one, and "no
+response over a brand-new socket-chardev test rig" isn't that yet.

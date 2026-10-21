@@ -55,13 +55,10 @@ listout_entry:	; write to list device - DL = char
 constat_entry:        ;check console status
 ;=============
 
-	push ax ! push dx ! mov al,'|' ! mov dx,03f8h ! out dx,al ! mov ax,rlr ! call cdbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: dump rlr at constat_entry start
 	call coninit
 	mov di,rlr ! cmp di,c_attach[si]
 	je cse_cl
-	    push ax ! mov al,'_' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE: constat_entry not console-attached, yielding via f_dispatch
 	    mov cl,f_dispatch ! call mpmif
-	    push ax ! mov al,'`' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE: f_dispatch returned
 	    mov bl,0 ! ret
 cse_cl:	call conbrk
 	mov bl,al ! ret

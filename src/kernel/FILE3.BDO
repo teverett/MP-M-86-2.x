@@ -1201,7 +1201,6 @@ chk_olist1:
 
 PR_TERM:
 
-	push ax ! mov al,6 ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE: marker byte 6, confirms PR_TERM itself starts executing
 	mov dx,pdaddr
 	mov bx,offset open_root! mov cur_pos,bx
 pr_term1:

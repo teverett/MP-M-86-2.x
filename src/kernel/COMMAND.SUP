@@ -468,7 +468,29 @@ clirls:
 	call mxwrite
 	pop ax ! and ax,pf_tempkeep+pf_keep
 	mov bx,rlr ! mov cx,p_flag[bx]
-	and cx,not pf_tempkeep+pf_keep
+	and cx,not (pf_tempkeep+pf_keep)	;missing parens made this
+				;`(not pf_tempkeep)+pf_keep` instead of
+				;`not (pf_tempkeep+pf_keep)` -- `not` binds
+				;to the single following term only (same
+				;unary precedence as `-`), so the mask was
+				;0FE01h (bit 9/pf_tempkeep left SET) instead
+				;of 0FDFDh. `pf_tempkeep` (set unconditionally
+				;at this routine's own top, clicmd_entry) was
+				;therefore never actually cleared on this,
+				;the *normal* return-to-CLI exit path (only
+				;the chain-and-terminate exit two lines above
+				;clears it, correctly, with its own already-
+				;parenthesized mask) -- it stuck permanently
+				;on every process that ever runs a command
+				;through here (e.g. TMP, every time the user
+				;runs anything), so every later attempt to
+				;terminate that process hits `abt_chk`'s
+				;`ac_tk`/tempkeep branch (CX=0FFFFh) forever,
+				;which `terminate_entry`'s `cmp cx,0!jle
+				;term_err` routes to the failure path -- the
+				;confirmed root cause of the stale-stack
+				;`term_err`/`ueout` symptom chased across
+				;docs/bugs.md #74-79.
 	or cx,ax ! mov p_flag[bx],cx
 	test p_flag[bx],pf_ctlc ! jz cli_nctl
 	    mov cx,f_terminate ! sub dx,dx
@@ -595,6 +617,32 @@ user_retf:
 ;	The process ends here
 
 	mov bx,rlr
-	and p_flag[bx],not pf_keep+pf_tempkeep+pf_ctlc+pf_sys
+	and p_flag[bx],not (pf_keep+pf_tempkeep+pf_ctlc+pf_sys)	;same
+				;missing-parens bug as clirls's own fix just
+				;above (`not` binds only to the single
+				;following term, same unary precedence as
+				;`-`, so this evaluated as `(not pf_keep)
+				;+pf_tempkeep+pf_ctlc+pf_sys` = 027Eh, which
+				;still has bit 9/pf_tempkeep SET -- i.e. `and`
+				;with it *preserves* pf_tempkeep instead of
+				;clearing it, same as the intended mask
+				;0FD7Ch would have) -- this is the routine
+				;that's actually supposed to clean up and
+				;terminate an RSP that falls off the end of
+				;its own code via a bare `retf` (the normal,
+				;expected way an RSP like TMP finishes
+				;running), so *every* normal RSP exit, not
+				;just an error path, hit this and carried
+				;pf_tempkeep through to `int mpmint`/
+				;`f_terminate` right below -- `abt_chk` then
+				;takes its `ac_tk`/tempkeep branch (CX=
+				;0FFFFh) instead of the real success path,
+				;which `terminate_entry`'s `cmp cx,0!jle
+				;term_err` routes to the failure path -- the
+				;actual, direct trigger for the stale-stack
+				;`term_err`/`ueout` symptom chased across
+				;docs/bugs.md #74-79 (clirls's own fix just
+				;above is real but this is the call site that
+				;actually fires for TMP's own natural exit).
 	mov cx,f_terminate ! sub dx,dx ! int mpmint
 

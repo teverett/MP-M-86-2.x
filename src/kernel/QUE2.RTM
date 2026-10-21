@@ -30,16 +30,15 @@ getqdaddr:
 	push ax ! mov cl,4 ! shr dx,cl
 	add ax,dx
 		;must be above SYSDAT
-	push ax ! mov al,'I' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
-	cmp ax,cs:sysdat ! jb gqd_bad	;bare form wrong, same bug class/fix as
-					;PROC.RTM's getpdadr (see its comment)
+	cmp ax,cs:sysdat ! jb gqd_bad	;bare "sysdat" is wrong -- same bug
+					;class/fix as PROC.RTM's getpdadr
 		;must be below end of system
 	    cmp ax,endseg  ! jae gqd_bad
 			;must be within 64K of SYSDAT
 			; 64K=1000h memory paragraphs
-		mov cx,cs:sysdat ! add cx,1000h	;bare form wrong, same bug class/fix
+		mov cx,cs:sysdat ! add cx,1000h
 		cmp ax,cx ! jae gqd_bad
-		    pop ax ! sub ax,cs:sysdat	;bare form wrong, same bug class/fix
+		    pop ax ! sub ax,cs:sysdat
 		    mov cl,4 ! shl ax,cl
 		    pop dx ! add dx,ax
 		    mov si,dx ! sub cx,cx
@@ -48,32 +47,24 @@ getqdaddr:
 			add q_buf[si],ax
 gqd_ret:	    ret
 gqd_bad:
-	push ax ! mov al,'J' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	pop ax ! pop dx ! pushf ! cli
 	mov di,qul
 	cmp di,0 ! jne gqd_have
 	    mov cx,e_no_qd ! popf ! ret
 gqd_have:
-	push ax ! push dx ! mov al,'K' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
-	push ax ! push dx ! mov al,module_map ! call ydbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	mov bx,q_link[di] ! mov qul,bx
 	push di ! push es ! push ds
 	mov ds,u_wrkseg ! pop es
 	mov cx,qdlen/2 ! mov si,dx
 	rep movs ax,ax
 	push es ! pop ds ! pop es ! pop di
-	push ax ! mov al,'L' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
-	push ax ! push dx ! mov al,module_map ! call ydbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	or q_flags[di],qf_table
 	push di ! mov si,di
-	call qspace
-	push ax ! mov al,'M' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
-	pop di
+	call qspace ! pop di
 	cmp cx,0 ! je gqd_exit
 	    mov ax,qul ! mov q_link[di],ax
 	    mov qul,di
 gqd_exit:
-	push ax ! mov al,'N' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	mov dx,di ! popf ! ret
 
 remqd:
@@ -103,41 +94,16 @@ qspace:
 		;call maualloc
 	mov cx,0 ! push cx ! push cx ! push ax
 	push ax ! push cx
-	mov dx,sp			;dx->MPB (5 words already pushed above)
-	push ds				;save the real ds *before* the next
-					;line clobbers it -- pushed *after*
-					;dx was captured, so it doesn't shift
-					;the MPB's own addressing; popped
-					;back below, before anything re-reads
-					;the MPB via bp (see this push's own
-					;pop for why a bare "mov ds,sysdat"
-					;can't be used to restore it instead)
-	mov ax,ss ! mov ds,ax
+	mov dx,sp ! mov ax,ss ! mov ds,ax
 	mov bx,offset qmau
 	push si
-	push ax ! push dx ! mov al,'O' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	mov cx,f_maualloc ! call mpmif
-	push ax ! mov al,'P' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
-	pop si
-	pop ds				;restore the real ds saved above --
-					;NOT "mov ds,sysdat": that bare
-					;reference only ever works when ds
-					;is *already* sysdat-ish (it reads
-					;SYSDAT's own self-referential cached
-					;copy of its own segment number, at
-					;a fixed offset -- not some per-
-					;module cell despite living in each
-					;module's own cseg too); with ds
-					;still = ss here (just set above,
-					;for this on-stack MPB), that read
-					;went via ss instead, pulling
-					;whatever word happened to be on the
-					;*stack* at that same bare offset --
-					;confirmed by probe: ds came back
-					;holding garbage, not the real
-					;sysdat segment, leaving every
-					;sysdat-relative read for the rest
-					;of this call silently wrong
+	pop si ! mov ds,cs:sysdat	;bare "sysdat" is wrong here specifically --
+					;this call deliberately runs with DS=SS
+					;(the on-stack MPB trick just above) so a
+					;bare read lands wherever SS happens to
+					;point instead of this module's own cseg
+					;cell
 	cmp cx,0 ! jne qspace_ret
 	    mov bp,sp ! mov ax,mpb_start[bp]
 	    mov q_buf[si],ax
@@ -160,4 +126,3 @@ qrelease:
 	call mpmif
 	pop ax ! pop ax ! pop ax
 	ret
-

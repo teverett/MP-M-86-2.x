@@ -30,19 +30,14 @@ proc_creat:		; Create Process
 ;==========		================
 ;		DX = pd address in u_wrkseg
 
-	push bp ! mov bp,sp ! push ax ! push dx ! mov al,0Eh ! mov dx,03f8h ! out dx,al ! mov ax,[bp+2] ! call ydbg ! pop dx ! pop ax ! pop bp	;TEMP DEBUG PROBE: marker 0Eh, dump the near-call return address (the word just above the saved bp) -- identifies proc_creat's caller for each invocation
-	push ax ! push dx ! mov al,1Fh ! mov dx,03f8h ! out dx,al ! pop dx ! push dx ! mov ax,dx ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 1Fh, confirms proc_creat reached, dump incoming dx
 	cmp dx,0 ! jne cp_doit
 	    sub bx,bx ! ret
 cp_doit:
 	call getpdadr		;si->pdaddr in rtm
-	push ax ! push dx ! mov al,19h ! mov dx,03f8h ! out dx,al ! mov ax,si ! call ydbg ! mov ax,cx ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 19h, dump si/cx right after getpdadr
 	jcxz cp_gpd
 	    mov bx,0ffffh ! ret
 cp_gpd:
-	push ax ! push dx ! mov al,1Ah ! mov dx,03f8h ! out dx,al ! mov ax,si ! call ydbg ! mov ax,p_uda[si] ! call ydbg ! mov ax,u_wrkseg ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 1Ah, dump si/p_uda[si]/u_wrkseg right at cp_gpd (after the PD copy, before cp_uda computes the absolute uda seg)
 	mov dx,p_link[si]
-	push ax ! push bx ! mov bx,dx ! mov al,2Dh ! mov dx,03f8h ! out dx,al ! mov ax,si ! call ydbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call ydbg ! mov dx,bx ! pop bx ! pop ax	;TEMP DEBUG PROBE: marker 2Dh, dump si and the just-read p_link[si] (saved into bx first since dx itself becomes the port address) -- MUST restore dx from bx before returning (the very next real instruction is "push dx", which needs the real p_link[si] value, not 03F8h) -- same mistake class as FLAG.RTM's 11h/13h fix last round, caught this time before it cost another whole investigative detour
 	push dx ! push si
 		; init uda fields
 cp_uda:
@@ -60,7 +55,6 @@ cp_slst:add al,ncondev
 
 		;share memory
 
-	push ax ! push dx ! mov al,1Ch ! mov dx,03f8h ! out dx,al ! mov ax,p_mem[bx] ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,es ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 1Ch, dump p_mem[bx] (share-memory gate) and ES before any share-loop iteration
 	cmp p_mem[bx],0 ! je cp_nm
 	    cmp p_mem[si],0 ! jne cp_nm
 		lea di,p_mem[bx]
@@ -70,15 +64,12 @@ cp_mnxt:	mov di,ms_link[di]
 		    push ms_start[di] ! push si ! push bx
 		    mov cx,f_share ! mov dx,sp
 		    push ds ! mov ax,ss ! mov ds,ax
-		    push ax ! push dx ! mov al,06h ! mov dx,03f8h ! out dx,al ! mov ax,es ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 06h, ES right before the nested mpmif/f_share call
 		    call mpmif ! pop ds
-		    push ax ! push dx ! mov al,07h ! mov dx,03f8h ! out dx,al ! mov ax,es ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 07h, ES right after the nested mpmif/f_share call returns -- compare against 06h to see if f_share clobbers ES
 		    pop bx ! pop si ! pop ax ! pop di
 		    jmps cp_mnxt
 cp_nm:
 		;set physical UDA segment
 
-	push ax ! push dx ! mov al,05h ! mov dx,03f8h ! out dx,al ! mov ax,es ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,u_wrkseg ! call ydbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 05h, ES and u_wrkseg right at cp_nm's own read -- compare against the earlier 1Ah probe's u_wrkseg (same call) to see if it changed between cp_gpd and here
 	mov ax,u_wrkseg
 	mov dx,p_uda[si] ! add dx,ax
 	mov p_uda[si],dx
@@ -142,23 +133,11 @@ cp_uda4:
 
 		; setup user stack for iret
 
-	push ax ! push bx ! push dx ! mov bx,ds ! mov al,8Ah ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,ds:u_ss ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,ds:u_initss ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,ds:u_stack_sp ! call ydbg ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE (#58): marker 8Ah, dump DS(current,should be TMP's absolute uda seg), u_ss, u_initss, u_stack_sp right before "mov ds,ds:u_ss" -- #58's own next step, chasing where DS=ES=0CCCCh enters during TMP's own iret-frame setup
 	mov ds,ds:u_ss
 	mov di,u_sp			;sp->offset
-	push ax ! push bx ! push dx ! mov bx,ds ! mov al,8Bh ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call ydbg ! mov al,' ' ! out dx,al ! mov ax,di ! call ydbg ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE (#58): marker 8Bh, dump the NEW DS (just loaded from u_ss) and DI (u_sp, should be stack_top's own offset, 01D8h for TMP) right after the switch -- if DS already reads 0CCCCh here, u_ss itself was already wrong; if DI is wrong instead, the write below lands somewhere unrelated
 	mov ax,u_initcs
 	mov 2[di],ax			;  ->segment
-	mov word ptr 4[di],0000h	;TEMP DIAGNOSTIC (#64): was 0200h (IF set) --
-					;testing whether a freshly-dispatched
-					;process's own first-ever IRET enabling
-					;interrupts with NO delay (unlike "sti",
-					;which this whole session's "sti!cli"
-					;fixes have exploited repeatedly) lets an
-					;already-pending interrupt divert control
-					;before the new process's own first
-					;instruction ever runs -- NOT a real fix,
-					;just a test; a real process obviously
-					;needs IF=1 eventually
+	mov word ptr 4[di],0200h	;  ->flags
 	pop ds ! pop es
 
 		; put on thread list
@@ -192,20 +171,11 @@ getpdadr:
 					;sysdat,ds" (see its comment): reads
 					;SYSDAT's own offset 6
 					;(module_table[sup].init_seg) instead of
-					;this module's own cseg cell. Confirmed
-					;via GDB single-stepping: before the
-					;init_seg-corruption fix this accidentally
-					;read a value close enough to the real
-					;sysdat segment to mostly work; after that
-					;fix it correctly reads init_seg's own
-					;(correct) 1000h, which is wrong for what
-					;this comparison actually needs.
+					;this module's own cseg cell.
 	    cmp ax,endseg ! jae gpd_bad
-		mov cx,cs:sysdat ! add cx,1000h	;bare form wrong, same bug class/fix
+		mov cx,cs:sysdat ! add cx,1000h
 		cmp ax,cx ! jae gpd_bad
-		    pop ax ! sub ax,cs:sysdat	;bare form wrong, same bug class/fix --
-						;this is the one that produced the
-						;SI=81F0h symptom
+		    pop ax ! sub ax,cs:sysdat
 		    mov cl,4 ! shl ax,cl
 		    pop dx ! add dx,ax
 		    mov si,dx ! sub cx,cx ! ret
@@ -216,13 +186,9 @@ gpd_bad:
 	    mov cx,e_no_pd ! popf ! ret
 gpd_have:
 	mov ax,p_link[di] ! mov pul,ax
-	push ax ! push bx ! mov bx,dx ! mov al,2Fh ! mov dx,03f8h ! out dx,al ! mov ax,di ! call ydbg ! mov ax,bx ! call ydbg ! mov ax,u_wrkseg ! call ydbg ! mov dx,bx ! pop bx ! pop ax	;TEMP DEBUG PROBE: marker 2Fh, dump DI (the pul slot about to be overwritten, should be 0E40), DX (the source offset within u_wrkseg, should be rsp_pd=0010), and u_wrkseg itself (the source segment), right before the copy that's supposedly about to put 0 into p_link[di] -- MUST restore dx from bx before falling through (same discipline as marker 2Dh's own fix)
 	push di ! push es ! push ds
 	mov ds,u_wrkseg ! pop es
 	mov si,dx ! mov cx,pdlen/2
-	push ax ! push bx ! pushf ! pop bx ! mov al,7Fh ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call ydbg ! pop bx ! pop ax	;TEMP DEBUG PROBE: marker 7Fh, sample FLAGS (via pushf/pop bx) immediately before "rep movsw" -- bit 9 (0200h) is IF; confirms whether interrupts are really still disabled here, as the source-level cli/popf bracket intends
 	rep movsw
-	push ax ! push bx ! pushf ! pop bx ! mov al,81h ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call ydbg ! pop bx ! pop ax	;TEMP DEBUG PROBE: marker 81h, sample FLAGS immediately after "rep movsw" returns -- compare IF (bit 9) against marker 7Fh's reading
 	push es ! pop ds ! pop es ! pop si
 	or p_flag[si],pf_table ! popf ! ret
-

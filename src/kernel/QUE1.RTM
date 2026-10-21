@@ -13,18 +13,12 @@ makeq_entry:		; Create a System Queue
 ;	output: BX = 0 if okay , 0ffffh if error
 ;		CX = Error Code
 
-	push ax ! push dx ! mov al,'G' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	call getqdaddr ! mov di,dx	;DI->QD addr
-	push ax ! mov al,'H' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	cmp cx,0 ! je qm_chk
 	    mov bx,0ffffh ! ret
 		;Make sure this queue doesn't already exist
 qm_chk:	pushf ! cli
-	push es ! mov es,cs:sysdat	;bare form wrong, same bug class/fix as
-					;PROC.RTM's getpdadr (see its comment) --
-					;reads SYSDAT's own offset 6
-					;(module_table[sup].init_seg) instead of
-					;this module's own cseg cell
+	push es ! mov es,cs:sysdat
 	mov si,(offset qlr)-q_link
 qm_nxt:	mov si,q_link[si]
 	cmp si,0 ! je qm_go
@@ -54,19 +48,14 @@ openq_entry:		; Find an active Queue
 ;		BX = 0 if okay, 0ffffh if not
 ;		CX = Error Code
 
-	push ax ! mov al,'u' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	pushf ! cli
 	push es ! mov es,u_wrkseg
 	mov si,(offset qlr)-q_link ! mov di,dx
-	push ax ! mov al,'v' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 qo_nqd:	mov si,q_link[si]
-	push ax ! mov al,'w' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	cmp si,0 ! je qo_noq
 	    push di ! push si ! mov cx,qnamsiz/2
 	    add si,q_name ! add di,qpb_name
-	    push ax ! mov al,'x' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	    repe cmpsw
-	    push ax ! mov al,'y' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	    pop si ! pop di ! jne qo_nqd
 			;Names match
 		mov es:qpb_qaddr[di],si
@@ -205,8 +194,7 @@ qw_ver:	push es ! mov es,u_wrkseg
 	    inc ax ! jnz qw_wait
 		popf ! pop es ! mov bx,0ffffh
 		mov cx,e_q_full ! jmps qw_exit
-qw_wait:    push ax ! mov al,1 ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE: queue full, about to sleep (marker byte 0x01, all printable chars already claimed by other probes)
-	    lea dx,q_nq[bx]			;DX = NQ List
+qw_wait:    lea dx,q_nq[bx]			;DX = NQ List
 	    mov bx,rlr ! mov p_stat[bx],ps_nq	;status=NQ
 	    popf ! pop es ! push si
 	    mov cx,f_sleep ! call mpmif		;Sleep on NQ List
@@ -247,4 +235,3 @@ qv_nxt:	mov bx,q_link[bx]
 qv_chk:	cmp bx,si ! je qv_fnd
 	    jmps qv_nxt
 qv_fnd:	mov cx,0 ! ret
-

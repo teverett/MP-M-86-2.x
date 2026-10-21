@@ -40,50 +40,18 @@ init:
 	mov ax,[bx] ! mov cs:[si],ax
 	mov ax,2[bx] ! mov cs:2[si],ax
 
-	push ax ! mov al,'q' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 		; create disk mx queue
 	mov dx,offset mxdiskqd ! mov cx,f_qmake
 	call mpmif
 
-	push ax ! push bx ! push cx ! push dx ! mov al,'[' ! mov dx,03f8h ! out dx,al ! mov ax,ds ! mov ch,al
-	mov cl,4 ! mov bl,ah ! shr bl,cl ! and bl,0fh ! cmp bl,9 ! ja dsd1
-	    add bl,'0' ! jmps dsd2
-dsd1:	add bl,'A'-10
-dsd2:	mov al,bl ! out dx,al
-	mov bl,ah ! and bl,0fh ! cmp bl,9 ! ja dsd3
-	    add bl,'0' ! jmps dsd4
-dsd3:	add bl,'A'-10
-dsd4:	mov al,bl ! out dx,al
-	mov al,ch ! mov cl,4 ! mov bl,al ! shr bl,cl ! and bl,0fh ! cmp bl,9 ! ja dsd5
-	    add bl,'0' ! jmps dsd6
-dsd5:	add bl,'A'-10
-dsd6:	mov al,bl ! out dx,al
-	mov al,ch ! mov bl,al ! and bl,0fh ! cmp bl,9 ! ja dsd7
-	    add bl,'0' ! jmps dsd8
-dsd7:	add bl,'A'-10
-dsd8:	mov al,bl ! out dx,al
-	mov al,']' ! out dx,al
-	pop dx ! pop cx ! pop bx ! pop ax	;TEMP DEBUG PROBE
-	push ax ! push bx ! push dx ! mov al,'?' ! mov dx,03f8h ! out dx,al ! mov bx,rlr ! test p_flag[bx],pf_tempkeep ! jz tkq1 ! mov al,'Y' ! jmps tkq2
-tkq1:	mov al,'N'
-tkq2:	out dx,al ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE
-	push ax ! mov al,'r' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 		; open mx disk queue
 	mov dx,offset mxdiskqpb ! mov cx,f_qopen
 	call mpmif
 
-	push ax ! push bx ! push dx ! mov al,'?' ! mov dx,03f8h ! out dx,al ! mov bx,rlr ! test p_flag[bx],pf_tempkeep ! jz tkq3 ! mov al,'Y' ! jmps tkq4
-tkq3:	mov al,'N'
-tkq4:	out dx,al ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE
-	push ax ! mov al,'s' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 		; write mx disk queue
 	mov dx,offset mxdiskqpb ! mov cx,f_qwrite
 	call mpmif
 
-	push ax ! push bx ! push dx ! mov al,'?' ! mov dx,03f8h ! out dx,al ! mov bx,rlr ! test p_flag[bx],pf_tempkeep ! jz tkq5 ! mov al,'Y' ! jmps tkq6
-tkq5:	mov al,'N'
-tkq6:	out dx,al ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE
-	push ax ! mov al,'t' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	retf
 
 ;*****************************************************
@@ -190,7 +158,6 @@ getdiskmx:
 	push si! push dx
 
 	mov cx,f_qread ! mov dx,offset mxdiskqpb
-	push ax ! push cx ! push dx ! mov al,'[' ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call bdbg ! mov al,']' ! mov dx,03f8h ! out dx,al ! pop dx ! pop cx ! pop ax	;TEMP DEBUG PROBE: dump CX right before mpmif for f_qread
 	call mpmif
 	pop dx ! pop si
 
@@ -208,7 +175,6 @@ getdiskmx:
 	push ax ! popf
 
 		;initialize bdos data area for user
-	push ax ! push dx ! mov al,7 ! mov dx,03f8h ! out dx,al ! mov ax,si ! call bdbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 7, dump SI right before it gets pushed for the bdosstack-relative section
 	push si ! push dx
 	mov ax,u_wrkseg
 	mov parametersegment,ax
@@ -266,19 +232,16 @@ PDCNT_OK:
 
 	call entryzero
 
-	push ax ! push bx ! push dx ! mov al,9 ! mov dx,03f8h ! out dx,al ! mov bx,sp ! add bx,6 ! mov ax,ss:[bx+2] ! call bdbg ! mov al,setbf ! mov ah,0 ! call bdbg ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE: marker 9, peek the stack-saved SI (at sp+2 relative to before this probe's own 3 pushes, i.e. +6+2) without popping it, plus setbf
 
 	;Set DMA buffer if needed
 
 	cmp setbf,true ! jne nsetbf
 	    call setdata
 nsetbf:
-	push ax ! push bx ! push dx ! mov al,10 ! mov dx,03f8h ! out dx,al ! mov bx,sp ! add bx,6 ! mov ax,ss:[bx+2] ! call bdbg ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE: marker 10 (as a raw byte, 0x0A), peek the same stack slot after the setdata call
 
 	;ready to go to the function
 
 	pop dx ! pop si
-	push ax ! push dx ! mov al,8 ! mov dx,03f8h ! out dx,al ! mov ax,si ! call bdbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 8, dump SI right after popping it back
 	PUSH ES! PUSH DS! POP ES
 
 	MOV AH,CS:btab_flag[SI]
@@ -307,7 +270,6 @@ RETMON:
 		;release mxdisk queue
 
 RETMONX:
-	push ax ! mov al,3 ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE: marker byte 3, confirms RETMONX is reached at all
 	push bx
 	mov cx,f_qwrite ! mov dx,offset mxdiskqpb
 	call mpmif
@@ -315,16 +277,10 @@ RETMONX:
 	mov si,rlr
 	pop bx! pop ax! not ax
 	xor ax,pf_tempkeep! and p_flag[si],ax
-	push ax ! mov al,'(' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
-	push ax ! mov ax,p_flag[si] ! call bdbg ! pop ax	;TEMP DEBUG PROBE: dump p_flag WORD (was wrongly truncated to a byte before -- "mov al,p_flag[si]" only reads bits 0-7, missing pf_tempkeep entirely, which is bit 9/0200h)
-	push ax ! mov al,')' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	test p_flag[si],pf_ctlc
 	jz mxdiskexit
 	    mov cx,f_terminate ! push bx
 	    sub dx,dx
-	    push ax ! mov al,'(' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
-	    push ax ! mov ax,dx ! call bdbg ! pop ax	;TEMP DEBUG PROBE: dump dx (should be 0000)
-	    push ax ! mov al,')' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	    call mpmif
 	    pop bx
 mxdiskexit:
@@ -416,12 +372,10 @@ COMPARE_RECS:
 	POP BX! MOV BX,7! JMP SHELL_ERR
 ;
 CALL_BDOS:
-	push ax ! push dx ! mov al,4 ! mov dx,03f8h ! out dx,al ! mov ax,si ! call bdbg ! mov ax,cs:btab_addr[si] ! call bdbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker byte 4, then SI, then the actual call target offset
 	MOV SAVE_SP,SP
 
 	call cs:btab_addr[si]
 
-	push ax ! mov al,5 ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE: marker byte 5, confirms the real function (e.g. PR_TERM) returned
 BDOS_RETURN:
 	MOV AL,SELDSK
 	cmp resel,0
@@ -536,21 +490,6 @@ mpmif:
 	callf cs:dword ptr .supervisor
 
 	POP	ES
-	ret
-
-;TEMP DEBUG PROBE: dump AX as 4 hex digits over serial
-bdbg:
-	push ax ! push bx ! push cx ! push dx
-	mov cx,0404h
-bdbg1:	rol ax,cl
-	mov bl,al ! and bl,0fh ! cmp bl,9
-	ja bdbg2
-	add bl,'0' ! jmp bdbg3
-bdbg2:	add bl,'A'-10
-bdbg3:	mov dx,03f8h ! push ax ! mov al,bl ! out dx,al ! pop ax
-	dec ch ! jnz bdbg1
-	mov al,' ' ! mov dx,03f8h ! out dx,al
-	pop dx ! pop cx ! pop bx ! pop ax
 	ret
 
 entryzero:

@@ -15,7 +15,7 @@ user_entry:
 ;	-----			------
 ;  CL - Function Code	  AX - Copy of BX
 ;  DL - Byte Param	  BX - Return
-;  DX - Word Param	  CX - Error Code	
+;  DX - Word Param	  CX - Error Code
 ;			  ES - Segment Return
 ;
 ;		SETUP FOR ENTRY POINTS
@@ -25,7 +25,7 @@ user_entry:
 ;		CS
 ;		IP		<- u_stack_ss,_sp
 ;	in u_stack of uda:
-;		DS 
+;		DS
 ;		user_ret	<- SS,SP
 ;	DS =  Sysdat Segment
 ;	ES -> user_data_area
@@ -35,34 +35,6 @@ user_entry:
 ;	u_retseg == user's ES
 
 		;initialize critical areas
-	push ax ! push bx ! push dx ! mov bx,dx ! mov al,'@' ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call zdbg ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE: now also dumps CX (incoming function code) then DX (incoming word param, saved into BX first since DX itself gets clobbered by the port address) -- added to chase FLAG.RTM's marker 14h finding DX=03F8h instead of flag_tick(1) by the time flag_valid checks it
-								;DX is this entry point's own
-								;documented live input ("DX ->
-								;function parameter", e.g the
-								;terminate code passed by INIT.SUP's
-								;"mov dl,0ffh!int mpmint") -- the
-								;original single-register probe
-								;clobbered it, at the very first
-								;instruction of EVERY "int mpmint"
-								;syscall, before the parameter is
-								;ever read. Confirmed via GDB: DL
-								;read back 0F8h (the serial port,
-								;left over from this very probe)
-								;at abt_chk, instead of the real
-								;0FFh, so "cmp dl,0ffh" took the
-								;wrong branch every time termination
-								;was attempted. Internal kernel-to-
-								;kernel calls (through a module's
-								;own "mpmif" trampoline, straight to
-								;SUP's "entry:" label) never hit
-								;this -- only real "int mpmint"
-								;syscalls go through user_entry
-								;first, which is why this went
-								;unnoticed through every earlier,
-								;successful dispatch this session.
-								;Same bug class as MEMIF.MEM's
-								;'a'/'b' and ABORT.RTM's '$' probes.
-	push ax ! push dx ! mov al,3Bh ! mov dx,03f8h ! out dx,al ! mov ax,ds ! call zdbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 3Bh, dump DS right here at user_entry's own literal first real instruction, before "mov di,ds" captures it as u_wrkseg. MUST preserve DX -- this is user_entry's own documented live input ("DX -> function parameter"), and the first version of this probe didn't save it, almost certainly the real explanation for #46/#47's "DX=03F8h at flag_valid" finding (that and marker 16h below, same bug, same two rounds).
 	cld ! mov di,ds			;DI=user's DSEG
 	mov ds,cs:sysdat ! mov bx,rlr	;BX=pd address -- bare "mov ds,sysdat"
 					;only works when the *caller's* DS
@@ -90,7 +62,6 @@ user_entry:
 					;reliably addresses the same combined
 					;location regardless of DS.
 	mov ax,es ! mov es,p_uda[bx]	;ES=uda
-	push ax ! push bx ! push dx ! mov al,03h ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! mov ax,es ! call zdbg ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE: marker 03h (reused, freed by this round's probe-density cleanup), dump BX(=rlr) and the resulting ES(=p_uda[bx]) right after user_entry loads them -- this is the very first real "int mpmint" syscall this trace has ever reached (TMP's own f_createproc, via INIT.SUP's nrsp loop), so rlr should read back as "initpd" and ES should read back as inituda's segment per INIT.SUP's own line-83 fix comment; checking both directly since the trace hangs with no further output a few instructions later
 	cmp u_insys,0 ! jne noswt
 	    mov u_stack_ss,ss		;switch stacks
 	    mov u_stack_sp,sp
@@ -98,24 +69,13 @@ user_entry:
 	    mov sp,ulen
 	    jmps uecont
 noswt:	push u_wrkseg
-uecont:	push ax ! push bx ! push dx ! mov al,2Ah ! mov dx,03f8h ! out dx,al ! mov ax,ss ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! mov ax,es ! call zdbg ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE: marker 2Ah (reused, freed by this round's probe-density cleanup), dump SS (post-switch, if the stack-switch branch above was taken) and ES right at uecont -- confirms whether the stack-switch landed on a sane segment before "inc u_insys"/the first ES-based UDA write of this syscall
-	inc u_insys
+uecont:	inc u_insys
 		;enable interrupts if intflag
 	cmp intflag,0 ! je noints
-	    sti ! cli	;TEMP DIAGNOSTIC (#56): "sti" has a standard one-
-			;instruction delay before it actually takes effect,
-			;so a "cli" immediately after it prevents any
-			;interrupt from ever actually being recognized --
-			;testing whether an interrupt that's ALREADY PENDING
-			;at the exact moment this "sti" runs (and fires
-			;before func() is ever reached) explains #55's CX
-			;corruption, which this round's GDB single-stepping
-			;proved is a genuine timing race, not a static bug
+	    sti
 noints:		;initialized non-critical areas
 	mov u_retseg,ax
 	mov u_wrkseg,di
-	push ax ! push dx ! push cx ! mov al,'#' ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop cx ! pop dx ! pop ax	;TEMP DEBUG PROBE
-	push ax ! push bx ! push si ! push dx ! mov bx,cx ! mov si,dx ! mov al,18h ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! mov ax,si ! call zdbg ! pop dx ! pop si ! pop bx ! pop ax	;TEMP DEBUG PROBE: marker 18h (reused, freed by this round's probe-density cleanup), dump CX (saved into BX) then DX (saved into SI, BOTH saved before DX itself gets clobbered by the port address) right at the real tail of user_entry, one instruction before "mov ch,0!call func" -- settles #51's "is CX genuinely 0010h here, or is the preceding '#' probe just not firing" question directly, independent of whatever is or isn't happening to the '#' probe immediately above
 	mov ch,0 ! call func	; execute function
 	mov ax,bx		; for INTEL's PL/M
 	mov ds,u_wrkseg ! cli
@@ -137,28 +97,8 @@ func:		; call system function
 ;		CL = function #
 ;		DX = arg
 
-	push ax ! push cx ! push dx ! mov al,16h ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call zdbg ! pop dx ! pop cx ! pop ax	;TEMP DEBUG PROBE: marker 16h, func()'s own literal first instruction (before fnchk even runs) -- dumps incoming CX. If this is missing for a call that still reaches 'Q'/'(' further down, func() was entered via a jump into its *middle*, not a call to its top. MUST preserve DX -- func()'s own documented input is "DX = arg", and this probe went a full two rounds (docs/bugs.md #46-#47) without saving/restoring it, likely corrupting every single syscall's argument the whole time and manufacturing the "DX=03F8h at flag_valid" finding from scratch.
-	push dx ! mov al,89h ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call zdbg ! pop dx	;TEMP DEBUG PROBE: marker 89h, #54's own final bisection step -- a deliberately *unprotected* read of the LIVE cx register (no push cx/pop cx around it, unlike every other cx-reading probe this entire session), immediately after marker 16h's own fully-protected read confirmed cx=0090h. Every other probe that's ever read cx this session restores it from its OWN stack-saved copy afterward, which would silently mask a case where zdbg's own internal "pop cx" fails to restore the real value on the LIVE register -- this is the first one that doesn't
-	push ax ! push dx ! mov al,84h ! mov dx,03f8h ! out dx,al ! mov ax,sp ! call zdbg ! mov al,' ' ! out dx,al ! mov ax,ss ! call zdbg ! pop dx ! pop ax	;TEMP DEBUG PROBE: marker 84h, #54's own next bisection step -- dump SP and SS right at func()'s own top, before fnchk's push block, to check whether the tiny UDA-stack-switch convention (ulen=0100h) could already be close to exhausted by the time f_createproc(TMP) reaches here (every earlier syscall this trace, idle's own queue calls, runs on the ORIGINAL/large boot stack instead, never through this switch, so this is the first real test of it)
-	push ax ! push bx ! push cx ! push dx ! push si	;TEMP DEBUG PROBE: same module_table
-	mov si,0						;integrity check as goodmod's,
-	push dx ! mov al,88h ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call zdbg ! pop dx	;TEMP DEBUG PROBE: marker 88h, #54's own next bisection step -- dump CX right before the FIRST loop iteration even begins, immediately after "mov si,0" -- if already wrong here, the corruption is in the fnchk setup pushes themselves or earlier; if correct here, it happens during one of the loop's own non-mismatching early iterations
-fnchk:	cmp word ptr module_table[si+2],1000h ! je fnchkok	;but at the top of func(), so it
-	    mov al,'#' ! mov dx,03f8h ! out dx,al		;fires on every syscall attempt,
-	    push dx ! mov al,86h ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call zdbg ! pop dx	;TEMP DEBUG PROBE: marker 86h, #54's own next bisection step -- dump CX right BEFORE the mismatch's own digit-printing "mov ax,si!call zdbg", to see whether corruption has already happened even before that specific call runs
-	    mov ax,si ! call zdbg				;not just ones that reach goodmod
-	    push dx ! mov al,87h ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call zdbg ! pop dx	;TEMP DEBUG PROBE: marker 87h, #54's own next bisection step -- dump CX right AFTER the mismatch's own digit-printing zdbg call returns, still before the closing '#' -- isolates whether THIS specific "call zdbg" is where it happens
-	    mov al,'#' ! out dx,al
-	    push dx ! mov al,85h ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call zdbg ! pop dx	;TEMP DEBUG PROBE: marker 85h, #54's own next bisection step -- dump CX right after the fnchk mismatch-print's own closing '#', still inside the loop (before "fnchkok"/the teardown pops) -- deliberately NOT saving/restoring ax/cx themselves (only dx, clobbered by the port address) since this is a pure read -- if CX is still correct here, the corruption happens in "fnchkok:add si,8!cmp si,56!jb fnchk" or the teardown pops; if it's already wrong here, it happens inside this mismatch branch itself
-fnchkok:add si,8
-	cmp si,56 ! jb fnchk
-	pop si ! pop dx ! pop cx ! pop bx ! pop ax	;TEMP DEBUG PROBE
-	push ax ! push cx ! push dx ! mov al,83h ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call zdbg ! pop dx ! pop cx ! pop ax	;TEMP DEBUG PROBE: marker 83h (NOT 20h -- 20h is the space character, used constantly throughout this whole codebase as an inter-value separator in other probes, making it worthless as a distinguishing marker; using a non-printable byte above 0x81 instead). Dump CX right after fnchk's teardown pops, BEFORE marker 'Y' or "mov u_func,cl" touch anything, to bisect where CX changes between marker 16h (confirmed correct) and marker 17h (confirmed wrong, for f_createproc(TMP) specifically)
-	push ax ! push cx ! push dx ! mov al,'Y' ! mov dx,03f8h ! out dx,al ! mov ax,es ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop cx ! pop ax	;TEMP DEBUG PROBE
 	mov u_func,cl
-	push ax ! push cx ! push dx ! mov al,82h ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call zdbg ! pop dx ! pop cx ! pop ax	;TEMP DEBUG PROBE: marker 82h (NOT 21h -- 21h silently collided with the pre-existing '!' char marker used elsewhere, exactly the #52-documented trap; using a non-printable byte above 0x81 instead, past the end of this whole session's printable-ASCII marker space, which a quick scan shows is now fully exhausted). Dump CX right after "mov u_func,cl", immediately before func1's own first instruction, to further bisect the same question as marker 20h
-func1:	push bx ! push dx ! mov bx,sp ! mov al,17h ! mov dx,03f8h ! out dx,al ! sub ax,ax ! mov al,ch ! call zdbg ! mov al,' ' ! out dx,al ! mov ax,[bx+4] ! call zdbg ! pop dx ! pop bx	;TEMP DEBUG PROBE: marker 17h, dump CH (the module# this branch is about to test, zero-extended into AX -- fixed this round from an invalid "mov ax,ch" that doesn't exist on the 8086) and the word just above the two just-pushed registers (bx,dx) -- i.e. whatever's on top of the stack at func1's own absolute top, BEFORE this probe's own pushes -- if func1 was reached by falling through from func()'s own body (the normal, intended path), this is still func()'s own original return address (whatever called "func"); if it was reached via SUPIF.SUP's own "call func1" at line ~225 (entry:'s f_flagset fast path), this is a fresh return address pointing right back there instead -- settles #50's still-open "where does gofar's stale CX/AX actually come from" question directly
-	cmp ch,0 ! je userf
+func1:	cmp ch,0 ! je userf
 	    mov al,ch ! mov ch,0
 	    jmps inmod
 userf:	mov si,cx ! shl si,1 ! add si,cx
@@ -171,66 +111,17 @@ userf:	mov si,cx ! shl si,1 ! add si,cx
 nonet:	mov cl,ent_func[si] ! mov ch,0
 	mov al,ent_mod[si]
 		;AL=mod,CL=func,CH=0
-	push ax ! push dx ! mov al,'Q' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
-	push ax ! push dx ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
-	push ax ! push bx ! push dx ! mov bl,al ! mov al,'(' ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call zdbg ! mov al,bl ! mov ah,0 ! call zdbg ! mov al,')' ! mov dx,03f8h ! out dx,al ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE: dump CX (CH=0,CL=local func#) then AL (target module#, saved in BL first, AH zeroed) right after nonet
 inmod:	cmp al,sup ! jne gofar
 	    shl cx,1 ! mov si,cx
 	    jmp cs:supfunc[si]
-gofar:	push ax ! push bx ! push dx ! mov bx,cx ! mov al,09h ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop bx ! pop ax	;TEMP DEBUG PROBE: marker 09h, dump CX (incoming, saved into BX first since CX itself is about to be reused as scratch by "mov cx,ax") and AL right at gofar's own top -- #49's own next step, to catch every visit (including the unexplained second one seen for f_createproc(TMP)) and see exactly what it's carrying each time
-	push bx ! push dx ! mov bx,ax ! mov al,0Bh ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call zdbg ! pop dx ! pop bx	;TEMP DEBUG PROBE: marker 0Bh, dump the full incoming AX (AL = target module#) right at gofar's own top -- FIXED this round (#56): the previous version did "mov al,0Bh" (the marker byte) BEFORE "call zdbg", clobbering the exact AX value it was trying to dump with the literal marker byte 0x0B -- every single "0B:000B" reading since #50 was reading back its own marker byte, not the real register. Save the real AX into BX first, same pattern as marker 09h, then restore AX from BX before the real dump -- leaves AX genuinely unmodified for "mov cx,ax" afterward, satisfying the original intent
-	push cx ! mov cx,ax ! dec cl
-	push ax ! push dx ! push cx ! mov al,'Z' ! mov dx,03f8h ! out dx,al ! mov al,cl ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop cx ! pop dx ! pop ax	;TEMP DEBUG PROBE
-	push ax ! push dx ! mov al,'d' ! mov dx,03f8h ! out dx,al ! mov ax,ds ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
-	mov al,module_map
-	push ax ! push dx ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
-	shr al,cl
-	push ax ! push dx ! mov al,'R' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
-	push ax ! push dx ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
+gofar:	push cx ! mov cx,ax ! dec cl
+	mov al,module_map ! shr al,cl
 	and al,1 ! jnz goodmod
 	    pop cx ! mov cx,e_not_implemented
-	    push ax ! mov al,'U' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	    mov bx,0ffffh ! mov ax,bx ! ret
-goodmod:
-	push ax ! push bx ! push cx ! push dx ! push si	;TEMP DEBUG PROBE: verify every
-	mov si,0						;module_table segment word is
-mtchk:	cmp word ptr module_table[si+2],1000h ! je mtchkok	;still MPM_CODE_SEG (1000h);
-	    mov al,'!' ! mov dx,03f8h ! out dx,al		;print "!<slot offset>!" for
-	    mov ax,si ! call zdbg				;each one that's gone bad
-	    mov al,'!' ! out dx,al
-mtchkok:add si,8
-	cmp si,56 ! jb mtchk
-	pop si ! pop dx ! pop cx ! pop bx ! pop ax	;TEMP DEBUG PROBE
-	push ax ! push dx ! mov al,'S' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
-	mov ch,0 ! mov si,cx
+goodmod:mov ch,0 ! mov si,cx
 	mov cl,3 ! shl si,cl ! pop cx
-	push ax ! push dx ! push cx
-	mov ax,cx ! call zdbg ! mov al,':' ! mov dx,03f8h ! out dx,al	;TEMP DEBUG PROBE: CX (module#,local func#)
-	mov ax,word ptr module_table[si] ! call zdbg ! mov al,':' ! mov dx,03f8h ! out dx,al	;TEMP DEBUG PROBE: target offset
-	mov ax,word ptr module_table[si+2] ! call zdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al	;TEMP DEBUG PROBE: target segment
-	pop cx ! pop dx ! pop ax
-	mov ax,cx		;every other module's entry: dispatcher indexes its
-				;own function table with CX (ch=0,cl=local func#,
-				;exactly as set up above) -- XIOS86Q.A86's entry:
-				;is the one exception, indexing with AX instead
-				;("mov ah,0!shl ax,1!call cs:functab[bx]"). Reached
-				;via this general goodmod path (as opposed to the
-				;direct xiosif trampoline, where each caller sets
-				;AX itself before the far call), AX was previously
-				;just whatever stale value happened to be live
-				;(typically the *enclosing* syscall's u_func, left
-				;there by SUPIF.SUP's own mpmif trampoline) --
-				;confirmed via GDB to misroute XIOS dispatches
-				;(e.g. f_setdmab/f_setdma/f_freadseq from LOAD.SUP's
-				;diskread) to the wrong XIOS local function, which
-				;never completes the real disk operation and leaves
-				;a retry loop spinning forever. Setting AX=CX here
-				;costs nothing for RTM/MEM/CIO/BDOS (none of them
-				;read AX for dispatch, and AX is documented as an
-				;*output* -- copy of BX -- not a live input, at this
-				;point in the call).
 	callf dword ptr module_table[si]
-	push ax ! push dx ! mov al,'T' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE
 	ret
 
 ;=====
@@ -242,7 +133,7 @@ entry:
 	    mov cx,f_inflagset
 	    call func1 ! mov ax,bx ! retf
 entry_notfs:
-	call mpmif ! retf	
+	call mpmif ! retf
 
 ;=====
 mpmif:
@@ -272,23 +163,7 @@ mpmif:
 ;======
 xiosif:
 ;======
-	push ax ! mov al,'X' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
-	push ax ! push bx ! mov bx,28h ! mov ax,[bx] ! call xdbg ! mov al,':' ! mov dx,03f8h ! out dx,al ! mov bx,2ah ! mov ax,[bx] ! call xdbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop bx ! pop ax	;TEMP DEBUG PROBE
 	callf dword ptr .xiosmod ! ret
-
-;TEMP DEBUG PROBE
-xdbg:
-	push ax ! push bx ! push cx ! push dx
-	mov cx,0404h
-xdbg1:	rol ax,cl
-	mov bl,al ! and bl,0fh ! cmp bl,9
-	ja xdbg2
-	add bl,'0' ! jmp xdbg3
-xdbg2:	add bl,'A'-10
-xdbg3:	mov dx,03f8h ! push ax ! mov al,bl ! out dx,al ! pop ax
-	dec ch ! jnz xdbg1
-	pop dx ! pop cx ! pop bx ! pop ax
-	ret
 
 ;*****************************************************
 ;*
@@ -311,4 +186,3 @@ supfunc	dw	not_implemented	; 0-not implemented
 	dw	chain_entry	; 12-(47)Program Chain
 	dw	serial_entry	; 13-(107)return serial
 	dw	cload_entry	; 14-chain load function
-

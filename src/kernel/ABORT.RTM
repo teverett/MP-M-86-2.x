@@ -1,6 +1,6 @@
 
 ;*************************************************************
-;* 
+;*
 ;*	Terminate and Abort Specify Process Entry Points
 ;*
 ;*			(D.H - July 1981)
@@ -21,28 +21,10 @@ terminate_entry:	; Terminate - DX=terminate code
 ; terminated when it comes back into context, as set up by
 ; abort specified process.
 
-	push ax ! push dx ! mov al,'$' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE:
-								;DX is the live terminate code
-								;here (this entry point's own
-								;documented input) -- the
-								;original single-register probe
-								;style clobbered it, so abt_chk
-								;(right below) read DL=0F8h (the
-								;serial port, left over from this
-								;very probe) instead of the real
-								;0FFh passed by INIT.SUP's "mov
-								;dl,0ffh!int mpmint", silently
-								;taking abt_chk's "SYS and not FF
-								;=> no abort" branch every time.
-								;Same bug class as MEMIF.MEM's
-								;'a'/'b' probes (see that fix's
-								;own comment).
 	mov bx,rlr
 	call abt_chk
-	push ax ! push bx ! push cx ! push dx ! mov al,'%' ! mov dx,03f8h ! out dx,al ! mov ax,bx ! call ydbg ! mov al,':' ! mov dx,03f8h ! out dx,al ! mov ax,cx ! call ydbg ! mov al,':' ! mov dx,03f8h ! out dx,al ! mov ax,p_flag[bx] ! call ydbg ! mov al,':' ! mov dx,03f8h ! out dx,al ! pop dx ! mov ax,dx ! push dx ! call ydbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop cx ! pop bx ! pop ax	;TEMP DEBUG PROBE: now also dumps BX (the PD) first, then DX (saved copy, popped+repushed so DX itself is unaffected)
 	cmp cx,0 ! jle term_err
-terminate:  push ax ! mov al,'^' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
-	    pushf ! cli
+terminate:  pushf ! cli
 	    mov bx,(offset thrdrt)-p_thread
 	    mov ax,rlr
 nchld:	    mov bx,p_thread[bx]
@@ -57,24 +39,20 @@ nochld:	    mov bx,ax
 		    or p_flag[bx],pf_childabort
 term_r1:    popf
 	    mov si,rlr ! call rlsmx
-	    push ax ! push dx ! mov al,'&' ! mov dx,03f8h ! out dx,al ! mov ax,rlr ! call ydbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE: dump rlr right after rlsmx, before f_bdosterm
 	    mov u_error_mode,0feh
 	    mov cx,f_bdosterm ! call mpmif
-	    push ax ! push dx ! mov al,'*' ! mov dx,03f8h ! out dx,al ! mov ax,ds ! call ydbg ! mov al,':' ! mov dx,03f8h ! out dx,al ! mov ax,rlr ! call ydbg ! mov al,' ' ! mov dx,03f8h ! out dx,al ! pop dx ! pop ax	;TEMP DEBUG PROBE: dump DS and rlr right after f_bdosterm returns
 	    mov dx,offset mxmemqpb ! mov cx,f_qread
 	    call mpmif
-	    push ax ! mov al,'+' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	    mov bx,rlr
 	    mov mxmemowner,bx
 	    mov mxmemcount,1
  	    mov p_stat[bx],ps_term
-	    push ax ! mov al,'=' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	    jmp dsptch
 term_err:
 	jcxz term_err1
 	    sub bx,bx ! mov cx,bx ! ret
 term_err1:
-	mov cx,e_pd_noterm		
+	mov cx,e_pd_noterm
 	mov bx,0ffffh ! ret
 
 ; end of terminate entry point
@@ -99,7 +77,7 @@ abort_spec_entry:		;Abort the specified process
 ;	Input:	DX = address of APB in the caller's u_wrkseg
 ;	Output: BX = 0 if success, 0FFFFH if failure
 ;		CX = 0 "     "   , err code if failure
-	 
+
 	push ds ! mov ds,u_wrkseg
 	mov si,dx ! mov bx,apb_pd[si]	; get PD adr to abort
 	mov cx,apb_term[si]		; get termination/memfree code
@@ -133,16 +111,16 @@ abt_notus:
 	pop dx ! push dx
 
 	add di,di
-	pushf ! cli	
+	pushf ! cli
 	call cs:abort_tab[di]	; find via p_link and take PD of its list
 	popf			; allow interrupts
-	    jcxz abt_err	; couldn't find PD, if several processes  
+	    jcxz abt_err	; couldn't find PD, if several processes
 				; are attempting an abort of the same
 				; process, only one of the abort calls
 				; will find it
 
 	; PD is only on thread list - can't come back into context
-	; until put on drl.  It is safe to fiddle with its priority 
+	; until put on drl.  It is safe to fiddle with its priority
 	; and stack
 
 	pop dx			; recall termination code
@@ -161,7 +139,7 @@ abt_notus:
 				; in context
 	xor cx,cx		; indicate sucess
 	mov bx,cx
-	jmp pdisp		; force abort to happen before we return 
+	jmp pdisp		; force abort to happen before we return
 
 ;	 Error exits for abort routines
 
@@ -174,7 +152,7 @@ abt_err:			; if error from above
 	ret
 
 ; The folowing are the abort handlers for a specific PD status.
-; These labels are entered in the abort_tab(le) in the RTM data area. 
+; These labels are entered in the abort_tab(le) in the RTM data area.
 ; Interrupts assumed off.
 ; For all of the following:
 ;	input:	BX = PD addr to be aborted
@@ -184,7 +162,7 @@ abt_err:			; if error from above
 ;
 ; abort_specified process jump table
 ;
-				; Status	
+				; Status
 abort_tab	dw	abtrun	; 0  = ready list root
 		dw	abtpol	; 1  = poll
 		dw	abtdly	; 2  = delay
@@ -197,7 +175,7 @@ abort_tab	dw	abtrun	; 0  = ready list root
 		dw	abtcns	; 9  = ciowait
 abt_tablen	equ	offset $ - offset abort_tab
 
-abtrun:			
+abtrun:
 ;-------
 ; On ready list root or dispatcher ready list
 
@@ -205,7 +183,7 @@ abtrun:
 	call find_pd
 	    jcxz abtr_drl
 	jmps snip_it
-abtr_drl:			; wasn't on rlr, try drl 
+abtr_drl:			; wasn't on rlr, try drl
 	mov di,(offset drl) - p_link
 	jmps abt_common
 
@@ -213,12 +191,12 @@ abtdq:
 ;------
 ; On a dq list
 
-	xor al,al		; arg to findpdq: to look on DQ lists
+	xor al,al		; arg to find_pdq: to look on DQ lists
 	jmps abtq_common
 
 abtnq:
 ;-------
-; On an nq list 
+; On an nq list
 
 	mov al,0ffh		; to look on NQ lists
 
@@ -254,7 +232,7 @@ abtdly:
 	mov p_wait[si],dx	; New value in next PD on dlr
 ad_nofix:
 	jmps snip_it
-	
+
 abtswp:
 ;----
 	mov di,offset slr - p_link
@@ -297,12 +275,12 @@ snip_it:
 ;		DI = offset of previous PD or offset of root - p_link.
 
 	mov dx,p_link[bx]	; DX = next link
-	mov p_link[di],dx       
+	mov p_link[di],dx
 	ret
 
 ;
 ; End of abort_tab(le) functions
-; 
+;
 
 abt_putdrl:
 ;-------
@@ -315,14 +293,14 @@ abt_putdrl:
 	mov drl,bx
         popf ! ret
 
-; Utility routines for abort entry point 
+; Utility routines for abort entry point
 
 findpdnc:
 ;--------
 ; Find PD by name and console, via thread list.
 ;	input:	BX = offset of thread list root - p_thread
 ;		DX = adr of name in u_wrkseg
-;		AH = console number	
+;		AH = console number
 ;	output: BX = PD
 ;		CX = 0 failure
 
@@ -448,4 +426,3 @@ abt_chk:
 ac_y:		inc cx ! ret
 ac_tk:	    or p_flag[bx],pf_ctlc ! dec cx ! ret
 ac_n:	and p_flag[bx],not pf_ctlc ! ret
-

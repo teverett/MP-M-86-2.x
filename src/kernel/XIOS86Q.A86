@@ -322,6 +322,46 @@ init:
 	and	al,0feh
 	out	pic_m_mask,al
 
+	;	TEMP DIAGNOSTIC (docs/bugs.md #72): mask every other master
+	;	PIC line this kernel doesn't itself drive (keyboard IRQ1,
+	;	cascade-to-slave IRQ2, in addition to IRQ6 just below) --
+	;	`info pic` showed both left unmasked by the BIOS the same
+	;	way IRQ6 was, and this build has no keyboard driver or any
+	;	use for slave-PIC (RTC etc) interrupts at all, so there's no
+	;	downside to masking them regardless of whether this changes
+	;	the #66-#72 crash.
+	in	al,pic_m_mask
+	or	al,06h
+	out	pic_m_mask,al
+
+	;	mask IRQ6 (floppy controller) explicitly -- SeaBIOS leaves
+	;	it unmasked by default (its own INT13h floppy driver relies
+	;	on it), and a real IVT entry 0Eh (confirmed: F000:EF57, a
+	;	genuine SeaBIOS handler, not garbage) is still installed
+	;	there, since this kernel never touches it. This driver
+	;	(fdc_wait_seek/fdc_in_byte/fdc_out_byte) is entirely
+	;	polled -- it never needs or waits for this interrupt -- but
+	;	every DMA-driven floppy read/write (docs/bugs.md #65/#66)
+	;	sets the FDC's own DOR "DMA/interrupt enable" bit, which
+	;	does let the real NEC765/82077 raise IRQ6 on completion.
+	;	Left unmasked, that interrupt can fire at any point during
+	;	this kernel's own execution (not just during an actual
+	;	floppy operation -- the controller can also raise it after
+	;	a SEEK/RECALIBATE elsewhere in this driver) and vector into
+	;	SeaBIOS's own handler, running with none of this kernel's
+	;	own conventions, asynchronously, at whatever instruction
+	;	this kernel happened to be executing -- a highly plausible
+	;	match for this session's still-unexplained, acutely timing-
+	;	sensitive "1000:004A" wild jump (docs/bugs.md #66-#72):
+	;	non-deterministic, appeared only after the DMA fix, and
+	;	resistant to single-step debugging (which changes timing
+	;	enough to perturb exactly when/whether it fires). Masking
+	;	it here costs nothing, since nothing in this driver ever
+	;	relies on it.
+	in	al,pic_m_mask
+	or	al,40h
+	out	pic_m_mask,al
+
 	push ax ! mov al,'s' ! mov dx,03f8h ! out dx,al ! pop ax	;TEMP DEBUG PROBE
 	;	--- disk: arm the floppy controller ---
 	;	NOT a reset pulse, and deliberately NOT followed by a

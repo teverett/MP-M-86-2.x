@@ -5679,3 +5679,599 @@ the most promising remaining thread: find out directly (not inferred
 from a now-disproven theory) why `mpm_clicmd` is reached at all with
 `clicb`/`read_blen` reading zero, when `nextcommand`'s own source
 should skip it for an empty line.
+
+## 70. Followed #69's own next step -- the `mpm_clicmd`/`clicb` thread
+was a dead end (never even reached); found the *real* immediate
+shape of the crash instead: `TMP.A86`'s own `crlf`/`getuser`
+trampolines alternate exactly ~128 times, then jump straight from
+`nextcommand`'s own top into the `1000:004A` wild jump with nothing
+else in between
+
+Set breakpoints across `nextcommand`'s entire prompt-printing
+sequence (`freedrive`, `attach`, `crlf`, `prchar`, `getuser`,
+`prnum`, `getdisk`, `printstring`, plus `conread_entry`/`readen`/
+`gonextcmd`/`clicall` from #68/#69 and the crash site itself) and let
+it run with the `continue`+`stepi`-between-hits discipline, budget
+raised to 600 iterations this time (every narrower trace before this
+ran out of budget first).
+
+**The `mpm_clicmd` thread is dead**: `conread_entry`, `readen`,
+`gonextcmd` and `clicall` are never hit at all before the crash --
+`TMP` never gets anywhere near actually reading a console line this
+run. #68's `CX=0096h` sighting at `mpm_clicmd`, and the all-zero
+`clicb` snapshot that went with it, must belong to some other moment
+entirely (a later pass this trace never reaches, or a different run
+altogether) -- not a lead worth pursuing further on its own.
+
+**What actually happens, cleanly, every time**: `freedrive` and
+`attach` each fire exactly 3 times (alternating) right at the start,
+then `crlf` and `getuser` alternate **exactly 128 times** (256 raw
+hits), then `nextcommand`'s own top fires once more, and the *very
+next* instruction-level stop is the `1000:004A` crash site -- with
+`prnum`, `getdisk`, `printstring`, and `freedrive`/`attach` again,
+all never hit in between. Note the exact count: **128** matches, to
+the digit, the "128 LSR reads with `rxrdy`=0 (and no error bits)"
+figure already captured independently in #68's raw-byte scan of the
+pre-#69-fix trace -- not likely a coincidence, though the mechanism
+connecting the two hasn't been nailed down this round.
+
+**Why `crlf` and `getuser` alternating 128 times is itself suspicious,
+independent of the 128-count**: neither of `TMP.A86`'s own source
+calls the other, and nothing in `nextcommand`'s own straight-line
+flow re-executes either of them without also re-executing
+`freedrive`/`attach`/`prnum`/etc first (own source, read directly) --
+yet here they alternate *exclusively*, hundreds of times, with every
+neighboring label in that same tightly-packed trampoline block
+(`prnum`@`0x2ED`, `prchar`@`0x300`, `getuser`@`0x306`, `crlf`@`0x30F`,
+`printstring`@`0x313`) staying completely cold. `getuser`
+(`mov dl,0ffh`, falling into `setuser`'s own `mov cl,mpm_usercode !
+jmp mpm1`) and `crlf` (`mov dx,offset crlfstr`, falling into
+`printstring`'s own `... ! call print_ds_string ! pop ds ! ret`)
+each end up making a real syscall (`mpm_usercode` with the `DL=0FFh`
+"query" convention, and `mpm_conwrite` respectively) via the same
+`int mpmint` trampoline -- two *different* outbound calls, landing
+back from `ret` at two *different* return addresses pushed by
+`nextcommand`'s own two separate, ordinary `call` sites. A clean
+`ret` from either should never land anywhere near the other's own
+label address. Bouncing between exactly these two specific addresses,
+repeatedly, smells like a corrupted/swapped return address or saved
+context -- not a logic bug in `TMP.A86`'s own straight-line code.
+
+**Not resolved this round**: which syscall (`getuser`'s or `crlf`'s)
+is the one actually retrying 128 times, whether the OTHER one is a
+real second call or an artifact of how GDB's breakpoint hits get
+named from `$pc`'s low 16 bits, and what specifically makes the
+dispatcher hand control back to the *other* trampoline's address
+instead of each call's own real return point. Given #68 already
+independently found QEMU's UART backend behaving oddly at a similar
+scale (not the same mechanism -- that was a data-register content
+issue, already fixed, already shown not to change this crash) and
+this round's 128-count lines up suspiciously well with it anyway,
+the most promising next check is probably: does `crlf`'s own
+`mpm_conwrite` call (printing `"\r\n"` via `conout`) genuinely need
+~128 poll-and-yield cycles per byte against this QEMU target's
+emulated UART transmit timing (plausible, if TCG runs much faster
+than the UART's real baud-rate-paced byte timing) -- and if so,
+whether `getuser`'s own address only *looks* like it's firing because
+of a `$pc`-decoding artifact in the tracing script, not a real second
+call. Worth re-running with full `$cs:$pc` (not just the low 16 bits)
+logged at every single hit, and the actual return address read off
+the stack at each stop, to settle this directly instead of inferring
+it from label names.
+
+**Did that check immediately, same round -- it settles the "artifact
+vs real" question and sharpens the lead considerably.** At every
+`crlf` hit: `SS:SP=177A:00D0` (`TMP`'s own, completely normal
+process stack) and a **constant** return address, `0x1A1C` -- a real
+address inside `TMP.A86` itself (a few bytes before `prnum`), i.e.
+`crlf`'s own call site in `nextcommand`, called the ordinary way,
+repeatedly, exactly as its own source says it should be when console
+output isn't immediately ready. Nothing wrong with `crlf` itself.
+
+At every `getuser` hit, by sharp contrast: `SS:SP=17A7:0B5A` --
+**not `TMP`'s stack at all**, and a constant return address,
+`0x231D`, that isn't a `TMP.A86` address either: mapped against
+`RTM.A86`'s own `asm86 --symbols`, `0x231D` (RTM's module base,
+`0x18BF`, plus local offset `0xA5E`) lands squarely inside
+`DSPTCH.RTM`'s `schedule`/`polld_another` -- the scheduler's own
+poll-list walk -- right where it returns from `call xiosif` (`mov
+al,io_polldev ! call xiosif`, `polld_another`'s own first real
+device check). So `getuser` (`TMP.A86`, flat `0x11A38`) is never
+really being *called* by anyone -- something inside the kernel's own
+poll-list walk is landing exactly on that address instead of
+returning to its own very next instruction, runs `getuser`'s
+harmless `mov dl,0ffh`/`mpm_usercode`-query code as a complete
+accident, and -- since nothing about *that* code path disturbs the
+stack -- its own trailing `ret` happens to pop the right thing
+(`0x231D`) anyway, landing back in `polld_another` none the wiser.
+That's why it keeps alternating with `crlf`: every time `crlf`'s own
+real retry yields via `poll_act`, `schedule`'s poll-list walk runs
+again, and this wrong-landing recurs.
+
+**Not yet confirmed**: the actual mechanism inside `xiosif`/`entry`'s
+`call cs:functab[bx]` (or `polld_another`'s own setup immediately
+before that call) that could make this land at flat `0x11A38`.
+`functab`'s own entries (`XIOS86Q.A86`'s `dw polldev` etc.) looked,
+on inspection, like they *should* need the same module-base
+adjustment this exact file's own comments already flag for `offset
+signon`/`offset tickint` elsewhere -- but if that adjustment were
+genuinely missing project-wide, every other XIOS function call this
+whole session (console I/O, the floppy DMA work in #65/#66) would
+already be broken the same way, and they aren't. So either `functab`
+is fine and something else (bad `bx`, a stale `ax` feeding the
+`shl ax,1` index, or similar) misroutes this *one* call, or there's a
+narrower condition under which the base-adjustment gap bites that
+hasn't been identified. Didn't resolve which before running out of
+budget this round.
+
+**Checked immediately -- ruled out, didn't even need to boot QEMU.**
+Read `build/kernel/MPM.bin.cseg` directly: the real `functab[17]`
+slot (`XIOS_base` `0x6D93` + `functab`'s own local offset `0x166` +
+`17*2`) holds `0x704E`, which is exactly `XIOS_base + polldev`'s own
+local offset (`0x6D93 + 0x2BB`) -- `functab`'s entries are already
+correctly adjusted to their real, combined-cseg position, not raw
+per-module-standalone-compile local offsets. (Checked the theory's
+own predicted wrong answer too, for completeness: reading `functab`
+as if `cs:` meant "flat offset 0, no module-base adjustment" lands
+on `0xC720`, which isn't `0x1A38` either and isn't a plausible jump
+target at all -- past the end of the whole cseg.) So `entry`'s own
+`call cs:functab[bx]` is not the bug, and the earlier concern (that
+this is the same "module_base-free offset" class as the already-
+fixed `signon`/`tickint` issues) doesn't apply here after all.
+
+**Status at the point this round's context ran out**: the mechanism
+is still open. What's solid: `crlf` is a real, repeated, perfectly
+ordinary call from `TMP`'s own stack with a real return address --
+not the bug. `getuser` is reached from a completely different stack
+context (`SS:SP=17A7:0B5A`, not `TMP`'s) with a return address
+sitting right after `schedule`'s `polld_another ! call xiosif` for
+`io_polldev` -- something lands on `TMP`'s `getuser` label instead
+of coming back to that call's own next instruction, runs it as an
+accident, and its harmless side effects don't disturb the stack
+enough to matter, so it still manages to pop its way back to the
+right place afterward. `functab` itself, and the dispatch through
+`entry`, are now confirmed clean. The next place to look is `bx`'s
+own value at the moment of that specific `call cs:functab[bx]` --
+whatever computes it (`ax` coming in as `io_polldev`=17, `shl ax,1`)
+-- on the exact pass that's about to land wrong, to see whether `bx`
+itself is corrupted before the table lookup even happens, rather than
+the lookup itself being at fault.
+
+## 71. Followed #70's own next step -- `bx`, `functab`, `xiosmod`,
+`polldev` and `insert_process` are all confirmed clean on every one
+of the 128 cycles; narrowed the mechanism to a stack misalignment
+between `entry`'s own `callf`/`retf`, and found a concrete,
+already-flagged-as-unconfirmed suspect: the tick ISR's own
+non-`IRET`, "abandon this context and jump straight into the
+dispatcher" design
+
+Checked every piece #70 left open, in order, each with hard evidence
+(register/memory reads, not inference):
+
+- **`bx` at `entry`'s own `call cs:functab[bx]`**: `0x0022` on every
+  single one of 128 consecutive calls (`17<<1`, exactly `io_polldev`'s
+  own correct index) -- never corrupted.
+- **`functab[17]`'s own stored word**, read directly out of
+  `build/kernel/MPM.bin.cseg` (no need to even boot QEMU for this
+  one): `0x704E`, exactly `XIOS_base + polldev`'s own local offset
+  -- already correctly adjusted, confirmed in #70, still true.
+- **`polldev`'s own return value and the waiting PD**: `AL=0FFh`
+  (ready) and `SI=0E40h` (`TMP`'s own PD), on *every single one* of
+  the 128 cycles, not just the last -- `TMP` is being found "ready"
+  and spliced onto `rlr` via `insert_process` every time, not just
+  once at the end. Given this device is `c0outdev` (console output,
+  almost always immediately ready against a real UART's THR-empty
+  bit), finding it ready every poll is itself unremarkable -- the
+  128-count most likely reflects `TMP` printing something on the
+  order of 128 characters through this same yield-and-recheck
+  convention, one character at a time, not 128 failed waits for one
+  byte.
+- **`insert_process`'s own splice logic** (`DSPTCH.RTM`), read
+  directly: structurally sound even for the "list currently empty"
+  case it hits here. (A same-round `rlr=0` reading turned out to be
+  from a stale, wrong `sysdat_segment` baked into that specific
+  debug script -- `0x17A6`, where this build's real segment is
+  `0x17A7`, confirmed directly afterward by `DS` at the crash itself
+  reading `0x17A7` -- so that one number is retracted, but the code
+  itself, read by eye, handles an empty list correctly regardless.)
+- **`xiosmod`'s own far pointer** (`SYSDAT.FMT` offset `0x28`, used
+  by `RTMIF.RTM`'s `xiosif: mov si,mod_entry ! callf dword ptr
+  xiosmod[si]`): `1000:6ECF` -- `XIOS`'s own real, correct `entry`
+  address -- both statically (`build/kernel/MPM.bin.dseg`) and live,
+  read directly out of memory at the exact moment of the `1000:004A`
+  crash. Not corrupted, even then.
+
+**So every static piece of this dispatch chain is provably correct,
+every single cycle, right up to and including the crash -- yet
+`getuser` (`TMP.A86`, flat `0x11A38`) still gets executed as if it
+were `xiosif`'s own return point.** Read directly off the stack at a
+`getuser` hit (#70): the top word is `0x231D`, `polld_another`'s own
+genuine, correct return address for `call xiosif` -- untouched,
+correct, still sitting there waiting to be popped. The only way to
+reconcile "the correct return address is still on the stack,
+undisturbed" with "execution is at the wrong address anyway" is that
+`entry`'s own `retf` (which pops the *outer*, far-call frame --
+`xiosif`'s own continuation address, one level further down than
+`0x231D`) is popping the wrong pair of words for *that* frame, while
+the frame underneath it is untouched. That means something adds (or
+removes) exactly one extra pushed value onto the stack somewhere
+between `callf dword ptr xiosmod[si]` landing in `entry` and
+`entry`'s own `retf` -- i.e. during `entry`'s probes or `call
+cs:functab[bx]`'s own execution (now shown clean) -- most
+consistent with an **asynchronous event interrupting that exact
+window**, not a logic bug in any of the code just re-verified.
+
+**Found a concrete, already-flagged-but-never-confirmed suspect for
+exactly that**: `XIOS86Q.A86`'s own tick ISR (`tickint`, IRQ0)
+deliberately does **not** execute `IRET` to return to whatever it
+interrupted -- its own comment says so outright ("this ISR never
+executes IRET, it falls into the dispatcher instead"): it saves
+registers, acks the PIC, restores the *interrupted* `SS:SP`, then
+does `jmpf cs:dword ptr mydispatch` -- abandoning the interrupted
+context's own place in its code entirely and forcing a fresh
+reschedule. If this interrupt fires during the narrow window between
+`entry`'s `callf`-landing and its own `retf` -- while `IF` is
+transiently `1` -- the interrupted process's own saved `CS:IP`
+(whatever `switch` stores for it to resume from later) would be
+*inside* that window, and resuming it later wouldn't replay the rest
+of `entry`/`xiosif`/`polld_another` cleanly; it would resume
+mid-flight with whatever stack state happened to exist at interrupt
+time. `DSPTCH.RTM`'s own `schedule:` has exactly one `sti ! cli`
+pair, right before `polld_another`'s own loop starts (line 358),
+*already flagged in its own comment* as "TEMP/precautionary... NOT
+yet confirmed via its own probe the way the other two were" -- i.e.
+a previously-identified, still-open risk in precisely this code
+path, from earlier in this same session, never actually exercised
+until now.
+
+**Not confirmed this round** (context ran out): whether a tick
+interrupt genuinely fires during this window, and whether `IF` is
+really transiently `1` there given `PROC.RTM`'s own `0000h`
+diagnostic (#64) keeps every freshly-dispatched process's `IF` off
+by default. This is the strongest remaining lead, but it's still a
+hypothesis, not something read directly off a register yet.
+
+**Next step**: probe `tickint`'s own very first instruction (marker
+`'"'`, already present) and `schedule`'s own `sti`/`cli` pair
+directly, specifically watching whether `tickint` ever fires between
+`entry`'s `call cs:functab[bx]` and its `retf` during one of these
+128 `TMP`-console-output cycles -- that's the one remaining concrete
+check needed to either confirm or rule out this exact mechanism.
+
+## 72. Two more concrete, directly-tested hypotheses, both with zero
+effect on the crash; one real, independent hardening fix kept anyway
+(IRQ6 was unmasked and had no business being so); several leads from
+this round retracted after closer checking; status honestly updated
+
+Checked `tickint`'s own next step from #71 immediately: breakpointed
+its very top across the full run from boot to the `1000:004A` crash.
+**It fires zero times.** The tick-interrupt theory is dead -- there
+is no tick anywhere in this picture.
+
+**Dead end, caught before being written up as a finding**: a
+properly rigorous (non-overlapping, exact-byte-pattern) decode of a
+free-running trace's `conout` probe output appeared to show `XIOS`'s
+own signon banner printing a *second* time, deep in the trace, right
+after ~128 repeats of a two-character sequence. This looked like a
+dramatic new lead (`INIT` re-entered). It wasn't checked carefully
+enough initially -- the pattern-match was real, but matches can
+legitimately span widely separated points in the trace when a call
+yields and resumes later (exactly what's happening here), so
+"reconstructed in order" isn't the same as "printed contiguously".
+Given how much else this round already demonstrated about this bug's
+own timing sensitivity, this one is left here as a caution rather
+than a retracted claim either way -- not confirmed, not disproven,
+just not pursued further.
+
+**A stack-pointer "smoking gun" that turned out to be a pairing bug,
+not a real corruption**: added a probe dumping `SP` immediately
+before and after `entry`'s own `call cs:functab[bx]`, free-running,
+no GDB. Found, with perfect reproducibility, 128 cases where the
+"before" and "after" `SP` differed by a huge, fixed amount. Adding
+`SS` to the same probe revealed why: those weren't one call's before
+and after -- they were two *different*, legitimately interleaved
+calls (`TMP`'s own `conin`, yielding because no input is ready, and
+the scheduler's own nested `polldev` check running on its own
+dedicated stack while `conin`'s call is suspended). Naive in-order
+pairing matched the wrong before/after records together. Once SS was
+checked, every real pair matched perfectly. No bug here -- reverted
+the probe.
+
+**Clarified, this time with real confidence, what `TMP` is actually
+doing in its own loop**: a cleaner probe (dumping the incoming XIOS
+function number, not just guessing from addresses) showed the
+repeating unit is an 8-step cycle -- `const`, `conout`, `conout`,
+`const`, `conout`, `conout`, `conin`, `polldev` -- repeating for as
+long as the run lasts (the exact repeat count varies run to run, from
+128 to several hundred, consistent with everything else's timing
+sensitivity). This is `TMP` printing two characters, trying to read
+one (never succeeding, since nothing feeds real input), and yielding
+once per pass. `conin` genuinely never returns real data in any of
+these runs.
+
+**Chased "128" to its real source, which turned out to be mundane**:
+`TMP.A86`'s own `maxcmdlen` is `128`, and its `read_buf`/`clicb_cmd`
+convention means a console-read line really does stop, by design,
+once 128 characters accumulate. Checked whether that boundary causes
+a buffer overflow in `clicall`'s own `mov byte ptr [bx],'$'` (writing
+to `savebuf + read_blen`, which equals `savebuf + 128` -- one byte
+past `savebuf`'s declared 128-byte allocation): it doesn't look like
+one in practice -- `TMP.A86`'s own source ends with a trailing `db 0`
+right after `savebuf`, and `build_mpmsys.py`'s own paragraph-rounding
+doesn't add any further padding, so that one-byte write already has
+exactly the slack the original 1981 source seems to have deliberately
+left for it. Not the bug, as far as this round could tell -- but
+worth a second look if `TMP`'s data segment layout ever changes.
+
+**Found and fixed something real and independently worth keeping,
+even though it didn't move the crash**: `info pic` showed the
+master PIC's IRQ6 (floppy controller) line unmasked -- left that way
+by SeaBIOS, which relies on it for its own INT13h floppy driver.
+Confirmed a genuine SeaBIOS handler is still installed at that exact
+IVT slot (`F000:EF57`, read directly out of guest memory, not
+garbo). This kernel's own floppy driver is entirely polled (never
+waits on this interrupt) but *does* set the FDC's own DMA/interrupt-
+enable bit on every DMA-driven read (#65/#66), which can make the
+real NEC765/82077 raise IRQ6 on completion -- left unmasked, that
+interrupt could fire at any point during this kernel's own execution
+and vector into SeaBIOS's own handler, asynchronously, matching this
+bug's own non-determinism suspiciously well. **Fixed** by masking
+IRQ6 at the PIC during `XIOS86Q.A86`'s own init, right alongside its
+existing IRQ0 unmask -- costs nothing, since nothing here ever
+relies on it. **Rebuilt and tested: no effect on the crash** --
+confirmed via `info pic` that the mask bit really did take
+(`imr=0xF8`, bit 6 set) and the crash still lands at the identical
+`1000:004A`, byte-for-byte the same trace length as before. Kept the
+fix anyway (it's real, independent hardening), but this specific
+mechanism is now also ruled out.
+
+**Honest status after this round**: six concrete hypotheses for the
+`1000:004A` crash are now ruled out with direct, hands-on evidence
+across #68-#72 (false-ready UART data, `functab`'s module-base
+adjustment, `INIT`'s own termination, the tick interrupt, a stack-
+pointer corruption in `entry`'s own dispatch, and now an unmasked
+IRQ6). The entire static dispatch chain -- `entry`, `xiosmod`,
+`functab`, `polldev`, `insert_process` -- has been directly verified
+correct on every cycle leading up to the crash. What's still real and
+unexplained: `getuser` (`TMP.A86`, an address with no business being
+reached from the scheduler's own poll-list walk) gets executed while
+running on the dispatcher's own stack, with the correct return
+address for that call still sitting untouched on the stack
+underneath it (#70/#71's own finding, not retracted). Two independent,
+mechanism-based fixes aimed squarely at async-interrupt theories have
+each had zero effect, which is itself informative: whatever's
+happening either isn't an interrupt at all, or isn't one of the two
+sources checked (IRQ0/tick, IRQ6/floppy) -- keyboard (IRQ1) and
+cascade (IRQ2) are also unmasked per the same `info pic` output and
+haven't been checked or ruled out yet. That's the most concrete
+remaining thread for the next round: either rule those out too, or
+find a genuinely non-interrupt explanation for how `entry`'s own
+`retf` ends up pointing at `TMP`'s `getuser` while the stack
+underneath it stays perfectly intact.
+
+**Did exactly that immediately, same round**: masked IRQ1 (keyboard)
+and IRQ2 (cascade-to-slave) too, alongside IRQ6 -- this build has no
+keyboard driver and no use for anything behind the slave PIC, so
+there's no downside regardless of outcome. Rebuilt, confirmed via
+`info pic` that the master PIC's mask is now `0xFE` (every line
+masked except IRQ0/tick, which #72 already proved never fires at
+all), and the crash is still byte-for-byte identical, same
+`1000:004A`. **This definitively rules out every master-PIC
+interrupt source as the cause** -- combined with tick's own confirmed
+zero firings, there is no hardware interrupt of any kind involved in
+this crash. (Kept all three masks -- IRQ1/2/6 -- as legitimate,
+harmless hardening regardless; none of this kernel's own code uses
+any of them.)
+
+**Revised status**: the `1000:004A` crash is conclusively *not*
+interrupt-driven. It's a pure logic/data issue somewhere in the
+already-verified-clean `entry`/`xiosmod`/`functab`/`polldev`/
+`insert_process` dispatch chain, or in something adjacent to it that
+hasn't been checked yet. Given the sheer amount of ground already
+covered without pinning down the exact faulting instruction, the
+most promising remaining approach for a future round is probably to
+stop inferring the mechanism from symptoms and instead trace the
+*complete*, uninterrupted instruction sequence from a known-good
+point (e.g. `polld_another`'s own `call xiosif`) all the way to the
+`1000:004A` landing in one continuous pass, accepting the cost of
+however many single-steps that takes, rather than sampling specific
+checkpoints across separate runs -- the cross-run sampling approach
+this round relied on has repeatedly produced inconsistent counts
+(128 here, 700+ there) precisely because the bug's own manifestation
+point drifts with timing, making point-sample evidence from
+different runs hard to stitch into one coherent story.
+
+**Did that check -- ruled out, cleanly.** Breakpointed `tickint`'s
+own top directly, running all the way from boot to the `1000:004A`
+crash site: it fires **zero times** the entire run. `#71`'s own
+leading hypothesis is dead -- there is no tick interrupt anywhere in
+this picture, so `schedule`'s own unconfirmed `sti ! cli` pair isn't
+the mechanism either (nothing is pending there to be let through).
+
+**One dead end along the way, worth recording so it isn't re-chased**:
+scanning a free-running trace for `XIOS`'s own signon banner
+appeared, at first, to show it printing a *second* time deep in the
+trace, right after ~128 repeats of a `^@` pattern -- which looked
+like a dramatic new lead (`INIT` re-entered, recreating every RSP
+from scratch). It isn't real: that "second signon" was an artifact
+of the same per-character `[c]36{c}c` extraction heuristic used
+earlier to read printed text out of a trace cluttered with debug
+markers -- the regex pulled matching single-character fragments from
+widely separated, unrelated parts of the 97KB trace and concatenated
+them in file order, which can spell out things that were never
+actually printed. Checked directly: the literal bytes `MP/M-86
+XIOS86Q` do not occur a second time anywhere in the raw trace file.
+Any future text reconstructed this way needs to be confirmed against
+the raw bytes before treating it as a real finding -- this one
+wasn't.
+
+**Status**: four concrete hypotheses for the `1000:004A` crash are
+now ruled out with hard evidence across #68-#71 (false-ready UART
+data, `functab`'s own module-base adjustment, `INIT`'s own
+termination, and the tick interrupt), and the dispatch chain through
+`entry`/`xiosif`/`polldev`/`insert_process` is confirmed structurally
+correct on every one of the 128 cycles leading up to the crash. The
+crash itself remains unexplained. Given how acutely timing-sensitive
+this has proven -- the exact same breakpoint set on consecutive runs
+has produced a "128 clean cycles then crash" trace and a "128
+`crlf`/`getuser` alternations then crash" trace, different enough
+that the precise moment of divergence hasn't been pinned down twice
+in a row -- further progress likely needs either a way to observe
+without perturbing timing (not available here), or picking apart
+exactly what `TMP` is printing that takes ~128 characters in the
+first place, independent of the crash mechanism itself, as a way in
+from a different angle.
+
+## 73. Found and fixed a major methodological bug in this *session's*
+own tracing, going back several rounds: `TMP.A86`'s own addresses
+were computed with the wrong formula the entire time -- the
+"`getuser` gets wrongly executed" finding that drove #70-#72 was a
+phantom. Corrected tracing shows the crash doesn't need 128 cycles at
+all -- it happens on `TMP`'s very first character, inside (or just
+after) printing a control-character escape for a literal NUL byte
+
+**The error**: `TMP.A86` is a separate RSP, loaded at its own real
+segment, `tmp_code_seg` (`build_mpmsys.py`'s own `tmp_code_seg =
+MPM_CODE_SEG + len(cseg)//16` -- a real segment *value*, computed
+from how many paragraphs the combined kernel cseg occupies). Every
+flat address this session computed for a `TMP.A86` symbol, across
+#70, #71, #72, used `MPM_CODE_SEG*16 + local_offset` (the formula
+that's correct for `SUP`/`RTM`/`MEM`/`CIO`/`BDOS`/`XIOS`, which really
+do all share `CS=1000h`) instead of `tmp_code_seg*16 + local_offset`.
+`TMP`'s own local offsets happen to be small (low hundreds/thousands),
+coincidentally landing inside `RTM`'s real address range under the
+wrong formula -- which is exactly why a breakpoint "at `getuser`"
+kept catching a real, legitimate, correctly-executing instruction
+inside `RTMIF.RTM`'s own `xiosif` (its `call word far [si+0x28]`,
+confirmed by disassembling the actual bytes there with `ndisasm -b
+16`) every time, with a perfectly intact, correct return address
+sitting right underneath it -- because that *was* real, correct
+code, not a wrong landing at all. None of #70-#72's *other* findings
+depended on this (the `1000:004A` crash site itself is in `SUP`,
+whose base really is 0, and all the ruled-out hypotheses -- UART,
+`functab`, `INIT`'s termination, every PIC interrupt -- stand on
+their own), but the specific "`entry`'s own `retf` lands on `TMP`
+code" narrative that organized #70-#72 does not, and is retracted.
+
+**Separately, re-confirmed and fixed a second, real tooling trap**:
+single-stepping (`stepi`) in this environment triggers a genuine
+`INT1` (debug exception) after every instruction, and the guest's own
+IVT entry 1 is a real SeaBIOS handler (`F000:FF53`, confirmed via
+`xp` on physical address 4). That's a real detour through BIOS code
+on *every single step* that free-running execution never takes.
+Worked around it for the rest of this round by never calling `stepi`
+at all -- advancing past a breakpoint by deleting it, issuing one
+`continue` (full speed, no trap flag), then re-arming it -- which
+keeps the Python-side bookkeeping GDB needs for "don't re-hit the
+same stale breakpoint" without ever setting TF.
+
+**With both fixed, corrected, clean traces (TMP addressed correctly,
+zero `stepi` calls) show something much simpler than every previous
+round's picture**: `TMP` reaches `nextcommand` → `freedrive` →
+`attach` → `nextcommand` → `freedrive` → `attach` → `getuser` (all
+confirmed via `CS=1733`, `TMP`'s own real segment, this time) →
+`CHARIO.CIO`'s `conread_entry` (`CS=1000`, correct) → `readen` →
+`1000:004A`, with the breakpoint budget for the *entire* sequence
+under 10 hits, not hundreds. `readen` dumps `read_blen` (confirmed:
+`BX=0042` at the crash, i.e. only 66, nowhere near `maxcmdlen`=128)
+and calls `pcr`/`conoutf`, which cleanly round-trips through
+`xiosc`/`xiosif`/`entry`/`conout` dozens of times (watched this
+directly, no crash) -- so the "it takes ~128 characters to go wrong"
+read from every earlier round was itself a symptom of the
+`stepi`/`INT1` contamination perturbing timing, not a real property
+of the bug.
+
+**Narrowed the real location further, directly, no longer relying on
+cross-run inference**: breakpointing `CHARIO.CIO`'s `readn0` right
+after `and dl,07fh` (dumping the just-read character) shows **`DL=00`
+(a literal NUL byte) on `BL=00` (the very first character of the
+line) -- and the crash follows directly, with no further `readn0`
+hits at all.** So this doesn't need 128 retries to manifest; it's
+wrong from `TMP`'s very first character. Read `CHARIO.CIO`'s own
+`rdecho`/`rdech1`/`ctlout` by eye for this exact byte: `chkctl`
+correctly passes a NUL through untouched (doesn't match `ctld`/
+`ctls`/`ctlc`), `rdecho` itself is correctly stack-balanced (confirmed
+directly, not just by reading), but `ctlout` -- called on every
+character via `rdech1` -- calls `echoc` to decide if the character is
+"graphic"; a NUL is not, so it takes `ctlout`'s *other* branch:
+`push dx ! mov dl,ctl ! call conout ! pop dx ! or dl,40h` -- an
+*additional*, nested `conout` call (print a literal `^` prefix)
+specifically for control characters, before falling through to
+`tabout` to print the (XOR'd) character itself. This is the one
+piece of the per-character path this round didn't get to exercise or
+rule out directly before running out of context.
+
+**Did exactly that immediately, same round -- and it points at
+something much bigger than a dispatch bug.** Traced `tabout`/`conout`
+cleanly (stepi-free) for ~25 more characters past the first NUL,
+logging `DL` at each one: `06, 06, 00, 50, 46, 40, 32, 47, 42, 78,
+03, 6e, 50, 52, 46, 40, 20, 47, 42, 78, 03, 6e, 5a, 58, 47...`.
+Decoded as ASCII where printable, this spells (with doubled bytes
+exactly matching how a `mov al,X ! out dx,al` debug probe emits each
+byte): `..PFF@@22GGBBxx..nnPPRRFF@@ ..GGBBxx..nnZZXG...` -- this is
+not random UART noise. It is **recognizably this kernel's own debug
+probe output** -- the same `[char]`/markers shape seen throughout
+every serial trace this whole session, specifically the
+`"]36{char}char"` / `"PPFF@@"`-style sequences this round already
+decoded out of free-running traces (#70's own careful byte-exact
+decode).
+
+**Leading theory, not yet proven**: this build's debug probes write
+their diagnostic bytes to port `03F8h` -- the exact same UART port
+`XIOS86Q.A86`'s real console I/O (`conin`/`conout`) uses. If writes
+to that port are visible back on the read side (QEMU's UART model
+looping transmitted bytes into its own receive path when the
+backing chardev is a plain file with no real far end, or some
+similar artifact of this specific `-serial file:...` setup), then
+**every debug probe this entire session has ever emitted has also
+been quietly feeding itself back into the console as "typed" input**
+-- which would mean the "128 characters", the UART `rxrdy`-with-
+error-bits anomaly (#68), and this round's single-NUL-character
+crash are not separate phenomena at all: they're all downstream of
+the same self-inflicted interference between this kernel's own
+instrumentation and the thing it's instrumenting.
+
+**Tested directly, same round -- ruled out, and found something more
+fundamental in the process.** Moved every debug probe in the kernel
+(236 occurrences across 18 files, verified the one real exception --
+`uart_base equ 03F8h` itself -- was left untouched) from `03F8h` to
+an otherwise-idle `02F8h` (COM2), rebuilt, and captured the real
+console (COM1) and the relocated debug stream on two separate
+`-serial file:` backends. **The same "garbage" text still appears on
+the real console port**, completely unchanged, with debug fully
+isolated on a different port. Also tried `-serial stdio` instead of
+`-serial file:` for the console, in case this was a quirk of the
+file-backed chardev specifically (e.g. transmitted bytes looping
+back as received ones with no real far end attached): identical
+output either way. **Both theories are dead**: this is not debug-
+probe self-interference, and it is not a serial-backend artifact.
+The "garbage" is real content the guest itself is sending out on the
+real console port.
+
+**What's actually significant, and still unexplained**: that
+content appears immediately after `XIOS86Q.A86`'s own init signon
+banner finishes printing -- i.e., during `SUP`'s own module-init
+sequence, well before `TMP` (or any RSP) has even been created. It
+cannot be `TMP` echoing back something it misread via `conin`; `TMP`
+doesn't exist yet at this point. Whatever's producing it is coming
+from the kernel's own early boot path. Given this round ran out of
+context immediately after finding this, it has not been decoded or
+traced further -- worth independent investigation in its own right
+in a future round, and may or may not be related to the
+`1000:004A` crash chased in #70-#72.
+
+**Process note, logged for completeness**: the "move every probe to
+a different port" edit was done with a careless Python script that
+read these 18 files in text mode and rewrote them, silently
+collapsing their original `\r\n` line endings to bare `\n` in the
+process (caught via `git diff --stat` showing near-total-file-sized
+diffs after reverting the port change back to `03F8h`). Fixed by
+renormalizing all 18 files back to `\r\n` directly, byte for byte,
+and verified both that no `02F8h` remained and that this round's own
+legitimate `XIOS86Q.A86` edits (DMA, IRQ masking, `ccbtab0`, etc.)
+were still intact -- confirmed afterward with `git diff --stat -b`
+(ignoring whitespace), which shows only `XIOS86Q.A86`'s real 40
+inserted lines and zero content differences anywhere else. No work
+was lost, but this is exactly the kind of mistake `AGENTS.md`'s own
+"never commit" rule exists to leave room to catch -- recorded here
+so a future round doesn't need to rediscover it the hard way.

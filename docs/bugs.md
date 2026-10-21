@@ -6472,3 +6472,73 @@ code itself (flat offsets `0x4A2`-`0x4CD` in `SUP`'s own cseg) against
 `SUP.A86`'s source directly, byte for byte the same way this round
 read `zdbg` and the banner text, to find exactly which stack slot it
 pulls `0x02FA` from and why.
+
+## 76. Followed #75's own next step -- read `SUPIF.SUP`'s real
+`user_entry` source directly against the `0x4A2`-`0x4CD` region
+identified there, and it needs no "stack corruption" at all: the
+whole chain is explained by one documented design assumption that
+just doesn't hold this one time
+
+**`0x4A2`-`0x4CD` is `user_entry`'s own epilogue, confirmed by
+source, not a mystery routine**: every `int mpmint` syscall enters
+through `user_entry`, which tracks nesting via `u_insys`. On the
+*outermost* call it switches to a dedicated per-process supervisor
+stack (`u_stack_ss`/`u_stack_sp` saved, `ss:sp` set to the UDA/
+`ulen`); on a *nested* call it just `push`es `u_wrkseg` instead. After
+`call func` returns, the epilogue mirrors this: `dec u_insys`, and if
+still nonzero takes the `nstk: pop u_wrkseg` path straight to `ueout:
+mov es,u_retseg ! iret` -- never restoring the real user stack at
+all. This `nstk`/`ueout`/`iret` sequence is exactly `0x4C3`-`0x4CD`;
+#75's trace already confirmed this exact nested-path branch (`jnz
+0x4c3`) is the one taken right before the crash.
+
+**That, by itself, fully explains #75's `iret`-lands-on-`zdbg`
+finding, with no additional corruption required**: `INIT.SUP`'s
+`rsp_out` calls `int mpmint` for `f_terminate` and -- per its own
+source comment, confirmed again here -- has **nothing coded after
+that instruction but `zdbg`'s own body**, because the original 1981
+author assumed this call can only ever succeed (successful
+termination takes `ABORT.RTM`'s own `jmp dsptch` path, which abandons
+this stack/process entirely and never returns here at all -- #67's
+own documented distinction). If it *fails* instead (`terminate_entry`
+on the `cmp cx,0 ! jle term_err` path, a plain `ret`, exactly as #67
+caught with `rlr=TMP`/`pf_tempkeep`), control returns completely
+normally, through `func`/`gofar`, into `user_entry`'s own ordinary
+epilogue -- which, being an ordinary IRET-based return (not a crash
+in itself), faithfully transfers control to whatever address
+genuinely follows the `int mpmint` instruction in the compiled
+binary. That address is `zdbg`'s own entry point, with no call frame
+ever set up for it -- so `zdbg`'s own trailing `ret` (end of #75's
+chain) pops whatever word is actually next on the stack at that
+point, landing in the banner text. **No stack push/pop imbalance bug
+is needed anywhere in this chain**: a syscall that fails when the
+source assumed it couldn't, with zero error handling at the call
+site, is sufficient on its own.
+
+**What's still open, and is now the single remaining question for
+this entire `1000:004A` saga**: *why* does `INIT`'s own
+self-termination call fail -- i.e. why doesn't `rlr`/`abt_chk` see a
+cleanly-terminatable `INIT` PD at that exact moment (#67's own
+unresolved (a)-vs-(b) choice, never settled). Tried to settle it this
+round with the same zero-GDB passive trace: `RTM.A86`'s real
+`terminate_entry` (`asm86 --symbols`, confirmed cseg-only this time
+per #73's own caution -- local `0x118A`, RTM's module base `0x18BF`
+computed directly from `SUP.cseg.bin`'s real 6335-byte length since
+`build_mpmsys.py` adds no inter-module padding, flat `0x12A49`) is
+only reached **twice** in the entire run. Inconclusive, not
+negative: both hits lead into what's almost certainly `RTM.A86`'s own
+`ydbg` debug-print helper (RTM's equivalent of SUP's `zdbg`, confirmed
+at local `0xD5`/flat `0x11994` by the same symbol method) immediately
+after `abt_chk` returns, and a trace of addresses alone can't tell
+apart "this is `abt_chk`'s own legitimate nested debug-probe call,
+business as usual" from "this is a sign the call already went wrong"
+-- that needs the actual `rlr` value in memory, which `-d exec`
+cannot give. **Next step, concrete and well-scoped**: a single GDB
+breakpoint at `terminate_entry` (flat `0x12A49`), re-armed once
+between the two hits (the established "re-arm fresh per hit" safe
+pattern from #39/#40 -- never `continue` twice past the same
+breakpoint on this gdbstub), reading `rlr` directly off each hit, to
+finally settle which of the two is `INIT`'s own call and what PD it
+actually sees -- not reached this round (usage ran out immediately
+after confirming `gdb` itself is available at `/opt/homebrew/bin/gdb`,
+before a session could be started).

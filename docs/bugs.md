@@ -7546,3 +7546,131 @@ cold halt through the hang, specifically checking whether `rlr` ever
 reads `0` for even one instruction -- the one direct observation that
 would confirm or kill the "ready list goes briefly empty" theory file
 instead of further inference from where execution ends up afterward.
+
+## 85. Continued from #84's own handed-off next step. The "ready list
+goes briefly empty" theory is dead -- `rlr`/`drl`/`plr` are all sane
+throughout -- but the real mechanism is now pinned down precisely:
+`indisp` really is stuck permanently true (not transiently toggling,
+contra a stray, never-written-up observation from #84's own last
+live session), `schedule`/`polldev` provably never run again once
+stuck (confirmed by a hardware breakpoint that fires normally during
+boot but never once in 20+ real seconds after the hang, console input
+injected or not), and the specific retry loop keeping the CPU busy the
+whole time is identified by name and call site.
+
+**First, a methodology correction, since it directly contradicts
+#84's own framing**: a leftover scratchpad log from #84's own final,
+un-written-up experiment (`gdb_indispfinal2.log`, continuously
+watching `indisp` from a cold halt with serial wired to `/dev/null`,
+~190 hits recorded) shows `indisp` toggling cleanly between `0` and
+`0FFh` forever, at two fixed addresses -- not sitting stuck at a
+single value the way #84's prose describes it (that prose was written
+from single-point sampling, before the continuous-watch experiment
+ran). Decoded against `asm86 --symbols` on `RTM.A86`, those two
+addresses are `dispin` (flat `0x11804`) and `dret` (flat `0x11AF8`) --
+i.e. that specific toggle is **normal, correct dispatcher activity**
+(every real dispatch cycle sets `indisp` true at `dispin` and clears
+it again at `dret`), not a bug at all. It shows up with `/dev/null`
+wired because printing the boot banner over a real UART takes dozens
+of poll/dispatch cycles, one per character -- the exact same toggle is
+directly confirmed this round during the early boot-message-printing
+window with a *real* pty attached too (see methodology note below).
+**The real hang only sets in once boot reaches the interactive `0A>`
+idle state**, and that part of #84's own "input-independent, same
+~20s window" finding still holds, now confirmed far more directly.
+
+**Methodology note on hardware breakpoints, confirmed the hard way
+this round**: a single long-lived QEMU process, reattached to by many
+successive `gdb -x` invocations each killed by `timeout` mid-`continue`
+(the pattern used for most of this round's probing, and apparently
+also late in #84's own session), eventually makes **hardware
+breakpoints/watchpoints silently stop firing at all** -- confirmed
+directly: `hbreak *0x15f91` (`polldev`'s own entry, see below) and
+`watch *(unsigned char*)0x174ee` (`indisp`) both sat armed through 15-
+20 real seconds of confirmed, register-sampled, actively-executing
+CPU with zero hits, on a QEMU instance that had already survived
+several earlier reattach/kill cycles -- then **the identical
+`hbreak *0x15f91` fired on the very first `continue`** against a
+freshly-launched QEMU process that had never been attached to before.
+Killing and relaunching QEMU per probe (not just reattaching GDB) is
+now the required discipline; the existing "prefer watchpoints/hbreak
+over software breakpoints" lesson (#38, #51) is necessary but not
+sufficient on this specific gdbstub.
+
+**Confirmed, via a disciplined fresh-QEMU-per-probe methodology,
+boot through hang, with a real raw-mode pty (not `/dev/null`) and real
+`DIR`+CR injected right at the `0A>` prompt, well inside the
+established ~20s window:**
+
+- `plr=0E40h` (= TMP's own PD), TMP's `p_stat=01h` (`ps_poll`),
+  `p_link=0` -- TMP is correctly, genuinely linked onto the real poll
+  list. The poll-list-linkage theory floated implicitly by #83/#84 is
+  not the bug.
+- `polldev` (`XIOS86Q.A86`, flat `0x15F91` -- confirmed by direct
+  disassembly match, `cmp cl,0`/`jne polldev_1` landing exactly where
+  `asm86 --symbols` says) is hit completely normally during boot
+  (confirmed hit, `cl=4`=`c0outdev`, while the boot banner prints) --
+  `schedule`'s poll loop provably works correctly before the hang.
+- After injecting real input at the `0A>` prompt, that *same*
+  hardware breakpoint, on a *freshly launched* QEMU instance, never
+  fires once in 20 real seconds. `schedule` -- and therefore
+  `polldev` -- provably never runs again once hung, with or without
+  real console input. This directly kills #84's own "ready list goes
+  briefly empty inside schedule" theory: schedule isn't intermittently
+  misbehaving, it simply never executes at all post-hang.
+- `indisp` reads `0FFh` on direct, repeated, post-hang inspection
+  (confirmed on a freshly-attached session, not inferred) -- genuinely
+  stuck, matching #83/#84's original characterization, not the
+  boot-time toggle #84's own unwritten-up log showed.
+- The CPU is *not* frozen: repeated `interrupt`+register-read samples
+  over several real seconds show `$pc`/`$sp` genuinely changing
+  between samples (e.g. `pc=33a4`u`sp=12c0`, `pc=1488`u`sp=12be`,
+  `pc=2fb`u`sp=12c8` -- small, bounded `SP` range, `CS=SS=1000h`
+  throughout, so the stack itself is sane here, unlike #84's own
+  "all-zero stack" sighting elsewhere). A hardware breakpoint at RTM's
+  own generic inter-module `entry:` trampoline (`RTMIF.RTM`, flat
+  `0x11488`) fires readily post-hang, with `CX=12h` (18 decimal) each
+  time -- `RTMIF.RTM`'s own function table (`function dw ...`) lists
+  index 18 as **`sleep_entry`** (`SYSENT.RTM`). So post-hang, *something*
+  keeps calling RTM's `f_sleep` (module-class, `CH=rtm(2)`, explicit,
+  not routed through `SUPIF.SUP`'s `sysent` table) in a tight loop.
+  (Chased whether this is `userf`'s `sysent[142]` -- `f_dispatch`,
+  what `idle`'s own loop actually calls -- misrouting to `sleep_entry`
+  instead of the correct `dispatch_entry`: it isn't. Read live:
+  `sysent[142] = {ent_mod=2(rtm), ent_func=0Ch(12)}`, and index 12 is
+  genuinely `dispatch_entry` per `RTMIF.RTM`'s own table. `idle`'s
+  `f_dispatch` call is correctly routed; it is not the thing calling
+  `sleep_entry`. Whoever calls `f_sleep` directly -- plausibly `tick`'s
+  own heartbeat, not yet confirmed by name -- is likely incidental,
+  not the root cause; see next step.)
+- `sleep_entry` (`SYSENT.RTM`: `mov bx,rlr / mov u_dparam,dx / ...
+  mov p_stat[bx],ps_sleep / jmp dsptch`) unconditionally `jmp dsptch`s.
+  `dsptch`'s own reentrancy guard (`DSPTCH.RTM`: `cmp indisp,true !
+  jne dispin / popf ! ret`) is hit first, every single time, and with
+  `indisp` already stuck true, bails out immediately via a bare
+  `ret` -- never reaching `dispin`/`schedule`/`polldev` again. This is
+  a fully sufficient, directly-observed explanation for everything
+  seen this round and in #83/#84: the CPU stays busy forever re-
+  entering RTM's `entry:` trampoline and immediately bouncing off
+  `dsptch`'s own guard, while `schedule`'s poll loop -- and TMP's
+  correctly-linked poll-list entry with it -- never runs again,
+  regardless of what arrives on the console.
+
+**What's still open, precisely**: the loop described above is a
+*symptom* -- it explains why nothing recovers once stuck, not what got
+`indisp` stuck in the first place. Exactly one real (non-guard-
+bounced) pass through `dsptch`'s full body must have set `indisp:=true`
+at `dispin` (flat `0x11804`) and then failed to reach either clear
+site (`dret`, flat `0x11AF8`, or `int_disp_exit`, flat `0x117B6`) --
+i.e. one specific call never returned, rather than this being a race
+between concurrent callers. **Next step**: using the now-confirmed
+fresh-QEMU-per-probe discipline, hardware-breakpoint `dispin` (flat
+`0x11804`) from a cold halt, let it run with `delete+rearm per hit`
+(the #38/#80 lesson) counting hits, and on the *last* hit before the
+hang sets in, single-step (`stepi`) all the way through `dsptch`'s
+body instead of `continue`-ing, watching for the first instruction
+where it diverges from the known-good path traced during #83/#84's
+own successful (pre-hang) dispatch cycles -- that single trace should
+catch the exact instruction that fails to reach `dret`/`int_disp_exit`,
+the same direct-tracing technique that nailed every other root cause
+in this file.

@@ -52,9 +52,9 @@ lf		equ	0ah
 ;	instead and keeps these two constants in sync with wherever they
 ;	actually land; the values below are current as of the last time it
 ;	was run (LDMPM=1007, LDBDOS=3744 bytes -- see docs/build.md).
-ldbdos_offset	equ	3efh		;offset of LDBDOS (= size of LDMPM's
+ldbdos_offset	equ	3f1h		;offset of LDBDOS (= size of LDMPM's
 					; own code, not a fixed DRI constant)
-mldbios_offset	equ	1115h		;offset of LDBIOS (= ldbdos_offset
+mldbios_offset	equ	1117h		;offset of LDBIOS (= ldbdos_offset
 					; + size of LDBDOS's own code)
 bdos_int	equ	224		;lbdos interrupt number
 

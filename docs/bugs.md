@@ -7303,3 +7303,246 @@ interactive terminal, or `-serial stdio` without redirection), since
 every fix this entry documents was found by trusting a *direct*,
 two-register-confirmed observation over an inferred one, and "no
 response over a brand-new socket-chardev test rig" isn't that yet.
+
+## 83. Told to figure out why console input isn't working. The harness
+was innocent (confirmed with a real, raw-mode pty, no echo) -- input
+really was dead. Found and fixed **three more real, confirmed bugs**
+getting it from "nothing, ever" to "reads and echoes any number of
+real characters correctly"; one precisely-scoped symptom remains (the
+line *terminator* specifically wedges the scheduler) and is handed off
+un-fixed, with the exact evidence needed to pick it back up.
+
+**Harness check, first**: before trusting "no response" as a kernel
+bug, the test rig itself was replaced twice -- a `-serial unix:...`
+socket (the previous entry's own open question), then a real
+`pty.openpty()` pair with `ECHO`/`ICANON` explicitly turned off on the
+slave's own termios (ruling out the pty's *own* line discipline
+echoing injected bytes back as fake "output", which is exactly what a
+first pass with echo still enabled produced -- `^B^B^B...` appearing
+to "come from" iPXE's own signon when it was only ever the test
+sending Ctrl-B back to itself). With echo off, zero bytes ever came
+back after a bare `\r` at a genuine `0A>` prompt. Real bug, not a
+harness artifact.
+
+**Root cause #1 -- `idle`'s/`tick`'s own UDA `u_initss` field, another
+unanswered GENSYS question**: `PROC.RTM`'s own `cp_uda` (`mov ax,ds:
+u_initss ! mov ds:u_ss,ax`) seeds a freshly-created process's *very
+first* resume stack segment from its own template UDA's `u_initss`
+field, paired with `u_stack_sp` (already correctly template-set to
+`offset(idle_tos)`/`offset(tick_tos)`, both living *inside* `sysdat`'s
+own segment). Read `build/kernel/MPM.bin.dseg` directly at `idleuda`'s
+own `u_initss` offset: `0000h` -- not `sysdat_segment`. `RTMIF.RTM`'s
+own `init:` only ever sets `u_initcs` for tick/idle (confirmed matching
+`orig/mpm862sr/02/RTMIF.RTM` byte-for-byte -- a real, original gap,
+not a transcription error), relying entirely on the template already
+having the right `u_initss`, same as `u_initcs` would need to if
+`RTMIF.RTM` didn't *also* explicitly patch that one at runtime. Left
+unset, idle's/tick's own first-ever `SS` becomes `0000h` -- the IVT/
+BIOS data area -- instead of `sysdat_segment`. **Fixed**: `RTMIF.RTM`'s
+own `init:` now also writes `u_initss` (`mov ax,cs:sysdat ! mov
+u_initss,ax`) for both tick and idle, right alongside the existing
+`u_initcs` write, using the identical ES-relative convention. Confirmed
+live via GDB, before and after: idle's own UDA `u_initss`/`u_ss` read
+back `0`/`0` before the fix, `1699h`/`1699h` (the real `sysdat_segment`
+this build) after.
+
+**Root cause #2 -- `XIOS86Q.A86`'s own `idle:` loop corrupts its own
+dispatch call with stale `CH`**: with #1 fixed, idle's stack was sane
+but the *symptom* (the scheduler's own `indisp` reentrancy flag,
+`DSPTCH.RTM`, stuck permanently `0FFh`, so `dsptch`'s own `cmp
+indisp,true ! jne dispin` bails to a bare `ret` on *every* subsequent
+call and a real process switch never happens again) was unchanged.
+Live single-step tracing (the same "watch every instruction, match
+addresses against `asm86 --symbols`" technique #80-82 relied on) caught
+idle -- confirmed by name, its own PD's `p_name` reading `"Idle"` --
+genuinely, repeatedly calling `CHARIO.CIO`'s `conin_entry`/`attach`/
+`cioattach`, retrying forever against a console `TMP` legitimately
+already owns, instead of its own real `idle:` loop. `idle:` itself is
+only three lines (`mov cl,f_dispatch ! call supif ! jmp idle`) -- and
+`f_dispatch` (`MODFUNC.DEF`: `(user*0100h)+142` = `008Eh`) is a *global*
+sysent-routed function number, needing `CH=0` for `SUPIF.SUP`'s own
+`func1`'s `cmp ch,0 ! je userf` to take the right branch. `mov cl,
+f_dispatch` is an 8-bit move -- `CH` survives untouched from whatever
+this process's own `u_cx` last held (verbatim-restored by `DSPTCH.RTM`'s
+own `switch:` on every dispatch) -- so whenever that's nonzero, `func1`
+takes the *explicit-module* branch instead, misrouting the call based
+on leftover register state. This is the *exact* bug class already
+fixed once in `INIT.SUP`'s own `nrsp` loop (`mov cl,f_createproc`,
+docs/bugs.md much earlier) -- just never caught in this file, which
+didn't exist yet at the time. **Fixed**: `mov cl,f_dispatch` -> `mov
+cx,f_dispatch` in `idle:`. Found and fixed the identical pattern at the
+same time, same file, for `f_polldev` (`rtm_poll`) and `f_flagset`
+(`tickint`, used twice) -- the latter doubly suspect, since `CX` on
+entry to a hardware ISR is whatever the *interrupted* code happened to
+be using, never guaranteed zero in `CH` at all.
+
+**Root cause #3 -- the identical bug, confirmed as a genuine original
+DRI typo, in `CHARIO.CIO`'s own `constat_entry`**: grepped every
+`mov cl,f_` call site across the kernel for the same pattern. One more
+turned up, in `constat_entry` (`mov cl,f_dispatch ! call mpmif`).
+Checked `orig/mpm862sr/03/CHARIO.CIO` directly: this file's own sibling
+call site (`dirio_entry`, a few lines down, same constant) already
+correctly uses `mov cx,f_dispatch` -- in the real, unmodified 1981
+source itself. The two call sites disagree with each other in the
+authentic original; this one is a genuine DRI-era typo, not a rebuild
+artifact, confirmed the same way #74's "missing parens" fixes were.
+**Fixed**: `mov cl,f_dispatch` -> `mov cx,f_dispatch` in
+`constat_entry` too.
+
+**Effect of all three together**: console input went from *zero bytes,
+ever* to correctly reading and echoing arbitrary runs of real
+characters -- confirmed with `DIR` (3 chars) and separately with
+`ABCDEFGH` (8 chars, spaced 0.2-0.3s apart to rule out a UART-overrun
+explanation), every single one landing on screen exactly as typed, over
+a real pty with echo disabled (so what's observed is genuinely the
+guest's own echo, not the test rig's).
+
+**Still open -- CR itself, specifically, reliably wedges it again**:
+after any number of regular characters (tested up to 8), sending `\r`
+produces *no* echo, no newline, nothing -- and live inspection
+afterward shows `indisp` stuck `0FFh` again, exactly like before #82's
+fixes, with `rlr` back on idle and TMP still parked on the poll list
+(`p_stat=1`, `p_wait=0`, unchanged). This is not the same mechanism as
+root cause #2 (idle's own misrouted `f_dispatch`): `CHARIO.CIO`'s own
+`conread_entry` char-reading loop (`readnx`/`readn0`/`rdecho`/`eofre`/
+`readen`) was traced by hand, instruction group by instruction group,
+confirming the stack depth *into* `readen:` (`pop di`) is identical
+--exactly one word, the buffer offset from `read:`'s own top -- whether
+reached via `eofre` (CR/LF) or via `rdecho`'s own `jae readen`
+(buffer-full case): no stack imbalance there. The regular-character
+path (`rdecho`) and the CR path (`eofre`) both call through the exact
+same `conin`/`rtm_poll`/poll-list/`schedule` machinery to *get* each
+character, and that machinery is demonstrably fine for every character
+except whichever one happens to be CR. The leading hypothesis, not yet
+confirmed: this isn't really about CR's own bytes at all, but about
+what `TMP.A86` does immediately *after* a line is complete and
+`conread_entry` returns -- `nextcommand:`'s own `call freedrive`/
+re-`attach`/prompt-redraw sequence, all still using the same
+unprotected `mov cl,<global-function-constant>` convention as idle's
+own (now-fixed) bug, confirmed matching the real original DRI
+`TMP.A86` byte-for-byte (so, if real, this is the *same* "CH must
+already be 0, and the rebuild doesn't reliably guarantee that the way
+the real 1981 system implicitly did" problem, just manifesting at a
+different call site) -- not yet caught in the act the way root causes
+#1-3 were. **Next step**: live-trace specifically from `conread_entry`'s
+own `ret` (right after `readen`/`pcr` finish echoing CR) through
+whatever `TMP.A86` calls next, the same instruction-by-instruction,
+address-matched-against-`asm86 --symbols` technique used for every
+other fix in this entry, watching `CH` at each syscall trampoline to
+catch the first one that's nonzero when it shouldn't be.
+
+## 84. Told to keep going and fix #83's "still open" CR bug. **The
+"CR-specific" framing from #83 is wrong** -- found and fixed one more
+real, confirmed bug (this time in the toolchain itself, `tools/asm86/`,
+not the kernel source), but the actual scheduler-corruption hang #83
+handed off survives it unfixed; this entry's own live evidence is
+handed off in its place.
+
+**#83's own framing disproven first**: a clean boot with a real pty but
+*zero bytes ever sent* -- no CR, no input at all -- still ends up with
+`indisp` stuck `0FFh` within the same ~20s window #83 saw it happen
+after a CR. Confirmed by watching `indisp` (flat `sysdat_seg*16+0B5Eh`)
+live from a cold `-S` halt with the serial port wired to `/dev/null`.
+Whatever's wedging the scheduler is input-independent and roughly
+boot-timing-dependent, not a property of the CR byte itself; #83's own
+"next step" (chasing `TMP.A86`'s post-`conread_entry` `CH` handling) was
+chasing a byte that isn't actually the trigger.
+
+**A real, confirmed, separate bug found along the way -- `tools/asm86`'s
+own operand classifier, not kernel source**: live register tracing of
+the hang (breakpoint at `CONSOLE.CIO`'s `cioattach`, `0x12e64`) caught
+`SI` reading back `37A0h` on entry -- garbage, since `conattach_entry`'s
+own `mov si,p_cns` should load the small, constant PD-field offset
+`0020h` (`PD.DEF`: `p_cns equ byte ptr p_parent + word`). Raw byte
+dump of the compiled `cioattach` confirmed why: `8B 36 20 00` --
+`MOV SI,[0020h]`, a *memory read* of absolute address `DS:0020h`, not
+`MOV SI,0020h` (an immediate load). `DS` at that point is `sysdat`, and
+`sysdat:0020h` happens to fall inside `module_table[bdos].mod_entry`'s
+own low word (`build_mpmsys`'s own reported `BDOS entry=0101h` +
+`BDOS module_base=369Fh` = `37A0h` -- an exact match). `tools/asm86`
+was mis-assembling `mov si,p_cns` as a memory operand because `p_cns`'s
+own `equ` definition carries a `byte ptr` cast (there purely to size a
+later *bracketed* use like `p_cns[bx]`), and the assembler's operand
+classifier (`tools/asm86/expr.py`'s `parse_operand`) treated *any*
+`equ` symbol with a cast-derived size as memory when referenced bare,
+with no way to tell "this cast sizes a structure-field offset constant"
+apart from "this cast aliases a real address" (e.g. `RTMIF.RTM`'s
+`supervisor equ offset $`, or `DATA.BDO`'s `lret equ byte ptr aret`,
+aliasing the real label `aret`). Confirmed this is a toolchain defect,
+not a kernel-source one: `CONSOLE.CIO` diffs byte-for-byte identical to
+`orig/mpm862sr/03/CONSOLE.CIO`.
+
+**Fixed**: added `Symbol.is_addr` (`tools/asm86/expr.py`), true only
+when an `equ`'s own defining expression is rooted in a real `offset $`/
+`offset LABEL`, or is a *bare* alias of an actual label (`v.symbol.kind
+== 'label'`) -- false for one built from pure `equ`/literal arithmetic
+under a `byte/word ptr` cast (`p_cns`'s own shape). `parse_operand` now
+requires `sym.size and sym.is_addr` (not just `sym.size`) before
+classifying a bare `equ` reference as memory, so `p_cns`/`p_lst`-shaped
+offset constants fall through to the plain-immediate case instead.
+Also had to teach `_prescan_sizes` (`tools/asm86/assembler.py`) the
+same distinction for *forward* references (a 3rd `is_addr` element
+added to its `prekind` tuples, guessed from the cast's own text: a bare
+single identifier inside the cast counts as address-like, same as the
+`offset` keyword; an arithmetic expression doesn't) -- otherwise a
+forward reference occurring before the `equ`'s own definition line
+(`BDOSIF.BDO`'s `mov lret,al`, reached before `DATA.BDO`'s own `lret
+equ byte ptr aret` since `BDOSIF.BDO` is `include`d first in `BDOS.A86`)
+guessed wrong during the tentative pass and the *final* pass's correct
+answer (memory, since `aret` really is a label) came too late to avoid
+an `unsupported MOV operand combination (mem,mem not allowed)` abort.
+Also had to extend the existing "a leading `.` on a bare number forces
+a memory operand" convention (`parse_operand`, already used for things
+like `XIOS.A86`'s `mov .0,offset int_trap`) to cover a leading `.` on a
+bare *name* too (`INIT.SUP`'s `mov es:.rsp_link,ds`, where `RSP.DEF`'s
+`rsp_link equ word ptr rsp_top` and `rsp_top equ 0` are both pure
+offset-constant `equ`s with `is_addr=False` under the new rule) --
+without it, the dot's own "dereference this address" meaning silently
+lost to the new, stricter bare-reference rule for the exact same reason
+`p_cns` needed fixing in the first place, and the same `mem,mem` abort
+resurfaced one file later. Confirmed via byte dump: `cioattach` now
+assembles `mov si,p_cns` as `C7 C6 20 00` (`MOV SI,0020h`, immediate) --
+and a fresh live trace confirms it: `SI` reads back `0020h` on entry,
+`DH` (console #) and the resulting CCB lookup are sane, and the PD
+caught retrying `cioattach` is now legitimately `TMP` (`rlr=0E40h`,
+confirmed by PD address) rather than garbage. Full `make`/`make disk`
+rebuild clean, no regressions (every other already-fixed bug's own
+instruction encoding, spot-checked, unchanged).
+
+**Still open -- the actual hang survives this fix untouched**: same
+test as before (boot, wait, send `DIR`\r over a real pty) still gets
+`DIR` echoed and then nothing -- `indisp` stuck `0FFh` again. Live
+inspection of the stuck state (`CS`/`SS`/`SP` read together, one
+breakpoint hit, not across separate attaches) shows something stranger
+than a simple missed-wakeup: whichever PD is `rlr` at the moment
+`RTM.A86`'s `sleep_entry` (`flat 0x11500`) or `CONSOLE.CIO`'s
+`cioattach` top fires -- it's been seen as both `idle` (`0x9f0`) and
+`TMP` (`0xe40`) across different runs/attaches, not consistently one or
+the other -- is running with `SS=CS=1000h` and `SP` pointing into a run
+of all-zero bytes sitting inside `SUP.A86`'s own `RPL.SUP` code
+(flat `0x112bc`-ish, between `rpl_entry` and `rpl_ret`), not into any
+declared stack buffer at all. That's not idle's/TMP's own real
+per-process stack: separately read back on a live (not-yet-hung) boot,
+idle's own `u_ss`/`u_sp` and `p_uda[idlepd]` are exactly what they
+should be (`1699h`/`1715h`, matching #83's own fix), and watchpoints on
+both of those exact flat addresses, armed from a cold `-S` halt and
+left running through an entire boot-to-hang cycle (including the `DIR`
+\r injection), **never fire even once** -- whatever ends up substituting
+a bogus `SS:SP` for the real one isn't writing through either of those
+fields, so `switch:`'s own `mov ss,u_ss ! mov sp,u_sp` (`DSPTCH.RTM`)
+isn't the corruption site either; something upstream of it is handing
+`switch:` a `BX`/`DS` that doesn't actually resolve to the UDA it
+thinks it does, or `rlr` itself goes through a state (plausibly `0`,
+the empty-list sentinel, briefly) this round of live testing didn't
+directly catch -- `DSPTCH.RTM`'s own `schedule:` comment ("there MUST
+be a process on the RLR at this point, ie. IDLE...") says plainly what
+should never happen but would explain every single symptom gathered so
+far (the all-zero "stack", the semi-plausible but address-mismatched
+bouncing through `SUPIF.SUP`'s `entry`/`func`/`userf`/`goodmod` region,
+`indisp` never clearing because `switch:`/`dret:` never cleanly
+finish) if it ever does. **Next step**: watch `rlr` (flat `0x169f8`)
+and `drl`/`plr` (`0x169fc`/`0x169fe`) together, continuously, from a
+cold halt through the hang, specifically checking whether `rlr` ever
+reads `0` for even one instruction -- the one direct observation that
+would confirm or kill the "ready list goes briefly empty" theory file
+instead of further inference from where execution ends up afterward.

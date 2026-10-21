@@ -45,14 +45,52 @@ init:		; RTM module Initialization
 	push es ! mov es,ax
 	mov si,offset supervisor
 	mov ax,cs:2[si]
-	mov u_initcs,ax ! pop es
+	mov u_initcs,ax
+	mov ax,cs:sysdat ! mov u_initss,ax	;u_initss (same unanswered-
+					;GENSYS-question bug class as
+					;c_mimic/mpmseg -- SYSTEM.DAT's own
+					;stock tickuda/idleuda template leaves
+					;this 0 instead of the real sysdat
+					;segment) -- PROC.RTM's own cp_uda
+					;copies u_initss into u_ss (tick/
+					;idle's own *first-ever* resume
+					;stack segment, used by DSPTCH.RTM's
+					;"switch:" the very first time either
+					;is dispatched), paired with
+					;u_stack_sp (already correctly
+					;template-set to offset(idle_tos)/
+					;offset(tick_tos), both *inside*
+					;this same sysdat segment) -- left at
+					;0, idle's/tick's own very first
+					;stack becomes SS=0000h, the IVT/BIOS
+					;data area, not sysdat. Confirmed live
+					;via GDB: idle's own UDA u_initss read
+					;back 0 exactly where this fix now
+					;writes cs:sysdat; with it 0, idle's
+					;own first-ever "switch:" leaves
+					;u_ss=0 permanently (nothing else ever
+					;rewrites it to anything sane), and
+					;every later real dispatch bails
+					;immediately on DSPTCH.RTM's own
+					;`indisp` reentrancy guard once it's
+					;left set -- the actual, direct cause
+					;of this build's console input never
+					;working: the scheduler never
+					;performs a real process switch again
+					;after idle's own first run, so a
+					;process that legitimately blocked
+					;waiting for console input (e.g. TMP)
+					;is never revisited.
+	pop es
 	mov bx,offset idlepd		;IDLE
 	mov ax,p_uda[bx]
 	add ax,cs:sysdat
 	push es ! mov es,ax
 	mov si,offset supervisor
 	mov ax,cs:2[si]
-	mov u_initcs,ax ! pop es
+	mov u_initcs,ax
+	mov ax,cs:sysdat ! mov u_initss,ax	;see tick's own fix above
+	pop es
 	mov dx,bx ! call proc_creat
 		;init is now a process and can run
 		;concurrently with idle process

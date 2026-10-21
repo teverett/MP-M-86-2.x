@@ -57,9 +57,9 @@ ldroffset       equ     0   	; offset of CPMLDR
 ; biosoffset (an absolute CALL/JMP target into LDBIOS86Q.A86's own jump
 ; table) is self-corrected the same way it already was. The value below
 ; is only a seed for that first assemble-and-measure pass.
-bdosoffset      equ     3efh	; LDBDOS's own position within MPMLDR.bin
+bdosoffset      equ     3f1h	; LDBDOS's own position within MPMLDR.bin
 				; (self-corrected -- see above)
-biosoffset      equ     1115h   ; offset of LBIOS-86 (self-corrected)
+biosoffset      equ     1117h   ; offset of LBIOS-86 (self-corrected)
 ;
 eject ! include lbdosequ.a86	 ; symbol definition
 eject ! include lbdosent.a86     ; entry module

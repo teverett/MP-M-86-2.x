@@ -154,7 +154,8 @@ class Assembler:
             seg[addr + i] = b & 0xFF
         self.loc[self.cur_seg] = addr + len(data)
 
-    def define_symbol(self, name, kind, value, size, filename, lineno, allow_redefine=False):
+    def define_symbol(self, name, kind, value, size, filename, lineno, allow_redefine=False,
+                       is_addr=False):
         key = name.lower()
         existing = self.symtab.get(key)
         if existing is not None and not allow_redefine:
@@ -162,7 +163,7 @@ class Assembler:
                 raise AsmError(f"symbol '{name}' redefined (was {existing.kind}={existing.value}, "
                                 f"now {kind}={value})", filename, lineno)
         seg = self.cur_seg if kind == 'label' else None
-        self.symtab[key] = Symbol(name, kind, value, size, seg)
+        self.symtab[key] = Symbol(name, kind, value, size, seg, is_addr)
         self.pending.discard(key)
 
     def active(self):
@@ -254,6 +255,12 @@ class Assembler:
 
     _CAST_PREFIX_RE = re.compile(r'^\s*(byte|word)\s+ptr\b', re.IGNORECASE)
     _OFFSET_KEYWORD_RE = re.compile(r'\boffset\b', re.IGNORECASE)
+    # A cast's remaining text is a *bare* reference (just one optionally
+    # dot-prefixed identifier, e.g. "aret" in "lret equ byte ptr aret")
+    # rather than an arithmetic expression (e.g. "p_parent + word" in
+    # PD.DEF's "p_cns equ byte ptr p_parent + word") -- see this method's
+    # own is_addr comment below for why that distinction matters.
+    _BARE_REF_RE = re.compile(r'^\s*\.?[A-Za-z_][A-Za-z0-9_]*\s*$')
 
     def _prescan_sizes(self, lines):
         """Learn every DB/DW/RB/RW/EQU symbol's kind+size (and, for the
@@ -278,22 +285,38 @@ class Assembler:
                 low = mnem.lower()
                 if low in ('db', 'byte', 'rb', 'rs'):
                     self.presize[label.lower()] = 1
-                    self.prekind[label.lower()] = ('label', 1)
+                    self.prekind[label.lower()] = ('label', 1, True)
                     self.preseg[label.lower()] = prescan_seg
                 elif low in ('dw', 'word', 'rw'):
                     self.presize[label.lower()] = 2
-                    self.prekind[label.lower()] = ('label', 2)
+                    self.prekind[label.lower()] = ('label', 2, True)
                     self.preseg[label.lower()] = prescan_seg
                 elif low == 'dd':
                     self.presize[label.lower()] = 4
-                    self.prekind[label.lower()] = ('label', 4)
+                    self.prekind[label.lower()] = ('label', 4, True)
                     self.preseg[label.lower()] = prescan_seg
                 elif low == 'equ':
+                    has_offset = (self._OFFSET_KEYWORD_RE.search(operand_text)
+                                  or operand_text.strip() == '$')
                     m = self._CAST_PREFIX_RE.match(operand_text)
                     if m:
                         size = 1 if m.group(1).lower() == 'byte' else 2
-                    elif (self._OFFSET_KEYWORD_RE.search(operand_text)
-                            or operand_text.strip() == '$'):
+                        # is_addr mirrors Symbol.is_addr's own rule (see
+                        # expr.py): a cast of a *bare* label reference
+                        # (e.g. "lret equ byte ptr aret") denotes a real
+                        # address, same as an "offset"-rooted expression;
+                        # a cast of an *arithmetic* expression (e.g.
+                        # PD.DEF's "p_cns equ byte ptr p_parent + word",
+                        # a structure-field OFFSET CONSTANT) does not.
+                        # This is only a forward-reference guess (no real
+                        # symbol table to check "aret" against yet) --
+                        # the final pass always re-evaluates the real
+                        # expression and gets the authoritative answer;
+                        # this just has to *size* the tentative encoding
+                        # the same way the final one will.
+                        rest = self._CAST_PREFIX_RE.sub('', operand_text, count=1)
+                        is_addr = bool(has_offset or self._BARE_REF_RE.match(rest))
+                    elif has_offset:
                         # "label equ offset <expr>" / "label equ $" (and
                         # arithmetic on these, e.g. SYSDAT.FMT's own
                         # "netmod equ (offset $)" or PARSE.SUP's "ndelims
@@ -317,9 +340,11 @@ class Assembler:
                         # instruction sizes being unstable between
                         # passes in general.
                         size = 2
+                        is_addr = True
                     else:
                         size = None
-                    self.prekind[label.lower()] = ('equ', size)
+                        is_addr = False
+                    self.prekind[label.lower()] = ('equ', size, is_addr)
 
     def _do_statement(self, stmt_text, filename, lineno, is_final):
         label, mnem, operand_text = parse_statement(stmt_text, ALL_MNEMONICS)
@@ -369,7 +394,17 @@ class Assembler:
         if low == 'equ':
             ctx = self._ectx(filename, lineno)
             v = eval_text(operand_text, ctx)
-            self.define_symbol(label, 'equ', v.n, v.size, filename, lineno, allow_redefine=True)
+            # is_addr tells parse_operand this EQU's own value is a genuine
+            # address -- either via "offset $"/"offset LABEL" (v.is_offset)
+            # or a bare alias of a real label (v.symbol.kind == 'label',
+            # e.g. "lret equ byte ptr aret") -- apart from a structure-field
+            # offset constant that merely carries a byte/word/dword ptr
+            # cast for sizing a *bracketed* use (e.g. "p_cns equ byte ptr
+            # p_parent + word"). See Symbol.is_addr's own comment in
+            # expr.py.
+            is_addr = v.is_offset or (v.symbol is not None and v.symbol.kind == 'label')
+            self.define_symbol(label, 'equ', v.n, v.size, filename, lineno, allow_redefine=True,
+                                is_addr=is_addr)
             return
 
         if low == 'cseg':

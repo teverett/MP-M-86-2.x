@@ -58,7 +58,17 @@ constat_entry:        ;check console status
 	call coninit
 	mov di,rlr ! cmp di,c_attach[si]
 	je cse_cl
-	    mov cl,f_dispatch ! call mpmif
+	    mov cx,f_dispatch ! call mpmif	;was "mov cl,f_dispatch" (an
+				;8-bit move, CH untouched) -- same bug
+				;class/fix as XIOS86Q.A86's own "idle:"
+				;(see its own comment), and confirmed a
+				;real, original DRI typo rather than
+				;something this tree introduced: this
+				;file's own `dirio_entry` (below) already
+				;correctly uses "mov cx,f_dispatch" for
+				;the exact same constant -- the two sibling
+				;call sites disagree in the real,
+				;unmodified 1981 source itself.
 	    mov bl,0 ! ret
 cse_cl:	call conbrk
 	mov bl,al ! ret

@@ -656,7 +656,35 @@ idle:	    ; Function 23: Idle
 ;	Cannot use any resource that might block it (poll
 ;	device, flags) -- same restriction as the real XIOS.
 
-	mov	cl,f_dispatch
+	mov	cx,f_dispatch	;"mov cl,f_dispatch" (an 8-bit move,
+				;CH untouched) was wrong -- same bug
+				;class/fix as INIT.SUP's own nrsp loop
+				;("mov cl,f_createproc", see its own
+				;comment): f_dispatch's real encoding
+				;needs CH=0 (a *global*, sysent-routed
+				;function number, not an explicit-module
+				;call), but CH survives from whatever
+				;this process's own CX last held (its own
+				;UDA-saved u_cx, restored verbatim by
+				;DSPTCH.RTM's own "switch:" on every
+				;dispatch) -- `func1`'s own "cmp ch,0!je
+				;userf" then takes the *explicit module*
+				;branch instead of the sysent lookup,
+				;misrouting this call entirely based on
+				;whatever CH happened to be. Confirmed
+				;live via GDB: idle's own `f_dispatch`
+				;call ended up landing on SUP's own
+				;supfunc[12] (`chain_entry`, falling
+				;through into `clicmd_entry`) instead of
+				;RTM's `dispatch_entry` -- idle spends its
+				;entire "idle loop" trying to attach to
+				;and read the console (which it can never
+				;get, since TMP already holds it) instead
+				;of ever reaching `dsptch`/`schedule`,
+				;which is why the real scheduler never
+				;runs again and TMP, correctly blocked
+				;waiting for console input, is never
+				;revisited.
 	call	supif
 	jmp	idle
 
@@ -673,7 +701,12 @@ rtm_poll:   ; check a device; if not ready, yield via RTM
 	call	polldev ! pop bx
 	cmp	al,0ffh ! je rtm_poll_ret
 	    cmp	stoppoll,true ! je rtm_poll
-	    mov	dx,bx ! mov cl,f_polldev
+	    mov	dx,bx ! mov cx,f_polldev	;same CH-untouched bug
+					;class/fix as idle's own f_dispatch
+					;above -- CX was last set to the
+					;device# (for polldev's own CL input)
+					;a few lines up and isn't guaranteed
+					;zero in CH afterward
 	    jmp	supif
 rtm_poll_ret:
 	ret
@@ -1094,11 +1127,17 @@ tickint:
 
 	dec	tick_count ! jnz tick_1
 	    mov	tick_count,60
-	    mov	dx,sec_flag ! mov cl,f_flagset
+	    mov	dx,sec_flag ! mov cx,f_flagset	;same CH-untouched bug
+					;class/fix as idle's own f_dispatch
+					;above -- doubly important here,
+					;since CX on entry to a hardware ISR
+					;is whatever the *interrupted* code
+					;happened to be using, never
+					;guaranteed zero in CH
 	    call	supif
 tick_1:
 	cmp	clockon,true ! jne tick_2
-	    mov	dx,tick_flag ! mov cl,f_flagset
+	    mov	dx,tick_flag ! mov cx,f_flagset	;see sec_flag's own fix above
 	    call	supif
 tick_2:
 	;	acknowledge the interrupt at the PIC before leaving --

@@ -5,9 +5,9 @@ from .lex import tokenize_expr, parse_number, SEGREG, REG16, REG8, MEM_COMBOS
 
 
 class Symbol:
-    __slots__ = ('name', 'kind', 'value', 'size', 'seg')
+    __slots__ = ('name', 'kind', 'value', 'size', 'seg', 'is_addr')
 
-    def __init__(self, name, kind, value, size=None, seg=None):
+    def __init__(self, name, kind, value, size=None, seg=None, is_addr=False):
         self.name = name       # original-case name
         self.kind = kind       # 'equ' or 'label'
         self.value = value     # resolved integer
@@ -21,6 +21,27 @@ class Symbol:
         # prefix (real ASM86's ESEG is defined as "whatever ES currently
         # points at", not just a third arbitrary segment like ASEG).
         self.seg = seg
+        # True only for an 'equ' whose *own* defining expression denotes a
+        # genuine address: rooted in "offset $"/"offset LABEL" (e.g.
+        # "supervisor equ offset $", "module_table equ dword ptr (offset
+        # $)"), or a bare alias of a real label (e.g. DATA.BDO's "lret equ
+        # byte ptr aret", meaning "the low byte stored at aret") -- as
+        # opposed to one built purely from EQU/literal arithmetic with a
+        # byte/word/dword ptr cast only for *bracketed-access sizing*
+        # (e.g. PD.DEF's "p_cns equ byte ptr p_parent + word", a
+        # structure-field OFFSET CONSTANT, not an address of its own: a
+        # *bare* reference like CONSOLE.CIO's "mov si,p_cns" means "SI :=
+        # 32", not "SI := word_at(DS:32)"). Confirmed by GDB register
+        # trace on a live boot: before this flag existed, "mov si,p_cns"
+        # assembled as a direct memory read of DS:0020h -- which, at
+        # runtime, is module_table's own BDOS far-pointer low word, not
+        # p_cns's intended offset-32 constant -- so SI silently picked up
+        # BDOS's own entry-point offset (0x37A0) instead, and every
+        # downstream cioattach/getccbadr computation keyed off that
+        # garbage SI operated on unrelated memory instead of the real
+        # console CCB. See parse_operand's own use of this flag for why
+        # the distinction matters for a *bare* (unbracketed) reference.
+        self.is_addr = is_addr
 
 
 class Value:
@@ -94,9 +115,9 @@ class ExprCtx:
             sym = self.symtab.get(key)
         if sym is None:
             if self.tentative:
-                kind, size = self.prekind.get(key, ('label', self.presize.get(key)))
+                kind, size, is_addr = self.prekind.get(key, ('label', self.presize.get(key), True))
                 seg = self.preseg.get(key) if kind == 'label' else None
-                sym = Symbol(name, kind, 0, size, seg)
+                sym = Symbol(name, kind, 0, size, seg, is_addr)
                 self.symtab[key] = sym
                 if self.pending is not None:
                     self.pending.add(key)
@@ -498,6 +519,27 @@ def parse_operand(text, ctx, branch_context=False):
         return Operand('mem', size=explicit_size,
                         mem={'base': None, 'disp': parse_number(m.group(1)), 'seg': seg_override})
 
+    # Same convention, but for a leading '.' on a bare *name* rather than
+    # a number (e.g. INIT.SUP's "mov es:.rsp_link,ds", RSP.DEF's own
+    # "rsp_link equ word ptr rsp_top" where "rsp_top equ 0" -- a pure
+    # structure-field-offset EQU chain with no label/offset anywhere in
+    # it). The dot is the explicit "dereference this address" marker
+    # here, same as for a number, so it must force a memory operand
+    # unconditionally -- unlike a *bare* (undotted) reference to the same
+    # name, which stays a plain immediate per Symbol.is_addr (see its own
+    # comment) precisely because "rsp_link"/"rsp_top" are themselves only
+    # offset constants, not real labels. Without this, "rsp_link"'s
+    # is_addr=False (correctly, for the undotted case) also made the
+    # *dotted* ".rsp_link" misclassify as an immediate, and MOV's own
+    # mem<-segreg form (the only one that makes sense for "give the
+    # segment register's value to a memory cell") had no matching
+    # imm<-segreg encoding to fall back to.
+    m = re.match(r'^\.([A-Za-z_][A-Za-z0-9_]*)$', text)
+    if m:
+        v = eval_text(text, ctx)
+        return Operand('mem', size=explicit_size or v.size,
+                        mem={'base': None, 'disp': v.n, 'seg': seg_override})
+
     low = text.lower()
     if seg_override is None and explicit_size is None:
         if low in REG16:
@@ -542,7 +584,7 @@ def parse_operand(text, ctx, branch_context=False):
         return Operand('imm', size=explicit_size or 2, mem={'value': v.n})
     if v.is_offset:
         return Operand('imm', size=explicit_size or 2, mem={'value': v.n})
-    if sym is not None and (sym.kind == 'label' or (sym.kind == 'equ' and sym.size)):
+    if sym is not None and (sym.kind == 'label' or (sym.kind == 'equ' and sym.size and sym.is_addr)):
         size = explicit_size or sym.size
         # A bare reference to a label declared under ESEG defaults to
         # ES, not DS -- see Symbol.seg's own comment for why (ESEG is

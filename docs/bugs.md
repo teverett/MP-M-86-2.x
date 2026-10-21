@@ -6275,3 +6275,200 @@ inserted lines and zero content differences anywhere else. No work
 was lost, but this is exactly the kind of mistake `AGENTS.md`'s own
 "never commit" rule exists to leave room to catch -- recorded here
 so a future round doesn't need to rediscover it the hard way.
+
+## 74. Followed up on #73's own open thread (the early-boot garbage
+right after the signon banner) -- re-confirmed `INIT.SUP`'s own
+module-init/`nrsp`/self-terminate sequence is genuinely correct, byte
+for byte, by disassembling the real compiled bytes directly; then
+settled what the repeating `"^@"` text actually is (`TMP`
+legitimately, harmlessly echoing a real stream of NUL bytes from
+`conin` as the standard `^@` control-character escape -- not a bug
+by itself); and finally hit a wall that looks like the real
+explanation for why this entire investigation has been so hard to
+pin down: **the crash's own timing is sensitive to which exact
+breakpoints are set, not just to single-stepping**
+
+**Re-verified #73's "garbage right after signon" lead was itself
+heading toward a correct, boring answer, not a new bug.**
+Disassembled the real bytes (not symbol lookups, which this file has
+already shown twice now can't be trusted at these low SUP offsets)
+from right after `XIOS86Q.A86`'s own `init` returns, all the way
+through `INIT.SUP`'s own `nrsp` process-creation loop and into
+`rsp_out`'s own termination call. Every instruction matches
+`INIT.SUP`'s own source exactly: the module-present check and far
+call that start this entry's own trace, the real IVT installation
+for `mpmint` (vector `0xE0`, pointed at `user_entry`, offset `0x39D`
+-- confirmed directly in the disassembly, matching `SYSTEM.DEF`'s own
+`mpmint equ 224`), the `'X'`/`':'` probe dumping `xiosmod`'s far
+pointer (already independently confirmed correct in #71), the real
+`nrsp` loop (`int 0E0h` with `CX=90h`, i.e. `f_createproc`, looped
+via `jcxz`/`jmp` exactly as `INIT.SUP`'s source reads), and
+`rsp_out`'s own markers through to the real termination call. No
+bug found here -- this whole stretch is correct, which also means
+#68/#71's own earlier "`INIT`'s termination is clean" finding is
+reconfirmed a third, independent way.
+
+**Settled the `"^@"` mystery directly.** Breakpointed `CHARIO.CIO`'s
+`ctlout` and its own inner `call conout` (the branch taken
+specifically for non-graphic characters -- `push dx ! mov dl,'^' !
+call conout ! pop dx ! or dl,40h`) with the stepi-free method: with
+`DL=00` (a real NUL, confirmed previously in #73), this round watched
+it cycle `ctlout -> conout('^') -> back to ctlout` **repeatedly**
+(30+ clean cycles in one run before this round's own breakpoint
+budget ran out, no crash). This is exactly `TMP`'s own designed
+behavior for an unprintable character: print `^`, then `0x00 XOR
+0x40 = 0x40 = '@'` -- i.e. `"^@"`, the conventional rendering of a NUL
+in a terminal. The repeating `"^@^@^@..."` seen all the way back in
+#70's own trace decode (and briefly, wrongly, suspected of being a
+reconstruction artifact or an `ABORT.RTM` marker collision) is simply
+this: `TMP` faithfully echoing a long run of real NUL bytes arriving
+from `conin`, over and over, exactly as designed. Not a bug on its
+own.
+
+**The actual wall hit this round**: re-running the *same* `ctlout`
+breakpoint check, with only one fewer intermediate breakpoint address
+being watched (dropping the `after_conout` checkpoint, keeping only
+`ctlout` itself and the crash site), changed the outcome completely
+-- the crash now hit after just **one** `ctlout` call, where the
+previous run had cycled cleanly through 30+ with no sign of trouble.
+Nothing about the *guest's* own code changed between these two runs;
+only how many addresses this session's own tooling was watching did.
+That rules out "it just takes N retries to overflow something" as
+the story -- if it did, the count would depend on the guest's own
+state, not on how many GDB breakpoints happen to be live. This
+strongly suggests the real trigger is a genuine wall-clock/real-time
+race (almost certainly still rooted in the UART's own emulated
+timing, given #68's already-confirmed false-ready quirk and how
+TCG's own execution speed relative to a real 16450's baud-rate-paced
+byte timing has come up repeatedly this session) that GDB's own
+overhead -- in this specific environment, apparently even just the
+bookkeeping cost of an extra live breakpoint, not only `stepi`'s
+already-confirmed `INT1` detour -- is itself enough to shift.
+
+**Where this leaves things**: the `1000:004A` crash is real,
+reproducible in every free-running trace, and still not root-caused
+to one specific faulting instruction. But its *context* is now
+solid and triply-confirmed: `INIT`'s own module-init/`nrsp`/
+termination sequence is clean; `TMP` reaches its own real
+`nextcommand`/`attach`/`conread_entry` flow correctly; the repeating
+output many earlier rounds chased as mysterious is `TMP` correctly
+echoing real NUL input; and every dispatch-chain component
+(`entry`/`xiosmod`/`functab`/`polldev`/`insert_process`) has been
+independently verified clean. What's left is a timing race this
+session's own tooling cannot observe without disturbing it -- not
+because of a single identified contamination source (`stepi`/`INT1`
+is confirmed and worked around; this round shows plain breakpoint
+*count* also matters, which is a new, harder constraint). Future
+investigation here will likely need either genuinely passive
+observation (a full instruction trace recorded by QEMU itself, e.g.
+`-d exec` to a log file, read after the fact, with zero GDB attached
+during the run) or accepting that this specific race needs to be
+reasoned about from the source and the hardware timing model
+directly, rather than caught live.
+
+## 75. Followed #74's own closing recommendation -- a genuinely
+passive QEMU-only trace, zero GDB, zero breakpoints, zero
+single-stepping -- and it paid off: the exact faulting `ret`, its
+wrong target, and the full accidental-decode path into `1000:004A`
+are now all directly confirmed, settling #67's year-old leading
+suspect for the first time
+
+**Method**: `qemu-system-i386 -accel tcg,one-insn-per-tb=on -d
+exec,nochain -D <logfile> -serial file:<consolelog> -display none
+-no-reboot -no-shutdown`, no `-s`/`-S`, no monitor, no GDB attached at
+any point. `one-insn-per-tb` forces exactly one guest instruction per
+translated block, so `-d exec`'s per-TB trace becomes a genuine
+per-instruction trace with no debugger-side perturbation at all --
+the thing #73 flagged `stepi`/`INT1` contamination couldn't give and
+#74 flagged plain breakpoint *count* also couldn't give. **Validated
+against the established baseline before trusting any of it**: the
+real COM1 console output this run produced is byte-identical in
+length to the already-known-good free-running trace (97,117 bytes,
+matching #73's own "97KB trace" and #65's post-fix 93,321-byte
+figure's successor) -- this specific logging setup does not change
+guest-observable behavior, unlike adding `-d int` alongside it (tried
+and discarded: logging interrupts as well as exec slows emulation
+enough that a 15-second run never even got past early BIOS/floppy
+polling, console output `0` bytes -- too perturbing to trust for a
+bug this timing-sensitive, so the write-up below relies only on the
+`exec,nochain`-only capture).
+
+**What the trace actually shows at the crash, read directly off real
+flat addresses (no `asm86 --symbols` reliance -- #73 already proved
+that's misleading at these exact low SUP offsets)**: after the
+already-confirmed-clean `nrsp` loop and `INIT`'s own termination
+sequence (#74), the very next two addresses are `0x104CD` then
+`0x102FA`, back to back, with nothing between them. Disassembling
+`build/kernel/MPM.bin.cseg` directly confirms `0x4CD` is a bare
+`IRET` (byte `CFh`), which means its popped `CS:IP` really is
+`1000:02FAh` -- and `0x2FA` is exactly `zdbg`, the hex-digit-to-port
+debug-print helper **confirmed at this same address by #67's own
+earlier, symbol-verified breakpoint**. This is the direct, traced
+confirmation of #67's own leading (and, at the time, unconfirmed)
+suspect: `INIT.SUP`'s `rsp_out` ends its `int mpmint`
+self-termination call with nothing coded after it but `zdbg`'s own
+body, so whatever return address the `mpmint` syscall gate's own
+dispatch-exit `iret` ends up using is the same one `int mpmint`
+itself pushed at the call site -- landing on `zdbg`, with no real
+`call` frame set up for it, exactly as #67 described but could not
+pin down end-to-end that round.
+
+**Traced the rest of the fall-through, instruction by instruction,
+the same way**: `zdbg` runs its real, correct 4-hex-digit print loop
+(`zdbg1`/`zdbg2`/`zdbg3`, `0x302`-`0x317`, matching #67's own
+symbol-confirmed addresses) and reaches its own unconditional near
+`ret` at `0x328` (byte `C3h`) -- confirmed by direct disassembly,
+right where `idle:` begins in the source per #67. Because this
+particular entry into `zdbg` was never a real `call` (it was the
+`iret`'s own fall-through landing, per above), there is no legitimate
+return address under it for this `ret` to consume. It pops whatever
+is actually there: `0x0043` -- squarely inside `INIT.SUP`'s own
+literal copyright/signon banner text, the same neighborhood #66
+already identified as a "wild jump into data," but never previously
+down to the exact instruction that produced it.
+
+**Decoded the accidental instruction stream from there, byte for
+byte, against the real banner text (`"...6 2.0 [5 Oct 81]..."`)**:
+`0x0043`: `2E 30 20` = `cs: xor [bx+si],ah` (3 bytes) → `0x0046`: `5B`
+= `pop bx` (1 byte) → `0x0047`: `35 20 4F` = `xor ax,0x4f20` (3 bytes)
+→ `0x004A`: `63 74 20` = `arpl [si+0x20],si`. All four landing
+addresses match the trace's own observed PCs exactly
+(`0x43`→`0x46`→`0x47`→`0x4A`), confirming this isn't guesswork --
+it's the literal path the real CPU took through literal string data.
+
+**At `0x004A`, the trace stops advancing and alternates forever**:
+`Trace: ...104a, fff53, 104a, fff53, 104a, fff53...`, confirmed over
+hundreds of repeats with nothing else interleaved. `0xFFF53` is
+`F000:FF53` -- the exact same SeaBIOS `INT1`/`#DB` debug-exception
+handler #73 identified and blamed entirely on GDB's own `stepi`
+mechanism. **That attribution needs qualifying, not retracting**:
+this round's trace proves the same handler is reached completely
+natively, with no GDB involved at all, right at this crash -- so
+`#DB`/`INT1` is not purely a tooling artifact; it is also a real part
+of this bug's own mechanism, at least here. The most likely
+explanation (not directly confirmed this round -- no GDB was attached
+to read `EFLAGS`/`DR7` at the exact moment) is that the trap flag
+ends up set somewhere in this same corrupted-stack chain, so every
+attempt to execute `arpl` at `0x004A` immediately re-traps before
+advancing to `0x004D`, and SeaBIOS's own handler `iret`s straight back
+without ever clearing it -- a self-sustaining trap loop that looks,
+from the outside (`info registers`, #66's own technique), exactly
+like a CPU permanently parked at one address, when it is actually
+cycling between two.
+
+**Where this leaves things**: the full mechanical chain from `INIT`'s
+own termination call down to the infinite `1000:004A`/`F000:FF53`
+trap loop is now traced and confirmed end-to-end, for the first time,
+with zero debugger interference -- closing #67's own open thread from
+many rounds back. What's still genuinely open: *why* the `mpmint`
+syscall gate's own dispatch-exit lands on `zdbg`'s pushed return
+address instead of `rsp_out`'s real caller context (is this always
+what happens on `INIT`'s very last termination, or does it depend on
+`rlr`/stack state left over from something earlier -- #67's own (a)/
+(b) ambiguity about *which* termination attempt it was is still
+unresolved), and *where* the trap flag genuinely gets set. Next
+round: disassemble the real `mpmint` interrupt-gate dispatch-exit
+code itself (flat offsets `0x4A2`-`0x4CD` in `SUP`'s own cseg) against
+`SUP.A86`'s source directly, byte for byte the same way this round
+read `zdbg` and the banner text, to find exactly which stack slot it
+pulls `0x02FA` from and why.

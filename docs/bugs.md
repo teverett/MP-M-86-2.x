@@ -7674,3 +7674,88 @@ own successful (pre-hang) dispatch cycles -- that single trace should
 catch the exact instruction that fails to reach `dret`/`int_disp_exit`,
 the same direct-tracing technique that nailed every other root cause
 in this file.
+
+## 86. Continued from #85's own next step. Didn't get to single-stepping
+`dispin` yet -- a side investigation (chasing `sleep_entry`'s own caller)
+ran long, cost a real but ultimately **self-corrected** false lead on
+console-attach ownership, and then landed on something more directly
+useful: live, stepi-confirmed evidence that `rlr` really does go
+transiently to `0` -- the exact thing #84/#85 both looked for and
+couldn't catch -- plus a second, separate GDB-reliability gotcha worth
+recording alongside #85's own.
+
+**False lead, fully self-corrected -- recorded so the next round
+doesn't re-walk it**: chasing *who* calls `sleep_entry` in #85's own
+busy-loop, a live read of `SYSDAT.FMT`'s `ccb` field (flat `0x169E4`,
+`CCB_OFFSET` in `tools/build_mpmsys.py`) came back `1015h`, which
+doesn't correspond to any real PD -- looked, for a while, like a second
+real corruption bug (even traced a plausible-looking but ultimately
+irrelevant path through the loader's own disk-read code before
+catching the error). It isn't one: `ccb` is a *pointer* field (GENSYS-
+computed in the real system; `build_mpmsys.py`'s own comment right
+above the write explains this is already a deliberate, correct fix for
+exactly the placeholder-zero problem its own comment describes), not
+the CCB array's own base -- `CHARIO.CIO`'s `getccbadr` (`mov si,ccb !
+add si,ax`) loads it and uses the *result* as the real base. `1015h`
+is `ccbtab0_off` (`XIOS86Q.A86`'s own private-tail CCB storage),
+exactly as intended. The *real* `c_attach` lives at `sysdat + 1015h`
+(flat `0x179A5`), and reads `0E40h` -- TMP's own PD, a perfectly
+legitimate, correct attachment. No console-ownership bug exists;
+disregard the opposite impression a shallower read of this same cell
+would give.
+
+**What's actually confirmed this round, with the methodology to
+reproduce it:**
+
+- `idle`'s own `f_dispatch` call was traced instruction-by-instruction
+  end to end this time (not just spot-read), `hbreak` at `idle` itself
+  (flat `0x15F69`) through roughly 35 `stepi`s -- `mov cx,f_dispatch`
+  (`CX=8Eh`, `CH=0` correctly loaded, confirming #83's own fix is
+  intact) → `supif` → `SUPIF.SUP`'s `entry`/`entry_notfs`/`mpmif`/
+  `func`/`func1`/`userf`/`nonet` (`CL` correctly becomes `0Ch` from
+  `sysent[8Eh]`) → `inmod`/`gofar`/`goodmod` (`AL=2`=`rtm`, module-map
+  bit test passes) → right up to the `callf module_table[si]` that
+  should land on RTM's own `entry:`. Every single register matches
+  the known-good path at every step. **`idle`'s own loop is not where
+  the busy-loop comes from** -- a cleaner, harder confirmation of what
+  #85 already suspected from the `sysent[142]` read alone.
+- Breaking at `cioattach`'s own top (`CONSOLE.CIO`, flat `0x12E64`)
+  and trusting naive repeated `continue` (no `stepi` in between)
+  reproduced **the exact same stale-non-progress pattern #51 already
+  documented for plain breakpoints** -- six "hits" in a row with
+  bit-for-bit identical `BX`/`CX`/`SI`/`SP`. Re-run with one `stepi`
+  pair inserted between each `delete`+`hbreak`+`continue` (confirming
+  real forward motion before trusting the next hit, exactly #51's own
+  prescription) tells a completely different story: hit 1 is TMP's own
+  legitimate first attach (`BX=0E40h`); hits 2 through 6 are a second,
+  genuinely-advancing (stack pointer dropped from `F8h` to `E8h`, a
+  real nested call) sequence with **`BX=0`** -- i.e. `cioattach`'s own
+  `mov bx,rlr` read the ready-list-empty sentinel directly, live,
+  stepi-verified real. This is the one direct observation #84 and #85
+  both went looking for and missed (#85's own continuous `watch` on
+  `rlr`'s memory cell, run at the wrong moments, never caught it).
+- It is **not** a permanent condition: a plain `interrupt`+read
+  immediately afterward, same session, shows `rlr=09F0h` (idle) again,
+  `indisp` still stuck `0FFh`. So `rlr` reads `0` for at least one real
+  instruction during whatever sequence gets `indisp` stuck, then gets
+  refilled with `idle` by *something* before the system settles into
+  the busy-loop #85 already characterized (bouncing through `entry:`
+  trampolines, `sleep_entry`, `dsptch`'s guard bailout) -- it isn't
+  `switch:` blindly running on a `rlr=0` it never recovers from, the
+  simplest version of that theory, since `rlr` is sane again by the
+  time anything else gets to read it.
+
+**Next step, sharpened by this round's own false start and its real
+finding**: #85's own prescribed `dispin` single-step-through is still
+the right next move, unchanged -- but now specifically watch `rlr`
+*during* that one traced pass (not just before/after it) for the exact
+instruction that reads it as `0`, and the exact instruction afterward
+that refills it with `idle`, to see whether that refill is what
+*fails* to also clear `indisp` on this one occasion (the two could be
+adjacent in the same code path, `switch:`'s own tail, and a single
+skipped instruction there would explain both symptoms from one root
+cause). Use `hbreak`+`stepi`-confirmed-progress throughout, per both
+this entry's and #51's own methodology notes -- naive repeated
+`continue` has now been caught giving false "no progress" *and* false
+"progress" (stale-identical-hit) readings on this gdbstub, at two
+different addresses, in two different sessions.

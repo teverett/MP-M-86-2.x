@@ -8023,3 +8023,278 @@ hang: `idle`'s own `u_ivectors` (flat `0x17188`) and the real IVT
 stub addresses (`F000:FF53` for vectors 0/1/3/4, `F000:E2C3` for
 vector 2) -- `switch:`'s save/restore of these is working correctly,
 not the mechanism here.
+
+## 89. Continued #88's own next step (read TMP's blocking path and
+`idle`'s dispatch cycles side by side for a shared non-atomic field).
+Found no new root cause, but **closed out two long-standing open
+theories with hard live/byte-level evidence** (one of them predating
+#83), replicated #88's timing finding on a third, independently-fast
+host, and caught an important methodology gap in #88's own single-
+touch window-narrowing that future sessions should not repeat.
+
+**Theory #1 closed, live-confirmed, 5/5 -- the pre-#83 "`fdisp` cuts
+into `switch:`'s own non-atomic DS/SS/SP restore" theory (`switch:`,
+flat `0x11A8F`) is wrong.** Using the established delete+rearm-per-hit
+`hbreak` discipline (#85/#86), broke at `switch:`'s entry 5 independent
+times across a fresh boot and read `$eflags` each time: **`IF=0` all 5
+times**, no exceptions. `switch:` (and therefore its `mov ss,u_ss !
+mov sp,u_sp`) only ever runs with hardware interrupts disabled --
+confirming, live, what a careful re-read of the full `dsptch:` body
+already implied (`drltorlr`'s own unconditional `cli` at its top is
+reached either straight through from `schedule:`'s poll loop, which
+re-`sti`s only transiently per polled device and always re-`cli`s
+before the next `drltorlr` iteration, or directly if the poll list and
+DRL are both empty -- there is no path from `dispin` to `switch:` that
+leaves `IF=1`). `fdisp`'s own interrupt path can still fire *during*
+`schedule`'s poll-loop `sti` window, but lands on `indisp` already
+`true` and bails via a bare `iret` that touches nothing -- safe by
+construction. This specific mechanism, floated again as #87's own
+"working theory," is now a dead end; stop pursuing it.
+
+**Theory #2 closed, byte-level-confirmed -- `dispin`'s register-save
+sequence and `switch:`'s restore sequence are NOT asymmetric.** Worried
+(from a cold read of `DSPTCH.RTM` alone) that `mov u_ss,ss`/`mov
+u_sp,sp` at `dispin` (lines just before the `push es ! pop ds` comment
+block) might execute before `DS` is switched to the outgoing process's
+own UDA, landing in a shared SYSDAT scratch cell instead -- while
+`switch:` restores `u_ss`/`u_sp` from the *incoming* process's own UDA,
+a real corruption path if true. Settled by disassembling the live
+compiled bytes at `dispin` (flat `0x11804`) instruction by instruction,
+confirmed against `UDA.FMT`'s own offsets: `C6 06 5E 0B FF` = `mov
+indisp,true` (confirms `indisp`'s dseg offset `0B5Eh`, and live `$ds`
+read back `1699h` at the same breakpoint -- the first direct live
+confirmation of the SYSDAT segment value this file has on record);
+`26 8F 06 4E 00` = **`ES:` pop `u_flag_sav`** (offset `004Eh`); `26 8C
+16 1E 00` = **`ES:` mov `u_ss`,ss** (offset `001Eh`); `26 89 26 1C 00`
+= **`ES:` mov `u_sp`,sp** (offset `001Ch`) -- all three correctly
+`ES:`-prefixed (byte `26`), even though the source text itself never
+spells out `es:` anywhere in this sequence. That's `tools/asm86/expr.py`
+doing exactly what its own comment says it does: a bare reference to a
+label declared under `ESEG` (`UDA.FMT`'s own `eseg`/`org 0` block,
+which `u_ss`/`u_sp`/`u_flag_sav`/`u_in_int` all live in) defaults to
+`ES:`, not `DS:`, with no override ever written explicitly anywhere in
+this source tree -- confirmed in the assembler source
+(`parse_operand`'s `if mem_seg is None and sym.seg == 'eseg': mem_seg =
+'es'`) and now in the actual emitted machine code too. `ES` at that
+point is genuinely the *outgoing* process's own UDA (set by
+`do_dispatch`'s `mov es,p_uda[bx]` for the interrupt path, or expected
+as a standing kernel-wide invariant for the direct `pdisp` path, per
+`UDA.FMT`'s own header comment: "While in the operating system, The
+Extra Segment register points to the beginning of the User Data
+Area"). `switch:`'s own restore side was spot-checked the same way
+(bytes at flat `0x11A8F`) and matches source exactly, `DS` explicitly
+loaded from `p_uda[rlr]` before every `u_*` read -- no asymmetry
+exists. Also resolved, along the way, why `dsptchtos` (`mov sp,offset
+dsptchtos`) decodes to the *same* immediate value as `indisp`'s own
+offset (`0B5Eh`): `SYSDAT.FMT` declares `dsptchtos` as a zero-size `rw
+0` marker sitting immediately after a dedicated 48-word (`rw 48`)
+scratch buffer, with `indisp` the very next field after that marker --
+the standard GENSYS `xxx_tos`-after-a-reserved-buffer idiom used
+identically for `idle_tos`/`tick_tos`/`init_tos` just above it in the
+same file, not an overlap or a bug.
+
+**Timing, replicated on a third host**: narrowed the clean-to-stuck
+transition (TMP still legitimately polling via `rtm_poll`/`polldev`,
+XIOS86Q.A86 flat `0x15FD9`-ish, vs. `idle` dispatched with `indisp`
+genuinely stuck) to roughly **t=0.12s-0.14s** post-boot on this
+session's host, via the same single-touch sparse-probe technique as
+#88, +-10-20ms of run-to-run host scheduling jitter (confirmed by
+repeating the identical nominal delay 5 times and seeing both outcomes
+at e.g. 0.12s). This is a close independent replication of #88's own
+0.10s-0.15s figure on a *different* fast host, reinforcing the
+already-established "absolute time-to-hang tracks host CPU speed, not
+a fixed guest-time duration" conclusion rather than adding a new one.
+On this specific host, a boot left completely untouched until a single
+first probe at t=2.0s is already stuck 3/3 -- i.e. the full boot-to-hang
+window here is on the order of **2 real seconds or less**, even faster
+than #83-87's hosts (~13-20s) and in the same fast ballpark as #88's
+own (sub-second).
+
+**Methodology gap found and worth flagging explicitly**: a *single*
+`interrupt`+read sample showing `indisp=0FFh` is **not by itself proof
+of permanent stuck-ness** -- `indisp` reads true for the entire
+duration of every legitimate, successfully-completing dispatch pass
+too (confirmed directly: the 5 `switch:`-breakpoint hits used for the
+`IF` check above all read `indisp=0FFh`, `rlr=09F0h` (idle), simply
+because `switch:` sits inside the `dispin`...`dret` window by
+construction, not because anything was hung). #87/#88's own "poll
+every ~2s" and "two single-touch reads one real second apart" techniques
+survive this concern (a real stuck condition reads `0FFh` on *every*
+sample across many seconds, which a normal toggling pass cannot fake
+for long), but a *single* fresh-boot probe at one specific delay --
+exactly #88's own last-round technique for narrowing the 0.10s-0.15s
+window, and this entry's own first pass at it -- cannot distinguish
+"caught mid-dispatch, about to clear normally" from "genuinely wedged"
+on its own. Confirmed empirically by re-running this entry's own
+single-touch probes with a second, ~2s-later confirm read added on the
+*same* still-running QEMU instance: every single probed delay from
+0.10s through 0.20s read `indisp=0FFh` on the confirm pass regardless
+of what the first touch showed, consistent with this host's own ~2s
+natural hang window (see above) rather than the touch itself causing
+or accelerating anything -- a two-sample confirm is cheap (sparse
+touches don't perturb the race per #87/#88) and should be standard
+practice for any future single-boot timing probe in this investigation.
+
+**Next step**: both of the two remaining *structural* theories
+on record predating this entry (non-atomic `switch:` restore,
+save/restore segment asymmetry) are now closed with direct evidence.
+The one piece of the dispatch body never yet audited live is
+`schedule:`'s own poll loop (`polld_another`, `XIOS86Q.A86`-adjacent
+`DSPTCH.RTM` code) -- the *only* place `indisp` is true while `IF=1`
+(deliberately, via its own `sti`), relying entirely on `fdisp`'s
+indisp-guard bare-`iret` bail for safety. That bail path assumes the
+interrupted code's own live registers (notably `DI`/`SI`, `schedule`'s
+own list-walk cursors, never saved by `fdisp`'s trivial bail) survive
+an arbitrary tick interrupt untouched -- true for a clean `iret`, but
+never directly confirmed live. Breakpoint inside `polld_another`
+(after `mov di,si` each iteration) with `indisp` already true, let a
+real tick interrupt land (don't disable the clock), and confirm `DI`
+reads back unchanged afterward, is the one structural stone still
+unturned in this specific path.
+
+## 90. Skipped #89's own handed-off `polld_another`/`DI` check (static
+reasoning made it low-priority: `fdisp`'s bail path only ever touches
+`DS` and flags, never `DI`/`SI`, confirmed by re-reading `fdisp`'s own
+body line by line -- `cli / push ds / mov ds,cs:sysdat / cmp
+indisp,true / jne do_dispatch / pop ds / iret`, nothing else). Instead
+found a new, previously-unconsidered **candidate root cause** for how
+`indisp` gets stuck in the first place, confirmed down to the actual
+compiled bytes, plus a **live-confirmed downstream mechanism** for why
+getting stuck is permanent and symptom-matching, neither tried before.
+
+**Candidate root cause, byte-level confirmed, not yet caught live**:
+`switch:`'s own `dret:` tail --
+
+```
+dret:	push u_flag_sav ! popf
+	mov indisp,false
+	ret
+```
+
+-- is byte-for-byte identical to the original 1981 DR source
+(`orig/mpm862sr/02/DSPTCH.RTM`, same three lines, confirmed by direct
+diff of both files' `dret:`-through-`ret` regions) and to this port's
+own actual compiled bytes (read directly from `build/kernel/MPM.bin.cseg`
+at `dret`'s file offset `0x1AF8`: `26 ff 36 4e 00` = `ES: push
+[004Eh]` i.e. `push u_flag_sav`; `9d` = `popf`; `c6 06 5e 0b 00` =
+`mov [0B5Eh],0` i.e. `mov indisp,false`, no segment prefix, matching
+`indisp`'s confirmed DS-relative offset; `c3` = `ret` -- no hidden
+`cli`/`sti` anywhere in the sequence). **`POPF`, unlike `STI`, has no
+one-instruction interrupt-inhibition shadow on x86** (documented
+since the original 8086: `STI` delays interrupt recognition until
+after the *following* instruction executes; `POPF` takes effect
+immediately, with no such delay) -- so if `u_flag_sav` has `IF=1` (the
+normal case for both `idle` and `TMP`), a pending hardware tick
+interrupt can be taken by the CPU in the single-instruction gap
+between `popf` and `ret`, i.e. **after** `indisp` has already been
+cleared but **before** the process has actually resumed.
+
+If that happens: the tick ISR (`XIOS.A86`'s tick handler) unconditionally
+ends with `jmp intdisp -> fdisp`. `fdisp` checks `indisp`, now sees
+`false`, and -- instead of its usual bare-`iret` bail -- takes the
+`do_dispatch` path, treating the about-to-resume process as an
+ordinary *running* process being legitimately preempted. `do_dispatch
+-> dsptch -> dispin` then saves `u_ss:u_sp` as the *current* `SS:SP`
+-- but the hardware interrupt entry has already pushed a 6-byte
+`IP:CS:FLAGS` frame onto that exact stack, on top of the process's own
+real, legitimate return address, since `dret`'s `ret` never got to
+consume it. That corrupted `SP` becomes the process's officially saved
+resume pointer. The next time this same process is switched back in,
+`switch:`'s own final `ret` pops the *stale interrupt frame* instead
+of the real return address -- jumping into the middle of kernel code
+(right after `switch:`'s own `popf`, by construction) instead of back
+into the process's own code, with a flags value that happens to be
+whatever `switch:`'s own local working flags were caught at.
+
+**This single mechanism accounts for every empirical finding in
+#83-89 without exception**: any added per-instruction overhead
+(`stepi`, watchpoints, `-d exec`/`nochain` tracing) shifts exactly
+which instruction a tick interrupt lands on, and the vulnerable window
+here is a single instruction wide -- explaining why *every* live-
+observation technique tried so far made the hang vanish. Absolute
+time-to-hang tracking host CPU speed rather than guest time is exactly
+what a probabilistic race against real-wall-clock timer cadence would
+produce. #88's localization of the transition to the exact handoff
+into `idle`'s first dispatch is consistent (every dispatch exercises
+this exact `dret` sequence, so the first one is as likely to lose the
+race as any other). #89's own confirmation that `switch:` always runs
+with `IF=0` is also exactly consistent -- true for the entire body,
+right up to the one instruction (`popf`) that flips it, one
+instruction before the vulnerable `ret`.
+
+**Not yet confirmed live** -- this is reasoned from the source and
+the documented hardware/QEMU-TCG interrupt-shadow model (QEMU's
+target/i386 implements `STI`'s one-instruction shadow explicitly and
+gives `POPF` no equivalent, matching real silicon), not caught in the
+act. The race is exactly as hard to catch live as everything else in
+this file for the same reason it exists: any observation technique
+precise enough to catch the exact `popf`/`ret` boundary is also
+precise enough to perturb which instruction the next tick lands on.
+
+**New downstream mechanism, live-confirmed this round, independent of
+the above**: once `indisp` is stuck `true`, every *subsequent* call
+into `pdisp`/`dsptch` -- including from the currently-running process
+itself, voluntarily yielding, not just interrupt-forced redispatch --
+becomes a **silent no-op**. `dsptch`'s own entry guard is `pushf / cld
+/ cli / cmp indisp,true / jne dispin / popf ! ret` -- if `indisp` is
+already `true`, the call just restores flags and returns immediately,
+with no actual list manipulation, no actual switch, nothing. Confirmed
+live, three independent fresh-boot samples, single-touch-plus-
+`detach` each (per #88's own resume-reliability fix): once in the
+confirmed-stuck state, `CS` stayed `1000h` every time but `IP` was
+different every single sample (`0x33A4` inside `CIO.A86`'s
+`getccbadr` -- confirmed by disassembling the actual compiled bytes at
+that file offset and matching them instruction-for-instruction against
+`getccbadr`'s known body, `mov bx,[rlr] / sub ax,ax / mov al,bh / shl
+ax,1 / shl ax,1 / mov si,[ccb] / add si,ax / add si,ax / add si,ax /
+ret`, i.e. `ccb + console#*12` per `XIOS86Q.A86`'s own comment on this
+routine; `0x268`/`0x2FB`, two more samples two real seconds apart on a
+second fresh boot, both inside `SUP`'s own module range) -- `eflags`
+also varied sample to sample (`IF` sometimes 0, sometimes 1). **This
+rules out both "the CPU is halted" and "the CPU is spinning in one
+tight infinite loop"**: something is genuinely, continuously executing
+varied kernel code the whole time `indisp` stays stuck. The
+straightforward reading: whichever process is currently `rlr` (almost
+always `idle`, per #88) keeps calling `pdisp` in its own loop exactly
+as designed, but every one of those calls is now a no-op that returns
+immediately without ever reaching `schedule`/`switch` again -- so
+`idle` just spins forever, legitimately busy (making whatever other
+calls its own loop body makes along the way, which is why `IP` varies
+sample to sample), while `TMP` (or whoever actually owns the console)
+never gets a turn again. This is the first live confirmation of *why*
+a stuck `indisp` specifically presents as "console input never
+serviced again" rather than a crash or visible lockup.
+
+(One live reading this round should be discounted: an attempted direct
+read of `rlr` at flat `0x169F8` -- `sysdat` segment `0x1699` (independently
+re-confirmed this round via the same `indisp`-at-`0x174EE` byte-read
+method #89 used) `*16 + 0x68` (`rlr`'s own confirmed `SYSDAT.FMT`
+offset) -- returned `0xE5E5` identically across two independent fresh
+boots, which looks like a stale/wrong-segment artifact rather than a
+real `rlr` value and needs redoing carefully, not trusted as-is.)
+
+**Next step**: the live-confirmed downstream mechanism (silent-no-op
+`pdisp` once stuck) is now solid and doesn't need more work. The
+candidate root cause (the `popf`/`ret` interrupt-shadow gap in `dret`)
+is the one piece left needing a live-or-equivalent confirmation before
+calling this closed, given how many earlier "working theories" in this
+file turned out wrong under scrutiny. Two ways forward, neither tried:
+(a) a targeted fault-injection test outside QEMU's normal timer path --
+e.g. a one-off patched build that forces a tick IRQ to fire
+synchronously right after `dret`'s `popf` (a debug-only, deliberately
+non-authentic build, not a change to `src/`) and confirms the
+predicted stack corruption happens exactly as reasoned; or (b) a
+live GDB session with a breakpoint on `fdisp`'s `do_dispatch` entry
+(not the bail path) that, on each hit, checks whether the *resuming*
+process's own about-to-be-restored `IP` (read from `u_ss:u_sp` before
+the corruption, if catchable at all) falls outside that process's own
+known code range -- harder to set up than (a) but requires no
+non-authentic build. If either confirms the mechanism, the fix is a
+real design decision, not a one-line patch: the original DR dispatcher
+has always had this exposure on real 8086 hardware too (confirmed
+identical in `orig/mpm862sr/02/DSPTCH.RTM`), just apparently rare
+enough there to never bite in practice, so patching `dret` to close it
+would be a deliberate deviation from the authentic source, not a
+restoration of broken intent -- worth flagging to whoever decides
+whether this port stays byte-faithful to GENSYS-86 dispatcher
+semantics or not.

@@ -8795,3 +8795,263 @@ confirmed protects ordinary process creation in general, so the bug
 here is more likely upstream of `cp_uda` (whatever segment value
 `COMMAND.SUP` hands it in the first place for this failure case) than
 in `cp_uda` itself.
+
+## 96. Followed #95's own next step -- read `COMMAND.SUP`'s
+`clicmd_entry`/`cli_fload` and `PARSE.SUP`'s `parse_entry` in full,
+side by side. **Ruled out the most obvious candidate theory (stale/
+unpadded FCB bytes making `AB` spuriously match a real file like
+`ABORT.CMD`) with direct evidence, narrowing the remaining mystery,
+but did not find the exact fault** -- and hit a new, specific,
+reproducible GDB/interactivity limitation worth recording for next
+time.
+
+**FCB construction confirmed clean**: `PARSE.SUP`'s `parse_entry`
+calls `fcbinit` unconditionally at its own top, which blank-pads the
+*entire* FCB (name bytes 1-11 explicitly set to `' '`, bytes 12-15
+zeroed, password field blanked) before anything else touches it, then
+`parse_entry`'s own `setfld` fills in only as many real characters as
+were actually typed, leaving the rest however `fcbinit` left them --
+i.e. `AB` genuinely becomes `"AB      "` (two real chars, six real
+blanks), not stale/leftover bytes from a previous parse. This rules
+out the "incomplete padding makes `AB` wildcard-match `ABORT.CMD`"
+theory directly, by reading the actual padding code, not by
+inference.
+
+**`cli_fload`'s own structure re-confirmed**: a PD is pulled from the
+free list (`pul`) and zeroed *before* the file is ever opened, but the
+actual dispatch to `f_createproc` (line ~429, well after `cli_gopen`)
+is only reached if `fileopen` returns `bl=0`, with every failure path
+(`cli_bopen`/`cli_bopene`) correctly setting `cli_err` and jumping to
+`cli_rmpd` (which returns the PD to `pul`) *before* reaching the
+create-process call -- read in full, this logic looks correct for the
+simple "file genuinely not found" case. The real question is now
+squarely "why does `fileopen` return success for `AB`", not anything
+about `cli_fload`'s own control flow.
+
+**Traced as far as the existing passive capture allows**: `cli_fload`
+(flat `0x105AF`, confirmed) is reached, and execution continues a
+little further (to `0x105BC`) before leaving the logged range -- but
+neither `cli_gopen` (`0x106E0`) nor `cli_bopen`/`cli_bopene`
+(`0x106D2`/`0x106D7`) appear anywhere in #95's own saved trace capture,
+for either outcome. This is very likely a `nochain`-style gap (the
+earlier capture used plain `-d exec,cpu`, *without* `nochain`, for
+speed -- #88's own established caveat that chained blocks only log
+their *first* visit through the main loop, and a long, mostly-linear
+run through `fileopen`'s own cross-module call and the few comparisons
+around it would very plausibly chain straight through without a fresh
+log line at either label) rather than evidence that neither branch
+ran.
+
+**New GDB/interactivity limitation found, specific to this scenario,
+not general**: every attempt this session to set a *live* breakpoint
+(at `cli_gopen`, at `cli_bopen`, at both at once, with or without the
+file-marker coordination trick from earlier entries) and `continue`
+through a real `expect`-driven keystroke sequence failed the exact
+same way -- `[Inferior 1 (process 1) exited normally]` almost
+immediately, regardless of which address was armed, including
+addresses that should only ever be hit *after* a real command line is
+submitted (i.e. failing before the target keystrokes were even due to
+arrive). Isolated carefully: a `continue` through a hardware
+breakpoint works completely normally against a `-serial mon:stdio`
+QEMU instance spawned under `expect`, *as long as no real input is
+ever sent* -- confirmed directly, same exact script, same spawn
+method, just without the later `send`. The instability appears
+specifically the moment real characters are sent through `expect`'s
+own `send` while a GDB session is simultaneously attached and
+`continue`-ing. Not resolved *why* -- a real race/interaction between
+this QEMU gdbstub and its own stdio-multiplexed serial handling under
+simultaneous remote-debug control, rather than anything about this
+bug's own address range (sanity-checked against `dispin`, a
+completely unrelated, frequently-hit, known-safe address, which
+reproduced the same instability once real input was involved). **Any
+future live GDB session on this specific CR-crash repro should assume
+`continue` while input is in flight is unreliable and prefer passive
+`-d exec,cpu` trace capture (per #95) over live breakpoints.**
+
+**Next step**: re-capture #95's own trace, this time either (a) with
+`-dfilter` narrowed *very* tightly to just `0x105af`-`0x106ff`
+(`cli_fload` through `cli_gopen`/`cli_bopen`) *and* `nochain` added --
+narrow enough that `nochain`'s per-TB overhead might stay affordable
+even though it's not supposed to help with filtering per se, worth
+trying empirically since the window here is much smaller than a full
+boot -- or (b) accept the chaining gap and instead set the live
+breakpoint at `cli_fload` itself (confirmed reachable, well before any
+`send` of real input happens, so plausibly safe per this entry's own
+finding) and single-step (`stepi`, never `continue`) through
+`fileopen`'s own body by hand from there, since `stepi` was not
+implicated in this entry's own instability finding, only `continue`
+across a `send` boundary was.
+
+## 97. Continued pushing on #96's specific gap with three cheap,
+decisive black-box repro tests instead of more (broken) live tooling
+-- narrowed the bug precisely, down to "any attempt to load a
+non-existent `.CMD` file," ruling out the leading theory along the
+way.
+
+**Test 1 -- a command that cannot possibly fuzzy-match any real
+file**: sent `ZZ` + `CR` (no file on this disk starts with `ZZ`,
+unlike `AB`/`ABORT.CMD`). **Crashed identically** (echoed `ZZ` back,
+then nothing -- no error message, no second prompt, same silent
+death as every `AB` repro). **This directly refutes #95/#96's own
+leading "spurious FCB fuzzy-match against a real file" theory** --
+the bug cannot be about `AB` accidentally matching `ABORT.CMD`,
+since `ZZ` matches nothing on this disk at all and dies the exact
+same way.
+
+**Test 2 -- a genuinely empty command (bare `CR`, nothing typed
+first)**: survived completely normally, echoed cleanly, printed a
+real second `0A>` prompt. **This rules out every theory that blamed
+something generic in `TMP.A86`'s own post-`CR`/post-`conread`
+sequence (echo, `freedrive`, `attach`, prompt redraw)** -- those all
+run on the empty-command path too, and are fine. The bug is
+specifically inside the *non-empty, unrecognized-command* path --
+i.e. genuinely inside `clicmd_entry`/`cli_fload`'s attempt to find
+and load a `.CMD` file that does not exist, exactly as originally
+suspected, just not for the reason (fuzzy match) first guessed.
+
+**Test 3 -- confirmed no error message *ever* prints, for either
+repro**: neither `AB` nor `ZZ` ever produces `TMP.A86`'s own
+`openerr` string (`"?Can't Find Command"`), which the normal
+"file genuinely not found" path (`cli_bopen`/`cli_bopene` setting
+`e_bad_open`, returned up through `clierror`'s own `showerr`) should
+print before looping back to `nextcommand`. **This means the crash
+happens *before* `cli_fload` ever returns an error code to `TMP` at
+all** -- i.e. somewhere inside the open-attempt-and-retry sequence
+itself (`cli_fload`'s own PD-pull/zero step, the `fileopen` cross-
+module call, the system-disk retry, or `FILE2.BDO`'s own real
+directory-search loop), not in how the *result* of a correctly-
+detected failure gets reported afterward. `FILE2.BDO`'s own
+character-by-character directory-search loop (`srchloop`/`srchok`/
+`SEARCHNM`, read in full this entry) looks like a faithful,
+structurally correct CP/M-style exact-match-or-wildcard scan on a
+static read -- nothing obviously wrong jumped out, consistent with
+this being deep, probably-authentic 1981 DRI logic rather than a
+rebuild artifact, same caution as #96's own read of `cli_fload`.
+
+**Status at handoff**: the bug is now narrowed to a specific,
+three-step chain -- `cli_fload`'s PD-pull-and-zero, then the
+`fileopen`/`f_fopen` cross-module dispatch and `FILE2.BDO`'s own
+real search, for a file that is *certain* not to exist -- somewhere
+in there, not in anything downstream of a correctly-returned failure
+code. `cli_fload`'s own structure (#96) and `FILE2.BDO`'s own search
+loop (#97) have both been read in full and look correct on inspection;
+the live-GDB route to catch this directly remains blocked by #96's
+own "`continue` across input delivery is unreliable for this repro"
+finding. **One cheap static lead checked and ruled out, same entry**:
+`cli_fload`'s own PD-zeroing step (`rep stosw`, size `pdlen/2`) uses
+`SYSTEM.DEF`'s hardcoded `pdlen equ 030h`. Summed `PD.DEF`'s own
+field list by hand (`p_link` through `p_wscrtch`, respecting each
+field's real size including `p_name`'s `pnamsiz`-sized block and
+`p_reserved`'s 2-word span): total is exactly `48` (`030h`) bytes,
+matching `pdlen` precisely -- no stale-constant mismatch here, unlike
+the similar-looking bugs this file has found elsewhere (#4/#5/#6).
+
+**Next step, still untried**: the two options #96 already proposed
+remain the most promising paths to the exact faulting instruction --
+a tightly `-dfilter`'d `nochain` capture just for the open/retry
+window, or a `stepi`-only walk from a safely-reached breakpoint at
+`cli_fload` (never issuing `continue` across the point where real
+input is in flight, per #96's own isolation of that specific
+instability).
+
+## 98. Did the `stepi` walk from `cli_fload` #96/#97 handed off --
+**and it worked end to end**, after first solving the exact tooling
+problem #96 flagged. Caught the wild jump to `0000:0000` live,
+instruction by instruction, and identified both its immediate cause
+and, one level further back, the real corruption.
+
+**Tooling fix, making the live walk possible at all**: #96's own
+"`continue` is unreliable once real input is in flight" finding turned
+out to be solvable, not a hard wall. Root cause: every previous
+attempt used `mon:stdio`/pty/`-serial unix:...` rigs that, it turns
+out, were *themselves* broken independent of GDB (confirmed directly:
+a plain, no-GDB `-chardev socket,...,wait=off` test produced zero
+bytes in either direction, even sending a bare `CR` and waiting).
+Switching to `-chardev socket,...,server=on,wait=on` (QEMU blocks
+startup until a client connects, so nothing written before connection
+is ever lost) gives a clean, fully reliable bidirectional channel --
+confirmed first stand-alone (full boot banner captured byte for byte,
+no GDB involved), then combined with a `-S`-started GDB session: one
+single `hbreak`+`continue` from the pristine, never-touched `-S` start
+(matching #91's own "one continuous session, never detach-reattach"
+discipline) runs cleanly through the *entire* boot, the external
+socket client's own `ZZ`+`CR` send, and lands on the `cli_fload`
+breakpoint without any instability at all. The earlier failures were
+about broken *input* rigs, not about GDB/`continue` and real input
+being fundamentally incompatible.
+
+**The walk itself**: `stepi`, no further `continue`, logging
+`cs:ip`/`bx`/`ds`/`es` every step. Confirmed directly, live: execution
+runs through `COMMAND.SUP`'s own `cli_fload` and `fileopen` path,
+through `TMP.A86`'s own code (flat `~0x166e`-`0x169c`) and `RTM.A86`
+(flat `~0x1574`-`0x16f3`), and then -- the actual moment -- hits a
+`ret` at `RTM.A86` flat `0x1157c` that pops **`0x0000`** as its return
+address, landing at flat `0x10000` -- **`INIT.SUP`'s own absolute
+first instruction, `jmp init`, the one-time cold-boot entry point**.
+
+**The `ret` itself identified precisely**: flat `0x1157c` is
+`PROC.RTM`'s own `proc_creat`, at its *own* top-of-routine early-exit
+path -- confirmed byte for byte against the source (`cmp dx,0 ! jne
+cp_doit / sub bx,bx ! ret`, `src/kernel/PROC.RTM` lines 33-34): `BX=0`
+at the moment of the crash matches the just-executed `sub bx,bx`
+exactly, and `proc_creat` is reached here with **`DX=0`**, taking its
+own documented "no PD address given" immediate-return path. This механ
+is itself completely ordinary, correct code -- the bug is not in
+`proc_creat`. The `ret` popping `0x0000` instead of the real caller's
+address means **the stack was already wrong by the time `proc_creat`
+was entered** -- this `ret` is a victim, the symptom, not the cause;
+a prior corruption (a lost/extra push or pop somewhere between
+`cli_fload`'s own `call f_createproc` dispatch chain and here) already
+happened before this.
+
+**What happens after landing at `init:` -- directly confirmed,
+instruction by instruction, byte-for-byte against `INIT.SUP`'s own
+source (lines 29-106)**: every single instruction from `init:`'s
+cold-boot prologue onward re-executes exactly as written -- `mov
+ss,ax`/`mov sp,offset init_tos` (re-pointing the stack at the
+init-time scratch area, *while real processes are running*), `mov
+cs:sysdat,ax`, the supervisor-entry-point/`version`/`tick_tos`/
+`idle_tos` setup, **`initpd`'s own UDA segment being recomputed and
+rewritten** (`mov bx,offset initpd ! mov ax,offset inituda ! shr ax,4
+! add ax,cs:sysdat ! mov p_uda[bx],ax`, directly confirmed byte for
+byte: `BX=0x9C0`, matching `initpd`'s own already-known PD address
+from #92/#97), `mov es,ax`/`mov u_wrkseg,ds`, and then straight into
+**"initialize modules"**'s own `push bx ! callf
+rtmmod[bx]/memmod[bx]/bdosmod[bx]/ciomod[bx]/xiosmod[bx] ! pop bx`
+sequence -- i.e. **re-running RTM/MEM/BDOS/CIO/XIOS's own one-time
+cold-boot module-`init:` routines against an already-running system**.
+This is unconditionally destructive by its very nature (reinitializing
+shared module state -- `SYSDAT`, `module_table`, device tables -- out
+from under already-running processes), and fully explains #94's own
+observed end state (repeating `#UD`/invalid-opcode fault loop,
+`CS:IP` parked at the BIOS's dummy vector stub): whichever module's
+`init:` runs into stale/already-different-than-cold-boot assumptions
+first corrupts something further, cascading into the crash loop
+already characterized in #94/#95. Confirmed the loop keeps re-entering
+`init:` repeatedly afterward too (the same `c5`-through-near-`0x10000`
+sequence recurs identically, ~30 steps apart, for as long as the walk
+was allowed to run) -- once this starts, it never recovers on its own.
+
+**Status: root cause of Bug B is the `proc_creat`-time stack
+corruption, not yet the corruption's own origin.** The `ret` that
+lands at `0000` is a downstream symptom of a stack already wrong by
+the time `cli_fload` dispatches into `f_createproc` with `DX=0` --
+*why* `DX` is `0` (should be `cli_pd`, a real PD address, per
+`COMMAND.SUP` line 429: `mov dx,cli_pd ! mov cx,f_createproc ! call
+mpmif`) and *why* the stack is already off by the time `proc_creat`'s
+own `ret` runs are the two threads still open.
+
+**Next step**: now that live stepping through this exact repro is
+confirmed reliable (methodology fix above), walk backward one more
+hop with the same technique -- breakpoint at `COMMAND.SUP`'s own line
+429 call site (`mov dx,cli_pd ! mov cx,f_createproc`) to directly read
+`cli_pd`'s real value there (confirming whether `DX` is genuinely `0`
+already at the call site, meaning `cli_pd` itself was never properly
+set after the `cli_fload`'s own PD-pull step, or whether it's correct
+there and gets lost somewhere in the `mpmif`/`func`/`gofar`/
+`module_table` dispatch chain before reaching `proc_creat`), and
+separately watch `SP` itself across that same dispatch chain (a
+hardware watchpoint on the live stack-pointer-relative return-address
+slot, or simply logging `$sp` at every `stepi`, the same technique
+used in this entry) to catch exactly where the push/pop imbalance is
+introduced.

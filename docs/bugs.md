@@ -7759,3 +7759,267 @@ this entry's and #51's own methodology notes -- naive repeated
 `continue` has now been caught giving false "no progress" *and* false
 "progress" (stale-identical-hit) readings on this gdbstub, at two
 different addresses, in two different sessions.
+
+## 87. Tried #86's own next step (single-step the one bad `dispin` pass
+live) and hit a wall worth recording precisely: **this specific hang
+is a genuine Heisenbug** -- every fine-grained live-observation
+technique tried so far (GDB hardware watchpoint on `indisp`, GDB
+breakpoint+`stepi` on `dispin`, and even a fully passive, zero-GDB
+QEMU-only instruction trace) prevents the race from ever firing, while
+coarse/infrequent polling does not and reproduces it reliably. Handing
+off with exact numbers so the next round doesn't re-spend the time
+confirming this.
+
+**Precise timing under near-native conditions, confirmed this round**:
+booted completely untouched (no GDB attached at all, not even to
+`interrupt`), then polled `indisp` (flat `0x174EE`) every ~2s via a
+fresh `interrupt`+read+implicit-resume (not a watchpoint, not a
+breakpoint -- the lightest possible touch). Stuck `0FFh` by the very
+first sample, `t+13s`, and stayed stuck through `t+76s` (10 samples,
+every single one `0FFh`). This is the real, reproducible window --
+matches #83/#84's own "~20s" figure closely enough to be the same
+phenomenon, now pinned to low-teens seconds specifically for this
+build.
+
+**Every attempt to watch the transition itself, instead of just
+sampling before/after it, failed to reproduce the hang at all**, three
+different ways:
+
+1. A GDB hardware watchpoint on `indisp`, looped via `while`+`continue`
+   (no `stepi`, pure watchpoint -- the exact technique #85 validated as
+   reliable, and the exact technique #84's own leftover, never-written-
+   up log appeared to use) for 3000 consecutive toggles from a cold
+   halt: completed cleanly, every single toggle a clean `dispin`
+   (flat `0x11804`)/`dret`-or-`int_disp_exit` (`0x11AF8`/`0x117B6`)
+   alternation, `rlr` never once `0`, no hang. (This also finally
+   explains #84's own leftover log the right way: it wasn't sampling a
+   lucky non-hanging window, continuous observation itself was
+   preventing the hang the whole time.)
+2. A fully passive trace -- `qemu-system-i386 -d exec,nochain -D
+   <log> -serial file:<consolelog> -display none -no-reboot
+   -no-shutdown`, genuinely zero GDB, matching #75's own "no debugger-
+   side perturbation at all" method but *without* `-accel
+   tcg,one-insn-per-tb=on` this time (that flag alone made the trace so
+   slow boot never even got past SeaBIOS's own floppy-wait loop in 15
+   real seconds; dropping it let boot complete normally while still
+   logging every executed TB) -- run for a 25-real-second budget,
+   grepped for the three flat addresses above: `dispin` hit **62941**
+   times, `dret` **62880**, `int_disp_exit` **61** -- and `62880+61 ==
+   62941` *exactly*. Every single dispatch, the whole 25 seconds,
+   paired up clean. No imbalance, no hang, despite this being the
+   closest thing to a truly unperturbed run available.
+3. Reconciling #1/#2 with the `t+13s` figure from the untouched-boot
+   test: `-d exec` logging (420MB+ for 25 seconds here) is itself
+   heavy enough to slow real wall-clock progress through the guest's
+   *own* timeline -- 25 real seconds of *traced* execution evidently
+   doesn't correspond to 25 real seconds of *un*traced execution, so
+   the trace may simply not have reached the real hang point yet, not
+   that tracing "fixed" it. A longer-budget version of the same traced
+   run (150s) was left running in the background this session under
+   `/private/tmp/claude-501/.../scratchpad/qemu_trace3.out` /
+   `exec_trace3.log` -- **note for whoever picks this up: that's a
+   session-scoped scratchpad path and the background process may not
+   survive past this session ending; if the file's gone, just re-run
+   the exact command above with a longer `timeout` budget (try 90-150s
+   first) and re-grep for the same three addresses.**
+
+**Working theory, not yet confirmed**: given `fdisp`'s own
+documented lack of protection against firing mid-`switch:`-restore
+(an *earlier*, separate entry's own still-open theory, long before
+#83-86's own investigation thread -- see this file's own discussion of
+interrupt-driven redispatch cutting into the non-atomic DS/SS/SP
+restore sequence), and given that *every* technique which adds enough
+per-instruction overhead to change the CPU-cycles-per-real-timer-tick
+ratio makes the hang vanish, the most likely remaining explanation is
+a real hardware-interrupt-vs-non-atomic-dispatcher-restore race tied
+to wall-clock timer timing, not a deterministic logic bug reachable by
+static tracing. **Next step**: stop trying to catch it with anything
+that watches *every* cycle. Either (a) let the long-budget passive
+trace above finish and grep it the same way once it covers enough
+real time to actually reach `t+13s`-equivalent guest execution, or (b)
+try a GDB breakpoint on `dispin` with a `commands` block that counts
+hits *silently* (no `printf`, minimal per-hit overhead) and only
+dumps verbose state (`rlr`/`indisp`/`pc`) every, say, 500th hit --
+cheap enough, maybe, to not perturb the race, while still giving
+*some* visibility close to the actual transition. Neither has been
+tried yet.
+
+**Follow-up, same session**: (a) was tried -- the 150-second-budget
+trace finished and was grepped the same way. Still no hang: `dispin`
+hit **652500** times (up from 25s's 62941 -- the rate itself climbs
+over time, from ~2500/s early, dominated by slow floppy/BIOS work, to
+~4350/s overall once settled into the steady idle-dispatch loop),
+`int_disp_exit` frozen at exactly **61** both times (whatever triggers
+an interrupt-sourced redispatch stops happening entirely after some
+early point and never resumes, a possibly-related side observation
+worth keeping in mind), `dret` **652484**. 150 real seconds -- over
+10x the untouched-boot hang window -- and still no imbalance. This
+rules out "the first trace just wasn't long enough" and makes the
+Heisenbug conclusion solid: *something about running under QEMU's
+`-d exec` tracing itself* (not just GDB) avoids the race, possibly the
+`nochain` flag's own effect on TB-to-TB timing (it forces a full
+round-trip through the main loop between blocks instead of direct
+chaining, changing timing granularity even with no single-instruction
+forcing and no logging-volume difference per block). Next session:
+try the same passive trace *without* `nochain` first, before
+attempting (b)'s sampled-breakpoint approach -- cheaper to rule out
+than to keep guessing at the mechanism.
+
+**Follow-up, next session: tried without `nochain`, and it pins the
+culprit down precisely -- it's `nochain` itself, not logging volume,
+not `-d exec`, not disk I/O.**
+
+Dropping `nochain` (`-d exec` alone) first exposed a measurement
+problem, not a timing one: without `nochain`, QEMU only logs a TB the
+*first* time it's entered through the main dispatch loop -- once two
+blocks chain directly (the normal case for a tight loop like `dispin`
+<-> `dret`), later executions skip the exec-trace callback entirely.
+A 20-second run logged `dispin` all of **2** times, `dret` **1**,
+`int_disp_exit` **1** -- not because the dispatcher only ran 2 times,
+but because chaining hid essentially all of it. So `-d exec` without
+`nochain` can't be used to *count* dispatch cycles the way the
+`nochain` runs could.
+
+It's still useful for the actual question (does it hang?), though,
+once the counting problem is separated from it: booted completely
+untouched except for `-d exec` (no `nochain`) running the whole time
+plus the gdbstub merely *exposed* (`-s`, never touched until one
+single `interrupt`+read at the end), `indisp` was `0FFh` by `t+16s`,
+twice, independently, two separate fresh boots. **Light `-d exec`
+tracing does not prevent the hang** -- a sharp contrast with every
+`nochain` variant tried in #87, all of which ran the exact same boot
+for far longer (150s) without ever getting stuck.
+
+To be sure it's really `nochain` and not just "any use of `-d exec`
+sometimes does, sometimes doesn't" (the lighter run above is still
+only two data points), scoped a `nochain` run down with `-dfilter`
+(confirmed working syntax: `-dfilter 0x11480+0x690`, start+size, not
+start-end or start..end -- both of those are rejected as "Invalid
+range") to just `dispin`..`dret`'s own narrow address window, to rule
+out log *volume* as the confound while keeping `nochain` itself. Still
+no hang in 20 seconds: `dispin` **7178**, `dret` **7160**,
+`int_disp_exit` **17** -- `7160+17=7177`, one short of `7178`, i.e.
+one dispatch pass genuinely still in flight when the timeout killed
+qemu (ordinary truncation, not a stuck guard). `nochain`'s own effect
+on TB-to-TB timing -- not the volume of what gets written to disk --
+is what avoids the race.
+
+**This settles the methodology question but not the bug.** The
+passive-trace approach is a dead end for catching this live (any
+`nochain` variant removes the race; without `nochain` there's no
+reliable per-cycle signal to grep for). The viable path now: use
+sparse, independent fresh-boot probes (confirmed safe -- infrequent
+`interrupt`+read doesn't perturb it either) to binary-search the exact
+elapsed time the transition happens at (narrower than today's
+"somewhere by `t+13s`"), then, once that window is a second or less
+wide, let the boot run completely untouched up to just before it and
+*only then* switch on fine-grained monitoring (`nochain` trace or
+GDB `stepi`) for that last short burst -- betting that perturbing
+timing for under a second right at the end is less likely to steer
+the outcome than perturbing it for the entire multi-second run the
+way every attempt so far has.
+
+## 88. Continued #87's own next step (binary-search the hang-onset
+time). Found a real methodology bug in this and every prior session's
+own GDB usage worth fixing first, then used the corrected version to
+localize the transition far more precisely than "somewhere by
+`t+13s`" -- down to a ~30-50ms window, naming the exact handoff it
+happens during.
+
+**Methodology fix, checked carefully because it could have tainted
+every "confirmed stuck" reading in #83-87**: a `gdb -x <script>` batch
+run that ends right after an `interrupt` (no explicit `continue` or
+`detach`) does **not reliably resume the guest on disconnect** --
+confirmed directly: two single-touch `interrupt`+read checks one real
+second apart came back with *bit-for-bit identical* `$pc`, i.e. the
+guest sat frozen the whole second, not running at all, then a third
+check *had* moved. Adding an explicit `detach` as the script's last
+command made every subsequent check come back with a different `$pc`,
+every time -- genuine, reliable resume-on-disconnect. **This was
+re-verified against the real bug, not just in isolation**: re-ran
+#86/#87's own "sample `indisp` every ~2s" test with `detach` added,
+20 real seconds, 10 samples -- still `0FFh` every single time, `rlr`
+still `idle` every time. The hang itself is real and this bug doesn't
+explain it away; it's a pure methodology hole (silent, inconsistent
+non-resume on a bare end-of-script disconnect) that any future
+session's own scripts should close by always ending a read-only probe
+with an explicit `detach`, not relying on gdb's own default behavior
+at EOF.
+
+**New localization, with the fixed methodology, on today's (fast,
+lightly-loaded) host**: the entire boot-to-hang sequence now completes
+in well under a second of real time -- a sharp contrast with #83-87's
+own `t+13s`-to-`t+16s` figures, strong independent confirmation that
+this really is tied to the *ratio* of real/wall-clock timer-interrupt
+cadence to guest execution speed (a slower or more loaded host just
+stretches the same relative race out over more real seconds) rather
+than anything resembling a fixed elapsed-time trigger. A sweep of
+independent fresh boots, each given exactly one single light touch at
+a different fixed delay, found:
+
+```
+delay=0.10s  indisp=0   rlr=0E40h (TMP)
+delay=0.12s  indisp=0   rlr=0E40h (TMP)
+delay=0.15s  indisp=0FFh rlr=09F0h (idle)   <- stuck
+delay=0.18s..0.3s  indisp=0FFh rlr=09F0h (idle), every time
+```
+
+So the transition -- `TMP` still legitimately running, `indisp`
+clean, through `indisp` permanently stuck and `rlr` landed on `idle`
+-- happens inside a roughly 30ms window, right as control passes from
+`TMP` to `idle`. This is the most precise localization yet: not "some
+dispatch cycle, eventually," but specifically *the handoff away from
+TMP*, naming a concrete pair of candidates to trace next (whatever
+`TMP` does right before yielding, and whatever the *first* `idle`
+dispatch after that does differently from every *subsequent* one that
+loops forever without getting stuck).
+
+**One attempt to catch it live, right at this window, came up empty
+-- recorded so the next one is better-informed, not repeated
+blind**: booted untouched to `t=0.10s` (the confirmed "still fine,
+TMP running" point), then attached and ran 10 cycles of
+delete+`hbreak *0x11804`+`continue` (one per `dispin` hit, verbose,
+`rlr`/`indisp` printed every time). All 10 came back clean -- `rlr`
+transitioning normally, `indisp` always false going in -- i.e. this
+particular 10-cycle monitored burst, started right at the edge of the
+known window, did not reproduce the stuck transition at all,
+consistent with #87's finding that *any* per-cycle GDB round-trip
+(even with minimal, non-`printf` overhead -- also separately
+reconfirmed this round with a silent `hbreak`+blind-`continue` loop
+counting 50000 `dispin` hits with no hang) is enough perturbation to
+dodge the race. Only one attempt was made at this exact starting
+point; it's not yet clear whether more tries from the same `t=0.10s`
+start, or starting even closer to the window's right edge, would ever
+catch it, or whether (per #87's own conclusion) *no* GDB-attached
+window can.
+
+**Next step**: now that the window is this narrow, read `TMP`'s own
+code for whatever it does in its very last moments before yielding
+back (around whatever syscall hands control to `idle` next -- likely
+back through `cioattach`'s successful-attach path or a subsequent
+`conin`/read-wait, given #86's own finding that `TMP` legitimately
+owns the console by this point) side by side with `idle`'s own first
+few dispatch cycles afterward, looking for anything that depends on
+*relative* timing between them (a shared, non-atomically-updated
+field each one reads/writes without the other's lock/`cli`) rather
+than continuing to try to catch the transition live at all -- #87 and
+this entry's own single attempt both point the same way: direct
+reasoning from the source, the technique that nailed every earlier
+root cause in this file before #83, is more likely to work here than
+another live-catch attempt.
+
+**One specific candidate checked and ruled out, same session**:
+confirmed `TMP.A86`'s own `nextcommand:` loop -- print prompt, then
+`mov dx,offset read_buf ! call conread` -- is exactly where `TMP`
+blocks for the first time (`conread` bottoms out in `poll_entry`,
+which is precisely the transition this entry localized). Floated a
+theory that `idle`'s own saved `u_ivectors` (`DSPTCH.RTM`'s
+`switch:` restores whatever a process last saved there back into the
+*real* IVT, vectors 0-4) might be garbage on `idle`'s *first* real
+switch-to, the same "GENSYS question never answered" class as the
+already-fixed `u_initss` bug -- wrong. Read live, right after the
+hang: `idle`'s own `u_ivectors` (flat `0x17188`) and the real IVT
+(flat `0x0`) are bit-for-bit identical, both holding the genuine BIOS
+stub addresses (`F000:FF53` for vectors 0/1/3/4, `F000:E2C3` for
+vector 2) -- `switch:`'s save/restore of these is working correctly,
+not the mechanism here.

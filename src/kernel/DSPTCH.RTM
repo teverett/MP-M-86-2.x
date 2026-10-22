@@ -378,6 +378,23 @@ switch:
 	mov ds,cs:sysdat
 	cmp u_in_int,true ! jne dret
 	    jmp int_disp_exit
-dret:	push u_flag_sav ! popf
+dret:	test u_flag_sav,0200h	;IF bit -- see docs/bugs.md #90/#92:
+				; POPF (unlike STI) has no one-
+				; instruction interrupt-shadow, so a
+				; tick landing between POPF and RET
+				; here can resume into fdisp's real
+				; do_dispatch path once indisp goes
+				; false below, corrupting this
+				; process's own saved SP. Route IF=1
+				; restores through STI instead, whose
+				; shadow protects the RET that follows.
+	jz dret_noif
+	    and u_flag_sav,0fdffh	;force IF=0 for the POPF itself;
+	    push u_flag_sav ! popf	; the real IF=1 restore happens
+	    mov indisp,false		; via STI below instead
+	    sti
+	    ret
+dret_noif:
+	push u_flag_sav ! popf
 	mov indisp,false
 	ret

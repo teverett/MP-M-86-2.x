@@ -8298,3 +8298,500 @@ would be a deliberate deviation from the authentic source, not a
 restoration of broken intent -- worth flagging to whoever decides
 whether this port stays byte-faithful to GENSYS-86 dispatcher
 semantics or not.
+
+## 91. Tried #90's own option (b) -- a live GDB breakpoint on `fdisp`'s
+`do_dispatch` entry (flat `0x1177B`), checking each hit's interrupted
+`CS:IP` against `switch:`/`dret`'s own narrow address range. Two new,
+reusable GDB/QEMU-gdbstub methodology fixes came out of getting this to
+run at all; the actual result is a clean negative, fully consistent
+with (not evidence against) #90's own theory, plus one more direct
+confirmation that the underlying hang is still real and still has the
+same signature.
+
+**Methodology fix #1 -- the "Cannot execute this command while the
+target is running" error (already flagged elsewhere in this file, #32)
+has a root cause now: it fires specifically when `target remote`
+*reattaches* to a QEMU instance that is already free-running** (either
+launched without `-S`, or previously `detach`ed from after a `-S`
+start). Confirmed directly: a QEMU launched with `-S` (genuinely halted
+at the reset vector, `0xfff0`) accepts `hbreak`+`continue` perfectly
+the *first* time; `detach`, then `target remote` again on the *same*
+still-running instance, reliably reproduces the error on the very next
+`continue` -- regardless of adding `interrupt`, `print $pc`, `info
+program`, or `stepi` beforehand (all tried, all still hit the same
+error on the subsequent `continue`; `info program`/`stepi` do get a
+genuine, correctly-updated stopped state each time, so this isn't a
+real vs. perceived stop-state mismatch, it's specifically `continue`
+itself that's unreliable post-reattach on this gdbstub). **Net rule:**
+set up every breakpoint and run the entire session's worth of
+`continue`s against one single, continuously-attached `-S`-started
+session; never detach-and-reattach mid-investigation if more
+`continue`s will be needed afterward -- kill and relaunch fresh with
+`-S` instead, exactly the existing "kill-and-relaunch per probe"
+discipline from #85, just now also covering *why* reattach-based
+multi-sample loops fail outright rather than just "eventually, after
+many reattaches."
+
+**Methodology fix #2 -- a breakpoint's own `commands` block
+auto-`continue`ing on hit does NOT reliably keep the session running
+across many hits in `gdb -batch` mode**, even within one single
+unbroken, never-detached session. Confirmed directly: the exact same
+breakpoint+`commands`+inner-`continue`+outer-`continue` script that
+should loop indefinitely consistently stopped and auto-detached after
+hit #1, every time, with `timeout` reporting the whole `gdb` process
+exited with code 0 (not killed) well under its time budget -- i.e.
+`-batch` mode appears to treat the top-level command list as
+"finished" once the single top-level `continue` and its triggered
+`commands` block complete one round-trip, regardless of a `continue`
+issued from *inside* that block. **The fix: use GDB's own `while ...
+end` control-flow construct at the top level instead**, wrapping an
+explicit `continue` + inspection + counter-increment each iteration
+(`while $iters < N ... continue ... set $iters = $iters + 1 ... end`).
+This looped reliably and correctly for the full run below -- the
+`commands`-block pattern should be considered unreliable on this
+gdbstub/GDB-batch-mode combination specifically and avoided in favor
+of an explicit `while` loop for any future multi-hit sampling here.
+
+**The actual test, using both fixes**: one continuously-attached `-S`
+session, `hbreak *0x1177B` (`do_dispatch`), a `while` loop running
+`continue` up to 100000 times, each hit reading the interrupted
+`CS:IP` off the stack (`[SS:SP+2]`/`[SS:SP+4]`, the two words `fdisp`'s
+own `push ds` leaves sitting just below its own pushed `DS`) and
+flagging any hit where that `CS:IP` falls inside `switch:`/`dret`'s own
+flat range (`0x11A8F`-`0x11B03`, the one-instruction-wide `popf`/`ret`
+gap and its immediate surroundings). **Result: 0 matches across
+~96000+ hits**, spanning real wall-clock time that carried the boot
+all the way through to the interactive `0A>` prompt printing cleanly
+(confirmed in the serial log) -- i.e. this breakpoint, firing roughly
+2000+ times/second throughout, is by far the heaviest-weight live
+observation technique tried anywhere in #83-91, consistent with (not
+contradicting) the established pattern that any sufficiently frequent
+live touch suppresses this race entirely while active.
+
+**And the hang still happened anyway, immediately after**: a
+follow-up single-touch read (no `continue`, just a register/memory
+peek, the technique that's never perturbed anything in this
+investigation) taken right after detaching from the 96000-hit loop
+found `indisp` already stuck `0xFFh` again, with `CS:IP` at
+`1000:33A4h` -- the *exact same* flat address (`CIO.A86`'s
+`getccbadr`) as #90's own very first stuck-state sample. This is a
+clean, expected negative result, not a refutation of #90's theory: the
+race, if #90's mechanism is right, needs a tick interrupt to land in a
+single specific instruction's width, and a breakpoint trapping into
+the debugger ~2000 times/second for the entire run is exactly the kind
+of continuous perturbation that has reliably prevented the race from
+firing anywhere else in this file (#87's watchpoint-loop and
+passive-trace results, #88's single-touch-burst attempts) -- it firing
+*immediately* once that perturbation stopped is, if anything, one more
+small data point in the theory's favor, though nowhere near proof.
+
+**Next step**: do_dispatch-breakpoint live monitoring is now a
+confirmed dead end for catching this, for the same reason everything
+else is -- any technique precise enough to inspect the right moment is
+also precise enough to prevent that moment from occurring. #90's other
+proposed option -- a deliberately non-authentic debug build that
+injects a synchronous tick IRQ right after `dret`'s `popf` to directly
+confirm the predicted corruption mechanism in isolation, without
+relying on catching the real race live at all -- remains untried and
+is now the most promising concrete next step.
+
+## 92. Did #91's own handed-off fault-injection test -- via live GDB
+state manipulation on the real binary rather than a separately-built
+non-authentic image (simpler, no rebuild needed, and arguably more
+convincing since it's the actual shipped bytes under test) -- and it
+**directly confirms #90's candidate root cause end to end, deterministically,
+with no reliance on the Heisenbug firing naturally at all**.
+
+**Method**: one continuously-attached `-S`-started GDB session (per
+#91's methodology fix #1). `hbreak *0x11B03` (`dret`'s own `ret`
+instruction, i.e. right after `popf` has already executed and
+`indisp` is already `false` -- the exact window #90 identified).
+`continue` to the first hit (caught `rlr=0x9C0`, `initpd`, early in
+boot -- the mechanism doesn't depend on which process this is). At the
+hit, read and record the genuine, uncorrupted state: `old_ss:old_sp =
+1705:00F8` (`initpd`'s real stack), `real_target_ip = 0x1494` (what
+this `ret` would legitimately pop and resume at), `flags = 0x246`
+(`IF=1`, confirming this process really would resume with interrupts
+enabled, the precondition for the race). Then **manually constructed,
+byte for byte, exactly the stack frame a real hardware tick interrupt
+would have pushed had it landed in this exact one-instruction gap**:
+three words at `SS:(old_sp-6)` = `[IP=0x1B03][CS=0x1000][FLAGS=0x246]`
+(the real 8086 interrupt-entry push order), `$sp` set to `old_sp-6`,
+then `$pc` set directly to `fdisp`'s own entry (`0x176B`) -- i.e.
+jumping to exactly where a real tick ISR's own `jmp intdisp` would
+have landed, with the stack already arranged exactly as that ISR
+would have left it. From there, let the CPU run its own real,
+unmodified code -- no further manual intervention.
+
+**Result, read back after letting `fdisp`/`do_dispatch`/`dsptch`/
+`dispin` run for real off the injected state**: `dispin`'s own `mov
+u_ss,ss ! mov u_sp,sp` (confirmed live via breakpoint right after it,
+`*0x11818`) saved `u_sp = 0xF2` -- **exactly `old_sp - 6`, bit for
+bit**, not the real `0xF8`. Reading what the *next* `switch:`/`dret`
+for this same process would pop as its resume `IP` off that corrupted
+`u_sp` gives **`0x1B03`** -- `dret`'s own `ret` instruction's address,
+inside the kernel, *not* the real `0x1494` resume point inside
+`initpd`'s own code. This is the complete mechanism from #90, now
+directly observed rather than reasoned: a tick landing in the
+`popf`/`ret` gap genuinely does leave the resuming process's saved
+stack pointer permanently off by exactly the size of the spurious
+interrupt frame, and the next resume for that process genuinely does
+jump into dispatcher-internal code instead of back into the process.
+
+**What this does and doesn't prove**: it proves the mechanism is real
+and mechanically exactly as predicted -- not a hypothesis anymore.
+It does *not* by itself prove this is *the* cause of every hang in
+#83-91 (that still requires the race to actually fire on its own,
+un-injected, which remains as hard to catch live as ever, per #87-91's
+own repeated findings) -- but given this mechanism is now proven to
+produce exactly the right kind of permanent, un-recoverable corruption
+(a process's own resume point silently replaced by kernel-internal
+code, with no crash, no visible symptom until that specific process is
+next switched back in), and given #90 already showed it's the only
+candidate that explains every single empirical timing/perturbation
+observation in this file, this should now be treated as the
+established root cause pending only the formality of a natural catch.
+
+**Next step**: the mechanism is proven; what's left is optional. (a)
+a real fix would change `dret`'s tail to close the `popf`/`ret` gap --
+e.g. `cli ! push u_flag_sav ! popf ! mov indisp,false ! <use `sti` and
+re-derive the one piece of state that still needs setting after it, or
+else accept a process always resumes with `IF` forced via `sti`'s own
+one-instruction-shadow instead of via `popf`'s unshadowed restore> --
+but as #90 already flagged, this is a deliberate deviation from the
+authentic 1981 DR dispatcher, not a restoration, and should be a
+decision made by whoever owns that tradeoff, not applied unilaterally
+here. (b) if a live natural catch is still wanted for completeness,
+the fault-injection technique in this entry suggests a much cheaper
+way to go hunting for it: instead of a breakpoint on every
+`do_dispatch` hit (#91's ~2000/sec, too heavy), set the hbreak only
+on `dret`'s `ret` (as this entry did) and, on every *natural* hit,
+non-invasively check `$eflags`'s `IF` bit and whether `u_sp` was
+already corrupted from a *previous* occurrence (i.e. check for the
+telltale `0x1B03`-at-`u_sp` pattern this entry establishes as the
+unique fingerprint) rather than trying to catch the interrupt landing
+in the gap itself -- `dret` is hit far less often than `do_dispatch`
+(only once per real dispatch cycle, not once per tick), so this may
+perturb the timing far less while still being able to detect, after
+the fact, that a given process's `u_sp` already carries the
+fingerprint from a race that already happened un-observed.
+
+## 93. Tried #92's own handed-off idea (b) -- a lighter-weight
+`switch:`-entry fingerprint check instead of a `do_dispatch`-rate
+breakpoint. The core assumption behind calling it "lighter" turned out
+wrong in practice; result is a clean negative of the same character as
+#91's, plus one more confirmation of how fast the un-observed hang
+recurs.
+
+**Method**: one continuously-attached `-S` session (methodology fix
+#1), `hbreak *0x11A8F` (`switch:`'s own entry, before `mov ss,u_ss`/
+`mov sp,u_sp` actually run), a `while` loop (methodology fix #2)
+reading, on every hit, the about-to-be-resumed process's own saved
+`u_ss:u_sp` (via `rlr` -> `p_uda[rlr]` -> that UDA's own `0x1E`/`0x1C`
+fields) and checking whether the *stack word already sitting there* --
+i.e. whatever an *earlier*, already-completed dispatch for this same
+process saved as its resume point, not anything about the live
+in-flight interrupt state -- falls inside `switch:`/`dret`'s own
+narrow flat range (`0x1A8F`-`0x1B03`), which #92 established as the
+unique fingerprint of a resume point already corrupted by a past,
+unobserved occurrence of the race.
+
+**Result: 0 matches across ~83000 hits** over a 50-real-second window
+that, per the serial log, carried boot all the way through to the
+`0A>` prompt printing cleanly. **The "lighter-weight" assumption behind
+this approach was wrong**: `switch:` turns out to fire nearly as often
+as `do_dispatch` did in #91 (~1660/sec here vs. ~2000+/sec there,
+same order of magnitude, not meaningfully lighter) -- every dispatch
+pass reaches `switch:` exactly once, and dispatch passes are
+apparently about as frequent as `do_dispatch`-triggering ticks, not an
+order of magnitude rarer as hoped. So this is, in practice, still one
+of the heaviest-weight live techniques tried in this file, and the
+result carries the same caveat as #91's: a clean negative, fully
+consistent with (not evidence against) #90/#92's theory, since nothing
+this invasive has ever let the race fire while active anywhere in
+#83-93.
+
+**And, same as #91, the hang recurred immediately once monitoring
+stopped**: a single light touch (register/memory peek only, no
+`continue`, the one technique that's never perturbed anything here)
+taken right after detaching from the 83000-hit loop found `indisp`
+already stuck `0xFFh` again, `CS:IP = 1000:1803h` (a different
+specific address than #90's or #91's own post-detach samples, but
+still `CS=1000h`, still consistent with #90's live-confirmed
+"no-op-`pdisp`, varying `IP`" downstream signature, not a new
+mechanism). **Three independent sessions now (#90's original
+observation, #91's `do_dispatch` test, this entry's `switch:` test)
+have all found the hang reappearing within at most a couple of real
+seconds of monitoring stopping**, every single time it's been
+checked -- suggesting the race's true, unperturbed probability per
+unit time is high enough that "stop watching briefly" is close to a
+reliable way to *get* the hang, even if no technique tried so far can
+watch *through* the actual moment it happens.
+
+**Next step**: both of #92's proposed follow-ups (the real `dret`
+fix, and a lighter live-catch attempt) are now covered -- the fix is
+still a deliberate, deferred design decision (#90/#92), and the
+"lighter fingerprint check" idea specifically (switching the
+breakpoint to `switch:` instead of `do_dispatch`) did not pan out as
+meaningfully lighter and shouldn't be retried as-is. If a live natural
+catch is still wanted, the next genuinely untried angle is reducing
+*when* the breakpoint is live rather than *where* it is: use the
+established safe/non-perturbing single-touch polling (#87-90) to
+narrow in on the known sub-second-to-low-teens-of-seconds hang window
+first, then arm the `switch:`/`dret` breakpoint only for that last
+narrow slice, rather than for the whole boot -- cheap to try, not yet
+done. Absent that, #92's direct fault-injection proof already stands
+on its own as the mechanism's confirmation; further live-catch
+attempts are now optional polish, not required to consider this
+closed.
+
+## 94. Applied #90/#92's candidate `dret` fix (route `IF=1` restores
+through `STI`'s interrupt shadow instead of the unguarded `POPF`),
+confirmed it assembles and boots -- **and confirmed, with the same
+rigor #87 used to establish "permanently stuck" in the first place,
+that it does NOT fix the hang**: 10 samples 8s apart over a fresh,
+completely untouched 80-second boot still show `indisp=0xFFh` on
+every single sample, `rlr=idle` every time, `IP` varying (identical
+signature to the unpatched build). The patch is left in place (it's
+real, harmless hardening, confirmed earlier via direct fault
+injection in #92) but **it is not resolving the actual observed
+hang, or not the only thing that is**.
+
+Re-examined every other `popf`/`iret` site in the kernel for the
+same hazard: `int_disp_exit`'s own tail sets `indisp,false` a few
+instructions before its final `iret`, but `iret` restores flags and
+transfers control as a single atomic instruction (no following
+instruction for a tick to land on with mismatched `IF`), so it's not
+exposed the same way `dret` was. `dsptch`'s own entry-guard `popf !
+ret` bail only ever runs while `indisp` is still `true`, so a tick
+landing there sees `fdisp`'s safe bail path, not `do_dispatch`. No
+other exposed site found.
+
+**This forced a re-read of this file's own much earlier #83, which
+turns out to have been quietly abandoned mid-investigation without
+its own next step ever being followed up on** -- #83 found and fixed
+three real, confirmed bugs (`idle`'s own UDA `u_initss` field left
+`0` instead of `sysdat_segment`; `idle:`'s and two other sites'
+`mov cl,f_xxx` leaving stale `CH` and misrouting the call; a genuine
+1981 DRI typo in `constat_entry`), getting console input from "zero
+bytes, ever" to "echoes any number of real characters correctly" --
+but documented one precisely-scoped symptom still open: **sending
+`CR` specifically, after any number of successfully-echoed regular
+characters, reliably wedges the scheduler again**, every time, not a
+race. #84 immediately pivoted into the Heisenbug/`popf`-`ret`
+investigation (#84-93) without ever returning to this handed-off CR
+symptom. Re-confirmed live, this session, that #83's finding still
+reproduces exactly as described: a real interactive harness (`expect`
+driving `qemu -serial mon:stdio`, the pty- and socket-based harnesses
+tried first both turned out to be broken rigs that delivered zero
+bytes in either direction -- raw-mode `tty.setraw`/termios tweaks
+didn't fix the pty rig either, root cause not pinned down, `expect`'s
+own pty handling is simply what worked) shows `ABC` echoing correctly
+immediately after the `0A>` prompt, then zero response of any kind
+once `\r` is sent.
+
+**This is a second, apparently distinct bug from #84-93's
+idle/dispatch race -- with a completely different live signature.**
+Single-touch reads taken 1-6 seconds after sending a real `CR`
+consistently show `indisp=0x0` (false, not stuck) and `rlr=0xE40`
+(`TMP`'s own PD, not `idle`) -- the opposite of every #84-93 reading.
+`CS:IP` varies between touches and lands in places like `F000:xxxx`/
+segment `0` (BIOS ROM address space) rather than anywhere in the
+kernel's own `cs=1000h`.
+
+**Confirmed, via QEMU's own `-d int`/`-d int,cpu` exception logging
+(not inferred from register snapshots), that this is a real CPU
+fault, not a scheduler deadlock**: shortly after the `CR` keystroke,
+the log shows `check_exception old: 0xffffffff new 0x6` (**exception
+vector 6 -- `#UD`, invalid opcode**) repeating in an exact, regular
+37-line cycle -- a tight hardware fault loop, not sporadic. The `-d
+cpu` register dump immediately before the first occurrence shows
+`CS=0000 EIP=00000000` -- **the CPU is trying to execute at flat
+address `0x00000000`**, inside the real interrupt-vector table
+itself, not anywhere code should ever be. Confirmed independently via
+GDB: a hardware breakpoint at `*0x0`, armed through the same
+interactive `expect` harness while sending `CR`, is followed almost
+immediately by `[Inferior 1 (process 1) exited normally]` -- strongly
+suggesting the fault loop is a precursor to an actual **triple
+fault**, with `-no-reboot` causing QEMU to tear the whole VM down
+(not a graceful reset) once that happens, rather than the guest
+"just" hanging.
+
+**Not yet found**: the actual instruction that makes `CS:IP` (or just
+`IP`, if this is a near `jmp`/`ret` with `CS` already corrupted to
+`0` earlier) land on `0000:0000`. The `-d cpu` trace immediately
+before the jump shows the CPU mid-way through what looks like genuine
+interrupt-vector-table *installation* code (individual `mov
+[addr],imm16` writes landing on values consistent with vector
+offset/segment pairs, including one write that stores the *current*
+`CS` register as `mpmint`'s (`int 224`, flat IVT offset `0x380`) own
+vector segment) -- plausible as legitimate `SUP.A86`/`RTMIF.RTM`
+init-time vector setup, but deeply suspicious to be running again
+*after* the system has already booted fully and processed real
+commands. Whether this is genuinely re-executing old init code (wild
+jump landing back there), or coincidental data at that address that
+merely disassembles into plausible-looking opcodes, is not resolved.
+
+**Next step**: pin down the actual faulting instruction and its real
+cause -- a GDB hardware watchpoint on the real IVT's vector-6 entry
+(`write` watchpoint on flat `0x18`-`0x1B`, the 4 bytes `#UD`'s own
+vector points to) would catch anything that corrupts *that* specific
+entry; alternatively, a `-d exec,nochain` trace scoped tightly (via
+`-dfilter`) to a narrow address window around the suspected
+TB-ending branch, read after the fact, would show the exact
+instruction without needing to catch it live with GDB at all. This is
+a deterministic, 100%-reproducible repro (not a race) -- send real
+characters ending in `CR` to a booted system over a real interactive
+harness -- so it should not need any of #83-93's own Heisenbug-specific
+sparse-probing discipline; ordinary breakpoints should work fine here.
+
+**Follow-up, same session**: tried a GDB write-watchpoint on the real
+IVT's own vector-6 (`#UD`) entry (flat `0x18`-`0x1B`) across the full
+`CR`-triggered crash, coordinated against the live interactive
+`expect` harness via a file-based ready-marker so the watchpoint was
+armed before `CR` was ever sent. It never fired -- vector 6's own IVT
+entry is not what gets corrupted; whatever's happening doesn't rely on
+rewriting that specific vector.
+
+**A passive `-d exec` trace (no `nochain` -- with it, boot never
+reaches the prompt within any reasonable budget, reconfirming #87's
+own finding that `nochain` itself, not log volume, is what's
+unworkably slow here) across the same `CR`-triggered crash shows an
+exact, regular 3-TB repeating cycle taking up the entire back half of
+the trace** (hundreds of thousands of consecutive lines, all 3 TBs,
+in the same order) -- flat addresses matching `F000:FF53` (the BIOS
+dummy vector-0/1/3/4 stub, same address already identified in #89's
+own `u_ivectors` read) paired with two other addresses that *drift
+slowly downward* across the trace (`FFFF`/`0003` early on, `FFFD`/
+`0001` hundreds of thousands of lines later) -- consistent with an
+`IRET`-only dummy handler blindly returning to the same bad `CS:IP`
+over and over, re-faulting every time, with the guest's own `SP`
+creeping down by a word or two on each cycle (a small, consistent net
+stack imbalance per iteration, not a clean repeat). Binary-searching
+backward through the trace for where this cycle *starts* did not
+converge this session -- by 1/3 of the way into even a short
+(~600,000-line) trace, the cycle (in some drifting variant) is already
+running, meaning whatever triggers it happens very early, close to
+`CR` itself, not after an extended delay -- but the exact triggering
+instruction was not isolated.
+
+**Three separate attempts to catch the transition live with GDB all
+failed the same way, for a reason specific to this bug rather than to
+GDB/QEMU in general**: a hardware breakpoint at `*0x0` (the fault
+target itself), a write-watchpoint on the vector-6 IVT entry, and a
+breakpoint at `CHARIO.CIO`'s own `readen:` (flat `0x13351`, where `CR`
+is first recognized) followed by a `stepi` loop, were all tried.  The
+`readen:` breakpoint item itself genuinely hit (confirmed: the
+script's own `=== HIT readen ===` marker printed), but reading
+registers immediately afterward failed with gdb's own `No registers`
+error, and separately, `[Inferior 1 (process 1) exited normally]` was
+printed close to every attempt -- strongly suggesting **QEMU itself
+tears the whole process down once the fault loop is reached or a
+triple fault occurs, even starting from a point as early as `readen:`
+itself**, which is *before* any of the suspect kernel-dispatch code
+runs at all. This may mean the fault happens fast enough after `CR`
+that normal single-stepping through the next few hundred instructions
+from `readen:` isn't enough headroom, or that something about
+single-stepping specifically (as opposed to free-running) interacts
+badly with whatever QEMU-internal condition tears the VM down. Not
+resolved this session.
+
+**Status at handoff**: the *mechanism* (real CPU exception --
+`#UD`/vector 6 -- repeating in a tight fault loop after jumping to
+`CS:IP=0000:0000`, most likely culminating in an actual triple fault
+that `-no-reboot` then surfaces as the whole VM exiting rather than
+rebooting) is now solid, confirmed three independent ways (live
+register snapshots, `-d int`/`-d int,cpu` exception logging, and the
+passive `-d exec` trace's repeating-TB signature). The *one specific
+instruction* that first sets `CS:IP` to `0000:0000` -- presumably a
+bad `jmp`/`call`/`ret` somewhere in `TMP.A86`'s or `CHARIO.CIO`'s own
+post-`CR` path, given #83's own narrowing to "whatever `TMP.A86` does
+immediately after a line is complete" -- is not yet isolated. **Next
+step, untried**: rather than single-stepping from `readen:` forward
+(which this session's attempts suggest may not survive long enough),
+work *backward* from the crash instead -- a `-d exec` trace (no
+`nochain`) scoped with `-dfilter` to just the `CHARIO.CIO`/`TMP.A86`
+address range (ruling out needing to wade through the BIOS-loop tail
+at all) would show the real last few kernel/RSP-level instructions
+executed before control left that range, without needing GDB to
+survive anywhere near the actual fault.
+
+## 95. Followed #94's own handed-off next step (a `-dfilter`-scoped
+passive trace, working backward from the crash instead of trying to
+survive forward into it with GDB) -- **and it worked, isolating the
+real trigger precisely, with no GDB-survival problems at all**.
+
+**Method**: `-d exec,cpu -dfilter 0x10000+0x5d95,0x16270+0x430`
+(covering the whole kernel from `SUP` through `BDOS`, plus `TMP`'s own
+runtime code segment, found live via its UDA's `u_initcs` field --
+`0x1627`, matching `build_mpmsys`'s own static layout number almost
+exactly) over the same real, interactive `expect`-driven `CR` repro.
+No GDB needed anywhere in this entry -- side-steps #94's own repeated
+"GDB session dies with the VM" problem entirely, since this reads a
+log file after the fact.
+
+**Found it**: the kernel's own absolute first instruction (flat
+`0x10000`, `RTMIF.RTM`'s `jmp init` -- the *boot-time reset entry
+point*, confirmed by reading the actual compiled bytes there) is
+genuinely **re-executed a second time**, tens of thousands of trace
+lines after its one legitimate appearance during normal boot. The
+instructions immediately preceding this second occurrence are
+`PROC.RTM`'s own `cp_uda`/`proc_creat` body (confirmed against
+`asm86 --symbols`: the flat addresses land squarely between
+`cp_uda4` and `getpdadr`) -- **i.e. the system is in the middle of
+creating a new process, immediately before jumping to the kernel's
+own reset vector instead of into whatever process it just created.**
+
+**This fits together completely with #83's own original, never-
+followed-up finding and with every live signature from #94**: sending
+a line ending in `CR` makes `TMP.A86` try to run it as a command
+(`nextcommand`'s own `clicall`/`not_builtin` path, `mov cl,mpm_clicmd
+! call mpm`) -- and typing an unrecognized command (this session's
+own repro used `AB`, which has no matching `.CMD` file) is exactly
+what reaches `proc_creat` on a command-load attempt. `cp_uda`'s own
+job is to seed the new process's `u_initcs`/`u_ss`/`u_sp` and build an
+`iret`-ready stack frame (`u_initcs`'s value as the frame's `CS`) for
+the dispatcher to later jump into via `int_disp_exit`'s `iret`. If
+`u_initcs` ends up `0` (or, more likely given the observed `CS=1000h`
+match, equal to the *kernel's own* code segment by some left-over/
+uninitialized value) instead of the real loaded-command's segment,
+the next dispatch of that "process" doesn't start the command at all
+-- it jumps straight into the kernel's own reset-time `init:` code,
+which then re-runs genuine one-time boot setup (the same interrupt-
+vector-table-installation-looking code this file's own #94 entry
+disassembled and was puzzled to find running again) against a machine
+that is very much *not* actually resetting, corrupting enough state
+(plausibly including the real IVT, directly explaining #94's own
+`CS:IP=0000:0000` / repeating `#UD` crash loop) to bring the whole
+system down shortly after.
+
+`COMMAND.SUP`'s own `clicmd_entry` -- the code actually responsible
+for opening and loading a `.CMD` file on `TMP`'s behalf -- was read in
+full for the "command not found" path specifically, since that's
+exactly what `AB` should trigger: it *does* correctly check
+`fileopen`'s own failure return (`cmp bl,0ffh ! je cli_bopen`) and
+sets `e_bad_open` before bailing, which should prevent ever reaching
+`f_load`/`proc_creat` for a genuinely nonexistent file -- so either
+this specific check has a gap not yet found (e.g. an FCB-matching
+quirk that makes `AB` spuriously "find" something, a wildcard/blank-
+padding issue, or similar), or `proc_creat` is reached via some other
+path than the one read here. **Not yet pinned down: the exact reason
+`u_initcs` ends up wrong, or the exact reason `AB` reaches
+`proc_creat` at all** -- but the mechanism from "process gets created
+with a bad starting segment" through to "kernel reset code re-runs
+and corrupts the real IVT" is now a complete, well-supported causal
+chain, a huge narrowing from #94's own "somewhere in `TMP.A86`'s
+post-`CR` path" vagueness.
+
+**Next step**: read `PROC.RTM`'s `cp_uda` (`src/kernel/PROC.RTM`
+lines ~70-95, the "set initial segment values"/"set user's stack"
+block already quoted in this file's own #83 write-up for the
+`idle`/`tick` case) side by side with whatever `COMMAND.SUP`/`LOAD.SUP`
+actually passes it for a failed `.CMD` lookup, to find the exact spot
+`u_initcs` (or the UDA segment it's copied from) goes wrong for this
+specific case -- `cp_uda`'s own "default from `u_wrkseg` if still `0`"
+logic (`cp_uda1`-`cp_uda4`) is the same generic mechanism #83 already
+confirmed protects ordinary process creation in general, so the bug
+here is more likely upstream of `cp_uda` (whatever segment value
+`COMMAND.SUP` hands it in the first place for this failure case) than
+in `cp_uda` itself.

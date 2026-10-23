@@ -1,0 +1,34 @@
+; Standalone wrapper for src/kernel/CPMMEM.MEM's maxmem_entry,
+; absmax_entry, cpmalloc_entry, cpmabsa_entry, cpmfree_entry (+ internal
+; getmemory, free_memory). freeall_entry is deliberately not wrapped --
+; its entire body is a boundary tail-jump into mpmif, nothing to port
+; (see cpmmem.c's own header comment).
+;
+; Every "push ds ! mov ds,u_wrkseg" here is the same already-established
+; pattern MEMORY.MEM's malloc_entry/mfree_entry use (a fixed per-process
+; scratch segment, not a dynamically-*different*-each-time one) -- not
+; the blocked PROC.RTM/ML.MEM/MAU.MEM/SHARE.MEM addressing gap. u_wrkseg
+; itself is never actually read by tools/i86sim.py's flat memory model
+; (segment overrides are no-ops there), so its own value doesn't matter
+; for this wrapper -- it just needs to exist as a word so `mov
+; ds,u_wrkseg` assembles.
+;
+; `rlr` is a DSEG label at the scratch address src-c/kernel/defs.h and
+; tests/src-c/test_cpmmem.py both use (see idle_wrapper.A86's comment
+; for why, same reasoning as there).
+	include system.def
+	include pd.def
+	include err.def
+	include mem.def
+	include mpb.def
+	include modtab.def
+	include modfunc.def
+	dseg
+	org	0A000h
+rlr		dw	0
+	org	0A012h
+u_wrkseg	dw	0
+	cseg
+mpmif	equ	9000h		; unported external call target (stub)
+	include cpmmem.mem
+	end

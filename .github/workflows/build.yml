@@ -2,7 +2,7 @@ name: build
 
 # Validates that the files this repo's own from-scratch toolchain
 # (tools/asm86/, tools/plmc.py) is currently known to compile/assemble
-# still do -- see the Makefile and docs/bugs.md for exactly which files
+# still do -- see src/Makefile and docs/bugs.md for exactly which files
 # that covers and which are deliberately excluded. Runs on all three
 # major OSes since the toolchain is plain-stdlib Python and the
 # Makefile is meant to be portable, not Linux-only.
@@ -46,13 +46,13 @@ jobs:
         run: choco install make --no-progress -y
 
       - name: make (known-good sources)
-        run: make
+        run: make -C src
 
       - name: make partial (known-incomplete toolchain sources)
-        run: make partial
+        run: make -C src partial
 
       - name: make disk (bootable QEMU floppy image)
-        run: make disk
+        run: make -C src disk
 
       - name: upload bootable disk image
         uses: actions/upload-artifact@v7

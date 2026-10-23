@@ -1,0 +1,54 @@
+; Standalone wrapper for a self-contained subset of src/kernel/
+; FILE1.BDO -- see src-c/kernel/file1.c's own header comment for
+; exactly which routines and why the rest is deferred.
+;
+; The whole BDOS module (FILE1-4.BDO + BDOSIF.BDO + DATA.BDO, the same
+; bundle src/kernel/BDOS.A86 itself assembles) has to assemble
+; together, since FILE1.BDO's own tail calls (GOBACK in FILE4.BDO,
+; staret/XCRLF/XPRINT in BDOSIF.BDO) and its scratch fields (DATA.BDO)
+; live in those sibling files. Unlike every other wrapper so far, this
+; one includes the real DATA.BDO rather than declaring its own
+; minimal DSEG stand-ins -- there's no way to know which of DATA.BDO's
+; many interdependent fields FILE2-4.BDO's own (unported) code also
+; needs just to assemble cleanly, so src-c/kernel/defs.h's own BD_*
+; scratch constants are kept in sync with DATA.BDO's real resulting
+; addresses instead (checked against `python3 tools/asm86.py
+; tests/src-c/fixtures/file1_wrapper.A86 -I src/kernel --symbols`).
+;
+; This combined module's own cseg is long enough (~0x2659 bytes) to
+; run past DATA.BDO's dseg (org 0C00h, 0x1000 bytes) if both start at
+; absolute 0 in tools/i86sim.py's single flat memory array -- unlike
+; every other wrapper so far, where cseg was always comfortably
+; smaller than the scratch base. BDOSIF.BDO's own "cseg ! org 0" right
+; at its own top means cseg can't just be pushed up front-of-file
+; either -- tests/src-c/test_file1.py's own run_reference() handles
+; this instead, by layering dseg's own bytes on top of cseg before
+; applying a test's specific values (nothing this port's own tested
+; routines execute ever actually runs as code in dseg's own address
+; range, so letting dseg's data win there is correct either way).
+	include cpyright.def
+	include equ.bdo
+	include system.def
+	include pd.def
+	include err.def
+	include qd.def
+	include modfunc.def
+	include xioscb.def
+; mpmif AND seldskf/homef/readf/writef/settrkf/sectran/setsecf/
+; setdmbf/setdmf are all real labels in BDOSIF.BDO itself (mpmif ends
+; in an unsupported `callf`; the other 9 are small real labels, "mov
+; al,io_seldsk ! jmps xiosif" -- the same shape as CHARIO.CIO's own
+; constf/coninf -- tail-calling into the real `xiosif`, which also
+; ends in an unsupported `callf`), not symbols this wrapper can equ
+; away. tests/src-c/test_file1.py registers each of these 10 labels'
+; own real addresses as call_stub_addrs directly, same idea as its own
+; XCRLF_ADDR/XPRINT_ADDR.
+	include bdosif.bdo
+	include file1.bdo
+	include file2.bdo
+	include file3.bdo
+	include file4.bdo
+	include uda.fmt
+	include sysdat.fmt
+	include data.bdo
+	end

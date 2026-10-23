@@ -75,7 +75,7 @@ clockloop:
 		; check for minute mark
 
 	cmp al,60h ! jae update_min
-	    jmp clock_loop
+	    jmp clockloop
 
 update_min:
 		; set minute flag
@@ -92,7 +92,7 @@ update_min:
 		; check if hour
 
 	cmp al,60h ! jae update_hour
-	    jmp clock_loop
+	    jmp clockloop
 
 update_hour:
 		;update hour field
@@ -104,14 +104,14 @@ update_hour:
 		; check for day
 
 	cmp al,24h ! jae update_day
-	    jmp clock_loop
+	    jmp clockloop
 
 update_day:
 		; update Day field
 
         mov tod_hour[bx],0
         inc tod_day[bx]
-        jmp clock_loop           ; loop forever
+        jmp clockloop           ; loop forever
 
 ;*****************************************************
 ;*

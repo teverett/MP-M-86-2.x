@@ -213,7 +213,11 @@ mfree_entry:		; 130 - Memory Free
 mfree_chkpd:
 	mov si,(offset thrdrt)-p_thread
 mfree_nxtpd:
-	mov si,p_link[si]
+	mov si,p_thread[si]	;was "p_link[si]" -- mismatched the "-p_thread"
+				;bias just above (malloc_entry's own identical
+				;active-PD check, a few lines up in this same
+				;file, correctly uses p_thread both times; see
+				;docs/src-c.md)
 	cmp si,0 ! je mfree_gotpd
 	    cmp si,bx ! jne mfree_nxtpd
 		cmp si,rlr ! je mfree_gotpd

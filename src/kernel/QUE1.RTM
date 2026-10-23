@@ -89,7 +89,14 @@ qd_nqd:	    mov si,q_link[bx]
 		    mov bx,0 ! mov cx,bx
 		    pop es ! jmps qd_e
 qd_neq:		mov bx,si ! jmps qd_nqd
-qd_noq:	    mov cx,e_q_notactive ! jmps qd_be
+qd_noq:	    pop ax ! mov cx,e_q_notactive ! jmps qd_be
+					;was missing the "pop ax" every other
+					;exit path has to balance this
+					;routine's own "push es" above --
+					;without it, the next "popf" pops that
+					;leftover es into FLAGS and "ret" pops
+					;the real saved flags as if it were a
+					;return address (see docs/src-c.md)
 qd_use:	pop ax ! mov cx,e_q_inuse
 qd_be:	mov bx,0ffffh
 qd_e:	popf ! ret

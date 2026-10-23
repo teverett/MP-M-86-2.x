@@ -184,7 +184,7 @@ Shared includes pulled in by the modules above:
    one floppy drive). Its disk parameter block, initially a flagged
    placeholder, has since been computed properly for the target
    geometry and kept in sync with `LDBIOS86Q.A86`'s own (see item 1;
-   also noted in the top-level `Makefile`'s own `KERNEL_NEW := XIOS86Q`
+   also noted in `src/Makefile`'s own `KERNEL_NEW := XIOS86Q`
    comment).
 3. A **new boot sector** replacing `04/ROM.A86` — **done and verified
    working in QEMU**: `src/loader/ROM86Q.A86`, a 512-byte PC boot

@@ -76,7 +76,12 @@ remqd:
 	and ax,qf_table ! jz rqd_exit
 	    pushf ! cli
 	    mov ax,qul ! mov q_link[si],ax
-	    mov qul,ax ! call qrelease
+	    mov qul,si ! call qrelease	;was "mov qul,ax" -- ax still held qul's
+					;own *old* value from two instructions
+					;above, a no-op that left a freed qd
+					;linked to the old qul head but never
+					;actually threaded onto the free list
+					;itself (see docs/src-c.md)
 	    popf
 rqd_exit:
 	ret

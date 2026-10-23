@@ -11,13 +11,18 @@ This is consistent with the provenance already noted in the top-level
 release, and this code likely never finished debugging on the original
 hardware.
 
-**Patch status, by section below:** #1–#3 (the RSPs) are left
-**unpatched** — `src/rsp/` remains an unmodified copy of `orig/` for
-those files. #4, #5, #7 (partially), #8, #9, #10, #11, #12, #13, and
-#14 (the kernel/loader name typos, the `LDBDOS.A86` fixed-offset
-interaction with `tools/asm86`'s raw-binary output, the `tools/asm86`
-port-truncation bug, `ROM86Q.A86`'s own two real runtime bugs, and
-`LDBIOS86Q.A86`'s relative-jump-to-an-absolute-address bug)
+**Patch status, by section below:** #1 (`CLOCK.A86`), #2 (`TMP.A86`),
+and #3 (`SUBMIT.A86`) were each **patched** once `src-c/` needed to
+assemble the real file for real as a differential-test reference (see
+`docs/src-c.md`'s own entries for each) — same confidence level as
+every other fix below (an exact squashed-name match to a real
+declaration, used incorrectly nowhere else in the
+file). #4, #5, #7
+(partially), #8, #9, #10, #11, #12, #13, and #14 (the kernel/loader
+name typos, the `LDBDOS.A86` fixed-offset interaction with
+`tools/asm86`'s raw-binary output, the `tools/asm86` port-truncation
+bug, `ROM86Q.A86`'s own two real runtime bugs, and `LDBIOS86Q.A86`'s
+relative-jump-to-an-absolute-address bug)
 **have been patched** directly in `src/kernel/`/`src/loader/`,
 `tools/asm86/`, or `tools/build_mpmldr.py` — once a fix is this
 confidently evidence-backed (an exact squashed-name match to a real
@@ -33,7 +38,7 @@ unpatched: either no confident fix exists (an undeclared symbol with no
 same-file candidate), or fixing it isn't a source-level change at all
 (the short-jump-range tooling trade-off).
 
-## 1. `src/rsp/CLOCK.A86` — jump to a label that doesn't exist
+## 1. `src/rsp/CLOCK.A86` — jump to a label that doesn't exist — FIXED
 
 The clock-update loop is entered at a label spelled `clockloop:`
 (line 64), but all four jumps back to the top of the loop reference
@@ -51,9 +56,13 @@ The clock-update loop is entered at a label spelled `clockloop:`
 `clock_loop` is never defined anywhere in the file. As written, this
 RSP cannot assemble at all with any assembler, let alone run.
 
-## 2. `src/rsp/TMP.A86` — call to a label that doesn't exist
+**Fixed** by changing all four `jmp clock_loop` to `jmp clockloop`,
+matching the real label — no other candidate label exists in the
+file, so there's no ambiguity about intent.
 
-Line 147 calls `print_string`:
+## 2. `src/rsp/TMP.A86` — call to a label that doesn't exist — FIXED
+
+Line 147 called `print_string`:
 
 ```
 147:	    call print_string
@@ -61,18 +70,23 @@ Line 147 calls `print_string`:
 
 but the routine is actually defined as `printstring:` (no underscore,
 line 373), and every *other* call site in the file (lines 237, 239,
-266, 268, 338) correctly uses `printstring`. This one call site is the
+266, 268, 338) correctly used `printstring`. This one call site was the
 odd one out.
 
-## 3. `src/rsp/SUBMIT.A86` — two mismatched labels and one missing routine
+**Fixed** (already, by an earlier commit in this tree, before this
+file caught up to say so) by changing it to `call printstring` — no
+other candidate label exists in the file, so there's no ambiguity
+about intent.
+
+## 3. `src/rsp/SUBMIT.A86` — two mismatched labels and one missing routine — FIXED
 
 Three separate defects in one file:
 
-- Line 464 jumps to `not_builtin`, but the label actually defined
+- Line 464 jumped to `not_builtin`, but the label actually defined
   (line 553) is `notbuiltin` (no underscore).
-- Line 127 loads the address of `sopen_err`, but the label actually
+- Line 127 loaded the address of `sopen_err`, but the label actually
   defined (line 881) is `sopenerr` (no underscore).
-- Line 630, inside the `showerr:` error-printing routine, calls
+- Line 630, inside the `showerr:` error-printing routine, called
   `conwrite`:
 
   ```
@@ -84,11 +98,17 @@ Three separate defects in one file:
   	jmp submitexit
   ```
 
-  `conwrite` is never defined anywhere in the file. Every other place
-  that needs to write to the console loads `mpm_conwrite` (an EQU'd
-  BDOS/MP/M function number) into `CL` and calls the shared `mpm` entry
-  point instead (see lines 91, 330, 770) — `showerr:` appears to be an
-  unfinished or broken implementation of the same pattern.
+  `conwrite` is never defined anywhere in the file, but `con_write`
+  (no missing underscore) is — a real, already-used label (`mov
+  cl,mpm_conwrite ! jmp mpm`), called directly from several other
+  spots in this same file (e.g. the `sopenerr`/`usererrmsg`/
+  `printererrmsg` handlers) — the same convention `showerr:` itself
+  is clearly trying to follow, not a different/unfinished one.
+
+**Fixed** all 3 by changing them to `notbuiltin`, `sopenerr`, and
+`con_write` respectively — each an exact squashed-name (or, for the
+third, exact-name) match to a real declaration used correctly
+elsewhere in the file, no other candidate in any of the 3 cases.
 
 ## Reclassified: `src/utils/ED.PLM`'s `TIME` is not a bug
 
@@ -2966,7 +2986,7 @@ all 22 `.PLM` utilities in `src/utils/`/`src/toolchain/` compile and
 assemble cleanly end-to-end (`ECHO.A86` and every `.PLM` file — see
 `tools/plm/README.md`) except where documented above. See
 `tools/README.md` and `tools/plm/README.md` for how to run the
-assembler/compiler yourself, and the top-level `Makefile`/
+assembler/compiler yourself, and `src/Makefile`/
 `.github/workflows/build.yml` for the automated, continuously-validated
 build of everything confirmed to work.
 
@@ -9055,3 +9075,146 @@ hardware watchpoint on the live stack-pointer-relative return-address
 slot, or simply logging `$sp` at every `stepi`, the same technique
 used in this entry) to catch exactly where the push/pop imbalance is
 introduced.
+
+## 99. `src/kernel/QUE2.RTM` — `remqd` never actually threads a freed QD onto the free list — FIXED
+
+Found while writing `/src-c`'s C port of this routine (`src-c/kernel/
+que2.c`, see `docs/src-c.md`) and differentially testing it against the
+real assembled bytes via `tools/i86sim.py` — not from an assembly
+failure, since this is a real logic bug, not a syntax one.
+
+`remqd` ("Place qd on queue unused list") is supposed to take a freed
+Queue Descriptor off `qlr` and put it on `qul`, the free list, so a
+later `getqdaddr` can reuse it:
+
+```
+remqd:
+	mov ax,q_flags[si]
+	and ax,qf_table ! jz rqd_exit
+	    pushf ! cli
+	    mov ax,qul ! mov q_link[si],ax
+	    mov qul,ax ! call qrelease
+	    popf
+rqd_exit:
+	ret
+```
+
+`mov ax,qul` loads `qul`'s current value into `ax`; `mov q_link[si],ax`
+correctly points the freed QD (`si`) at the old free-list head. But
+`mov qul,ax` then writes that *same unchanged* value straight back into
+`qul` — a no-op, since nothing between those two instructions ever
+modifies `ax`. The freed QD's own `q_link` field is set correctly, but
+`qul` itself is never updated to point *at* `si`, so the QD is never
+actually threaded onto the free list at all — the only reference to it
+(`si`) exists in the caller's own register, gone the moment `remqd`
+returns, and the slot leaks.
+
+Confirmed this isn't a misreading by checking the analogous working code
+a few lines above it in the same file (`getqdaddr`'s own `gqd_have`
+success path): `mov ax,qul ! mov q_link[di],ax` followed by `mov
+qul,di` — the same two-step "link to the old head, then move the head"
+idiom, but correctly using the *new* node (`di`) for the second move,
+not reloading the *old* value. `remqd` is the one place this pattern
+was written with the wrong register.
+
+**Patched**: `mov qul,ax` → `mov qul,si`.
+
+## 100. `src/kernel/QUE1.RTM` — `deleteq_entry`'s `qd_noq` path corrupts the stack — FIXED
+
+Found the same way as #99 above, while building `/src-c`'s differential
+test for `deleteq_entry` (`src-c/kernel/que1.c`, `tests/src-c/
+test_que.py`): `tools/i86sim.py`'s reference run landed on an invalid
+opcode at address `0x0000` partway through a test case exercising this
+exact path, which traced back to a real stack imbalance, not a test bug.
+
+`deleteq_entry` pushes `es` once at entry and expects every exit path to
+pop exactly one word before `popf ! ret`, to keep the stack balanced:
+
+```
+deleteq_entry:
+	pushf ! cli
+	push es ! mov es,u_wrkseg
+	...
+	add dx,ax ! jnz qd_use
+	    ...
+qd_nqd:	    mov si,q_link[bx]
+	    cmp si,0 ! jz qd_noq
+		cmp si,di ! jne qd_neq
+		    ...
+		    pop es ! jmps qd_e
+qd_neq:		mov bx,si ! jmps qd_nqd
+qd_noq:	    mov cx,e_q_notactive ! jmps qd_be
+qd_use:	pop ax ! mov cx,e_q_inuse
+qd_be:	mov bx,0ffffh
+qd_e:	popf ! ret
+```
+
+The success path (`pop es ! jmps qd_e`) and the `qd_use` path (`pop ax
+! mov cx,...`) each consume exactly the one word `push es` put there.
+`qd_noq` — reached whenever the QD being deleted isn't actually linked
+into `qlr` — is the one path that jumps straight to `qd_be`/`qd_e`
+without popping anything first. With that word still on the stack,
+`popf` pops it into FLAGS instead of the real saved flags, and the
+following `ret` then pops the real saved-flags word and treats it as a
+return address — a jump to whatever bit pattern the flags happened to
+be, not back to the caller. Confirmed directly: a test memory image
+with `qlr` empty landed `tools/i86sim.py`'s reference run at address
+`0x0000` (decoding the flags word `0x0000` as a return address) instead
+of returning normally.
+
+**Patched**: added a `pop ax` at the start of `qd_noq`, matching
+`qd_use`'s own convention for discarding the pushed `es` on an error
+exit (rather than restoring it via `pop es`, which nothing downstream of
+either path relies on `es` still holding).
+
+## 101. `src/kernel/MEMORY.MEM` — `mfree_entry`'s active-PD check walks the wrong field — FIXED
+
+Found the same way as #99/#100 above, while building `/src-c`'s
+differential test for `mfree_entry` (`src-c/kernel/memory.c`,
+`tests/src-c/test_memory.py`, see `docs/src-c.md`).
+
+`mfree_entry`'s `mfree_chkpd`/`mfree_nxtpd` walk the Process Thread
+list to check whether the PD memory is being freed from is a currently
+active process other than the caller:
+
+```
+mfree_chkpd:
+	mov si,(offset thrdrt)-p_thread
+mfree_nxtpd:
+	mov si,p_link[si]
+	cmp si,0 ! je mfree_gotpd
+	    cmp si,bx ! jne mfree_nxtpd
+		cmp si,rlr ! je mfree_gotpd
+		    mov bx,0ffffh
+		    mov cx,e_active_pd
+		    ret
+mfree_gotpd:
+```
+
+`mov si,(offset thrdrt)-p_thread` biases `si` so that the very next
+`p_thread[si]` read lands on `thrdrt` itself (the real head of the
+Process Thread list), and every subsequent iteration's `p_thread[si]`
+reads the next PD's own thread-link field. But that first instruction
+reads `p_link[si]`, not `p_thread[si]` — a different field (`p_link` is
+offset 0 in a PD, `p_thread` is offset 2), so the bias set up for
+`p_thread` is wrong for it, and the walk follows the System List link
+chain instead of the Thread List, visiting the wrong set of PDs (or
+garbage, depending on what currently happens to sit at `thrdrt+2`
+relative to `p_link`'s own 0 offset).
+
+Confirmed this is a genuine mismatch, not a misreading, by checking
+`malloc_entry`'s own identical active-PD check a few lines earlier in
+the same file (`mall_pdnxt`), which sets up the exact same
+`(offset thrdrt)-p_thread` bias and then correctly reads `p_thread[si]`
+both times.
+
+**Patched**: `mov si,p_link[si]` → `mov si,p_thread[si]`.
+
+`/src-c/kernel/memory.c`'s own translation had two further, separate
+bugs of its own (not `/src` bugs, so not logged here — see
+`docs/src-c.md`'s own writeup): both `malloc_entry`'s and
+`mfree_entry`'s C ports of this same `(offset thrdrt)-p_thread` bias
+were missing the bias term entirely, and `mfree_it`'s C port had its
+`cmp cx,0 ! jne mfree_r` check inverted plus a hardcoded `bx = 0` in its
+return where the real routine always returns its own input `bx`
+unchanged.

@@ -1,0 +1,30 @@
+; Standalone wrapper for src/kernel/TICK.SUP: the whole file, `notick:`/
+; `tick:` (one full pass -- see docs/src-c.md).
+;
+; `notick:`'s own `call xiosif` (io_stopclk) is a mid-routine CALL into
+; the unported XIOS interface; per docs/src-c.md's boundary-stub
+; convention that's a `call_stub_addrs` entry (an instant no-op return
+; is correct here: nothing downstream reads AL, the only register this
+; call could have set).
+;
+; `rlr`/`dlr`/`drl` are DSEG labels at the scratch addresses
+; src-c/kernel/defs.h and tests/src-c/test_tick.py both use (see
+; idle_wrapper.A86's comment for why, same reasoning as there).
+; `u_wrkseg` likewise (same address UDA_WRKSEG already uses).
+	include system.def
+	include pd.def
+	include modfunc.def
+	include xioscb.def
+	dseg
+	org	0A000h
+rlr		dw	0
+	org	0A002h
+drl		dw	0
+	org	0A004h
+dlr		dw	0
+	org	0A012h
+u_wrkseg	dw	0
+	cseg
+xiosif	equ	9000h		; unported XIOS interface entry (stub)
+	include tick.sup
+	end

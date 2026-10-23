@@ -1,0 +1,79 @@
+; Standalone wrapper for src/kernel/COMMAND.SUP's shifttail, fileopen,
+; and user_retf -- the only 3 routines in this file src-c/kernel/
+; command.c ports (see that file's own header comment for why the rest
+; -- chain_entry/clicmd_entry and everything only they call -- is
+; deferred: a real segment-relative-addressing gap in cli_fload's own
+; chain-mode UDA copy).
+;
+; The whole file still has to assemble together (clicmd_entry's own
+; undeferred-looking labels included), so every SYSDAT.FMT-resident
+; scratch field it touches needs a DSEG stand-in below, even the ones
+; none of the 3 ported routines actually use -- same reasoning as
+; idle_wrapper.A86's own comment on fixed scratch addresses.
+	include system.def
+	include modfunc.def
+	include modtab.def
+	include xioscb.def
+	include pd.def
+	include err.def
+	include qd.def
+	include fcb.def
+	include acb.def
+	include char.def
+	include clicb.def
+	include basep.fmt
+	dseg
+	org	0A000h
+rlr		dw	0
+	org	0A012h
+u_wrkseg	dw	0
+	org	0A036h
+ncondev		db	0
+	org	0A040h
+tod_hr		db	0
+tod_min		db	0
+tod_sec		db	0
+	org	0A050h
+dayfile		db	0
+srchdisk	db	0
+pul		dw	0
+u_error_mode	db	0
+u_dma_ofst	dw	0
+u_dma_seg	dw	0
+	org	0B300h
+cli_fcb		rb	fcblen+1
+	org	0B320h
+cli_cuspqpb	rb	16
+	org	0B340h
+cli_acb		rb	12
+	org	0B350h
+cli_pcb		rw	2
+	org	0B360h
+cli_cmdtail	rb	130
+	org	0B400h
+mxcliqpb	rb	16
+	org	0B500h
+cli_chain	db	0
+cli_term	db	0
+cli_pflag	dw	0
+cli_net		db	0
+cli_ppd		dw	0
+cli_pd		dw	0
+cli_err		dw	0
+cli_bpage	dw	0
+cli_lddsk	db	0
+cli_dsk		db	0
+cli_user	db	0
+cli_cns		db	0
+cli_err_mode	db	0
+cli_dma_ofst	dw	0
+cli_dma_seg	dw	0
+cli_dfil	db	0
+cli_dma		rb	128
+inituda		rb	ulen
+	cseg
+mpmif	equ	9000h		; unported external call target (stub)
+mpmint	equ	48		; unported interrupt vector (stub number)
+sysdat	dw	0		; normally supplied by this module's own init
+	include command.sup
+	end

@@ -1,16 +1,18 @@
-# Builds every source file in src/ that is currently known to compile
-# and/or assemble cleanly with this repo's own from-scratch toolchain
-# (tools/asm86/, tools/plmc.py). See docs/bugs.md for exactly which
-# files are deliberately left out and why (genuine 1981 source defects,
-# or a documented tools/asm86 limitation) -- src/ itself is never
-# patched to make something build; only the lists below change as more
-# of the source is validated.
+# Builds every source file in this directory (src/) that is currently
+# known to compile and/or assemble cleanly with this repo's own
+# from-scratch toolchain (../tools/asm86/, ../tools/plmc.py). See
+# ../docs/bugs.md for exactly which files are deliberately left out and
+# why (genuine 1981 source defects, or a documented ../tools/asm86
+# limitation) -- src/ itself is never patched to make something build;
+# only the lists below change as more of the source is validated.
 #
-# Usage:
+# Usage (from the repo root: `make -C src <target>`; or `cd src &&
+# make <target>`):
 #   make            # build everything in ALL_GOOD below
 #   make partial    # also compile (but not assemble) the two known-
 #                   # incomplete toolchain files
-#   make disk       # build build/disk/mpm86q.img, a bootable floppy image
+#   make disk       # build ../build/disk/mpm86q.img, a bootable floppy
+#                   # image
 #   make run        # boot that image in QEMU (builds it first if needed)
 #   make clean
 
@@ -18,17 +20,22 @@
 # "python", not "python3" -- pick whichever actually exists so this
 # Makefile works unmodified on Linux/macOS/Windows (see
 # .github/workflows/build.yml's os matrix).
+#
+# This Makefile lives in src/ and is invoked as `make -C src` (or from
+# within src/ directly), so its own source paths below are relative to
+# src/ itself, while tools/ and the build/ output dir -- both outside
+# src/ -- are reached via ../.
 PYTHON  := $(shell command -v python3 2>/dev/null || command -v python)
-PLMC    := $(PYTHON) tools/plmc.py
-ASM86   := $(PYTHON) tools/asm86.py
-STUB    := tools/plm/runtime_stub.A86
-BUILD   := build
+PLMC    := $(PYTHON) ../tools/plmc.py
+ASM86   := $(PYTHON) ../tools/asm86.py
+STUB    := ../tools/plm/runtime_stub.A86
+BUILD   := ../build
 QEMU    := qemu-system-i386
 
 # --- .PLM utilities: compile with plmc, then concatenate the real
 # mon1-4 interface stub and assemble the result (see
 # tools/plm/README.md's "pl_mon1-pl_mon4 now have a real
-# implementation"). All of src/utils/ and INS86.PLM assemble cleanly
+# implementation"). All of utils/ and INS86.PLM assemble cleanly
 # this way. ASS86.PLM/DIS86.PLM compile but don't fully assemble -- they
 # also need DDT86 entry points that runtime_stub.A86 explicitly doesn't
 # provide (see docs/bugs.md and tools/plm/README.md's "Known
@@ -59,7 +66,7 @@ KERNEL_OK := CIO SYSDAT BDOS MEM RTM SUP
 # itself before relying on it. Its own disk parameter block (dpb0) was
 # originally a flagged placeholder with the wrong SPT; it's since been
 # recomputed for the real target geometry and kept identical to
-# src/loader/LDBIOS86Q.A86's own DPB, since both read the same on-disk
+# loader/LDBIOS86Q.A86's own DPB, since both read the same on-disk
 # filesystem.
 KERNEL_NEW := XIOS86Q
 
@@ -75,7 +82,7 @@ LOADER_OK := LDBDOS LDBIOS LDMPM ROM
 LOADER_NEW := LDBIOS86Q
 
 # --- MPMLDR.bin: LDMPM/LDBDOS/LDBIOS86Q combined into one loadable image
-# by tools/build_mpmldr.py, DRI's own "pip the three modules' hex
+# by ../tools/build_mpmldr.py, DRI's own "pip the three modules' hex
 # together, then GENCMD" build step (orig/mpm862sr/04/MKALL.SUB)
 # re-done without GENCMD -- see that script's own docstring and
 # docs/build.md for why it lays the pieces out differently than DRI did,
@@ -84,7 +91,7 @@ LOADER_NEW := LDBIOS86Q
 MPMLDR_BIN := $(BUILD)/loader/MPMLDR.bin
 
 # --- MPM.bin{.cseg,.dseg}: SUP/RTM/MEM/CIO/BDOS/XIOS86Q combined into
-# one kernel image by tools/build_mpmsys.py -- the kernel-side
+# one kernel image by ../tools/build_mpmsys.py -- the kernel-side
 # counterpart of MPMLDR_BIN above, replacing GENSYS-86 (whose source
 # was never part of this distribution -- see that script's own
 # docstring and docs/build.md). Both output files come from one
@@ -100,7 +107,7 @@ MPMSYS_BIN := $(BUILD)/kernel/MPM.bin.cseg $(BUILD)/kernel/MPM.bin.dseg
 # Uses BIOS INT 13h for disk I/O (confirmed via AskUserQuestion), not
 # the from-scratch NEC765 driver XIOS86Q.A86/LDBIOS86Q.A86 carry --
 # see ROM86Q.A86's own header comment. Built by
-# tools/build_bootsect.py, which also has to slice the real 512-byte
+# ../tools/build_bootsect.py, which also has to slice the real 512-byte
 # sector out of asm86's own padded output -- see that script's own
 # docstring for why (the same `org`-padding behavior as docs/bugs.md
 # #11).
@@ -109,7 +116,7 @@ BOOTSECT_BIN := $(BUILD)/loader/ROM86Q.bin
 # --- mpm86q.img: the final bootable QEMU floppy image, combining
 # BOOTSECT_BIN + MPMLDR_BIN + MPMSYS_BIN -- the three pieces above --
 # plus a real on-disk `MPM.SYS` file (built by hand to the CP/M
-# directory format `tools/build_disk.py` itself documents; none of the
+# directory format `../tools/build_disk.py` itself documents; none of the
 # three scripts above produce one). See that script's own docstring
 # for the exact disk layout. Not added to ALL_GOOD: it re-invokes the
 # three build scripts above itself (so it's never stale), making it
@@ -149,10 +156,10 @@ run: $(DISK_IMG)
 # compiler's own trailing END so the stub's END is the one that counts,
 # see tools/README.md's "END is scoped to the file it appears in") ->
 # assemble.
-$(BUILD)/utils/%.gen.A86: src/utils/%.PLM | $(BUILD)/utils
+$(BUILD)/utils/%.gen.A86: utils/%.PLM | $(BUILD)/utils
 	$(PLMC) $< -o $@
 
-$(BUILD)/toolchain/%.gen.A86: src/toolchain/%.PLM | $(BUILD)/toolchain
+$(BUILD)/toolchain/%.gen.A86: toolchain/%.PLM | $(BUILD)/toolchain
 	$(PLMC) $< -o $@
 
 $(BUILD)/utils/%.combined.A86: $(BUILD)/utils/%.gen.A86 $(STUB)
@@ -170,38 +177,38 @@ $(BUILD)/toolchain/%.cseg.bin: $(BUILD)/toolchain/%.combined.A86
 	$(ASM86) $< -o $(BUILD)/toolchain/$*
 
 # -- RSPs and kernel modules: assembled directly, no PL/M stage.
-$(BUILD)/rsp/%.cseg.bin: src/rsp/%.A86 | $(BUILD)/rsp
+$(BUILD)/rsp/%.cseg.bin: rsp/%.A86 | $(BUILD)/rsp
 	$(ASM86) $< -o $(BUILD)/rsp/$*
 
-$(BUILD)/kernel/%.cseg.bin: src/kernel/%.A86 | $(BUILD)/kernel
+$(BUILD)/kernel/%.cseg.bin: kernel/%.A86 | $(BUILD)/kernel
 	$(ASM86) $< -o $(BUILD)/kernel/$*
 
-$(BUILD)/loader/%.cseg.bin: src/loader/%.A86 | $(BUILD)/loader
+$(BUILD)/loader/%.cseg.bin: loader/%.A86 | $(BUILD)/loader
 	$(ASM86) $< -o $(BUILD)/loader/$*
 
 # -- MPMLDR.bin depends on all three loader modules' own sources (not
 # just their .cseg.bin -- the script re-assembles LDMPM itself if it
 # patches its offset constants) plus the build script.
-$(MPMLDR_BIN): src/loader/LDMPM.A86 src/loader/LDBDOS.A86 src/loader/LDBIOS86Q.A86 tools/build_mpmldr.py | $(BUILD)/loader
-	$(PYTHON) tools/build_mpmldr.py -o $@
+$(MPMLDR_BIN): loader/LDMPM.A86 loader/LDBDOS.A86 loader/LDBIOS86Q.A86 ../tools/build_mpmldr.py | $(BUILD)/loader
+	$(PYTHON) ../tools/build_mpmldr.py -o $@
 
 # -- Both MPM.bin{.cseg,.dseg} come from one invocation of
 # build_mpmsys.py; the stamp file is what actually carries the
 # dependency, so two output files never trigger two separate runs.
-$(MPMSYS_STAMP): src/kernel/SYSDAT.A86 src/kernel/SUP.A86 src/kernel/RTM.A86 src/kernel/MEM.A86 src/kernel/CIO.A86 src/kernel/BDOS.A86 src/kernel/XIOS86Q.A86 tools/build_mpmsys.py | $(BUILD)/kernel
-	$(PYTHON) tools/build_mpmsys.py -o $(BUILD)/kernel/MPM.bin
+$(MPMSYS_STAMP): kernel/SYSDAT.A86 kernel/SUP.A86 kernel/RTM.A86 kernel/MEM.A86 kernel/CIO.A86 kernel/BDOS.A86 kernel/XIOS86Q.A86 ../tools/build_mpmsys.py | $(BUILD)/kernel
+	$(PYTHON) ../tools/build_mpmsys.py -o $(BUILD)/kernel/MPM.bin
 	touch $@
 
 # -- ROM86Q.bin: one source file, one build script, no multi-module
 # combining needed.
-$(BOOTSECT_BIN): src/loader/ROM86Q.A86 tools/build_bootsect.py | $(BUILD)/loader
-	$(PYTHON) tools/build_bootsect.py -o $@
+$(BOOTSECT_BIN): loader/ROM86Q.A86 ../tools/build_bootsect.py | $(BUILD)/loader
+	$(PYTHON) ../tools/build_bootsect.py -o $@
 
-# -- mpm86q.img: tools/build_disk.py re-invokes build_bootsect.py/
+# -- mpm86q.img: ../tools/build_disk.py re-invokes build_bootsect.py/
 # build_mpmldr.py/build_mpmsys.py itself, so its own real dependencies
 # are those three scripts' own sources, not their outputs.
-$(DISK_IMG): src/loader/ROM86Q.A86 tools/build_bootsect.py src/loader/LDMPM.A86 src/loader/LDBDOS.A86 src/loader/LDBIOS86Q.A86 tools/build_mpmldr.py src/kernel/SYSDAT.A86 src/kernel/SUP.A86 src/kernel/RTM.A86 src/kernel/MEM.A86 src/kernel/CIO.A86 src/kernel/BDOS.A86 src/kernel/XIOS86Q.A86 tools/build_mpmsys.py tools/build_disk.py | $(BUILD)/disk
-	$(PYTHON) tools/build_disk.py -o $@
+$(DISK_IMG): loader/ROM86Q.A86 ../tools/build_bootsect.py loader/LDMPM.A86 loader/LDBDOS.A86 loader/LDBIOS86Q.A86 ../tools/build_mpmldr.py kernel/SYSDAT.A86 kernel/SUP.A86 kernel/RTM.A86 kernel/MEM.A86 kernel/CIO.A86 kernel/BDOS.A86 kernel/XIOS86Q.A86 ../tools/build_mpmsys.py ../tools/build_disk.py | $(BUILD)/disk
+	$(PYTHON) ../tools/build_disk.py -o $@
 
 $(BUILD)/kernel/MPM.bin.cseg $(BUILD)/kernel/MPM.bin.dseg: $(MPMSYS_STAMP)
 

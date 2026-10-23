@@ -1,0 +1,19 @@
+; Standalone wrapper for src/kernel/PARSE.SUP's parse_entry (plus its own
+; internal helpers setfld/delim/deblank/fcbinit, all in this one file).
+; Fully self-contained: no calls into any unported module.
+;
+; `u_wrkseg` is a DSEG label at the scratch address src-c/kernel/defs.h and
+; tests/src-c/test_parse.py both use (see idle_wrapper.A86's comment for
+; why, same reasoning as there).
+	include system.def
+	include pd.def
+	include char.def
+	include fcb.def
+	include pcb.def
+	include err.def
+	dseg
+	org	0A012h
+u_wrkseg	dw	0
+	cseg
+	include parse.sup
+	end

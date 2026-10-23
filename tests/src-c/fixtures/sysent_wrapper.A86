@@ -1,0 +1,38 @@
+; Standalone wrapper for 7 of src/kernel/SYSENT.RTM's 8 entries: poll_entry,
+; delay_entry, dispatch_entry, set_prior_entry, pd_entry, sleep_entry,
+; wakeup_entry. `creat_proc_entry` is deferred (it's one line, `call
+; proc_creat ! jmp pdisp` -- nothing to port without proc_creat itself) --
+; see docs/src-c.md.
+;
+; Every routine here either tail-jumps into the unported dispatcher
+; (`dsptch`/`pdisp`) or, in wakeup_entry's case, calls it mid-routine and
+; keeps going. Per docs/src-c.md's boundary-stub convention:
+;   - a tail JMP target is a `tools/i86sim.py` `stop_addrs` entry (the test
+;     halts there and checks registers, same as idle_wrapper.A86);
+;   - a mid-routine CALL target is a `call_stub_addrs` entry (treated as an
+;     instant no-op return -- correct here because nothing downstream reads
+;     a register the dispatcher might have set, same as a process that
+;     simply gets rescheduled later resumes right after the call).
+;
+; `rlr`/`drl` are DSEG labels at the scratch addresses src-c/kernel/defs.h
+; and tests/src-c/test_sysent.py both use (see idle_wrapper.A86's comment
+; for why, same reasoning as there). `u_dparam` likewise.
+	include system.def
+	include pd.def
+	dseg
+	org	0A000h
+rlr		dw	0
+drl		dw	0
+	org	0A010h
+u_dparam	dw	0
+u_wrkseg	dw	0		; unused by these 7 entries, kept only so u_retseg
+				; lands at the same address src-c/kernel/defs.h's
+				; UDA_RETSEG uses (consistent with every other
+				; Tier-1 wrapper's UDA layout)
+u_retseg	dw	0
+	cseg
+dsptch	equ	9000h		; unported dispatcher entry (stub)
+pdisp	equ	9010h		; unported dispatcher entry (stub)
+proc_creat equ 9020h		; unported, creat_proc_entry is deferred/unexercised
+	include sysent.rtm
+	end

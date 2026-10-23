@@ -1,0 +1,34 @@
+; Standalone wrapper for a self-contained subset of src/kernel/
+; FILE2.BDO -- see src-c/kernel/file2.c's own header comment for
+; exactly which routines and why the rest is deferred.
+;
+; This is the exact same combined BDOS module bundle as
+; tests/src-c/fixtures/file1_wrapper.A86 (FILE1-4.BDO + BDOSIF.BDO +
+; DATA.BDO, the same bundle src/kernel/BDOS.A86 itself assembles) --
+; FILE2.BDO isn't self-contained either, for the same reason FILE1.BDO
+; wasn't (see that wrapper's own header comment for the full
+; rationale). tests/src-c/test_file2.py's own run_reference() handles
+; this bundle's own cseg/dseg collision the same way
+; tests/src-c/test_file1.py's does.
+	include cpyright.def
+	include equ.bdo
+	include system.def
+	include pd.def
+	include err.def
+	include qd.def
+	include modfunc.def
+	include xioscb.def
+; mpmif AND seldskf/homef/readf/writef/settrkf/sectran/setsecf/
+; setdmbf/setdmf are all real labels in BDOSIF.BDO itself -- see
+; file1_wrapper.A86's own header comment. Not needed by anything
+; file2.c ports, but kept here since the whole module still has to
+; assemble as one unit.
+	include bdosif.bdo
+	include file1.bdo
+	include file2.bdo
+	include file3.bdo
+	include file4.bdo
+	include uda.fmt
+	include sysdat.fmt
+	include data.bdo
+	end

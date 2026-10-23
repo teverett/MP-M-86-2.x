@@ -1,0 +1,29 @@
+; Standalone wrapper for src/kernel/FLAG.RTM: flag_set_entry, flag_wait_entry,
+; and their shared internal helpers flag_valid/flag_exit/flag_bexit (all in
+; this one file, ported as ordinary internal C calls -- no stub needed for
+; those). flag_wait_entry's `fw_noff` path calls the unported dispatcher
+; (`call dsptch`); per docs/src-c.md's boundary-stub convention that's a
+; `call_stub_addrs` entry (an instant no-op return is correct here: nothing
+; downstream reads a register the dispatcher might have set).
+;
+; `rlr`/`nflags`/`flags` are DSEG labels at the scratch addresses
+; src-c/kernel/defs.h and tests/src-c/test_flag.py both use (see
+; idle_wrapper.A86's comment for why, same reasoning as there).
+	include system.def
+	include pd.def
+	include flg.def
+	include err.def
+	dseg
+	org	0A000h
+rlr		dw	0
+drl		dw	0
+	org	0A006h
+nflags		db	0
+	org	0A008h
+flags		dw	0
+	org	0A010h
+u_dparam	dw	0
+	cseg
+dsptch	equ	9000h		; unported dispatcher entry (stub)
+	include flag.rtm
+	end

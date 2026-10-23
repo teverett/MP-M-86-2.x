@@ -1,0 +1,35 @@
+; Standalone wrapper for src/kernel/MEMORY.MEM's malloc_entry, mfree_entry
+; (+ internal mfree_it), and mall_try_mau. Unlike MAU.MEM/SHARE.MEM, none
+; of these switch DS to a dynamically-computed segment and then use a
+; fixed offset relative to it -- they only use the already-established
+; u_wrkseg/cs:sysdat patterns, so no new addressing gap applies here.
+; getmd/freemd (src/kernel/UTIL.MEM, already ported in util_mem.c) are
+; called as ordinary internal calls below, not boundary stubs.
+;
+; `rlr`/`thrdrt`/`mal`/`mfl`/`mdul` are DSEG labels at the scratch
+; addresses src-c/kernel/defs.h and tests/src-c/test_memory_mem.py both
+; use (see idle_wrapper.A86's comment for why, same reasoning as there).
+	include system.def
+	include pd.def
+	include err.def
+	include mem.def
+	include mpb.def
+	include modtab.def
+	include modfunc.def
+	dseg
+	org	0A000h
+rlr		dw	0
+	org	0A012h
+u_wrkseg	dw	0
+	org	0A028h
+mdul		dw	0
+mal		dw	0
+mfl		dw	0
+	org	0A032h
+thrdrt		dw	0
+	cseg
+sysdat	dw	0		; normally supplied by this module's own init
+mpmif	equ	9000h		; unported external call target (stub)
+	include util.mem
+	include memory.mem
+	end

@@ -22,6 +22,9 @@ src/            The same source, organized by what it builds:
                   INS86).
   utils/          PL/M sources for user-facing utilities (PIP, ED,
                   DIR, TYPE, etc.).
+  Makefile        Build everything with `make -C src` (or `cd src &&
+                  make`); see its own header comment for all targets
+                  (`make disk`, `make run`, ...).
 tools/          This project's own from-scratch build tooling (none of
                 it is DRI source):
   asm86/          An ASM86-dialect assembler, since none survived.
@@ -34,9 +37,7 @@ tools/          This project's own from-scratch build tooling (none of
   build_disk.py     Combines everything above into one bootable
                     QEMU floppy image.
 docs/           Documentation -- see "Documentation" below.
-build/          Build output (gitignored, created by `make`).
-Makefile        Build everything with `make`; see its own header
-                comment for all targets (`make disk`, `make run`, ...).
+build/          Build output (gitignored, created by `make -C src`).
 ```
 
 ## Documentation
@@ -63,6 +64,10 @@ Makefile        Build everything with `make`; see its own header
 - [docs/syscalls.md](docs/syscalls.md) — the MP/M-86 kernel's and the
   loader's own system-call tables: every `CL` function number, what it
   does, and where it's implemented.
+- [docs/src-c.md](docs/src-c.md) — `/src-c`, a routine-by-routine C port of
+  the hand-written kernel/loader/RSP assembly, verified by differential
+  testing rather than byte-for-byte matching; what's ported so far and
+  what's next.
 
 ## Source
 

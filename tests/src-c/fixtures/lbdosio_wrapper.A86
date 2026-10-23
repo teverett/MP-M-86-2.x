@@ -1,0 +1,32 @@
+; Standalone wrapper for src/loader/LBDOSIO.A86's conbrk, conout,
+; tabout, crlf, print, func9, staret, funcret, setlret1.
+;
+; constf/coninf/conouf/listf/wbootf resolve (via LBDOSEQU.A86's own
+; `BIOS+3*n` scheme) to small numeric offsets right at the start of
+; cseg, coincidentally overlapping where this wrapper's own real code
+; begins -- harmless, since tools/i86sim.py's call_stub_addrs only
+; intercepts a near CALL whose *target* matches, never plain
+; straight-line execution reaching the same numeric address by chance.
+;
+; `kbchar`/`compcol`/`column`/`listcp`/`aret` are DSEG labels at the
+; scratch addresses src-c/loader/defs.h and tests/src-c/test_lbdosio.py
+; both use (see idle_wrapper.A86's comment for why, same reasoning as
+; there) -- declared directly here rather than via `include
+; lbdosdat.a86`, which places them at that file's own in-sequence cseg
+; position and pulls in a lot of unrelated BDOS filesystem data this
+; wrapper has no use for.
+cpmsegment	equ	0
+biosoffset	equ	0
+	include lbdosequ.a86
+	dseg
+	org	0B000h
+kbchar		db	0
+compcol		db	0
+column		db	0
+listcp		db	0
+aret		dw	0
+lret		equ	byte ptr aret
+parametersegment dw	0
+	cseg
+	include lbdosio.a86
+	end

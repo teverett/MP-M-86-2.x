@@ -1,0 +1,38 @@
+; Standalone wrapper for the 4 self-contained entries in
+; src/kernel/SYSFUNC.SUP: not_implemented, bad_entry, version_entry,
+; mpmversion_entry. The file's other entries (callbios_entry, sysdat_entry,
+; tod_entry, serial_entry) call into unported modules (mpmif/xiosif) or
+; `rep movs` from module-local data (tod/serial) and are deferred -- see
+; docs/src-c.md. They're still given trivial placeholder definitions below
+; purely so the whole file assembles (asm86 assembles FINDPD.RTM-style
+; wrappers one whole file at a time); tests/src-c/test_sysfunc.py never
+; exercises them.
+;
+; `vernum`/`mpmvernum` normally come from SYSDAT.FMT; declared here as DSEG
+; labels at the harness-chosen scratch addresses src-c/kernel/defs.h and
+; tests/src-c/test_sysfunc.py both use (see idle_wrapper.A86's own comment
+; for why a plain EQU would be wrong for a value that's read, not jumped to).
+; `rlr`/`u_wrkseg`/`u_retseg` are the same, for callbios_entry/sysdat_entry
+; (unexercised, but still memory reads, not immediates).
+	include system.def
+	include pd.def
+	include err.def
+	include modtab.def
+	include modfunc.def
+	dseg
+	org	0A000h
+rlr		dw	0
+	org	0A00Ah
+vernum		dw	0
+mpmvernum	dw	0
+	org	0A010h
+u_dparam	dw	0
+u_wrkseg	dw	0
+u_retseg	dw	0
+	cseg
+mpmif	equ	9000h		; unported external call target (stub), unexercised
+xiosif	equ	9010h		; ditto
+tod	dw	0, 0, 0		; placeholder -- tod_entry is deferred, unexercised
+serial	dw	0, 0, 0		; placeholder -- serial_entry is deferred, unexercised
+	include sysfunc.sup
+	end

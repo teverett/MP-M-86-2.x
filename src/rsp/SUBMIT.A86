@@ -124,7 +124,7 @@ setp:	mov cl,mpm_setprior
 	call openfile
 	cmp al,0ffh
 	jnz exists
-	mov dx,offset sopen_err
+	mov dx,offset sopenerr
 	call con_write
 	jmp submitexit
 
@@ -461,7 +461,7 @@ notdrive:	    mov di,offset clicmd
 
 goodparse:	    mov parseret,bx
 		    cmp parseresult,0 ! jz try_builtin
-			jmp not_builtin
+			jmp notbuiltin
 
 try_builtin:
 		    mov di,offset usercmd
@@ -627,7 +627,7 @@ showerr:
 ; Print Error String
 ;	input: DX = address of Error String
 
-	call conwrite
+	call con_write
 	jmp submitexit
 
 ;==========

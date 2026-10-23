@@ -1,0 +1,15 @@
+; Standalone wrapper for src/kernel/UTIL.MEM's getmd/freemd: both fully
+; self-contained (no calls into any other module at all).
+;
+; `mdul` is a DSEG label at the scratch address src-c/kernel/defs.h and
+; tests/src-c/test_util_mem.py both use (see idle_wrapper.A86's comment
+; for why, same reasoning as there).
+	include system.def
+	include err.def
+	include mem.def
+	dseg
+	org	0A028h
+mdul		dw	0
+	cseg
+	include util.mem
+	end

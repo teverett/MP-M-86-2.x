@@ -1,0 +1,14 @@
+; Minimal standalone wrapper so tools/asm86.py can assemble
+; src/kernel/FINDPD.RTM on its own: it has no INCLUDEs of its own and
+; relies on equates that normally come from RTM.A86's own include chain
+; (see src/kernel/RTM.A86). Pulls in only what findpdname_entry actually
+; needs: SYSTEM.DEF (pnamsiz), PD.DEF (p_thread/p_name, needs pnamsiz),
+; ERR.DEF (e_no_pdname), UDA.FMT (u_wrkseg, referenced by `mov es,u_wrkseg`).
+	include system.def
+	include pd.def
+	include err.def
+	include uda.fmt
+	cseg			; UDA.FMT leaves the segment as ESEG; findpdname_entry
+				; is real code and belongs back in CSEG.
+	include findpd.rtm
+	end

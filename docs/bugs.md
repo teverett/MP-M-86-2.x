@@ -9332,4 +9332,65 @@ kernel/mau.c`'s own `mau_insert` needs a real backward `REP MOVSB`
 (`STD`) to shift a SAT table up without self-clobbering the
 overlapping region it's shifting into. **Fixed**: added a tracked
 direction flag (`self.df`), `STD`/`CLD` opcode handlers, and made
+
+## 103. `tools/i86sim.py` — two more gaps found porting `DSPTCH.RTM` as a debugging aid (no `/src` bug) — FIXED
+
+`src-c/kernel/dsptch.c` (a C port of `DSPTCH.RTM`, written per request
+as a reading/debugging aid for the still-open scheduler-hang
+investigation, #83-98, not a kernel-build component — see the file's
+own header comment) is the first routine in this project to actually
+switch `SS` away from zero (`switch:`'s own `mov ss,u_ss ! mov
+sp,u_sp`, restoring the newly-dispatched process's own real stack)
+and the first to execute a near indirect `JMP`/`CALL` through a
+*CS-segment-overridden* table (`jmp cs:dsp_table[bx]` at the top of
+`dsptch:`, and `call mpmif` inside `term_act`) while also under a
+`CSEG_BASE`-shifted reference run (`tests/src-c/test_dsptch.py` needs
+the shift for the same reason `proc.c`'s/`load.c`'s own tests do:
+absolute segment-0 IVT reads/writes). Both of the new gaps below were
+latent in exactly that combination and never exercised before.
+
+**Gap 1 — `PUSH`/`POP` ignored `SS` entirely under `segmented=True`.**
+`_push16`/`_pop16` always used `regs['sp']` as a bare flat address,
+never combining it with `SS` the way every other segment:offset pair
+in the module already does. Harmless for every routine before this
+one (none of them ever changed `SS` away from its default of 0, so
+plain `SP` already *was* the flat address) but fatal here: after
+`switch:`'s own stack switch, `dret`'s/`dret_noif`'s closing `ret`
+popped from physical address `0x0000:SP` instead of the real
+`SS:SP`, landing on whatever garbage happened to be at that flat
+offset instead of the differential test's own placed return sentinel
+(see the test's own comment on `u_ss`/`u_sp`) — a wild jump, not
+dsptch's own real control flow. **Fixed**: added `_stack_addr()`,
+used by both `_push16_into` and `_pop16`, that applies the module's
+usual `(seg*16+offset)&0xFFFF` rule to `SS:SP` under `segmented=True`
+and falls back to bare `SP` otherwise (so every pre-existing test,
+which never sets a nonzero `SS`, is unaffected).
+
+**Gap 2 — near indirect `CALL r/m16`/`JMP r/m16` (opcode `FF` `/2`/`/4`,
+added in #102's own investigation for `ABORT.RTM`) didn't add the
+current `CS` base to the loaded target offset.** `self.ip` is tracked
+as an absolute address throughout this module (already including
+whatever base a `CSEG_BASE`-shifted test loaded code at), but the
+loaded r/m16 value is a bare *offset* — exactly like a direct `CALL
+rel16`/`JMP rel16`'s own displacement is added to the current
+(already-absolute) `self.ip`, an indirect near jump's target offset
+needs the current `CS*16` added too. Never visible in `ABORT.RTM`'s
+own test (no `CSEG_BASE` shift there, so `CS*16` is always 0) or
+anywhere else that used this opcode form, until `dsptch:`'s own `jmp
+cs:dsp_table[bx]` ran under `dsptch`'s `CSEG_BASE`-shifted test and
+landed `0x800` bytes short of every `dsp_table` entry's real address.
+**Fixed**: both handlers now set `self.ip = (self.regs['cs'] * 16 +
+target) & 0xFFFF` instead of `self.ip = target`.
+
+Also needed, not a bug in the module itself: `term_act`'s own `call
+mpmif`/`call xiosif` (an *unported, fixed-address* boundary stub, see
+the module's own docstring on `call_stub_addrs`) is a direct `CALL
+rel16`, so its *displacement* was assembled assuming the call site
+itself would land exactly on `mpmif`'s/`xiosif`'s real address
+(`9000h`/`9001h`) — true with no `CSEG_BASE` shift, but off by
+`CSEG_BASE` under one, for the same reason as gap 2 above (the
+displacement gets added to an already-shifted `self.ip`). Not a sim
+bug: `test_dsptch.py`'s own `call_stub_addrs` just has to name the
+shifted absolute addresses (`CSEG_BASE + 0x9000`, `CSEG_BASE +
+0x9001`), which it now does.
 `_string_op_once`'s own SI/DI step negative when `self.df` is set.

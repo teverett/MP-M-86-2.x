@@ -118,16 +118,26 @@ void freepd(uint8_t *mem, uint16_t si) {
  *		sysdat = this module's own copy of the SYSDAT segment
  *	output:	returns 0 (dx was 0), 0xFFFF (getpdadr failed), or
  *		(real asm leaves no other observable bx value)
+ *		*dx_out, if non-NULL: dx's own real final value at the
+ *		routine's own exit (0 on the success path, the PD
+ *		address `getpdadr` failed on otherwise) -- the real
+ *		asm's own "pop dx" at the bottom of each loop pass
+ *		restores exactly this value every time, including right
+ *		before either real `ret`; needed so sysent.c's own
+ *		`creat_proc_entry` can feed the real post-loop dx into
+ *		`pdisp`, matching its own real `jmp pdisp`
  */
-uint16_t proc_creat(uint8_t *mem, uint16_t dx, uint16_t sysdat) {
+uint16_t proc_creat(uint8_t *mem, uint16_t dx, uint16_t sysdat, uint16_t *dx_out) {
     for (;;) {
         if (dx == 0) {
+            if (dx_out) *dx_out = dx;
             return 0;
         }
 
         uint16_t cx;
         uint16_t si = getpdadr(mem, dx, sysdat, &cx);
         if (cx != 0) {
+            if (dx_out) *dx_out = dx;
             return 0xFFFF;
         }
 

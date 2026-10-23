@@ -27,6 +27,12 @@ BD_SDCNT, BD_SDBLK, BD_CURDSK, BD_PACKED_DCNT = 0x0C7D, 0x0C7F, 0x0C36, 0x0C37
 BD_OPEN_ROOT, BD_LOCK_ROOT, BD_CUR_POS, BD_PRV_POS = 0x0C90, 0x0C92, 0x0C79, 0x0C7B
 BD_BLKSHF, BD_BLKMSK = 0x0C4A, 0x0C4B
 BD_FREE_ROOT = 0x0052
+BD_PDADDR, BD_FLUSHED, BD_PD_CNT = 0x0C3A, 0x0C8D, 0x0C33
+P_UDA, U_PD_CNT = 0x10, 0x1A
+
+
+def phys(seg):
+    return (seg * 16) & 0xFFFF
 
 # mpmif and its 9 XIOS-call helpers, plus XCRLF/XPRINT -- all real
 # BDOSIF.BDO labels this combined bundle needs to assemble, even
@@ -42,7 +48,8 @@ def assemble_reference():
     code = asm.segment_bytes('cseg')
     dseg = asm.segment_bytes('dseg')
     names = ('pack_sdcnt', 'compare', 'search_olist', 'search_llist', 'searchn_list',
-              'delete_item', 'create_item', 'set_olist_item')
+              'delete_item', 'create_item', 'set_olist_item',
+              'flush_files', 'flush_file0', 'remove_locks', 'inc_pdcnt')
     entries = {name: asm.symtab[name].value for name in names}
     return code, dseg, entries
 
@@ -70,7 +77,7 @@ def base_memory():
     return bytearray(0x10000)
 
 
-def run_reference(code, dseg, entry, mem, regs, stop_addrs=()):
+def run_reference(code, dseg, entry, mem, regs, stop_addrs=(), segmented=False):
     # Same cseg/dseg layering as test_file1.py's own run_reference --
     # see file1_wrapper.A86's own header comment for why this is
     # needed for this combined bundle specifically.
@@ -89,7 +96,7 @@ def run_reference(code, dseg, entry, mem, regs, stop_addrs=()):
     # BD_CURDSK's own explicit override line already works around).
     image[BD_FREE_ROOT:BD_FREE_ROOT + 2] = mem[BD_FREE_ROOT:BD_FREE_ROOT + 2]
     sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry, stop_addrs=set(stop_addrs),
-                 call_stub_addrs=STUBS)
+                 call_stub_addrs=STUBS, segmented=segmented)
     sim.run()
     return sim.regs, image
 
@@ -125,6 +132,10 @@ def main():
         lib.create_item.restype = ctypes.c_uint8
         lib.create_item.argtypes = [c_u8p, ctypes.POINTER(ctypes.c_uint16)]
         lib.set_olist_item.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint8]
+        lib.flush_files.argtypes = [c_u8p]
+        lib.flush_file0.argtypes = [c_u8p]
+        lib.remove_locks.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.inc_pdcnt.argtypes = [c_u8p]
 
         failures = []
 
@@ -343,6 +354,84 @@ def main():
         ref = bytes(ref_img[ITEM:ITEM + 11])
         port = bytes(bytes(buf)[ITEM:ITEM + 11])
         check("set_olist_item: attrs|drive, packed_dcnt/pdaddr copy, opncnt zeroed", ref, port)
+
+        # -- inc_pdcnt: ordinary bump --
+        mem = base_memory()
+        mem[BD_PD_CNT] = 0x10
+        ref_regs, ref_img = run_reference(code, dseg, entries['inc_pdcnt'], mem, {})
+        buf = to_ctypes(mem)
+        lib.inc_pdcnt(ctypes.cast(buf, c_u8p))
+        check("inc_pdcnt: ordinary bump", ref_img[BD_PD_CNT], bytes(buf)[BD_PD_CNT])
+
+        # -- inc_pdcnt: wraps past 0 --
+        mem = base_memory()
+        mem[BD_PD_CNT] = 0xF8
+        ref_regs, ref_img = run_reference(code, dseg, entries['inc_pdcnt'], mem, {})
+        buf = to_ctypes(mem)
+        lib.inc_pdcnt(ctypes.cast(buf, c_u8p))
+        check("inc_pdcnt: wraps past 0", ref_img[BD_PD_CNT], bytes(buf)[BD_PD_CNT])
+
+        # -- remove_locks: olist item without the lock bit -> no-op --
+        mem = base_memory()
+        ITEM = 0x4100
+        mem[ITEM:ITEM + 11] = olist_entry(0, 0, b'\x00\x00\x00', 0)  # attrs byte has no 0x40 bit
+        ref_regs, ref_img = run_reference(code, dseg, entries['remove_locks'], mem, {'bx': ITEM})
+        buf = to_ctypes(mem)
+        lib.remove_locks(ctypes.cast(buf, c_u8p), ctypes.c_uint16(ITEM))
+        check("remove_locks: no lock bit -> no-op", mem_r16(ref_img, BD_LOCK_ROOT),
+              mem_r16(bytes(buf), BD_LOCK_ROOT))
+
+        # -- remove_locks: removes every lock record owned by this item --
+        mem = base_memory()
+        ITEM = 0x4100
+        mem[ITEM + 2] = 0x40  # lock bit set
+        LOCK1, LOCK2 = 0x4300, 0x4400  # LOCK1 belongs to ITEM, LOCK2 doesn't
+        mem_w16(mem, LOCK1, LOCK2)
+        mem_w16(mem, (LOCK1 + 8) & 0xFFFF, ITEM)
+        mem_w16(mem, LOCK2, 0)
+        mem_w16(mem, (LOCK2 + 8) & 0xFFFF, 0x9999)
+        mem_w16(mem, BD_LOCK_ROOT, LOCK1)
+        mem_w16(mem, BD_FREE_ROOT, 0)
+        ref_regs, ref_img = run_reference(code, dseg, entries['remove_locks'], mem, {'bx': ITEM})
+        buf = to_ctypes(mem)
+        lib.remove_locks(ctypes.cast(buf, c_u8p), ctypes.c_uint16(ITEM))
+        port_img = bytes(buf)
+        ref = (mem_r16(ref_img, BD_LOCK_ROOT), mem_r16(ref_img, BD_FREE_ROOT))
+        port = (mem_r16(port_img, BD_LOCK_ROOT), mem_r16(port_img, BD_FREE_ROOT))
+        check("remove_locks: removes the owned record, keeps the other", ref, port)
+
+        # -- flush_file0: one matching-drive open file, owning PD not yet
+        # counted this pass and matches BD_PDADDR -> PD_CNT bumped --
+        mem = base_memory()
+        ITEM, PD, PD_UDA_SEG = 0x4100, 0x5000, 0x0800
+        mem[ITEM:ITEM + 11] = olist_entry(0, 3, b'\x00\x00\x00', PD)
+        mem_w16(mem, BD_OPEN_ROOT, ITEM)
+        mem[BD_CURDSK] = 3
+        mem_w16(mem, PD + P_UDA, PD_UDA_SEG)
+        mem[phys(PD_UDA_SEG) + U_PD_CNT] = 0
+        mem_w16(mem, BD_PDADDR, PD)
+        mem[BD_PD_CNT] = 0x10
+        mem_w16(mem, BD_FREE_ROOT, 0)
+        ref_regs, ref_img = run_reference(code, dseg, entries['flush_file0'], mem, {}, segmented=True)
+        buf = to_ctypes(mem)
+        lib.flush_file0(ctypes.cast(buf, c_u8p))
+        port_img = bytes(buf)
+
+        def flush_snapshot(img):
+            return (mem_r16(img, BD_OPEN_ROOT), img[phys(PD_UDA_SEG) + U_PD_CNT], img[BD_PD_CNT])
+
+        check("flush_file0: flushes the file, marks + counts its PD", flush_snapshot(ref_img),
+              flush_snapshot(port_img))
+
+        # -- flush_files: only runs flush_file0 once (BD_FLUSHED guards it) --
+        mem = base_memory()
+        mem[BD_FLUSHED] = 1
+        mem_w16(mem, BD_OPEN_ROOT, 0x4100)  # would crash if flush_file0 ran for real
+        ref_regs, ref_img = run_reference(code, dseg, entries['flush_files'], mem, {}, segmented=True)
+        buf = to_ctypes(mem)
+        lib.flush_files(ctypes.cast(buf, c_u8p))
+        check("flush_files: already flushed -> no-op", mem_r16(ref_img, BD_OPEN_ROOT),
+              mem_r16(bytes(buf), BD_OPEN_ROOT))
 
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")

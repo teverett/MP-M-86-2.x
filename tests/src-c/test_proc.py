@@ -117,7 +117,7 @@ def main():
 
         lib.freepd.argtypes = [c_u8p, ctypes.c_uint16]
         lib.proc_creat.restype = ctypes.c_uint16
-        lib.proc_creat.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16]
+        lib.proc_creat.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.POINTER(ctypes.c_uint16)]
 
         failures = []
 
@@ -168,7 +168,7 @@ def main():
         mem = bytearray(0x10000)
         ref_regs, ref_img = run_reference(code, entries['proc_creat'], mem, {'dx': 0}, 0x1000)
         buf = to_ctypes(mem)
-        bx = lib.proc_creat(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(0x1000))
+        bx = lib.proc_creat(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(0x1000), None)
         check("proc_creat: dx==0", ref_regs['bx'], bx)
 
         # -- proc_creat: getpdadr fails (pul exhausted) -> bx=0xFFFF --
@@ -179,7 +179,7 @@ def main():
         mem_w16(mem, SD_PUL, 0)
         ref_regs, ref_img = run_reference(code, entries['proc_creat'], mem, {'dx': 0x5100}, SYSDAT)
         buf = to_ctypes(mem)
-        bx = lib.proc_creat(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0x5100), ctypes.c_uint16(SYSDAT))
+        bx = lib.proc_creat(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0x5100), ctypes.c_uint16(SYSDAT), None)
         check("proc_creat: getpdadr fails -> 0xFFFF", ref_regs['bx'], bx)
 
         # -- proc_creat: single, full success --
@@ -254,7 +254,7 @@ def main():
         mem, SYSDAT, CHILD_PD, UDA_SEG, WRKSEG, PARENT_UDA_SEG = build_success_mem()
         ref_regs, ref_img = run_reference(code, entries['proc_creat'], mem, {'dx': CHILD_PD, 'es': PARENT_UDA_SEG}, SYSDAT)
         buf = to_ctypes(mem)
-        bx = lib.proc_creat(ctypes.cast(buf, c_u8p), ctypes.c_uint16(CHILD_PD), ctypes.c_uint16(SYSDAT))
+        bx = lib.proc_creat(ctypes.cast(buf, c_u8p), ctypes.c_uint16(CHILD_PD), ctypes.c_uint16(SYSDAT), None)
         port_img = bytes(buf)
         ref = (ref_regs['bx'],) + success_snapshot(ref_img, CHILD_PD, UDA_SEG, WRKSEG)
         port = (bx,) + success_snapshot(port_img, CHILD_PD, UDA_SEG, WRKSEG)
@@ -272,7 +272,7 @@ def main():
 
         ref_regs, ref_img = run_reference(code, entries['proc_creat'], mem, {'dx': CHILD_PD, 'es': PARENT_UDA_SEG}, SYSDAT)
         buf = to_ctypes(mem)
-        bx = lib.proc_creat(ctypes.cast(buf, c_u8p), ctypes.c_uint16(CHILD_PD), ctypes.c_uint16(SYSDAT))
+        bx = lib.proc_creat(ctypes.cast(buf, c_u8p), ctypes.c_uint16(CHILD_PD), ctypes.c_uint16(SYSDAT), None)
         port_img = bytes(buf)
 
         def chain_snapshot(img):

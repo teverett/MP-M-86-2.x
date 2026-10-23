@@ -88,16 +88,19 @@ immediate load instead of a memory read.
 |---|---|---|
 | `src/kernel/FINDPD.RTM` | `findpdname_entry` | — |
 | `src/kernel/IDLE.SUP` | `idle` | — |
-| `src/kernel/SYSFUNC.SUP` | `not_implemented`, `bad_entry`, `version_entry`, `mpmversion_entry` | `callbios_entry`, `sysdat_entry`, `tod_entry`, `serial_entry` — call into unported `mpmif`/`xiosif` or copy from module-local data this port has no home for yet |
-| `src/kernel/SYSENT.RTM` | `poll_entry`, `delay_entry`, `dispatch_entry`, `set_prior_entry`, `pd_entry`, `sleep_entry`, `wakeup_entry` | `creat_proc_entry` — one line (`call proc_creat ! jmp pdisp`), nothing to port without `proc_creat` itself |
+| `src/kernel/SYSFUNC.SUP` | all 8 entries: `not_implemented`, `bad_entry`, `version_entry`, `mpmversion_entry`, `sysdat_entry`, `tod_entry`, `serial_entry`, `callbios_entry` | — (the whole file is ported; `tod_entry`/`serial_entry` copy from real `SYSDAT.FMT`/`RTMIF.RTM` data, given their own harness-chosen scratch address/inlined literal; `callbios_entry`'s two real tail-jumps into `mpmif(f_terminate)`/`xiosif` are boundary stubs, same convention as `SYSENT.RTM`'s own `poll_entry`/etc.) |
+| `src/kernel/SYSENT.RTM` | all 8 entries: `poll_entry`, `delay_entry`, `dispatch_entry`, `set_prior_entry`, `pd_entry`, `sleep_entry`, `wakeup_entry`, `creat_proc_entry` | — (the whole file is ported; `creat_proc_entry` — `call proc_creat ! jmp pdisp` — was deferred until `proc_creat`/`pdisp` existed, and now that they do it's a real internal call into both, not a boundary stub like its 7 siblings' own tail-jumps; a real quirk this surfaced: `ax`/`bx`/`cx`/`si`/`di` aren't actually preserved across the `call proc_creat` at all, see `src-c/kernel/sysent.c`'s own header comment) |
 | `src/kernel/FLAG.RTM` | `flag_set_entry`, `flag_wait_entry` (+ internal `flag_valid`/`flag_exit`/`flag_bexit`) | — |
+| `src/kernel/ABORT.RTM` | `sysreset_entry`, `terminate_entry` (+ internal `abt_chk`), `abort_spec_entry` (+ internal `find_pd`, `find_pdthrd`, `findpdnc`, `findpdq`, `fflgpd`, `snip_it`, `abt_putdrl`, `gccba`, and the whole `abort_tab` dispatch: `abtrun`/`abtpol`/`abtdly`/`abtswp`/`abtdq`/`abtnq`/`abtflg`/`abtcns`) | — (the whole file is ported; needed `tools/i86sim.py`'s new `CALL r/m16`/`JMP r/m16` for `call cs:abort_tab[di]` — see below) |
+| `src/kernel/DSPTCH.RTM` | `fdisp`, `int_disp_exit`, `farpdisp`/`pdisp`, `dsptch` (+ internal `insert_process`, `schedule`, `switch_`, and the whole `dsp_table` dispatch: `disp_act`/`poll_act`/`delay_act`/`swap_act`/`term_act`/`sleep_act`/`flag_act`) | — (the whole file is ported, but **as a reading/debugging aid for the live scheduler-hang investigation, #83-#98, not a kernel-build component** — see the file's own header comment; a real interrupt return and a real context switch's register/stack resumption have no C equivalent, modeled as explicit output parameters instead; needed two more `tools/i86sim.py` fixes, `SS`-aware `PUSH`/`POP` and a `CS`-base fix for near indirect `CALL r/m16`/`JMP r/m16` — see #103) |
 | `src/kernel/PARSE.SUP` | `parse_entry` (+ internal `setfld`/`delim`/`deblank`/`fcbinit`) | — |
+| `src/kernel/RPL.SUP` | `rpl_entry` | — (the file's one routine is ported, but collapses to its single deterministic `rpl_err` outcome under the boundary-stub convention — `mpmif(f_qopen)`'s own function code, MODFUNC.DEF's `(user*0100h)+135`, is never 0, so `cmp cx,0 ! jne rpl_err` is always taken; the real success path — a hand-built fake far-return stack frame and a `retf` transferring control into a queue-delivered RSP entry point, with no C equivalent at all — is provably unreachable, same reasoning as `CONSOLE.CIO`'s/`CPMMEM.MEM`'s own unreachable branches, see `src-c/kernel/rpl.c`'s own header comment) |
 | `src/rsp/ECHO.A86` | `main`/`loop` (one full pass — see below) | — |
 | `src/rsp/CLOCK.A86` | `clockloop` (one full pass — see below) | — (`clock`'s own one-time setup, `mov ds,sysdat`/`mov bx,tod_offset`, is moot under the flat memory model, same as the DS/ES-switch convention elsewhere — the test starts directly at `clockloop` with `bx` preset instead) |
 | `src/rsp/TMP.A86` | `nextcommand_once` (one full pass — see below) | `tmp:`'s own one-time setup — moot, every operation in it is a boundary-stub call or a register load feeding one; `goodparse` and everything downstream of it (`try_builtin`/`notuser`/`not_builtin`'s own real CLI dispatch) — provably unreachable under the boundary-stub convention, see below |
 | `src/rsp/SUBMIT.A86` | `deblank`+`fill_argtable` (unlabeled code after `submit:`'s own `call openfile`), `expand_command`, `readbuffer`, `readchar`, `topofcmdloop_once` (one full pass — see below) | `submit:`'s own one-time version-check/priority/FCB-open preamble — no observable effect under the boundary-stub convention beyond what `deblank`/`fill_argtable` already cover; `clicall`'s own real CLI dispatch — provably unreachable past `notdrive`'s own `call parsefilename`, same wall `TMP.A86`'s `goodparse` hit, see below |
 | `src/kernel/TICK.SUP` | `notick_once`, `tick_once` | — (both of this file's real labels are ported) |
-| `src/kernel/QUE1.RTM` | `makeq_entry`, `openq_entry`, `deleteq_entry`, `queverify` | `readq_entry`/`creadq_entry`/`readq`, `writeq_entry`/`cwriteq_entry`/`writeq` — retry in a loop after a boundary-stubbed `mpmif(f_sleep)` call, see below |
+| `src/kernel/QUE1.RTM` | all 10 routines: `makeq_entry`, `openq_entry`, `deleteq_entry`, `queverify`, `readq_entry`/`creadq_entry`/`readq`, `writeq_entry`/`cwriteq_entry`/`writeq` | — (the whole file is ported; `readq`'s/`writeq`'s own real "wait forever" retry — unconditional call, queue empty/full — is translated faithfully but not exercised by the test, same unexercisable-but-real shape as `cioattach` below/`CPMMEM.MEM`'s `cpmfree_entry`; every other path, including the conditional-and-empty/full immediate-error case, is fully portable and exercised) |
 | `src/kernel/QUE2.RTM` | `rlsmx`, `getqdaddr`, `remqd`, `qspace`, `qrelease` | — (all 5 of this file's routines are ported) |
 | `src/kernel/PROC.RTM` | `freepd`, `proc_creat` (+ internal `getpdadr`) | — (all 3 of this file's routines are ported, using `tools/i86sim.py`'s `segmented=True` mode plus a CSEG_BASE-shifted reference run — see below) |
 | `src/kernel/CONSOLE.CIO` | all 15 routines (`lstattach_entry`, `clstattch_entry`, `cconattch_entry`, `conattach_entry`, `cioattach`, `lstdetach_entry`, `condetach_entry`, `ciodetach`, `conassign_entry`, `getdefcon_entry`, `getdeflst_entry`, `setdefcon_entry`, `setdeflst_entry`, `mimic_entry`, `unmimic_entry`) + `CHARIO.CIO`'s `getccbadr` (a small dependency, pulled in on its own) | — |
@@ -105,14 +108,16 @@ immediate load instead of a memory read.
 | `src/kernel/COMMAND.SUP` | `shifttail`, `fileopen`, `user_retf` | `chain_entry`/`clicmd_entry` (the file's own two real entry points) and everything only they call (`cli_cli`, `cli_copy`, `cli_parse`, `cli_fload`'s own chain-mode UDA copy, etc.) — real segment-relative addressing, same class as `PROC.RTM`/`ML.MEM`; `crlf`/`prchar`/`prtime`/`prnum`/`prdisk`/`prcusp`/`prcsm`/`prtyp`/`prnam`/`prn1`/`cprnt`/`pruser`/`prfilnam`/`mxwrite`/`mxread`/`mxw1`/`jmpm`/`pfn`/`conasn`/`fileclose` — each collapses entirely to register setup before a boundary-stub tail call with nothing downstream ever reading the result: nothing to port, same reasoning as `freeall_entry` (`src-c/kernel/cpmmem.c`) |
 | `src/kernel/FILE1.BDO` | `pererror`/`roderror`/`roferror`/`selerror` (+ internal `goerr`), `move`, `selectdisk`, `home`, `PASS_ARECORD`, `rdbuff`, `wrbuff`/`wrbufflg` (+ internal `diocomp`), `seekdir`/`seek`, `dmposition`, `GET_DMA`, `getdm`, `bdos_index`, `alloct`, `atran`, `GET_ATTS`, `GET_S1`, `GET_RRA`, `GET_RCNTA`, `getexta`, `gtfcba`, `getfcb`, `setfcb`, `cmpecs`/`CMPEC0`, `CHKSUM_FCB`, `SET_CHKSUM_FCB`, `RESET_CHECKSUM_FCB`, `CHEK_FCB`, `setcdisk`, `nowrite`, `setro`, `ckrodir`/`ckrofile`/`RO_TEST`, `checkwrite`, `getdptra`, `getmodnum`, `clrmodnum`, `CLR_EXT`, `setfwf`, `compcdr`, `setcdr`, `rddirbuf`, `setdata`/`setdir`/`setdma`, `dirtouser`, `MAKE_FCB_INV`, `CHK_INV_FCB`, `TST_INV_FCB`, `endofdir`, `setenddir`, `getallocbit`, `setallocbit` | `CHECK_FCB` (+ `CHEK_FCB`'s own MPM branch calling it) — its own `PACK_SDCNT`/`SEARCH_OLIST` dependency is since ported (`src-c/kernel/file3.c`), but it also calls `CLOSE1` (`FILE2.BDO`), which cascades into `CLOSE_FCB`/`GET_DIR_EXT`/`RESTORE_RC`/`srch`/`getdptra` -- not scoped yet, so still deferred; `checksum`/`newchecksum`, `wrdir`, `rddir`/`rddir0` — each calls into `FILE2.BDO`/`FILE3.BDO`'s own real, not-yet-ported logic (`FLUSH_FILE0`/`FLUSH_FILES`, themselves blocked by a real segment-relative-addressing gap, see `FILE3.BDO`'s own status-table row); `subdh` — its only two real callers are `checksum` and `rddir`, both deferred: nothing to port |
 | `src/kernel/FILE2.BDO` | `GET_NALBS`, `getblock` (+ internal `lefttst`/`righttst`/`rblok`/`rblok0`) | `SEARCH`/`SEARCHN`/`DELETE`/`RENAME`/`OPEN`/`MAKE` and the rest of the file (80+ labels) — all route through `srch`, which calls `rddir` (`FILE1.BDO`'s own deferred routine, blocked transitively by `FLUSH_FILE0`'s real segment-relative-addressing gap, `FILE3.BDO`); `GET_DIR_EXT`/`RESTORE_RC` are themselves clean, self-contained FCB arithmetic, but their only real caller `CLOSE_FCB` (part of `CLOSE1`) also calls `srch` — porting them alone wouldn't un-defer anything |
-| `src/kernel/FILE3.BDO` | `PACK_SDCNT`, `COMPARE`, `SEARCH_OLIST`/`SEARCH_LLIST`/`SEARCHN_LIST` (+ internal `search_listo`), `DELETE_ITEM`, `CREATE_ITEM`, `SET_OLIST_ITEM` | `TST_OLIST`/`CHK_OLIST`/`PR_TERM` — on closer reading (not as clean as an earlier pass of this file claimed) `CHK_OLIST` calls the still-unported `openx06`/`compare_pds` and relies on its own caller having pushed a word for it to `pop` partway through (an implicit calling convention, not a boundary stub); `PR_TERM` calls the still-unported `tst_tbl_lmt`/`remove_locks`/`func48`; the rest of the file — not reconned this pass; `FLUSH_FILES`/`FLUSH_FILE0` — `FLUSH_FILE0` dynamically switches `ES` to a PD's own UDA segment (`mov es,p_uda[bx]`) then reads a fixed offset off it, the same real segment-relative-addressing gap as `PROC.RTM`/`ML.MEM`; one further routine (not identified by name) uses `std`, the same gap as `MAU.MEM` |
+| `src/kernel/FILE3.BDO` | `PACK_SDCNT`, `COMPARE`, `SEARCH_OLIST`/`SEARCH_LLIST`/`SEARCHN_LIST` (+ internal `search_listo`), `DELETE_ITEM`, `CREATE_ITEM`, `SET_OLIST_ITEM`, `TST_TBL_LMT`, `REMOVE_LOCKS`, `FLUSH_FILES`/`FLUSH_FILE0`, `INC_PDCNT` | `TST_OLIST`/`CHK_OLIST`/`PR_TERM` — `CHK_OLIST` calls the still-unported `openx06`/`compare_pds` and relies on its own caller having pushed a word for it to `pop` partway through (an implicit calling convention, not a boundary stub); `PR_TERM` calls the still-unported `func48`; one further routine (not identified by name) uses `std` (now resolvable, `tools/i86sim.py` tracks the direction flag — not reconned this pass); the rest of the file not reconned this pass |
 | `src/kernel/FILE4.BDO` | `func24`, `func25`, `func29`, `func32`, `FUNC44`, `FUNC45`, `func51`, `func52` | `func13`-`func23`, `func30`, `func33`-`func43`, `FUNC46`, `FUNC48` — all route through `srch`/`rddir`, `CURSELECT`/`initialize`, `CHECK_FCB`, or `FLUSH_FILES`, all transitively blocked by `FLUSH_FILE0`'s real segment-relative-addressing gap (`FILE3.BDO`); `GOBACK` — a 2-instruction tail jump into `BDOSIF.BDO`'s own module-dispatch epilogue (`BDOS_RETURN`), the same jump-table-dispatcher class already deferred elsewhere, not worth porting alone; the rest of the file not reconned this pass |
+| `src/kernel/DATA.BDO` | — | pure data (BDOS-wide scratch fields + the `XERR_LIST` error-message table) — zero real code, nothing to port |
+| `src/kernel/BDOSIF.BDO` | — | `init`/`entry`/`getdiskmx`/`CALL_BDOS`/the whole SHELL mechanism (`SHELL`/`CBDOS`/`SHELL_ERR`/`SHELL_RTN`/`INCR_RR`/`SAVE_RR`/`RESET_RR`/`TST_WRT`/`MULT_IO`/`COMPARE_RECS`/`BDOS_RETURN`) — this module's own central dispatch, needing far CALL/RET support (`callf cs:dword ptr .supervisor`/`.xiosmod`) that doesn't exist yet, the same deferred class as `MEMIF.MEM`/`CIOIF.CIO`/`RTMIF.RTM`/`SUPIF.SUP`; `XCRLF`/`XPRINT`/`staret`/`funcret`/`setlret1`/`parsave`/`parsave33`/`parsave36`/`parunsave`/`entryzero`/`mpmif`/`xiosif`/the `bootf`-family boundary stubs (`homef`/`seldskf`/.../`flush`) — each either collapses to register setup before a boundary-stub tail call (already accounted for directly inline in `file1.c` where it matters, e.g. `staret`'s own effect) or is transitively blocked by the same `entry:`/SHELL machinery (`parsave`/`parunsave`'s own `SHELL_FLAG` dependency); read in full, nothing left to port |
 | `src/kernel/UTIL.MEM` | `getmd`, `freemd` | — (both of this file's routines are ported) |
 | `src/kernel/ML.MEM` | `mlalloc_entry` (+ internal `mla_value`, `mla_makemau`, `mla_initmau`), `mlfree_entry` (+ internal `ml_insert`) | — (all of this file's routines are ported, using `tools/i86sim.py`'s new `segmented=True` mode — see below) |
 | `src/kernel/MAU.MEM` | `maualloc_entry`, `maufree_entry` (+ internal `mau_split`, `mau_insert`, `mau_release`, `mau_collapse`) | — (all 6 of this file's routines are ported; see below for 2 real bugs found and fixed in `/src`, and 2 `tools/i86sim.py` gaps fixed along the way: a `LEA`-under-`segmented=True` bug and missing `STD`/`CLD` support) |
 | `src/kernel/SHARE.MEM` | `share_entry` | — (this file's one routine is ported) |
-| `src/kernel/LOAD.SUP` | `load_finish` (a named tail portion of `load:` — see below) | `cload_entry`/`load_entry`/`load:`'s own front half (header disk-read, memory allocation/spreading), `load_group`, `diskread` — unlike every file ported so far, nearly every branch here depends on a *real* disk-read/allocation result from `mpmif`, not a decorative one; disk I/O (`f_freadseq`) isn't ported anywhere in this tree yet |
-| `src/kernel/MEMORY.MEM` | `malloc_entry`, `mfree_entry` (+ internal `mall_try_mau`, `mfree_it`) | — |
+| `src/kernel/LOAD.SUP` | `load_finish` (a named tail portion of `load:`), `diskread`, `load_group` — see below | `cload_entry`/`load_entry`/`load:`'s own remaining front half (`get_ch_info`'s own CMD-header parsing, and allocating/spreading memory across `ldtab`'s entries) — `MEMORY.MEM`'s own `malloc_entry` (`memory.c`) now makes real `mpmif(f_malloc)`-equivalent calls (see that file's own row below), so this is no longer blocked on disk I/O *or* allocation in principle; not yet attempted, since `load:`'s own front half needs its own differential-test design (CMD header parsing, `ldtab` spreading across multiple groups) separate from `diskread`/`load_group` |
+| `src/kernel/MEMORY.MEM` | `malloc_entry`, `mfree_entry` (+ internal `mall_try_mau`, `mfree_it`) | — (the whole file is ported; `malloc_entry`'s own `mpmif(f_maualloc)`/`mpmif(f_mlalloc)` are now real internal calls into `mau.c`'s `maualloc_entry`/`ml.c`'s `mlalloc_entry` — both fully ported already — rather than boundary stubs; `mfree_entry`'s own `mpmif(f_maufree)` is a separate, still-deferred upgrade, see `memory.c`'s own header comment for why its own tail-jump-out-of-two-call-frames shape needs more care) |
 | `src/kernel/CPMMEM.MEM` | `maxmem_entry`, `absmax_entry`, `cpmalloc_entry`, `cpmabsa_entry`, `cpmfree_entry` (+ internal `getmemory`, `free_memory`) | `freeall_entry` — one line (`mov cx,f_terminate ! sub dx,dx ! jmp mpmif`), same as `SYSENT.RTM`'s `creat_proc_entry`: nothing to port |
 | `src/loader/LBDOSIO.A86` | `conbrk`, `conout`, `tabout`, `crlf`, `print`, `func9`, `staret`, `funcret`, `setlret1` | `func1`/`func3`/`func6`/`func7`/`func8`/`func10`/`func11` — each just an `EQU` alias for the bare `return:` label: nothing to port. `func2` is likewise just an alias for `tabout` itself, already ported under its own name |
 | `src/loader/LBDOSF1.A86` | `selectdisk`, `home`, `rdbuff`, `wrbuff`, `seekdir`, `seek`, `dmposition`, `getdm`/`getdmd`, `bdos_index`, `alloct`, `atran`, `getexta`, `gtfcba`, `getfcb`, `setfcb`/`setfc1`, `cmpecs`/`cmpec0`, `setcdisk`, `nowrite`, `setro`, `ckrodir`/`ckrofile`, `checkwrite`, `getdptra`, `getmodnum`, `clrmodnum`, `setfwf`, `compcdr`, `setcdr`, `subdh`, `newchecksum`/`checksum`, `wrdir`, `rddirbuf`, `dirtouser`, `endofdir`, `setenddir`, `rddir`/`rddir0`, `getallocbit`, `setallocbit`, `rotr` | `selerror`/`goerr` — a pure boundary-stub tail into the still-deferred `LBDOSENT.A86`'s own error-reporting table, nothing to port; `setdata`/`setdir`/`setdma` — pure boundary-stub setup, no observable effect, not even defined as functions |
@@ -229,13 +234,6 @@ the whole trampoline is just skipped.
 need machinery that doesn't exist yet rather than being a routine-by-
 routine translation — revisit once that machinery exists):
 
-- `src/kernel/RPL.SUP` (`rpl_entry`) — builds a custom far-return stack
-  frame by hand and ends in a real `retf` to transfer control into an
-  RSP's own entry point. Needs far CALL/JMP/RET support in
-  `tools/i86sim.py` (not yet implemented) and a controllable stub for
-  `mpmif`'s queue-read behavior, neither of which the boundary-stub
-  convention above covers (this routine's whole point *is* the
-  cross-segment transfer, not a call that's safe to skip over).
 - `src/kernel/CIOIF.CIO`, `src/kernel/RTMIF.RTM`, `src/kernel/SUPIF.SUP`,
   `src/kernel/MEMIF.MEM` (each one's `init`/`entry`/`mpmif`/`xiosif`) —
   every kernel module's own central dispatcher: module init via far calls,
@@ -246,19 +244,20 @@ routine translation — revisit once that machinery exists):
   tree has nowhere else yet.
 **Tier 3 additions, same two categories as above:**
 
-- `src/kernel/DSPTCH.RTM` (`jmp cs:dsp_table[bx]`), `src/kernel/
-  ABORT.RTM` (`call cs:abort_tab[di]`), `src/kernel/BDOSIF.BDO` (`call
-  cs:btab_addr[si]`) — each one's own central jump-table dispatch, the
-  same deferred class as `MEMIF.MEM`/`CIOIF.CIO`/`RTMIF.RTM`/
-  `SUPIF.SUP` (now `BDOSIF.BDO`'s turn, for BDOS). `DSPTCH.RTM`
-  specifically is the real process dispatcher's own internals (stack
-  switching between processes, `switch:`) -- also the direct subject of
-  the live, ongoing scheduler-hang investigation in this doc's #83-#98;
-  porting it now would duplicate that work, not help it.
-- `src/kernel/DATA.BDO`, `src/kernel/FILE2.BDO`, `src/kernel/
-  FILE4.BDO` — not reconned in depth this pass (only a grep-level
-  pattern check for the known blockers above, which didn't trip on
-  these). `src/kernel/CHARIO.CIO` (the large, deeply
+- `src/kernel/BDOSIF.BDO` (`call cs:btab_addr[si]`) — its own central
+  jump-table dispatch, the same deferred class as `MEMIF.MEM`/
+  `CIOIF.CIO`/`RTMIF.RTM`/`SUPIF.SUP` (now `BDOSIF.BDO`'s turn, for
+  BDOS). Not yet reconned for how much of it, if any, is portable
+  around that gap (same as `ABORT.RTM` turned out to be, almost
+  entirely).
+- `src/kernel/FILE2.BDO`, `src/kernel/FILE4.BDO` — their own
+  remaining routines all route through `srch`/`rddir`, transitively
+  blocked by `FLUSH_FILE0`'s real segment-relative-addressing gap in
+  `FILE3.BDO` — now resolved in principle (same `mem_*_seg` helpers as
+  `ml.c`/`proc.c`/`mau.c`/`share.c`/`load.c`), but `FLUSH_FILE0`
+  itself isn't ported yet, so neither file has anything new to port
+  until that happens. (`DATA.BDO` is confirmed pure data, see its own
+  status-table row above.) `src/kernel/CHARIO.CIO` (the large, deeply
   interdependent console-input state machine this bucket used to defer
   — `coninit`/`attach`/`conbrk`/`conin`/`chkctl`/`echoc`/`tabout`/...),
   `src/kernel/COMMAND.SUP` (its own `chain_entry`/`clicmd_entry`
@@ -1241,3 +1240,225 @@ committing to the ~21k total lines across `src/kernel`+`src/loader`+
   slot (`bpg_cseg` from the Code-group entry, `bpg_dseg` from the
   Data-group one, same base page either way), so a realistic `.CMD`
   always needs both. All 6 differential-test cases pass.
+- **Re-examined `src/kernel/COMMAND.SUP` for the segment-addressing
+  gap now that it's resolved (ml.c/proc.c/mau.c/share.c/load.c) --
+  still correctly deferred, no new port.** Its own two gap spots read
+  differently once actually reasoned through in full: the chain-mode
+  UDA swap (`cli_ld1`'s own `cmp cli_chain,true` block) stashes the
+  calling process's entire current UDA into the dormant real INIT
+  process's own template UDA area as temporary scratch while chaining
+  -- a real mechanism, but intricate enough (and chain-mode-only, so
+  rarely exercised) that isolating it as its own confidently-tested
+  unit wasn't a good value trade against the rest of this session's
+  list. The base-page command-tail setup is entangled with `pfn`'s
+  (`f_parsefilename`) own boundary-stub-dependent branching (`cmp
+  bx,0ffffh`), the same "undefined branch, fix at a well-defined
+  constant" situation `CONSOLE.CIO`'s own `conbrk` already needed.
+  `shifttail`/`fileopen`/`user_retf` remain the whole of what's
+  ported here.
+- **`src/kernel/ABORT.RTM`: the whole file.** `sysreset_entry`/
+  `terminate_entry` and `abort_spec_entry` (+ its own dozen internal
+  helpers: list-walking, the `abort_tab` status dispatch, flag-table
+  removal) are all ported. `rlsmx` (`que2.c`) and `findpdname_entry`
+  (`findpd.c`) are called as ordinary internal calls, not boundary
+  stubs. `jmp dsptch`/`jmp pdisp` are boundary tail-jumps into the
+  still-unported dispatcher, same convention as every other already-
+  ported caller of either (e.g. `SYSENT.RTM`'s `wakeup_entry`) -- the
+  state set immediately beforehand is the whole observable result,
+  confirmed concretely: `terminate_entry`'s own final `CX` is left
+  holding `f_qread`'s own function-code value (`0x89`/137), not reset
+  to 0, since nothing after the boundary-stub `mpmif` calls touches
+  it before the real `jmp dsptch`.
+
+  `call cs:abort_tab[di]` -- a real indirect near CALL through a jump
+  table, the first in this tree -- needed two new `tools/i86sim.py`
+  opcodes, `CALL r/m16` and `JMP r/m16` (`0xFF /2`, `/4`); every
+  earlier file's own CALL/JMP targets were fixed `rel16` displacements.
+  Also needed `TEST r/m8,r8`/`TEST r/m16,r16` (`0x84`/`0x85`,
+  `abtdly`'s own `test si,si`) -- every earlier `TEST` used the
+  immediate form (`F6`/`F7 /0`).
+
+  `abort_spec_entry`'s own fake-return-address setup (writing
+  `terminate`'s own address onto the aborted process's own stack, so
+  switching back into it later lands directly there) takes
+  `terminate`'s real assembled offset as an explicit parameter, same
+  convention as `sysdat`/`user_retf_offset` elsewhere. All 8
+  differential-test cases pass.
+- **`src/kernel/FILE3.BDO`: a 2nd follow-up pass, un-blocking
+  `FLUSH_FILES`/`FLUSH_FILE0` (+ new `TST_TBL_LMT`/`REMOVE_LOCKS`/
+  `INC_PDCNT`).** The real segment-relative-addressing gap an earlier
+  pass flagged this pair for (`FLUSH_FILE0`'s own `mov es,p_uda[bx]`)
+  is resolved the same way as `ml.c`/`proc.c`/`mau.c`/`share.c`/
+  `load.c` (`mem_r8_seg`/`mem_w8_seg` against the target PD's own UDA
+  segment, `u_pd_cnt`'s real UDA.FMT offset already in defs.h from
+  `proc.c`). `INC_PDCNT` is `CHK_OLIST`'s own internal label
+  (`CHK_OLIST` itself stays deferred), ported standalone since
+  `FLUSH_FILE0` shares it. Two new `BD_*` scratch constants
+  (`BD_PDADDR`, `BD_FLUSHED`), confirmed via `--symbols` against the
+  combined bundle same as every other one. All 6 new differential-
+  test cases pass (12 pre-existing, unchanged).
+- **`src/kernel/DSPTCH.RTM`: the whole file, as a reading/debugging
+  aid for the live scheduler-hang investigation (#83-#98), not a
+  kernel-build component** — see `src-c/kernel/dsptch.c`'s own header
+  comment for the full rationale and for the three "no C equivalent"
+  gaps (a real interrupt return, and a real context switch's register/
+  stack save-and-resume, both modeled as explicit output parameters
+  instead of attempted fidelity) plus one deliberate code-shape
+  divergence in `term_act` (walks `p_mem`'s own `ms_link` chain
+  directly rather than relying on the real, unported `mpmif(f_memfree)`
+  boundary stub's own effect, which the boundary-stub convention would
+  otherwise turn into a real infinite loop).
+
+  Needed two more `tools/i86sim.py` fixes, both found via the new
+  test's own differential failures and written up in full as #103:
+  `PUSH`/`POP` ignoring `SS` entirely under `segmented=True` (latent
+  since no routine before this one ever moved `SS` away from its
+  default of 0 — `switch:`'s own `mov ss,u_ss ! mov sp,u_sp` is the
+  first real stack switch in this tree), and near indirect `CALL
+  r/m16`/`JMP r/m16` (added in #102 for `ABORT.RTM`) not adding the
+  current `CS` base to the loaded target offset (latent since
+  `ABORT.RTM`'s own test never needed a `CSEG_BASE` shift; `dsptch:`'s
+  own `jmp cs:dsp_table[bx]`, under `test_dsptch.py`'s own shifted
+  reference run, is the first to combine both). All 13 differential-
+  test cases pass.
+- **`src/kernel/RPL.SUP`: the whole file (`rpl_entry`).** Previously
+  deferred as needing real far CALL/JMP/RET support and a
+  controllable `mpmif` queue-read stub (neither of which the plain
+  boundary-stub convention covers), on the assumption the routine's
+  own interesting behavior was the success path. Revisited: `mpmif`'s
+  own no-op-return convention leaves `cx` holding the just-loaded
+  function code (`f_qopen`, MODFUNC.DEF's `(user*0100h)+135`, never
+  0) going into the routine's very next `cmp cx,0 ! jne rpl_err`, so
+  under the *existing* convention — no new machinery needed at all —
+  the routine deterministically takes the error path on every call,
+  same mechanical reason every other `mpmif`-function-code-gated
+  routine in this tree already is. The real success path (the QPB
+  build and the `retf` transfer into a queue-delivered RSP entry
+  point — which, like `dsptch.c`'s own documented gaps, has no C
+  equivalent at all) is real, well-shaped code that's simply never
+  reached, same class as `CONSOLE.CIO`'s/`CPMMEM.MEM`'s own
+  unreachable branches — translated faithfully in `src-c/kernel/
+  rpl.c`'s own header comment, not in code. `tests/src-c/test_rpl.py`
+  confirms the one deterministic outcome (`bx=1`, `cx=e_no_queue`)
+  across two different CPBs. No new `tools/i86sim.py` infrastructure
+  needed.
+- **`src/kernel/QUE1.RTM`: the remaining 6 routines (`readq_entry`,
+  `creadq_entry`, `readq`, `writeq_entry`, `cwriteq_entry`,
+  `writeq`), completing the file.** Previously deferred wholesale as
+  "retries in a loop after a boundary-stubbed `mpmif(f_sleep)` call."
+  Revisited: that's only true of one specific combination —
+  unconditional (`ax==0`) *and* the queue already empty/full — which
+  does spin forever under the no-op-return convention and is
+  translated faithfully (a real `for(;;)`) but never exercised, same
+  class as this same file's own `cioattach` / `CPMMEM.MEM`'s
+  `cpmfree_entry`. Every other combination — conditional-and-empty/
+  full (an immediate, deterministic error return, no retry at all)
+  and any call where a message/buffer slot is already available — is
+  fully portable with nothing new needed, and is exercised by 6 new
+  differential-test cases (18 pre-existing ones unchanged). `dx`
+  (QPB address) is treated as already flat, the same simplification
+  `openq_entry`/`deleteq_entry`/`queverify` already use in this file.
+  Two new `defs.h` constants needed (`e_q_empty`, `e_q_full`,
+  ERR.DEF), plus `ps_swap`/`ps_dq`/`ps_nq` (PD.DEF, `ps_swap` was
+  already implicitly used elsewhere as a raw `3`, now named).
+- **`src/kernel/SYSENT.RTM`: the remaining routine, `creat_proc_entry`,
+  completing the file.** Previously deferred as "nothing to port
+  without `proc_creat` itself"; now that `proc_creat` (`proc.c`) and
+  `pdisp` (`dsptch.c`) both exist, unlike its 7 siblings in this same
+  file (each still just a boundary-stub tail-jump, ported before
+  either existed), this one goes all the way: a real internal call
+  into both, returning `pdisp`'s own `switch_result`. Needed
+  `proc_creat`'s own signature extended with an optional `uint16_t
+  *dx_out` (the real asm's own final `DX` at its exit, needed to feed
+  `pdisp` correctly -- `DX` is proc_creat's own loop variable, reused
+  as internal scratch throughout each pass, only matching the next-
+  pending-creation value right at each exit; purely additive, every
+  existing caller updated to pass `NULL`). Surfaced a real, slightly
+  surprising quirk along the way: `call proc_creat ! jmp pdisp` has no
+  save/restore around the call, so `ax`/`bx`/`cx`/`si`/`di` are NOT
+  preserved across it either -- `proc_creat` clobbers all five as
+  its own scratch, same as `dx` -- so whatever `dsptch`'s own
+  register-save step saves for this process is really just
+  `proc_creat`'s own leftover state, observable only if the same
+  process is re-dispatched into right away. The new differential-
+  test case (`tests/src-c/test_sysent.py`, via its own new combined
+  wrapper bundling the real `PROC.RTM`/`DSPTCH.RTM`) exercises exactly
+  that (the creating process outranks its own new child and
+  dispatches straight back into itself) and deliberately only checks
+  `bp` of the resulting `switch_result` (the one register `proc_creat`
+  never touches) -- same "real but not meaningfully specified
+  register" class as `chario.c`'s own `xiosif`-left `bx`.
+- **`src/kernel/SYSFUNC.SUP`: the remaining 4 entries (`sysdat_entry`,
+  `tod_entry`, `serial_entry`, `callbios_entry`), completing the
+  file.** `tod`/`serial` turned out to be real, fully portable data,
+  not actually missing a "home": `tod` is a genuine `SYSDAT.FMT`
+  field (`tod`/`tod_day`/`tod_hr`/`tod_min`/`tod_sec`, given its own
+  harness-chosen `SD_TOD` scratch address and `todlen`=5, same
+  convention as every other such field); `serial` is `RTMIF.RTM`'s
+  own fixed, literal `db '654321'` cseg constant, inlined directly
+  (not a runtime-chosen message, so `chario.c`'s own `write_cstr`
+  helper wasn't needed). `sysdat_entry` is trivial, the same
+  `u_retseg=ds` shape as `SYSENT.RTM`'s own `pd_entry`.
+  `callbios_entry`'s own two tail-jumps (`mpmif(f_terminate)` for
+  BOOT/WBOOT, `xiosif` otherwise) are ordinary boundary stubs, same
+  convention as `SYSENT.RTM`'s own `poll_entry`/`delay_entry`/etc. --
+  this port's job for those is the register state right up to the
+  jump. One real surprise caught by the differential test itself:
+  `cl`'s own "stays whatever it already was" branches (`al` in
+  `{4..7}`) looked at first like a caller-register input, but the
+  real asm's very first instructions load `cx` from the input block's
+  own 2nd field (`mov cx,1[si]`) and those branches simply never
+  overwrite it again -- not a caller input at all, see
+  `src-c/kernel/sysfunc.c`'s own header comment.
+- **`src/kernel/LOAD.SUP`'s own real disk-I/O blocker: resolved, with
+  `diskread`/`load_group` now ported.** Unlike the deterministic-
+  collapse/real-internal-call fixes applied to other files' own
+  deferred routines this session, this one needed genuinely new
+  infrastructure, since the whole point of these two routines
+  *is* a real disk read: `tools/i86sim.py` gained `call_hooks`, a
+  generalization of `call_stub_addrs` that runs a Python callback
+  (with full read/write access to `sim.mem`/`sim.regs`) before
+  treating the call as the usual instant no-op return. `diskread`'s
+  own real `mpmif(f_freadseq)` (plus the `f_setdmab`/`f_setdma` calls
+  that set up its target first) is modeled, on both the C port's
+  side (`load.c`'s own new `freadseq`) and the reference-assembly
+  side (`test_load.py`'s own new `call_hooks` entry, implementing the
+  *identical* algorithm against `sim.mem` directly), as a
+  deliberately simplified single-extent "virtual disk"
+  (`SD_LOAD_DISK`/`SD_LOAD_DISK_RECS`, defs.h) indexed directly by the
+  FCB's own `fcb_nxtrec` field -- no real disk-map/extent-switch
+  logic, since every file this project's own tests load is small
+  enough to stay within one extent (same "deliberate, documented
+  simplification" spirit as `dsptch.c`'s own `term_act` divergence).
+  Since both sides share the exact same simplified primitive, the
+  differential test is actually exercising the real, interesting
+  logic around it: `diskread`'s own ctlc-abort/hard-read-error
+  handling, and `load_group`'s own buffer-reuse arithmetic (the
+  "already partly in `load_dma`" transfer path, the direct-to-
+  destination path for a full record, and the shared-buffer path for
+  a trailing partial one). 12 new differential-test cases (6
+  pre-existing `load_finish` ones unchanged). `load:`'s own remaining
+  front half (CMD-header parsing, memory allocation/spreading) is a
+  separate, still-open blocker -- see the status table.
+- **`src/kernel/MEMORY.MEM`'s own `malloc_entry`: upgraded `mall_try_mau`/
+  `mall_ml` from boundary stubs to real internal calls** into `mau.c`'s
+  `maualloc_entry`/`ml.c`'s `mlalloc_entry` -- both already fully
+  ported, so (same technique as `sysent.c`'s own `creat_proc_entry`,
+  `que1.c`'s own `readq`/`writeq`) there was no reason left to stub
+  them out. This is what directly unblocks `LOAD.SUP`'s own
+  `mpmif(f_malloc)` dependency in principle (see that file's own row).
+  `tests/src-c/fixtures/memory_mem_wrapper.A86`'s own `mpmif` is now a
+  small real dispatcher (not a flat `equ` stub): it tail-jumps into
+  the real `MAU.MEM`/`ML.MEM` (now bundled into the same wrapper) for
+  exactly the two function codes that matter, `ret`-ing immediately
+  for everything else, same as before. One existing test case's own
+  name ("boundary stub always fails") was stale -- renamed, since it
+  now passes because `mlalloc_entry` genuinely fails on an empty
+  Memory Free List, not because of a stub; everything else was
+  already set up to hit a real, matching failure the same way, so no
+  other test needed changes. `mfree_entry`'s own `mpmif(f_maufree)` is
+  NOT upgraded this pass -- its real "free an empty MAU back to the
+  Memory Free List" path tail-jumps out of two call frames at once
+  (`mfree_it` *and* `mfree_entry`, via `mpmif(f_mlfree)`), which needs
+  more careful translation than a drop-in call; see `memory.c`'s own
+  header comment.

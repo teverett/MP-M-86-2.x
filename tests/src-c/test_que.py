@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/kernel/que1.c + que2.c against 4 of
-src/kernel/QUE1.RTM's 10 routines (makeq_entry, openq_entry,
-deleteq_entry, queverify) and 5 of src/kernel/QUE2.RTM's 6
+"""Differential test for src-c/kernel/que1.c + que2.c against all 10 of
+src/kernel/QUE1.RTM's routines (makeq_entry, openq_entry,
+deleteq_entry, queverify, readq_entry, creadq_entry, readq,
+writeq_entry, cwriteq_entry, writeq) and 5 of src/kernel/QUE2.RTM's 6
 (rlsmx, getqdaddr, remqd, qspace, qrelease).
+
+readq's/writeq's own real "wait forever" retry path (unconditional,
+queue empty/full) is deliberately not exercised here -- see que1.c's
+own header comment for why.
 """
 import ctypes
 import os
@@ -22,16 +27,19 @@ QUE_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', 'que1.c'),
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 
 STACK_TOP = 0xFFF0
+SD_RLR = 0xA000
 SD_QLR, SD_QUL, SD_QMAU, SD_ENDSEG = 0xA020, 0xA022, 0xA024, 0xA026
 UDA_WRKSEG = 0xA012
 MPMIF_STUB = 0x9000
 
-Q_LINK, Q_FLAGS, Q_NAME, Q_NMSGS, Q_DQ, Q_NQ, Q_MSGCNT, Q_MSGOUT, Q_BUF = 0, 4, 6, 0x10, 0x12, 0x14, 0x16, 0x18, 0x1A
+Q_LINK, Q_FLAGS, Q_NAME, Q_MSGLEN, Q_NMSGS, Q_DQ, Q_NQ, Q_MSGCNT, Q_MSGOUT, Q_BUF = \
+    0, 4, 6, 0x0E, 0x10, 0x12, 0x14, 0x16, 0x18, 0x1A
 QNAMSIZ = 8
-QPB_QADDR, QPB_NAME = 2, 8
+QPB_QADDR, QPB_BUFFPTR, QPB_NAME = 2, 6, 8
 QF_MX, QF_TABLE = 0x01, 0x10
 F_MAUALLOC = 0x309
 E_NO_QD, E_NO_QUEUE, E_Q_INUSE, E_Q_NOTACTIVE = 7, 9, 0xA, 0xB
+E_Q_EMPTY, E_Q_FULL = 0xE, 0xF
 
 SYSDAT = 0x2000  # this test's chosen "cs:sysdat" value
 
@@ -42,6 +50,7 @@ def assemble_reference():
     code = asm.segment_bytes('cseg')
     entries = {name: asm.symtab[name].value for name in (
         'makeq_entry', 'openq_entry', 'deleteq_entry', 'queverify',
+        'readq_entry', 'creadq_entry', 'writeq_entry', 'cwriteq_entry',
         'rlsmx', 'getqdaddr', 'remqd', 'qspace', 'qrelease')}
     return code, entries
 
@@ -105,6 +114,14 @@ def main():
         lib.openq_entry.argtypes = [c_u8p, ctypes.c_uint16]
         lib.deleteq_entry.restype = BxCx
         lib.deleteq_entry.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.readq_entry.restype = BxCx
+        lib.readq_entry.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.creadq_entry.restype = BxCx
+        lib.creadq_entry.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.writeq_entry.restype = BxCx
+        lib.writeq_entry.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.cwriteq_entry.restype = BxCx
+        lib.cwriteq_entry.argtypes = [c_u8p, ctypes.c_uint16]
         lib.queverify.restype = ctypes.c_uint16
         lib.queverify.argtypes = [c_u8p, ctypes.c_uint16]
         lib.rlsmx.argtypes = [c_u8p, ctypes.c_uint16]
@@ -288,6 +305,120 @@ def main():
         buf = to_ctypes(mem)
         cx = lib.queverify(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
         check("queverify: not found", ref_regs['cx'], cx)
+
+        # -- readq_entry: a real message in the buffer, with wraparound --
+        mem = base_memory()
+        QD = 0x4100
+        mem_w16(mem, QD + Q_LINK, 0)
+        mem_w16(mem, SD_QLR, QD)
+        mem_w16(mem, QD + Q_MSGCNT, 1)
+        mem_w16(mem, QD + Q_MSGLEN, 4)
+        mem_w16(mem, QD + Q_NMSGS, 2)
+        mem_w16(mem, QD + Q_MSGOUT, 1)  # last slot -> wraps back to 0
+        mem_w16(mem, QD + Q_BUF, 0x4300)
+        mem[0x4300 + 4:0x4300 + 8] = b'\x11\x22\x33\x44'  # slot 1's own message
+        QPB = 0x5000
+        mem_w16(mem, QPB + QPB_QADDR, QD)
+        mem_w16(mem, QPB + QPB_BUFFPTR, 0x4400)
+        ref_regs, ref_img = run_reference(code, entries['readq_entry'], mem, {'dx': QPB})
+        buf = to_ctypes(mem)
+        r = lib.readq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
+        port_img = bytes(buf)
+        ref = ((ref_regs['bx'], ref_regs['cx']), bytes(ref_img[0x4400:0x4404]),
+               mem_r16(ref_img, QD + Q_MSGOUT), mem_r16(ref_img, QD + Q_MSGCNT))
+        port = ((r.bx, r.cx), bytes(port_img[0x4400:0x4404]),
+                mem_r16(port_img, QD + Q_MSGOUT), mem_r16(port_img, QD + Q_MSGCNT))
+        check("readq_entry: copies the message, msgout wraps to 0", ref, port)
+
+        # -- readq_entry: msglen==0, an MX queue -> BUF becomes the reader's own PD --
+        mem = base_memory()
+        QD = 0x4100
+        mem_w16(mem, QD + Q_LINK, 0)
+        mem_w16(mem, SD_QLR, QD)
+        mem_w16(mem, QD + Q_MSGCNT, 1)
+        mem_w16(mem, QD + Q_MSGLEN, 0)
+        mem_w16(mem, QD + Q_FLAGS, QF_MX)
+        QPB = 0x5000
+        mem_w16(mem, QPB + QPB_QADDR, QD)
+        RLR_PD = 0x8000
+        mem_w16(mem, SD_RLR, RLR_PD)
+        ref_regs, ref_img = run_reference(code, entries['readq_entry'], mem, {'dx': QPB})
+        buf = to_ctypes(mem)
+        r = lib.readq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
+        port_img = bytes(buf)
+        ref = ((ref_regs['bx'], ref_regs['cx']), mem_r16(ref_img, QD + Q_BUF), mem_r16(ref_img, QD + Q_MSGCNT))
+        port = ((r.bx, r.cx), mem_r16(port_img, QD + Q_BUF), mem_r16(port_img, QD + Q_MSGCNT))
+        check("readq_entry: msglen==0, MX queue -> BUF=reader's own PD", ref, port)
+
+        # -- creadq_entry: empty queue, conditional -> immediate e_q_empty, no wait --
+        mem = base_memory()
+        QD = 0x4100
+        mem_w16(mem, QD + Q_LINK, 0)
+        mem_w16(mem, SD_QLR, QD)
+        mem_w16(mem, QD + Q_MSGCNT, 0)
+        QPB = 0x5000
+        mem_w16(mem, QPB + QPB_QADDR, QD)
+        ref_regs, _ = run_reference(code, entries['creadq_entry'], mem, {'dx': QPB})
+        buf = to_ctypes(mem)
+        r = lib.creadq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
+        check("creadq_entry: empty queue -> e_q_empty, no wait", (ref_regs['bx'], ref_regs['cx']), (r.bx, r.cx))
+
+        # -- writeq_entry: room available, with wraparound --
+        mem = base_memory()
+        QD = 0x4100
+        mem_w16(mem, QD + Q_LINK, 0)
+        mem_w16(mem, SD_QLR, QD)
+        mem_w16(mem, QD + Q_MSGCNT, 1)
+        mem_w16(mem, QD + Q_MSGLEN, 4)
+        mem_w16(mem, QD + Q_NMSGS, 2)
+        mem_w16(mem, QD + Q_MSGOUT, 1)  # (msgout + msgcnt) == 2 == nmsgs -> wraps to slot 0
+        mem_w16(mem, QD + Q_BUF, 0x4300)
+        mem_w16(mem, QD + Q_FLAGS, 0)
+        QPB = 0x5000
+        mem_w16(mem, QPB + QPB_QADDR, QD)
+        mem_w16(mem, QPB + QPB_BUFFPTR, 0x4400)
+        mem[0x4400:0x4404] = b'\xAA\xBB\xCC\xDD'  # the caller's own message
+        ref_regs, ref_img = run_reference(code, entries['writeq_entry'], mem, {'dx': QPB})
+        buf = to_ctypes(mem)
+        r = lib.writeq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
+        port_img = bytes(buf)
+        ref = ((ref_regs['bx'], ref_regs['cx']), bytes(ref_img[0x4300:0x4304]), mem_r16(ref_img, QD + Q_MSGCNT))
+        port = ((r.bx, r.cx), bytes(port_img[0x4300:0x4304]), mem_r16(port_img, QD + Q_MSGCNT))
+        check("writeq_entry: copies into slot 0 (wrapped), msgcnt bumped", ref, port)
+
+        # -- writeq_entry: msglen==0, an MX queue -> BUF cleared, no owner --
+        mem = base_memory()
+        QD = 0x4100
+        mem_w16(mem, QD + Q_LINK, 0)
+        mem_w16(mem, SD_QLR, QD)
+        mem_w16(mem, QD + Q_MSGCNT, 0)
+        mem_w16(mem, QD + Q_MSGLEN, 0)
+        mem_w16(mem, QD + Q_NMSGS, 1)
+        mem_w16(mem, QD + Q_FLAGS, QF_MX)
+        mem_w16(mem, QD + Q_BUF, 0x8000)  # previous owner
+        QPB = 0x5000
+        mem_w16(mem, QPB + QPB_QADDR, QD)
+        ref_regs, ref_img = run_reference(code, entries['writeq_entry'], mem, {'dx': QPB})
+        buf = to_ctypes(mem)
+        r = lib.writeq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
+        port_img = bytes(buf)
+        ref = ((ref_regs['bx'], ref_regs['cx']), mem_r16(ref_img, QD + Q_BUF), mem_r16(ref_img, QD + Q_MSGCNT))
+        port = ((r.bx, r.cx), mem_r16(port_img, QD + Q_BUF), mem_r16(port_img, QD + Q_MSGCNT))
+        check("writeq_entry: msglen==0, MX queue -> BUF cleared", ref, port)
+
+        # -- cwriteq_entry: full queue, conditional -> immediate e_q_full, no wait --
+        mem = base_memory()
+        QD = 0x4100
+        mem_w16(mem, QD + Q_LINK, 0)
+        mem_w16(mem, SD_QLR, QD)
+        mem_w16(mem, QD + Q_MSGCNT, 2)
+        mem_w16(mem, QD + Q_NMSGS, 2)
+        QPB = 0x5000
+        mem_w16(mem, QPB + QPB_QADDR, QD)
+        ref_regs, _ = run_reference(code, entries['cwriteq_entry'], mem, {'dx': QPB})
+        buf = to_ctypes(mem)
+        r = lib.cwriteq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
+        check("cwriteq_entry: full queue -> e_q_full, no wait", (ref_regs['bx'], ref_regs['cx']), (r.bx, r.cx))
 
         # -- rlsmx: releases a matching MX queue, leaves a non-matching one alone --
         mem = base_memory()

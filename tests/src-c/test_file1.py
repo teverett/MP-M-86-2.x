@@ -19,6 +19,7 @@ from i86sim import I86Sim  # noqa: E402
 
 WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'file1_wrapper.A86')
 FILE1_C = os.path.join(REPO_ROOT, 'src-c', 'kernel', 'file1.c')
+FILE3_C = os.path.join(REPO_ROOT, 'src-c', 'kernel', 'file3.c')
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 
 STACK_TOP = 0xFFF0
@@ -57,6 +58,12 @@ BD_SECTPT, BD_BLKSHF, BD_BLKMSK, BD_EXTMSK, BD_MAXALL, BD_DIRMAX, BD_OFFSETV = \
 BD_TRANV, BD_WFLAG, BD_SEQIO, BD_SINGLE, BD_RCOUNT, BD_EXTVAL = 0x0C94, 0x0C98, 0x0C9A, 0x0C9F, 0x0CA1, 0x0CA2
 BD_VRECORD, BD_ARECORD, BD_ARECORD_HI, BD_ABLOCK, BD_DPTR = 0x0CA3, 0x0CA4, 0x0CA6, 0x0CA7, 0x0CA9
 BD_PARAMETERSEGMENT, BD_RODSK, BD_RETURN_FFFF, BD_REM_DRV = 0x0CB9, 0x0C01, 0x0C69, 0x0C0B
+BD_CHECKA, BD_CHKSIZ, BD_OPEN_ROOT = 0x0C44, 0x0C53, 0x0C90
+P_UDA, P_DSK, U_PD_CNT = 0x10, 0x12, 0x1A
+
+
+def phys(seg):
+    return (seg * 16) & 0xFFFF
 
 FCB_TYPE, FCB_EXTNUM, FCB_MODNUM, FCB_RECCNT, FCB_DSKMAP, FCB_NXTREC, FCB_RANREC = 9, 12, 14, 15, 16, 32, 33
 FWFMSK = 0x80
@@ -76,7 +83,8 @@ def assemble_reference():
              'chek_fcb', 'setcdisk', 'nowrite', 'setro', 'ckrodir', 'ckrofile', 'checkwrite',
              'getdptra', 'getmodnum', 'clrmodnum', 'clr_ext', 'setfwf', 'compcdr', 'setcdr',
              'rddirbuf', 'dirtouser', 'make_fcb_inv', 'chk_inv_fcb', 'tst_inv_fcb', 'endofdir',
-             'setenddir', 'getallocbit', 'setallocbit', 'goback')
+             'setenddir', 'getallocbit', 'setallocbit', 'goback',
+             'checksum', 'newchecksum', 'rddir', 'rddir0', 'wrdir')
     entries = {name: asm.symtab[name].value for name in names}
     return code, dseg, entries
 
@@ -85,7 +93,7 @@ def build_c_library():
     lib_path = tempfile.mktemp(suffix='.dylib' if sys.platform == 'darwin' else '.so')
     subprocess.run(
         ['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC',
-         '-I', INCLUDE_DIR, FILE1_C, '-o', lib_path],
+         '-I', INCLUDE_DIR, FILE1_C, FILE3_C, '-o', lib_path],
         check=True,
     )
     return lib_path
@@ -115,7 +123,7 @@ def base_memory():
     return mem
 
 
-def run_reference(code, dseg, entry, mem, regs, stop_addrs=()):
+def run_reference(code, dseg, entry, mem, regs, stop_addrs=(), segmented=False):
     # Layering order matters here: cseg is long enough to run past
     # dseg's own end (see the wrapper's own header comment), so dseg's
     # bytes go down second to win in the overlap, and `mem` (this
@@ -144,7 +152,7 @@ def run_reference(code, dseg, entry, mem, regs, stop_addrs=()):
     image[0x68:0x6A] = mem[0x68:0x6A]
     image[BD_CURDSK] = mem[BD_CURDSK]
     sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry, stop_addrs=set(stop_addrs),
-                 call_stub_addrs=STUBS | {XCRLF_ADDR, XPRINT_ADDR})
+                 call_stub_addrs=STUBS | {XCRLF_ADDR, XPRINT_ADDR}, segmented=segmented)
     sim.run()
     return sim.regs, image
 
@@ -216,6 +224,11 @@ def main():
         lib.getallocbit.restype = ctypes.c_uint8
         lib.getallocbit.argtypes = [c_u8p, ctypes.c_uint16, ctypes.POINTER(ctypes.c_uint16), ctypes.POINTER(ctypes.c_uint8)]
         lib.setallocbit.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint8]
+        lib.checksum.argtypes = [c_u8p, ctypes.c_uint8]
+        lib.newchecksum.argtypes = [c_u8p]
+        lib.rddir.argtypes = [c_u8p, ctypes.c_uint8]
+        lib.rddir0.argtypes = [c_u8p, ctypes.c_uint8]
+        lib.wrdir.argtypes = [c_u8p]
 
         failures = []
 
@@ -618,6 +631,108 @@ def main():
         buf = to_ctypes(mem)
         lib.setallocbit(ctypes.cast(buf, c_u8p), ctypes.c_uint16(9), ctypes.c_uint8(1))
         check("setallocbit", ref_img[ALLOC_AT + 1], bytes(buf)[ALLOC_AT + 1])
+
+        # -- checksum: past the checksum vector's own size -> no-op --
+        mem = base_memory()
+        mem_w16(mem, BD_ARECORD, 100)
+        mem_w16(mem, BD_CHKSIZ, 50)
+        CHECKA_AT = 0x4500
+        mem_w16(mem, BD_CHECKA, CHECKA_AT)
+        mem[phys(0) + CHECKA_AT + 100] = 0xAA  # would be touched if not short-circuited
+        ref_regs, ref_img = run_reference(code, dseg, entries['checksum'], mem, {'cl': 0}, stop_addrs=STUBS)
+        buf = to_ctypes(mem)
+        lib.checksum(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0))
+        check("checksum: past checksum vector size -> no-op",
+              ref_img[phys(0) + CHECKA_AT + 100], bytes(buf)[phys(0) + CHECKA_AT + 100])
+
+        # -- newchecksum: initializes the current record's own checksum --
+        mem = base_memory()
+        mem_w16(mem, BD_ARECORD, 5)
+        mem_w16(mem, BD_CHKSIZ, 50)
+        mem_w16(mem, BD_CHECKA, CHECKA_AT)
+        mem_w16(mem, BD_BUFFA, 0x4600)
+        for i in range(128):
+            mem[0x4600 + i] = (i * 3) & 0xFF
+        ref_regs, ref_img = run_reference(code, dseg, entries['newchecksum'], mem, {}, stop_addrs=STUBS)
+        buf = to_ctypes(mem)
+        lib.newchecksum(ctypes.cast(buf, c_u8p))
+        check("newchecksum: initializes the checksum byte",
+              ref_img[CHECKA_AT + 5], bytes(buf)[CHECKA_AT + 5])
+
+        # -- checksum: mismatch, writable disk, past cdrmax -> flushes files
+        # and marks the disk read-only (the full FLUSH_FILE0 path) --
+        mem = base_memory()
+        mem_w16(mem, BD_ARECORD, 5)
+        mem_w16(mem, BD_CHKSIZ, 50)
+        mem_w16(mem, BD_CHECKA, CHECKA_AT)
+        mem[CHECKA_AT + 5] = 0xFF  # deliberately wrong -> mismatch
+        mem_w16(mem, BD_BUFFA, 0x4600)
+        for i in range(128):
+            mem[0x4600 + i] = (i * 3) & 0xFF
+        mem_w16(mem, BD_DCNT, 5)
+        CDRMAX_AT2 = 0x4700
+        mem_w16(mem, BD_CDRMAXA, CDRMAX_AT2)
+        mem_w16(mem, CDRMAX_AT2, 3)  # cdrmax <= dcnt -> compcdr true
+        mem[BD_SELDSK] = 2
+        mem_w16(mem, BD_RODSK, 0)  # disk 2 not yet read-only -> nowrite false
+        mem_w16(mem, BD_DIRMAX, 20)
+        ITEM, CHK_PD, PD_UDA_SEG = 0x4800, 0x5900, 0x0900
+        mem[ITEM:ITEM + 11] = bytes(11)  # link=0,drive=0,...
+        mem[ITEM + 2] = 3  # matches curdsk below
+        mem_w16(mem, ITEM + 6, CHK_PD)
+        mem_w16(mem, BD_OPEN_ROOT, ITEM)
+        mem[BD_CURDSK] = 3
+        mem_w16(mem, CHK_PD + P_UDA, PD_UDA_SEG)
+        mem[phys(PD_UDA_SEG) + U_PD_CNT] = 0
+        PDADDR_AT = 0x0C3A
+        mem_w16(mem, PDADDR_AT, CHK_PD)
+        mem[0x0C33] = 0x10  # PD_CNT
+        ref_regs, ref_img = run_reference(code, dseg, entries['checksum'], mem, {'cl': 0},
+                                           stop_addrs=STUBS, segmented=True)
+        buf = to_ctypes(mem)
+        lib.checksum(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0))
+        port_img = bytes(buf)
+
+        def checksum_snapshot(img):
+            return (mem_r16(img, BD_RODSK), mem_r16(img, CDRMAX_AT2),
+                    mem_r16(img, BD_OPEN_ROOT), img[0x0C33])
+
+        check("checksum: mismatch triggers flush_file0 + setro",
+              checksum_snapshot(ref_img), checksum_snapshot(port_img))
+
+        # -- rddir: past the end of the directory -> setenddir --
+        mem = base_memory()
+        mem_w16(mem, BD_DIRMAX, 5)
+        mem_w16(mem, BD_DCNT, 5)  # dcnt+1 (6) > dirmax (5)
+        ref_regs, ref_img = run_reference(code, dseg, entries['rddir'], mem, {'cl': 0}, stop_addrs=STUBS)
+        buf = to_ctypes(mem)
+        lib.rddir(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0))
+        check("rddir: past end of directory -> setenddir", mem_r16(ref_img, BD_DCNT),
+              mem_r16(bytes(buf), BD_DCNT))
+
+        # -- rddir0: not a new record boundary -> no-op (ret71) --
+        mem = base_memory()
+        mem[BD_DCNT] = 1  # (1 & dskmsk) << fcbshf != 0
+        ref_regs, ref_img = run_reference(code, dseg, entries['rddir0'], mem, {'cl': 0}, stop_addrs=STUBS)
+        buf = to_ctypes(mem)
+        lib.rddir0(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0))
+        check("rddir0: not a record boundary -> no-op", ref_img[BD_DPTR], bytes(buf)[BD_DPTR])
+
+        # -- wrdir: checkwrite + newchecksum + wrbuff chain --
+        mem = base_memory()
+        mem_w16(mem, BD_ARECORD, 5)
+        mem_w16(mem, BD_CHKSIZ, 50)
+        mem_w16(mem, BD_CHECKA, CHECKA_AT)
+        mem_w16(mem, BD_BUFFA, 0x4600)
+        for i in range(128):
+            mem[0x4600 + i] = (i * 5) & 0xFF
+        mem[BD_SELDSK] = 1
+        mem_w16(mem, BD_RODSK, 0)
+        ref_regs, ref_img = run_reference(code, dseg, entries['wrdir'], mem, {}, stop_addrs=STUBS)
+        buf = to_ctypes(mem)
+        lib.wrdir(ctypes.cast(buf, c_u8p))
+        check("wrdir: checksum initialized via newchecksum",
+              ref_img[CHECKA_AT + 5], bytes(buf)[CHECKA_AT + 5])
 
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")

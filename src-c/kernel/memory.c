@@ -8,16 +8,27 @@
  * so the real segment-addressing gap documented for those two files (and
  * PROC.RTM/ML.MEM) doesn't apply here.
  *
- * Every real allocator call here goes through the unported `mpmif`
- * trampoline (`f_mlalloc`/`f_maualloc`/`f_maufree`) and is a boundary
- * stub per docs/src-c.md's convention. As with QUE2.RTM's own `qspace`,
- * this has a real consequence: the real code sets `cx` to the function
- * code immediately before each call and only checks `cx == 0`
- * afterward, so under the no-op convention every one of those checks
- * always "fails" -- `malloc_entry`'s own "successful allocation from an
- * existing MAU or a freshly-created one" paths, and `mfree_it`'s own
- * "actually free the segment" path, are therefore unreachable here,
- * exactly as they are in the real reference assembly run the same way.
+ * `mall_try_mau`'s/`malloc_entry`'s own `mpmif(f_maualloc)`/
+ * `mpmif(f_mlalloc)` calls are now real internal calls into
+ * `mau.c`'s `maualloc_entry` and `ml.c`'s `mlalloc_entry` -- both are
+ * fully ported, so (same technique as `sysent.c`'s own
+ * `creat_proc_entry`, `que1.c`'s own `readq`/`writeq`) there's no
+ * reason left to stub them out: `malloc_entry`'s own "successful
+ * allocation from an existing MAU or a freshly-created one" paths are
+ * real and exercised now, which is what unblocks `LOAD.SUP`'s own
+ * `load:` from being able to use this port for its own `mpmif(f_malloc)`
+ * dependency (see `load.c`'s own header comment).
+ *
+ * `mfree_entry`/`mfree_it`'s own `mpmif(f_maufree)` is NOT upgraded
+ * yet -- unlike the allocate side, the real asm's own "free an empty
+ * MAU back to the Memory Free List" path tail-jumps clear out of
+ * `mfree_it` *and* `mfree_entry` via `mpmif(f_mlfree)` (bypassing
+ * both routines' own normal `ret`), which needs its own careful
+ * translation, not a drop-in call -- left for a separate pass. It's
+ * still a boundary stub, so `cx` is still set to the function code
+ * immediately before the call and only checked afterward, meaning
+ * `mfree_it`'s own "actually free the segment" path stays
+ * unreachable here, exactly as in the real reference assembly run.
  *
  * `getmd`/`freemd` (src/kernel/UTIL.MEM, util_mem.c) are called as
  * ordinary internal calls below, not boundary stubs. They're declared
@@ -40,18 +51,17 @@ typedef struct {
     uint16_t bx, cx;
 } mem_bxcx;
 
+extern mem_bxcx maualloc_entry(uint8_t *mem, uint16_t bx, uint16_t dx);
+extern mem_bxcx mlalloc_entry(uint8_t *mem, uint16_t dx, uint16_t bx);
+
 /*
- * mall_try_mau
+ * mall_try_mau -- try to allocate the MPB's own request out of a
+ * specific, already-existing MAU.
  *	input:	bx -> MAU, dx -> MPB in u_wrkseg
- *	output:	returns the error code (always nonzero here -- see header
- *		comment)
+ *	output:	returns the error code (0 = ok)
  */
 static uint16_t mall_try_mau(uint8_t *mem, uint16_t bx, uint16_t dx) {
-    (void)mem;
-    (void)bx;
-    (void)dx;
-    /* mov cx,f_maualloc ! call mpmif -- boundary stub, no-op */
-    return f_maualloc;
+    return maualloc_entry(mem, bx, dx).cx;
 }
 
 /*
@@ -101,14 +111,24 @@ mem_bxcx malloc_entry(uint8_t *mem, uint16_t dx) {
         si = mem_r16(mem, (uint16_t)(si + ms_link));
         if (si == 0) {
             /* mall_ml: create a new MAU from the Memory Free List */
-            uint16_t qcx = f_mlalloc; /* boundary stub, see header comment */
+            mem_bxcx ml = mlalloc_entry(mem, dx, SD_MFL);
+            if (ml.cx != 0) {
+                freemd(mem, new_md);
+                mem_bxcx r = {0xFFFF, ml.cx};
+                return r;
+            }
+            /* mall_ml0: link the new MAU onto the active MAU list (mal) */
+            uint16_t new_mau = ml.bx;
+            mem_w16(mem, (uint16_t)(new_mau + m_link), mem_r16(mem, SD_MAL));
+            mem_w16(mem, SD_MAL, new_mau);
+            uint16_t qcx = mall_try_mau(mem, new_mau, dx);
             if (qcx != 0) {
                 freemd(mem, new_md);
                 mem_bxcx r = {0xFFFF, qcx};
                 return r;
             }
-            /* mall_ml0: unreachable under the boundary-stub convention --
-             * see header comment. mau/link_si stay 0 (fresh MAU). */
+            mau = new_mau;
+            link_si = 0; /* si=0 -- "from new MAU", same as the real asm's own mov si,0 */
             break;
         }
         if (last_tried == mem_r16(mem, (uint16_t)(si + ms_mau))) {
@@ -118,8 +138,6 @@ mem_bxcx malloc_entry(uint8_t *mem, uint16_t dx) {
         if (mall_try_mau(mem, candidate, dx) != 0) {
             continue;
         }
-        /* unreachable under the boundary-stub convention -- see header
-         * comment -- but translated faithfully regardless */
         mau = candidate;
         link_si = si;
         break;

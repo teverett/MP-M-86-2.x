@@ -29,7 +29,23 @@ mfl		dw	0
 thrdrt		dw	0
 	cseg
 sysdat	dw	0		; normally supplied by this module's own init
-mpmif	equ	9000h		; unported external call target (stub)
+; mpmif: a real dispatcher now, not a flat stub, for the two function
+; codes malloc_entry's own mall_try_mau/mall_ml genuinely need for
+; real (f_maualloc/f_mlalloc -- see src-c/kernel/memory.c's own header
+; comment for why): tail-jumps into the real MAU.MEM/ML.MEM entry
+; points bundled below, whose own "ret" returns straight to mpmif's
+; own caller, exactly like the real dispatcher would. Every other
+; function code (f_maufree, still unported for real -- same header
+; comment) falls through to a plain no-op ret, same as every other
+; boundary stub in this tree.
+mpmif:
+	cmp cx,f_maualloc ! je mpmif_maualloc
+	cmp cx,f_mlalloc ! je mpmif_mlalloc
+	ret
+mpmif_maualloc:	jmp maualloc_entry
+mpmif_mlalloc:	jmp mlalloc_entry
 	include util.mem
 	include memory.mem
+	include mau.mem
+	include ml.mem
 	end

@@ -56,7 +56,11 @@
 #define ps_run      0x00
 #define ps_poll     0x01
 #define ps_delay    0x02
+#define ps_swap     0x03
+#define ps_term     0x04
 #define ps_sleep    0x05
+#define ps_dq       0x06
+#define ps_nq       0x07
 #define ps_flagwait 0x08
 #define ps_ciowait  0x09
 
@@ -89,6 +93,9 @@
 #define e_no_umd           0x12
 #define e_no_pd            0x0C
 #define e_no_cseg          33 /* no CSEG in load file */
+#define e_pd_noterm        35 /* could not terminate process */
+#define e_bad_read         29 /* bad ret. from BDOS read */
+#define e_abort            40 /* external termination occurred */
 
 /* src/kernel/XIOSCB.DEF */
 #define io_idle 0x17
@@ -120,6 +127,8 @@
 #define UDA_DPARAM    0xA010 /* word: arg to dispatch */
 #define UDA_WRKSEG    0xA012 /* word: current segment addr of buf */
 #define UDA_RETSEG    0xA014 /* word: return segment for a far return */
+#define SD_PLR        0xA01C /* word: Poll List Root */
+#define SD_SLR        0xA01E /* word: Swap List Root */
 #define SD_QLR        0xA020 /* word: root of the active Queue Descriptor list */
 #define SD_QUL        0xA022 /* word: root of the unused-QD free list */
 #define SD_QMAU       0xA024 /* word: MAU root queue buffers allocate from */
@@ -133,6 +142,12 @@
 #define SD_NLSTDEV    0xA035 /* byte: number of XIOS list devices */
 #define SD_NCONDEV    0xA036 /* byte: number of XIOS console devices */
 #define SD_PUL        0xA038 /* word: Process Descriptor Unused List */
+#define SD_MXMEMOWNER 0xA03A /* word: PD owning the MX memory queue mutex */
+#define SD_MXMEMCOUNT 0xA03C /* byte: mutex nesting count */
+#define SD_INDISP     0xAC00 /* byte: currently in dispatch? */
+#define SD_INTFLAG    0xAC01 /* byte: if 0, interrupts not enabled */
+#define SD_ES_SAV     0xAC02 /* word */
+#define SD_BX_SAV     0xAC04 /* word */
 
 /* src/kernel/CHAR.DEF */
 #define ctlc   0x03
@@ -200,6 +215,8 @@
 
 /* src/kernel/ERR.DEF */
 #define e_no_qd        0x07
+#define e_q_empty      0x0E
+#define e_q_full       0x0F
 #define e_no_queue     0x09
 #define e_q_inuse      0x0A
 #define e_q_notactive  0x0B
@@ -320,10 +337,13 @@
 #define BD_DBLK        0x0C27 /* word: directory block */
 #define BD_ERROR_MODE  0x0C29 /* byte */
 #define BD_PD_CNT      0x0C33 /* byte: BDOS process count */
+#define BD_PDADDR      0x0C3A /* word: PD address target for the current call */
 #define BD_HIGH_EXT    0x0C34 /* byte: FCB high extent bits */
 /* 0x0C35 (XFCB_READ_ONLY) unused by name */
 #define BD_CURDSK      0x0C36 /* byte: current disk */
 #define BD_CDRMAXA     0x0C3C /* word: pointer to current dir max value */
+#define BD_CHECKA      0x0C44 /* word: current checksum vector addr */
+#define BD_CHKSIZ      0x0C53 /* word: size of checksum vector */
 #define BD_DRVLBLA     0x0C3E /* word: drive label data byte address */
 #define BD_BUFFA       0x0C40 /* word: pointer to directory dma address */
 #define BD_DPBADDR     0x0C42 /* word: current disk parameter block address */
@@ -371,6 +391,7 @@
 #define BD_SDCNT       0x0C7D /* word: saved dcnt of file's 1st fcb */
 #define BD_SDBLK       0x0C7F /* word: saved dblk of file's 1st fcb */
 #define BD_PACKED_DCNT 0x0C37 /* byte[3]: packed dblk(15 bits)+dcnt(9 bits) */
+#define BD_FLUSHED     0x0C8D /* byte: lock-list open-file flush flag */
 #define BD_OPEN_ROOT   0x0C90 /* word: open-file list root */
 #define BD_LOCK_ROOT   0x0C92 /* word: locked-record list root */
 #define BD_CUR_POS     0x0C79 /* word: current position in olist/llist */
@@ -464,6 +485,13 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
 #define u_in_int      0x1B /* byte */
 #define u_sp          0x1C /* word: save register area -- sp */
 #define u_ss          0x1E /* word: save register area -- ss */
+#define u_ax          0x20 /* word */
+#define u_bx          0x22 /* word */
+#define u_cx          0x24 /* word */
+#define u_dx          0x26 /* word */
+#define u_di          0x28 /* word */
+#define u_si          0x2A /* word */
+#define u_bp          0x2C /* word */
 #define u_ds_sav      0x32 /* word */
 #define u_stack_sp    0x34 /* word: usr stack pointer */
 #define u_ivectors    0x38 /* word[10]: save int 0-4 */
@@ -477,6 +505,7 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
                                debug_cs immediately following, copied
                                together as one 4-word block) */
 #define u_insys       0x60 /* byte: # times through user_entry */
+#define u_stat_sav    0x61 /* byte: p_stat save, used during interrupts */
 
 /* src/kernel/VEC.FMT -- i_mpm_ip, overlaying the real (absolute,
  * segment-0) interrupt vector table at mpmint*4 (src/kernel/
@@ -516,6 +545,16 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
  * (COMMAND.SUP's own, independently chosen, not confirmed to be the
  * same physical struct), same "fixed scratch address" reasoning */
 #define SD_CLOCK_TOD_BASE 0xA044 /* word[1]+byte[3]: day/hour/min/sec */
+
+/* src/kernel/SYSDAT.FMT's own `tod`/`tod_day`/`tod_hr`/`tod_min`/
+ * `tod_sec` (real offsets 0/0/2/3/4, `tod` itself a zero-size alias
+ * for `tod_day`) -- src/kernel/SYSFUNC.SUP's own `tod_entry` reads
+ * this same real struct `rep movs`-style (`todlen`=5 bytes), but at
+ * its own independently-chosen scratch base, same reasoning as
+ * SD_CLOCK_TOD_BASE just above (not confirmed to be the same real
+ * struct as either SD_TOD_HR/MIN/SEC or SD_CLOCK_TOD_BASE) */
+#define SD_TOD     0xA049 /* word[1]+byte[3]: tod_day/tod_hr/tod_min/tod_sec */
+#define todlen     5
 
 /* src/kernel/SYSDAT.FMT -- src/kernel/COMMAND.SUP's own scratch
  * variables (the subset src-c/kernel/command.c's ported subroutines
@@ -578,6 +617,10 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
 #define ulen    0x100 /* size of uda */
 #define lstklen 96    /* size of load stack */
 
+/* src/kernel/EQU.BDO -- fixed build-time constants (not scratch) */
+#define fcbshf  5 /* log2(fcblen) */
+#define dskmsk  3 /* dirrec-1 = (recsiz/fcblen)-1 = directory elements per record, minus 1 */
+
 /* src/kernel/LDTAB.DEF -- one Load Table entry (src-c/kernel/load.c's
  * own load_finish) */
 #define ldtab_start  0x00 /* word */
@@ -622,7 +665,46 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
 #define SD_LOAD_8080        0xA908 /* byte */
 #define SD_LOAD_UDA         0xA909 /* word */
 #define SD_LOAD_LSTK        0xA90B /* word */
-#define SD_LOAD_LDTAB       0xA910 /* ldtab[], ldtablen bytes per entry */
+#define SD_LOAD_LDTAB       0xA910 /* ldtab[], ldtablen bytes per entry (up to
+                                       10 entries, wrapper reserves 200 bytes
+                                       -- ends at 0xA9D8) */
+#define SD_LOAD_INDMA       0xA9E7 /* word: starting paragraph # currently
+                                       sitting in SD_LOAD_DMA (tests/src-c/
+                                       fixtures/load_wrapper.A86's own real
+                                       `load_indma`, confirmed via --symbols) */
+#define SD_LOAD_DMA         0xAB00 /* 128-byte (8-paragraph) shared record
+                                       buffer, src-c/kernel/load.c's own
+                                       load_group/load_finish (load_wrapper.
+                                       A86's own real `load_dma`) */
+
+/* `diskread`'s/`load_group`'s own real `mpmif(f_freadseq)` dependency
+ * (see src-c/kernel/load.c's own header comment): a deliberately
+ * simplified single-extent "virtual disk" standing in for a real
+ * sequential BDOS file read. `SD_LOAD_DISK` is laid out as
+ * consecutive `SD_LOAD_DISK_RECS`-many 128-byte CP/M records,
+ * starting at `fcb_nxtrec`'s own real record 0; this port supports
+ * only a single extent (no disk-map/extent-switch logic), which every
+ * file this project's own tests load is small enough to stay within
+ * -- real multi-extent handling is out of scope here, same spirit as
+ * every other "deliberate simplification, documented" case elsewhere
+ * in this tree. Both scratch addresses are this port's own (no real
+ * SYSDAT.FMT equivalent -- the real BDOS keeps no such flat array). */
+#define SD_LOAD_DISK_RECS   0xA9E9 /* word: # of 128-byte records in SD_LOAD_DISK */
+#define SD_LOAD_DISK        0xB000 /* record 0 starts here, 128 bytes/record */
+
+/* src/kernel/APB.DEF -- Abort Parameter Block (abort_spec_entry's own
+ * input, reached through u_wrkseg same as every other *PB above) */
+#define abt_prior   32
+#define apb_pd      0x00 /* word */
+#define apb_term    0x02 /* word */
+#define apb_cns     0x04 /* byte */
+#define apb_net     0x05 /* byte */
+#define apb_pdname  0x06 /* byte[pnamsiz] */
+#define apb_len     0x0E
+
+/* src/kernel/MODFUNC.DEF -- mpmif function code src-c/kernel/abort.c's
+ * own terminate_entry uses (bdos*0x100)+46 */
+#define f_bdosterm 0x12E
 
 #define CLI_FCB        0xB300 /* byte[fcblen+1] */
 #define CLI_CUSPQPB    0xB320 /* byte[16] */

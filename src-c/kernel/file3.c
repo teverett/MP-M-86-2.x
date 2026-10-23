@@ -2,27 +2,34 @@
  * file3.c -- C port of a self-contained subset of src/kernel/
  * FILE3.BDO: PACK_SDCNT, COMPARE, SEARCH_OLIST/SEARCH_LLIST/
  * SEARCHN_LIST (+ internal search_listo), DELETE_ITEM, CREATE_ITEM,
- * SET_OLIST_ITEM.
+ * SET_OLIST_ITEM, TST_TBL_LMT, REMOVE_LOCKS, FLUSH_FILES/FLUSH_FILE0,
+ * INC_PDCNT.
  *
  * FILE3.BDO is not self-contained -- same situation as FILE1.BDO (see
  * src-c/kernel/file1.c's own header comment): it's one of 4 files
  * meant to be assembled together into one BDOS module. This is a
- * small, scoped follow-up pass, not a full file3 port, and a 2nd pass
- * over this same file: an earlier revision of this comment claimed
- * `TST_OLIST`/`CHK_OLIST`/`PR_TERM` were also self-contained -- on
- * closer reading they aren't: `CHK_OLIST` calls the still-unported
- * `openx06`/`compare_pds` and relies on its own caller having pushed
- * a word onto the stack for it to `pop` partway through (an implicit
- * calling convention, not a boundary stub this port can safely stand
- * in for); `PR_TERM` calls the still-unported `tst_tbl_lmt`/
- * `remove_locks`/`func48`. Left for a later pass along with the rest
- * of the file. `FLUSH_FILES`/`FLUSH_FILE0` hit a different, real
- * blocker: `FLUSH_FILE0` dynamically switches `ES` to a PD's own UDA
- * segment (`mov es,p_uda[bx]`) and then reads a fixed offset relative
- * to it (`u_pd_cnt`) -- the same real segment-relative-addressing gap
- * as `PROC.RTM`/`ML.MEM`. One other routine in this file (not
- * identified by name here) uses `std` (reverse-direction string ops),
- * the same gap as `MAU.MEM`.
+ * small, scoped follow-up pass, not a full file3 port: an earlier
+ * revision of this comment claimed `TST_OLIST`/`CHK_OLIST`/`PR_TERM`
+ * were also self-contained -- on closer reading they aren't:
+ * `CHK_OLIST` calls the still-unported `openx06`/`compare_pds` and
+ * relies on its own caller having pushed a word onto the stack for it
+ * to `pop` partway through (an implicit calling convention, not a
+ * boundary stub this port can safely stand in for); `PR_TERM` also
+ * calls the still-unported `func48`. Left for a later pass.
+ *
+ * `FLUSH_FILES`/`FLUSH_FILE0` (+ their own `REMOVE_LOCKS`) were
+ * flagged in an earlier pass as blocked by the real segment-relative-
+ * addressing gap (`FLUSH_FILE0` dynamically switches `ES` to a PD's
+ * own UDA segment, `mov es,p_uda[bx]`, then reads `u_pd_cnt` relative
+ * to it) -- now resolved the same way as `ml.c`/`proc.c`/`mau.c`/
+ * `share.c`/`load.c` (`mem_r8_seg`/`mem_w8_seg` against that PD's own
+ * UDA segment, `u_pd_cnt`'s real UDA.FMT offset already in defs.h).
+ * `INC_PDCNT` is `CHK_OLIST`'s own internal label, shared by
+ * `FLUSH_FILE0`; ported standalone since `CHK_OLIST` itself stays
+ * deferred. One other routine in this file (not identified by name
+ * here) uses `std` (reverse-direction string ops), the same gap as
+ * `MAU.MEM` (now also resolved, `tools/i86sim.py` tracks the
+ * direction flag) -- not reconned this pass, left for the next one.
  *
  * `DELETE_ITEM`/`CREATE_ITEM` touch `free_root` -- not a FILE1-4.BDO
  * scratch field like `BD_CURDSK` et al, but a real `SYSDAT.FMT` field
@@ -219,4 +226,85 @@ void set_olist_item(uint8_t *mem, uint16_t bx, uint8_t al) {
     mem[(uint16_t)(bx + 2)] = (uint8_t)(al | mem[BD_CURDSK]);
     move(mem, BD_PACKED_DCNT, (uint16_t)(bx + 3), 5);
     mem_w16(mem, (uint16_t)(bx + 8), 0);
+}
+
+/*
+ * tst_tbl_lmt -- compare the word at bx+cx against dx
+ *	output: returns 1 if equal (the real ZF), 0 if not
+ */
+static uint8_t tst_tbl_lmt(const uint8_t *mem, uint16_t bx, uint16_t cx, uint16_t dx) {
+    return mem_r16(mem, (uint16_t)(bx + cx)) == dx ? 1 : 0;
+}
+
+/*
+ * remove_locks -- remove every lock-list record belonging to olist
+ * item bx (identified by that item's own address, stored at offset 8
+ * in each of its own lock-list records)
+ */
+void remove_locks(uint8_t *mem, uint16_t bx) {
+    if (!(mem[(uint16_t)(bx + 2)] & 0x40)) {
+        return;
+    }
+    uint16_t owner = bx;
+    mem_w16(mem, BD_CUR_POS, BD_LOCK_ROOT);
+    for (;;) {
+        if (!searchn_list(mem, 0)) {
+            return; /* retl25 */
+        }
+        uint16_t found = mem_r16(mem, BD_CUR_POS);
+        if (tst_tbl_lmt(mem, found, 8, owner)) {
+            delete_item(mem, found);
+        }
+    }
+}
+
+/*
+ * inc_pdcnt -- bump BD_PD_CNT by 16, skipping over 0 (CHK_OLIST's own
+ * internal label, shared by FLUSH_FILE0)
+ */
+void inc_pdcnt(uint8_t *mem) {
+    uint8_t al = mem[BD_PD_CNT];
+    do {
+        al = (uint8_t)(al + 16);
+    } while (al == 0);
+    mem[BD_PD_CNT] = al;
+}
+
+/*
+ * flush_file0 -- flush (close) every open file on the current
+ * default disk (BD_CURDSK, via searchn_list's own ch==1 mode),
+ * removing any locks each one holds, and bump BD_PD_CNT once per
+ * distinct process that owned a flushed file (u_pd_cnt's own low bit
+ * marks a process already counted this pass, cleared elsewhere).
+ */
+void flush_file0(uint8_t *mem) {
+    mem_w16(mem, BD_CUR_POS, BD_OPEN_ROOT);
+    for (;;) {
+        if (!searchn_list(mem, 1)) {
+            return; /* retl2 */
+        }
+        uint16_t item = mem_r16(mem, BD_CUR_POS);
+        remove_locks(mem, item);
+        delete_item(mem, item);
+
+        uint16_t pd = mem_r16(mem, (uint16_t)(item + 6));
+        uint16_t pd_uda = mem_r16(mem, (uint16_t)(pd + p_uda));
+        uint8_t pd_cnt_flag = mem_r8_seg(mem, pd_uda, u_pd_cnt);
+        if (pd_cnt_flag & 1) {
+            continue;
+        }
+        mem_w8_seg(mem, pd_uda, u_pd_cnt, (uint8_t)(pd_cnt_flag | 1));
+        if (pd == mem_r16(mem, BD_PDADDR)) {
+            inc_pdcnt(mem);
+        }
+    }
+}
+
+/* flush_files -- flush_file0, but only once (BD_FLUSHED guards it) */
+void flush_files(uint8_t *mem) {
+    if (mem[BD_FLUSHED]) {
+        return; /* retl2 */
+    }
+    mem[BD_FLUSHED] = 1;
+    flush_file0(mem);
 }

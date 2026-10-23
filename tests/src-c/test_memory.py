@@ -2,6 +2,12 @@
 """Differential test for src-c/kernel/memory.c against src/kernel/
 MEMORY.MEM's malloc_entry and mfree_entry (+ internal mall_try_mau,
 mfree_it, both static in the C port and exercised only indirectly).
+
+malloc_entry's own mall_try_mau/mall_ml now make real mpmif(f_maualloc)/
+mpmif(f_mlalloc) calls into the real MAU.MEM/ML.MEM (bundled into this
+test's own wrapper, with mpmif itself a small real dispatcher -- see
+the wrapper's own header comment) -- see memory.c's own header comment
+for why mfree_entry's own mpmif(f_maufree) isn't upgraded yet.
 """
 import ctypes
 import os
@@ -17,13 +23,14 @@ from i86sim import I86Sim  # noqa: E402
 
 WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'memory_mem_wrapper.A86')
 MEMORY_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', 'memory.c'),
-            os.path.join(REPO_ROOT, 'src-c', 'kernel', 'util_mem.c')]
+            os.path.join(REPO_ROOT, 'src-c', 'kernel', 'util_mem.c'),
+            os.path.join(REPO_ROOT, 'src-c', 'kernel', 'mau.c'),
+            os.path.join(REPO_ROOT, 'src-c', 'kernel', 'ml.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 
 STACK_TOP = 0xFFF0
 SD_RLR, SD_THRDRT, SD_MDUL, SD_MAL, SD_MFL = 0xA000, 0xA032, 0xA028, 0xA02A, 0xA02C
 UDA_WRKSEG = 0xA012
-MPMIF_STUB = 0x9000
 
 MPB_START, MPB_MIN, MPB_MAX, MPB_PDADR, MPB_FLAGS = 0, 2, 4, 6, 8
 MFPB_START, MFPB_PD = 0, 2
@@ -75,7 +82,10 @@ def run_reference(code, entry, mem, regs, sysdat_word=SYSDAT):
     image[0:len(code)] = code
     image[0] = sysdat_word & 0xFF  # `sysdat dw 0` sits at cseg offset 0
     image[1] = (sysdat_word >> 8) & 0xFF
-    sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry, call_stub_addrs={MPMIF_STUB})
+    # mpmif is a real dispatcher now (see the wrapper's own comment),
+    # not a flat call_stub_addrs target -- f_maualloc/f_mlalloc tail
+    # into the real MAU.MEM/ML.MEM, everything else just ret's.
+    sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry)
     sim.run()
     return sim.regs, image
 
@@ -157,7 +167,7 @@ def main():
         port, port_img = call_malloc(mem, MPB)
         ref = ((ref_regs['bx'], ref_regs['cx']), mem_r16(ref_img, SD_MDUL))
         got = (port, mem_r16(port_img, SD_MDUL))
-        check("malloc_entry: new-MAU boundary stub always fails, MD freed back", ref, got)
+        check("malloc_entry: new-MAU, mlalloc genuinely fails (empty MFL), MD freed back", ref, got)
 
         # -- mfree_entry: explicit pdadr equal to the caller's own rlr --
         # (mfree_chkpd's "bx==0" fast path is covered by the next two cases,

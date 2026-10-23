@@ -88,7 +88,9 @@ def assemble_reference():
     code = asm.segment_bytes('cseg')
     lb_more = asm.symtab['lb_more'].value
     user_retf = asm.symtab['user_retf'].value
-    return code, lb_more, user_retf
+    diskread_entry = asm.symtab['diskread'].value
+    load_group_entry = asm.symtab['load_group'].value
+    return code, lb_more, user_retf, diskread_entry, load_group_entry
 
 
 def build_c_library():
@@ -110,9 +112,12 @@ def base_memory(nldtabents):
 
 
 MPMIF_STUB = 0x9000
+F_SETDMA, F_SETDMAB, F_FREADSEQ = 0x1A, 0x33, 0x14
+FCB_NXTREC = 0x20
+SD_LOAD_DISK_RECS, SD_LOAD_DISK = 0xA9E9, 0xB000
 
 
-def run_reference(code, entry, mem, regs):
+def run_reference(code, entry, mem, regs, call_hooks=None):
     image = bytearray(0x10000)
     image[0:len(code)] = code
     for addr, val in enumerate(mem):
@@ -121,9 +126,52 @@ def run_reference(code, entry, mem, regs):
     image[0] = SYSDAT & 0xFF  # `sysdat dw 0` sits at cseg offset 0
     image[1] = (SYSDAT >> 8) & 0xFF
     sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry, segmented=True,
-                 call_stub_addrs={MPMIF_STUB})
+                 call_stub_addrs={MPMIF_STUB}, call_hooks=call_hooks)
     sim.run()
     return sim.regs, image
+
+
+def make_freadseq_hook():
+    """mpmif(f_setdmab)/mpmif(f_setdma)/mpmif(f_freadseq) hook for
+    diskread's own 3-call sequence -- see load.c's own header comment
+    for the "virtual disk" model this reproduces exactly (same
+    fcb_nxtrec-indexed single-extent read, same SD_LOAD_DISK/
+    SD_LOAD_DISK_RECS scratch layout)."""
+    state = {'dma_seg': 0, 'dma_ofst': 0}
+
+    def hook(sim):
+        cx = sim.regs['cx']
+        if cx == F_SETDMAB:
+            state['dma_seg'] = sim.regs['dx']
+        elif cx == F_SETDMA:
+            state['dma_ofst'] = sim.regs['dx']
+        elif cx == F_FREADSEQ:
+            fcb = sim.regs['dx']  # ds=u_wrkseg at this exact call
+            wrkseg = mem_r16(sim.mem, UDA_WRKSEG)
+            nxt_addr = (phys(wrkseg) + fcb + FCB_NXTREC) & 0xFFFF
+            nxtrec = sim.mem[nxt_addr]
+            recs = mem_r16(sim.mem, SD_LOAD_DISK_RECS)
+            if nxtrec >= recs:
+                bl = 1
+            else:
+                src = (SD_LOAD_DISK + nxtrec * 128) & 0xFFFF
+                dst = (phys(state['dma_seg']) + state['dma_ofst']) & 0xFFFF
+                for i in range(128):
+                    sim.mem[(dst + i) & 0xFFFF] = sim.mem[(src + i) & 0xFFFF]
+                sim.mem[nxt_addr] = (nxtrec + 1) & 0xFF
+                bl = 0
+            sim.regs['bx'] = (sim.regs['bx'] & 0xFF00) | bl
+        else:
+            raise AssertionError(f"unexpected mpmif function code {cx:#x}")
+
+    return hook
+
+
+def put_disk_records(mem, records):
+    mem_w16(mem, SD_LOAD_DISK_RECS, len(records))
+    for i, rec in enumerate(records):
+        padded = (rec + bytes(128))[:128]
+        mem[SD_LOAD_DISK + i * 128:SD_LOAD_DISK + i * 128 + 128] = padded
 
 
 def to_ctypes(mem):
@@ -131,7 +179,7 @@ def to_ctypes(mem):
 
 
 def main():
-    code, lb_more, user_retf = assemble_reference()
+    code, lb_more, user_retf, diskread_entry, load_group_entry = assemble_reference()
     lib_path = build_c_library()
     try:
         lib = ctypes.CDLL(lib_path)
@@ -142,6 +190,10 @@ def main():
 
         lib.load_finish.restype = BxCx
         lib.load_finish.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16]
+        lib.diskread.restype = BxCx
+        lib.diskread.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16]
+        lib.load_group.restype = ctypes.c_uint16
+        lib.load_group.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16]
 
         failures = []
 
@@ -261,6 +313,104 @@ def main():
         mem_w16(mem, SD_LOAD_FCB, FCB_ADDR)
         ref, ref_img, port, port_img = run_both(mem)
         check("load_finish: bpg_cseg == 0 -> e_no_cseg", ref, port)
+
+        # ================= diskread =================
+        P_FLAG = 6
+        PF_CTLC = 0x80
+        # A dedicated, code-free scratch segment for these two sections'
+        # own FCB -- WRKSEG/FCB_ADDR above (load_finish's own choice)
+        # physically lands at phys(0x40)+0x30 = 0x430, well inside this
+        # wrapper's own ~1.5KB of cseg code (0-0x627), which load_finish's
+        # own tests never actually read/write far enough into to notice;
+        # fcb_nxtrec (offset 0x20 further in) would collide with real
+        # code bytes there.
+        DR_WRKSEG, DR_FCB_ADDR = 0x0100, 0x0000
+
+        def diskread_case(label, dma_seg, dma_ofst, fcb_nxtrec_in, records, pf_ctlc=False):
+            mem = base_memory(0)
+            mem_w16(mem, UDA_WRKSEG, DR_WRKSEG)
+            mem_w16(mem, SD_LOAD_FCB, DR_FCB_ADDR)
+            mem[phys(DR_WRKSEG) + DR_FCB_ADDR + FCB_NXTREC] = fcb_nxtrec_in
+            put_disk_records(mem, records)
+            mem_w16(mem, SD_RLR, PD_ADDR)
+            mem[PD_ADDR + P_FLAG] = PF_CTLC if pf_ctlc else 0
+            ref_regs, ref_img = run_reference(code, diskread_entry, mem, {'dx': dma_ofst, 'cx': dma_seg},
+                                               call_hooks={MPMIF_STUB: make_freadseq_hook()})
+            buf = to_ctypes(mem)
+            got = lib.diskread(ctypes.cast(buf, c_u8p), ctypes.c_uint16(dma_ofst), ctypes.c_uint16(dma_seg))
+            port_img = bytes(buf)
+            dma_base = phys(dma_seg) + dma_ofst
+            nxt_addr = phys(DR_WRKSEG) + DR_FCB_ADDR + FCB_NXTREC
+            ref = ((ref_regs['bx'], ref_regs['cx']), bytes(ref_img[dma_base:dma_base + 128]), ref_img[nxt_addr])
+            port = ((got.bx, got.cx), bytes(port_img[dma_base:dma_base + 128]), port_img[nxt_addr])
+            check(label, ref, port)
+
+        diskread_case("diskread: success, copies record 0", DATA_SEG, 0x0010, 0,
+                       [bytes([0x11]) * 128])
+        diskread_case("diskread: success, advances to record 1", DATA_SEG, 0x0010, 1,
+                       [bytes([0x11]) * 128, bytes([0x22]) * 128])
+        diskread_case("diskread: pf_ctlc set -> e_abort (read still happens)", DATA_SEG, 0x0010, 0,
+                       [bytes([0x33]) * 128], pf_ctlc=True)
+
+        # ================= load_group =================
+        LDTAB_FSTRT, LDTAB_FLEN = 0x0A, 0x0C
+        SD_LOAD_INDMA = 0xA9E7
+
+        def load_group_case(label, fstrt, flen, dest_seg, records, indma=0xFFFF):
+            mem = base_memory(1)
+            mem_w16(mem, UDA_WRKSEG, DR_WRKSEG)
+            mem_w16(mem, SD_LOAD_FCB, DR_FCB_ADDR)
+            mem[phys(DR_WRKSEG) + DR_FCB_ADDR + FCB_NXTREC] = 0
+            put_disk_records(mem, records)
+            mem_w16(mem, SD_RLR, PD_ADDR)
+            mem[PD_ADDR + P_FLAG] = 0
+            mem_w16(mem, SD_LOAD_INDMA, indma)
+            put_ldtab(mem, 0, dest_seg, 0, 0, 2)
+            mem_w16(mem, SD_LOAD_LDTAB + LDTAB_FSTRT, fstrt)
+            mem_w16(mem, SD_LOAD_LDTAB + LDTAB_FLEN, flen)
+            ref_regs, ref_img = run_reference(code, load_group_entry, mem, {'si': SD_LOAD_LDTAB},
+                                               call_hooks={MPMIF_STUB: make_freadseq_hook()})
+            buf = to_ctypes(mem)
+            got_cx = lib.load_group(ctypes.cast(buf, c_u8p), ctypes.c_uint16(SD_LOAD_LDTAB), ctypes.c_uint16(SYSDAT))
+            port_img = bytes(buf)
+            dest_base = phys(dest_seg)
+            want_bytes = flen * 16
+            ref = (ref_regs['cx'], bytes(ref_img[dest_base:dest_base + want_bytes]))
+            port = (got_cx, bytes(port_img[dest_base:dest_base + want_bytes]))
+            check(label, ref, port)
+
+        # one full 128-byte record, straight to the destination (xfer_direct)
+        load_group_case("load_group: one full record (xfer_direct)", 0, 8, DATA_SEG,
+                         [bytes([0xAA]) * 128])
+        # two full records
+        load_group_case("load_group: two full records (xfer_direct x2)", 0, 16, DATA_SEG,
+                         [bytes([0xAA]) * 128, bytes([0xBB]) * 128])
+        # a partial (sub-record) length -- goes through the shared load_dma buffer
+        load_group_case("load_group: partial record (via load_dma)", 0, 3, DATA_SEG,
+                         [bytes([0xCC]) * 128])
+        # fstrt already within what's "in dma" (load_indma == fstrt): the
+        # transfer-from-buffer path runs without any new diskread call at
+        # all -- pre-seed load_dma directly to prove that
+        mem_setup = base_memory(1)
+        mem_w16(mem_setup, UDA_WRKSEG, DR_WRKSEG)
+        mem_w16(mem_setup, SD_LOAD_FCB, DR_FCB_ADDR)
+        put_disk_records(mem_setup, [bytes([0xEE]) * 128])  # never actually read
+        mem_w16(mem_setup, SD_RLR, PD_ADDR)
+        mem_w16(mem_setup, SD_LOAD_INDMA, 0)
+        SD_LOAD_DMA = 0xAB00
+        mem_setup[SD_LOAD_DMA:SD_LOAD_DMA + 128] = bytes([0xDD]) * 128
+        put_ldtab(mem_setup, 0, DATA_SEG, 0, 0, 2)
+        mem_w16(mem_setup, SD_LOAD_LDTAB + LDTAB_FSTRT, 2)  # 2 paragraphs into the buffer
+        mem_w16(mem_setup, SD_LOAD_LDTAB + LDTAB_FLEN, 3)   # take exactly 3 paragraphs
+        ref_regs, ref_img = run_reference(code, load_group_entry, mem_setup, {'si': SD_LOAD_LDTAB},
+                                           call_hooks={MPMIF_STUB: make_freadseq_hook()})
+        buf = to_ctypes(mem_setup)
+        got_cx = lib.load_group(ctypes.cast(buf, c_u8p), ctypes.c_uint16(SD_LOAD_LDTAB), ctypes.c_uint16(SYSDAT))
+        port_img = bytes(buf)
+        dest_base = phys(DATA_SEG)
+        ref = (ref_regs['cx'], bytes(ref_img[dest_base:dest_base + 48]))
+        port = (got_cx, bytes(port_img[dest_base:dest_base + 48]))
+        check("load_group: already-in-dma transfer, no new read needed", ref, port)
 
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")

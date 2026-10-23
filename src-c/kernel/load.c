@@ -2,19 +2,44 @@
  * load.c -- C port of a self-contained tail portion of src/kernel/
  * LOAD.SUP's `load:` routine: from "init Base Page" through
  * `load_exit` (the real asm's own `lb_more`..`load_exit`), ported
- * here as `load_finish`.
+ * here as `load_finish` -- plus, now, the two routines that actually
+ * do the real disk I/O that tail depends on: `diskread` and
+ * `load_group`.
  *
- * `load:`'s own front half -- reading the .CMD header off disk and
- * populating `ldtab` (`get_ch_info`'s own `diskread` calls), then
- * allocating and spreading memory across `ldtab`'s entries (`lt_more`
- * onward, more `mpmif(f_malloc)` calls) -- is NOT ported here: unlike
- * every file ported so far, where `mpmif` calls are decorative (a
- * boundary-stub no-op whose result nothing downstream actually
- * depends on), nearly every branch in that front half depends on a
- * *real* disk-read or allocation result (`jcxz`/`cmp bx,0ffffh`
- * against registers a no-op stub never meaningfully sets). Disk I/O
- * (`f_freadseq`, via `diskread`/`load_group`) isn't ported anywhere
- * in this tree yet, so that front half stays deferred.
+ * `diskread`'s real `mpmif(f_freadseq)` call (a sequential BDOS file
+ * read) is modeled by `freadseq` below against a deliberately
+ * simplified "virtual disk" (`SD_LOAD_DISK`/`SD_LOAD_DISK_RECS`, see
+ * defs.h's own comment there): a single extent's worth of 128-byte
+ * records, indexed directly by the FCB's own `fcb_nxtrec` field, with
+ * no disk-map/extent-switch logic at all. Every file this project's
+ * own tests load is small enough to stay within one extent, so this
+ * is a deliberate, documented simplification (same spirit as
+ * `dsptch.c`'s own `term_act` divergence) rather than a real BDOS
+ * file system -- `tools/i86sim.py`'s own differential test needs the
+ * *identical* simplified model on the reference-assembly side too
+ * (a `call_hooks` entry at `mpmif(f_freadseq)`'s own call site,
+ * implementing the same `freadseq` semantics directly against
+ * `sim.mem`), so what's actually being compared is everything
+ * *around* that shared primitive -- the real, interesting logic in
+ * `diskread`/`load_group` themselves. `f_setdmab`/`f_setdma` (which
+ * `diskread` also calls, to set up the real DMA target before
+ * `f_freadseq`) need no modeling of their own: `diskread`'s own input
+ * registers already fully determine where the read goes, so this
+ * port passes them straight into `freadseq` instead of maintaining
+ * separate "current DMA" state.
+ *
+ * `load:`'s own remaining front half -- `get_ch_info`'s own CMD
+ * header parsing into `ldtab`, and allocating/spreading memory across
+ * `ldtab`'s entries (`lt_more` onward) -- is still NOT ported: unlike
+ * disk I/O above, those branches depend on a *real* `mpmif(f_malloc)`
+ * allocation result, and while `f_malloc`'s own real target
+ * (`MEMORY.MEM`'s `malloc_entry`) is already ported (`memory.c`), that
+ * port's own `mlalloc`/`maualloc` calls are themselves still boundary
+ * stubs (see `memory.c`'s own header comment) -- so calling it for
+ * real here would only ever observe the same deterministic "no memory
+ * found" outcome the plain no-op convention already gives, not
+ * meaningfully un-defer anything. A separate blocker from disk I/O,
+ * left for another pass.
  *
  * This tail portion has no `mpmif` dependency of its own: it just
  * builds a Base Page and initializes a new PD's own UDA/LDSTK from an
@@ -57,6 +82,112 @@
 typedef struct {
     uint16_t bx, cx;
 } load_bxcx;
+
+/*
+ * freadseq -- stand-in for the real mpmif(f_freadseq): a simplified,
+ * single-extent sequential read off SD_LOAD_DISK. See this file's
+ * own header comment.
+ *	input:	wrkseg = u_wrkseg; fcb = address of the open FCB in it;
+ *		dma_seg/dma_ofst = where to copy the record
+ *	output:	returns bl (0 = ok, 1 = eof -- diskread treats both the
+ *		same way; 0xFF, a hard read error, is never produced by
+ *		this simplified model)
+ */
+static uint8_t freadseq(uint8_t *mem, uint16_t wrkseg, uint16_t fcb, uint16_t dma_seg, uint16_t dma_ofst) {
+    uint8_t nxtrec = mem_r8_seg(mem, wrkseg, (uint16_t)(fcb + fcb_nxtrec));
+    uint16_t recs = mem_r16(mem, SD_LOAD_DISK_RECS);
+    if (nxtrec >= recs) {
+        return 1; /* eof */
+    }
+    uint16_t src = (uint16_t)(SD_LOAD_DISK + nxtrec * 128);
+    for (unsigned i = 0; i < 128; i++) {
+        mem_w8_seg(mem, dma_seg, (uint16_t)(dma_ofst + i), mem[(uint16_t)(src + i)]);
+    }
+    mem_w8_seg(mem, wrkseg, (uint16_t)(fcb + fcb_nxtrec), (uint8_t)(nxtrec + 1));
+    return 0;
+}
+
+/*
+ * diskread -- read the next sequential record of load_fcb into a
+ * given DMA buffer.
+ *	input:	dx = dma offset, cx = dma segment
+ *	output:	bx=rlr, cx=0 on success/eof; bx=0xFFFF, cx=e_bad_read on
+ *		a hard read error (translated faithfully, never
+ *		exercised by this simplified model); bx=0xFFFF,
+ *		cx=e_abort if the calling process's own pf_ctlc is set
+ */
+load_bxcx diskread(uint8_t *mem, uint16_t dx, uint16_t cx) {
+    uint16_t dma_seg = cx, dma_ofst = dx;
+    uint16_t wrkseg = mem_r16(mem, UDA_WRKSEG);
+    uint16_t fcb = mem_r16(mem, SD_LOAD_FCB);
+    uint8_t bl = freadseq(mem, wrkseg, fcb, dma_seg, dma_ofst);
+    if (bl == 0xFF) {
+        return (load_bxcx){0xFFFF, e_bad_read};
+    }
+    uint16_t rlr = mem_r16(mem, SD_RLR);
+    if (mem_r16(mem, (uint16_t)(rlr + p_flag)) & pf_ctlc) {
+        return (load_bxcx){0xFFFF, e_abort};
+    }
+    return (load_bxcx){rlr, 0};
+}
+
+/*
+ * load_group -- load a group described in ldtab, filling it from the
+ * virtual disk (via diskread), reusing whatever's already sitting in
+ * the shared load_dma buffer (SD_LOAD_DMA/SD_LOAD_INDMA) when
+ * possible.
+ *	input:	si = ldtab entry address; sysdat = this module's own
+ *		copy of the SYSDAT segment (the partial-record read's
+ *		own DMA segment, same as `cs:sysdat` in the real asm)
+ *	output:	returns the error code (0 = ok)
+ */
+uint16_t load_group(uint8_t *mem, uint16_t si, uint16_t sysdat) {
+    uint16_t bx = si;
+    for (;;) {
+        uint16_t indma = mem_r16(mem, SD_LOAD_INDMA);
+        uint16_t fstrt = mem_r16(mem, (uint16_t)(bx + ldtab_fstrt));
+        if (fstrt >= indma) {
+            uint16_t off = (uint16_t)(fstrt - indma);
+            if (off < 8) {
+                uint16_t avail = (uint16_t)(8 - off);
+                uint16_t flen = mem_r16(mem, (uint16_t)(bx + ldtab_flen));
+                uint16_t take = (avail <= flen) ? avail : flen;
+                uint16_t dest_seg = mem_r16(mem, (uint16_t)(bx + ldtab_start));
+                for (uint16_t i = 0; i < (uint16_t)(take * 16); i++) {
+                    mem_w8_seg(mem, dest_seg, i, mem[(uint16_t)(SD_LOAD_DMA + off * 16 + i)]);
+                }
+                mem_w16(mem, (uint16_t)(bx + ldtab_start), (uint16_t)(dest_seg + take));
+                mem_w16(mem, (uint16_t)(bx + ldtab_flen), (uint16_t)(flen - take));
+                mem_w16(mem, (uint16_t)(bx + ldtab_fstrt), (uint16_t)(fstrt + take));
+            }
+        }
+
+        uint16_t flen = mem_r16(mem, (uint16_t)(bx + ldtab_flen));
+        if (flen == 0) {
+            return 0;
+        }
+
+        if (flen >= 8) {
+            /* xfer_direct -- a full record goes straight to the
+             * destination segment, bypassing load_dma entirely */
+            uint16_t dest_seg = mem_r16(mem, (uint16_t)(bx + ldtab_start));
+            load_bxcx r = diskread(mem, 0, dest_seg);
+            if (r.cx != 0) return r.cx;
+            mem_w16(mem, (uint16_t)(bx + ldtab_start), (uint16_t)(dest_seg + 8));
+            mem_w16(mem, (uint16_t)(bx + ldtab_fstrt), (uint16_t)(mem_r16(mem, (uint16_t)(bx + ldtab_fstrt)) + 8));
+            mem_w16(mem, (uint16_t)(bx + ldtab_flen), (uint16_t)(flen - 8));
+            continue; /* real asm: jmp read_first -- a no-op re-run of
+                the "already in dma" check above, since fstrt is now
+                >= indma+8 */
+        }
+
+        /* read_1st -- less than a full record remains: read one into
+         * the shared buffer, then restart from the top (jmp load_group) */
+        load_bxcx r = diskread(mem, SD_LOAD_DMA, sysdat);
+        if (r.cx != 0) return r.cx;
+        mem_w16(mem, SD_LOAD_INDMA, mem_r16(mem, (uint16_t)(bx + ldtab_fstrt)));
+    }
+}
 
 load_bxcx load_finish(uint8_t *mem, uint16_t sysdat, uint16_t user_retf_offset, uint16_t cs) {
     uint8_t load_8080 = 0;

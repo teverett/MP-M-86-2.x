@@ -1,19 +1,26 @@
-; Standalone wrapper for the 4 self-contained entries in
-; src/kernel/SYSFUNC.SUP: not_implemented, bad_entry, version_entry,
-; mpmversion_entry. The file's other entries (callbios_entry, sysdat_entry,
-; tod_entry, serial_entry) call into unported modules (mpmif/xiosif) or
-; `rep movs` from module-local data (tod/serial) and are deferred -- see
-; docs/src-c.md. They're still given trivial placeholder definitions below
-; purely so the whole file assembles (asm86 assembles FINDPD.RTM-style
-; wrappers one whole file at a time); tests/src-c/test_sysfunc.py never
-; exercises them.
+; Standalone wrapper for all 8 entries in src/kernel/SYSFUNC.SUP:
+; not_implemented, bad_entry, version_entry, mpmversion_entry,
+; callbios_entry, sysdat_entry, tod_entry, serial_entry.
 ;
-; `vernum`/`mpmvernum` normally come from SYSDAT.FMT; declared here as DSEG
-; labels at the harness-chosen scratch addresses src-c/kernel/defs.h and
-; tests/src-c/test_sysfunc.py both use (see idle_wrapper.A86's own comment
-; for why a plain EQU would be wrong for a value that's read, not jumped to).
-; `rlr`/`u_wrkseg`/`u_retseg` are the same, for callbios_entry/sysdat_entry
-; (unexercised, but still memory reads, not immediates).
+; `vernum`/`mpmvernum`/`tod` normally come from SYSDAT.FMT; declared
+; here as DSEG labels at the harness-chosen scratch addresses
+; src-c/kernel/defs.h and tests/src-c/test_sysfunc.py both use (see
+; idle_wrapper.A86's own comment for why a plain EQU would be wrong
+; for a value that's read, not jumped to). `rlr`/`u_wrkseg`/
+; `u_retseg` are the same.
+;
+; `serial` is RTMIF.RTM's own real, literal `db '654321'` cseg
+; constant (see src-c/kernel/sysfunc.c's own header comment) --
+; declared here exactly as that file does, not a placeholder.
+;
+; `mpmif`/`xiosif` are boundary-stub targets, same convention as
+; every other file's own unported-call stubs: `callbios_entry`'s own
+; BOOT/WBOOT path tail-jumps into `mpmif(f_terminate)` with nothing
+; further to check (same class as CPMMEM.MEM's own `freeall_entry`),
+; and its other tail-jump path (into `xiosif`) is a `stop_addrs`
+; checkpoint -- the test checks the register state right there, same
+; convention as SYSENT.RTM's own already-ported `poll_entry`/
+; `delay_entry`/etc.
 	include system.def
 	include pd.def
 	include err.def
@@ -29,10 +36,14 @@ mpmvernum	dw	0
 u_dparam	dw	0
 u_wrkseg	dw	0
 u_retseg	dw	0
+	org	0A049h
+tod		dw	0
+tod_hr		db	0
+tod_min		db	0
+tod_sec		db	0
 	cseg
-mpmif	equ	9000h		; unported external call target (stub), unexercised
+mpmif	equ	9000h		; unported external call target (stub)
 xiosif	equ	9010h		; ditto
-tod	dw	0, 0, 0		; placeholder -- tod_entry is deferred, unexercised
-serial	dw	0, 0, 0		; placeholder -- serial_entry is deferred, unexercised
+serial	db	'654321'
 	include sysfunc.sup
 	end

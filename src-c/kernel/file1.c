@@ -455,6 +455,102 @@ void setro(uint8_t *mem) {
     mem_w16(mem, bx, dx);
 }
 
+extern void flush_files(uint8_t *mem);
+extern void flush_file0(uint8_t *mem);
+uint8_t compcdr(const uint8_t *mem);
+void checkwrite(uint8_t *mem);
+void setenddir(uint8_t *mem);
+
+/*
+ * checksum/newchecksum -- compute (or, if cl==true, initialize) the
+ * current directory record's own checksum; on a mismatch, flush the
+ * files open on this disk and mark it read-only (unless it's already
+ * read-only, in which case just flush) -- now portable since
+ * FLUSH_FILES/FLUSH_FILE0 (src-c/kernel/file3.c) are.
+ *	input:	cl = true (0xFF) to initialize, or (MPM-specific) 0xFE
+ *		for the "directory checksum" variant (TEST_DIR_CS)
+ */
+void checksum(uint8_t *mem, uint8_t cl) {
+    uint16_t dx = mem_r16(mem, BD_ARECORD);
+    uint16_t bx = (uint16_t)(mem_r16(mem, BD_CHKSIZ) & 0x7FFF); /* and bh,7fh */
+    if (dx >= bx) {
+        return; /* ret6 -- past the checksum vector's own size */
+    }
+    uint8_t al = cmpecs(mem);
+    bx = (uint16_t)(mem_r16(mem, BD_ARECORD) + mem_r16(mem, BD_CHECKA));
+    cl = (uint8_t)(cl + 1);
+    if (cl == 0) {
+        mem[bx] = al; /* initcs */
+        return;
+    }
+    cl = (uint8_t)(cl + 1);
+    if (cl == 0) {
+        /* TEST_DIR_CS */
+        if (al != mem[bx]) {
+            flush_files(mem);
+        }
+        return;
+    }
+    if (al == mem[bx]) {
+        return; /* ret7 */
+    }
+    if (!compcdr(mem)) {
+        return; /* ret7 */
+    }
+    if (nowrite(mem)) {
+        return; /* ret7 */
+    }
+    flush_file0(mem);
+    setro(mem);
+}
+
+void newchecksum(uint8_t *mem) {
+    checksum(mem, 0xFF); /* true */
+}
+
+/* rddirbuf, declared ahead for rddir0's own use below */
+void rddirbuf(uint8_t *mem);
+void seekdir(uint8_t *mem);
+
+/*
+ * rddir0 -- seek and read the next directory record if the current
+ * entry starts one (dcnt's own low byte lands on a record boundary),
+ * then checksum it
+ */
+void rddir0(uint8_t *mem, uint8_t cl) {
+    uint8_t al = (uint8_t)((mem[BD_DCNT] & dskmsk) << fcbshf);
+    mem[BD_DPTR] = al;
+    if (al != 0) {
+        return; /* ret71 -- not a new record */
+    }
+    seekdir(mem);
+    rddirbuf(mem);
+    checksum(mem, cl);
+}
+
+/*
+ * rddir -- read the next directory entry (cl = true if initializing)
+ */
+void rddir(uint8_t *mem, uint8_t cl) {
+    uint16_t dirmax = mem_r16(mem, BD_DIRMAX);
+    uint16_t dcnt = (uint16_t)(mem_r16(mem, BD_DCNT) + 1);
+    mem_w16(mem, BD_DCNT, dcnt);
+    if (dirmax < dcnt) {
+        setenddir(mem);
+        return;
+    }
+    rddir0(mem, cl);
+}
+
+/* wrdir -- write the current directory entry, setting its checksum */
+void wrdir(uint8_t *mem) {
+    checkwrite(mem);
+    newchecksum(mem);
+    /* call setdir -- boundary stub, no-op, see header comment */
+    wrbuff(mem);
+    /* jmp setdata -- boundary stub, no-op */
+}
+
 /* RO_TEST -- test a directory element/fcb for r/o status, carry set if r/o */
 static uint8_t ro_test(const uint8_t *mem, uint16_t bx) {
     bx = (uint16_t)(bx + fcb_type); /* rofile == fcb_type's own offset */

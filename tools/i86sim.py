@@ -118,11 +118,23 @@ class I86Sim:
     table -- there's no multi-segment model here for a real IRET to
     unwind, and the same "doesn't return, or resumes exactly here" calling
     convention applies.
+
+    `call_hooks`: like `call_stub_addrs` (an instant no-op return, no
+    push, no jump), but a Python callable (`hook(sim)`) runs first and
+    may freely read/write `self.mem`/`self.regs` -- for a boundary call
+    whose real effect genuinely has to be modeled for the test to mean
+    anything (e.g. `LOAD.SUP`'s own `mpmif(f_freadseq)`, a real
+    sequential disk read: the caller's own control flow depends on
+    actual data coming back, not just a fixed pass/fail sentinel, so
+    the plain no-op convention above isn't enough). An address in both
+    `call_hooks` and `call_stub_addrs` just runs the hook; listing it in
+    `call_stub_addrs` too is unnecessary.
     """
 
     def __init__(self, mem: bytearray, regs: dict, code_addr: int,
                  stop_addrs=frozenset(), call_stub_addrs=frozenset(),
-                 int_stub_nums=frozenset(), segmented: bool = False):
+                 int_stub_nums=frozenset(), segmented: bool = False,
+                 call_hooks=None):
         if len(mem) != 0x10000:
             raise I86SimError(f"mem must be exactly 64KB, got {len(mem)} bytes")
         self.mem = mem
@@ -132,6 +144,7 @@ class I86Sim:
         self.stop_addrs = set(stop_addrs)
         self.call_stub_addrs = set(call_stub_addrs)
         self.int_stub_nums = set(int_stub_nums)
+        self.call_hooks = dict(call_hooks) if call_hooks else {}
         self.segmented = segmented
         self.seg_override = None  # set per-instruction by a 26h/2Eh/36h/3Eh prefix
         self._last_ea_offset = 0  # raw (pre-segmentation) offset from the most
@@ -308,7 +321,9 @@ class I86Sim:
             disp = self._fetch_simm16()
             ret_addr = self.ip
             target = (self.ip + disp) & 0xFFFF
-            if target not in self.call_stub_addrs:
+            if target in self.call_hooks:
+                self.call_hooks[target](self)
+            elif target not in self.call_stub_addrs:
                 self._push16(ret_addr)
                 self.ip = target
             # else: stubbed -- treated as an instant no-op return, see class docstring
@@ -511,6 +526,19 @@ class I86Sim:
             _, reg, rm = self._modrm()
             if op == 0xFF and reg == 0b110:  # PUSH r/m16
                 self._push16(self._load(rm, 16))
+            elif op == 0xFF and reg == 0b010:  # CALL r/m16 (near indirect) --
+                                                # src-c/kernel/abort.c's own
+                                                # `call cs:abort_tab[di]` is
+                                                # the first routine to need
+                                                # this (every earlier near
+                                                # CALL target was a fixed
+                                                # rel16, opcode 0xE8)
+                target = self._load(rm, 16)
+                self._push16(self.ip)
+                self.ip = (self.regs['cs'] * 16 + target) & 0xFFFF
+            elif op == 0xFF and reg == 0b100:  # JMP r/m16 (near indirect)
+                target = self._load(rm, 16)
+                self.ip = (self.regs['cs'] * 16 + target) & 0xFFFF
             elif reg in (0b000, 0b001):
                 mask = 0xFF if width == 8 else 0xFFFF
                 delta = 1 if reg == 0b000 else -1
@@ -519,6 +547,17 @@ class I86Sim:
                 self.zf = 1 if val == 0 else 0
             else:
                 raise I86SimError(f"group (0x{op:02X}) /{reg} not implemented at {start_ip:#06x}")
+        elif op in (0x84, 0x85):  # TEST r/m8,r8 / TEST r/m16,r16 -- src-c/
+                                  # kernel/abort.c's own differential test
+                                  # is the first to need a register-vs-
+                                  # register/memory TEST (every earlier one
+                                  # used the F6/F7 immediate form below)
+            width = 8 if op == 0x84 else 16
+            _, reg, rm = self._modrm()
+            if width == 8:
+                self._bitwise('and', self._load(rm, 8), self._get_r8(reg), 8)
+            else:
+                self._bitwise('and', self._load(rm, 16), self.regs[_R16[reg]], 16)
         elif op in (0xF6, 0xF7):  # group F6/F7 byte/word (only /0 TEST, /4 MUL implemented)
             width = 8 if op == 0xF6 else 16
             _, reg, rm = self._modrm()
@@ -760,9 +799,21 @@ class I86Sim:
 
     def _push16_into(self, regs: dict, value: int) -> None:
         regs['sp'] = (regs['sp'] - 2) & 0xFFFF
-        self._w16(regs['sp'], value)
+        self._w16(self._stack_addr(regs), value)
 
     def _pop16(self) -> int:
-        value = self._r16(self.regs['sp'])
+        value = self._r16(self._stack_addr(self.regs))
         self.regs['sp'] = (self.regs['sp'] + 2) & 0xFFFF
         return value
+
+    def _stack_addr(self, regs: dict) -> int:
+        # SS:SP, exactly like any other segment:offset pair -- see the
+        # module docstring's `segmented=True` rule. Every routine before
+        # src-c/kernel/dsptch.c's own differential test only ever ran
+        # with SS=0 (so plain SP already was the flat address and this
+        # was never exercised); DSPTCH.RTM's own `switch:` is the first
+        # to really switch SS (`mov ss,u_ss`) before its own final RET,
+        # so PUSH/POP need to honor it too.
+        if not self.segmented:
+            return regs['sp'] & 0xFFFF
+        return (regs['ss'] * 16 + regs['sp']) & 0xFFFF

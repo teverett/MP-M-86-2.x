@@ -10,18 +10,28 @@
  * getmodnum, clrmodnum, CLR_EXT, setfwf, compcdr, setcdr,
  * rddirbuf, setdata/setdir/setdma, dirtouser, MAKE_FCB_INV,
  * CHK_INV_FCB, TST_INV_FCB, endofdir, setenddir, getallocbit,
- * setallocbit).
+ * setallocbit, checksum/newchecksum, rddir/rddir0, wrdir).
  *
  * FILE1.BDO is not self-contained -- it's one of 4 files (FILE1-4.BDO)
  * meant to be assembled together into one BDOS module, sharing data
- * and tail-calling into each other. Three things are deferred because
- * they call into FILE2.BDO/FILE3.BDO/FILE4.BDO's own real (not yet
- * ported) logic, not a boundary stub:
+ * and tail-calling into each other. `checksum`/`newchecksum`'s own
+ * MPM branch calls `FLUSH_FILE0`/`FLUSH_FILES` (`src-c/kernel/
+ * file3.c`, now real internal calls rather than a boundary stub --
+ * see that file's own header comment for the segment-relative-
+ * addressing fix that unblocked them), which in turn unblocked
+ * `rddir`/`rddir0` (both call `checksum`) and `wrdir` (calls
+ * `newchecksum`). `subdh` (`checksum`'s own `dx<bx` size check) folds
+ * directly into an `if` there instead of a separate function -- its
+ * only two real callers are `checksum` and (transitively, via
+ * `rddir0`) `rddir`, both now ported, but the subtraction itself was
+ * never worth a standalone C routine.
+ *
+ * One thing is still deferred, for an unrelated reason -- it calls
+ * into `FILE2.BDO`'s own real (not yet ported) logic, not a boundary
+ * stub:
  *   - CHECK_FCB (+ its own CHEK_FCB tail only when it leads there) --
- *     its MPM branch calls CLOSE1, PACK_SDCNT, SEARCH_OLIST.
- *   - checksum/newchecksum -- calls FLUSH_FILE0/FLUSH_FILES on its own
- *     MPM-specific branch.
- *   - wrdir, rddir/rddir0 -- both call the deferred checksum.
+ *     its MPM branch calls CLOSE1, which cascades into FILE2.BDO's
+ *     own still-unported CLOSE_FCB/srch.
  *
  * `GOBACK` (pererror/roderror/roferror/selerror/goerr's own common
  * tail, via RTN_PHY_ERRS) lives in FILE4.BDO: `mov sp,save_sp ! jmp
@@ -629,8 +639,11 @@ void setcdr(uint8_t *mem) {
     mem_w16(mem, bx, dx);
 }
 
-/* subdh -- compute dx - bx. Not ported here: its only two real callers
- * are checksum and rddir, both deferred (see header comment) */
+/* subdh -- compute dx - bx. Not a standalone function here: its only
+ * real use (checksum's own "drec < chksiz?" size check, reached
+ * transitively from rddir0/rddir too) folds directly into checksum's
+ * own `if (dx >= bx) return;` above, see this file's own header
+ * comment */
 
 /* rddirbuf -- read a directory entry into the directory buffer */
 void rddirbuf(uint8_t *mem) {

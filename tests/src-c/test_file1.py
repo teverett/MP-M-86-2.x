@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/file1.c against a self-contained
 subset of src/kernel/FILE1.BDO. See file1.c's own header comment for
-exactly which routines are ported and why the rest (CHECK_FCB,
-checksum/newchecksum, wrdir, rddir/rddir0) is deferred -- each calls
-into FILE2.BDO/FILE3.BDO/FILE4.BDO's own real, not-yet-ported logic.
+exactly which routines are ported and why the one remaining holdout
+(CHECK_FCB) is still deferred -- its own MPM branch calls FILE2.BDO's
+still-unported CLOSE1.
 """
 import ctypes
 import os

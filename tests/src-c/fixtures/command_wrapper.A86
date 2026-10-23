@@ -1,15 +1,41 @@
-; Standalone wrapper for src/kernel/COMMAND.SUP's shifttail, fileopen,
-; and user_retf -- the only 3 routines in this file src-c/kernel/
-; command.c ports (see that file's own header comment for why the rest
-; -- chain_entry/clicmd_entry and everything only they call -- is
-; deferred: a real segment-relative-addressing gap in cli_fload's own
-; chain-mode UDA copy).
+; Standalone wrapper for src/kernel/COMMAND.SUP's clicmd_entry (the
+; non-chain path -- see command.c's own header comment for why
+; chain_entry/chain mode is excluded) plus shifttail/fileopen/
+; user_retf, bundled together with every real module clicmd_entry's
+; own mpmif(...) calls now reach for real (`f_fopen`, COMMAND.SUP's
+; own `fileopen`'s real BDOS open call, is NOT bundled -- it's fixed
+; at the same well-defined BL=0ffh/BH=0 constant command.c's own
+; `fileopen` uses, right in `mpmif`'s own dispatch below, since the
+; real open is still unported -- see command.c's own header comment):
+; src/kernel/QUE1.RTM
+; (openq_entry/readq_entry/writeq_entry/cwriteq_entry -- QUE2.RTM is
+; not needed, since their own mpmif(f_sleep)/mpmif(f_wakeup) calls
+; stay plain unreached boundary stubs, same as que1.c's own port
+; treats them, see that file's own header comment),
+; src/kernel/CONSOLE.CIO+CHARIO.CIO (cconattch_entry/conassign_entry/
+; conout_entry/conprint_entry, the latter two needing CHARIO.CIO's own
+; getccbadr dependency from CONSOLE.CIO -- same pairing
+; chario_wrapper.A86 already uses), and src/kernel/PARSE.SUP
+; (parse_entry). f_load/f_cload/f_createproc/f_setprior/f_terminate
+; are NOT bundled -- they stay unreached boundary stubs in the C port
+; too (see command.c's own header comment), so `mpmif`'s own dispatch
+; below falls through to a plain `ret` for those codes, same as every
+; other unhandled function code hitting a boundary-stub mpmif
+; elsewhere in this tree (see memory_mem_wrapper.A86's own comment on
+; this exact pattern).
 ;
-; The whole file still has to assemble together (clicmd_entry's own
-; undeferred-looking labels included), so every SYSDAT.FMT-resident
-; scratch field it touches needs a DSEG stand-in below, even the ones
-; none of the 3 ported routines actually use -- same reasoning as
-; idle_wrapper.A86's own comment on fixed scratch addresses.
+; `xiosif` (CHARIO.CIO's own real XIOS trampoline, via listf/conoutf/
+; constf/coninf) stays a flat, no-op boundary stub -- chario.c's own
+; `tabout` already treats it the same way, see that file's own header
+; comment.
+;
+; Every SYSDAT.FMT-resident scratch field any of these bundled
+; routines touches gets a DSEG label below at the exact same flat
+; address src-c/kernel/defs.h's own SD_*/UDA_*/CLI_* macros use (not
+; just "some" address, unlike a routine tested alone) -- this wrapper
+; and the C port must agree on where every one of these fields lives,
+; since tests/src-c/test_command.py sets up state at those addresses
+; for both sides to read.
 	include system.def
 	include modfunc.def
 	include modtab.def
@@ -17,29 +43,69 @@
 	include pd.def
 	include err.def
 	include qd.def
+	include mpb.def
 	include fcb.def
 	include acb.def
+	include ccb.def
 	include char.def
 	include clicb.def
+	include pcb.def
 	include basep.fmt
 	dseg
 	org	0A000h
 rlr		dw	0
 	org	0A012h
 u_wrkseg	dw	0
-	org	0A036h
+	org	0A020h
+qlr		dw	0
+qul		dw	0
+qmau		dw	0
+endseg		dw	0
+	org	0A030h
+ccb		dw	0
+	org	0A032h
+thrdrt		dw	0
+	org	0A034h
+ncns		db	0
+nlstdev		db	0
 ncondev		db	0
-	org	0A040h
+	org	0A038h
+pul		dw	0
+	org	0A049h
+tod		dw	0
 tod_hr		db	0
 tod_min		db	0
 tod_sec		db	0
 	org	0A050h
-dayfile		db	0
-srchdisk	db	0
-pul		dw	0
-u_error_mode	db	0
+cli_cns		db	0
+cli_user	db	0
+cli_dsk		db	0
+cli_pd		dw	0
+	org	0A055h
+cli_chain	db	0
+cli_term	db	0
+cli_dfil	db	0
+cli_err		dw	0
+	org	0A05Ah
+cli_err_mode	db	0
+cli_dma_ofst	dw	0
+cli_dma_seg	dw	0
+	org	0A060h
 u_dma_ofst	dw	0
 u_dma_seg	dw	0
+u_error_mode	db	0
+	org	0A066h
+cli_net		db	0
+	org	0A068h
+dayfile		db	0
+srchdisk	db	0
+	org	0A072h
+cli_pflag	dw	0
+	org	0A074h
+cli_ppd		dw	0
+	org	0A076h
+cli_lddsk	db	0
+cli_bpage	dw	0
 	org	0B300h
 cli_fcb		rb	fcblen+1
 	org	0B320h
@@ -53,27 +119,59 @@ cli_cmdtail	rb	130
 	org	0B400h
 mxcliqpb	rb	16
 	org	0B500h
-cli_chain	db	0
-cli_term	db	0
-cli_pflag	dw	0
-cli_net		db	0
-cli_ppd		dw	0
-cli_pd		dw	0
-cli_err		dw	0
-cli_bpage	dw	0
-cli_lddsk	db	0
-cli_dsk		db	0
-cli_user	db	0
-cli_cns		db	0
-cli_err_mode	db	0
-cli_dma_ofst	dw	0
-cli_dma_seg	dw	0
-cli_dfil	db	0
 cli_dma		rb	128
 inituda		rb	ulen
 	cseg
-mpmif	equ	9000h		; unported external call target (stub)
-mpmint	equ	48		; unported interrupt vector (stub number)
 sysdat	dw	0		; normally supplied by this module's own init
+xiosif	equ	9010h		; unported external call target (stub)
+; mpmif: a real dispatcher now, for every function code clicmd_entry's
+; own (now-real) calls need -- see this file's own header comment.
+; Every other code (f_load/f_cload/f_createproc/f_setprior/
+; f_terminate, still unreached boundary stubs in the C port) falls
+; through to a plain no-op `ret`.
+mpmif:
+	cmp cx,f_fopen ! je mpmif_fopen
+	cmp cx,f_qopen ! je mpmif_qopen
+	cmp cx,f_qread ! je mpmif_qread
+	cmp cx,f_qwrite ! je mpmif_qwrite
+	cmp cx,f_cqwrite ! je mpmif_cqwrite
+	cmp cx,f_cconattch ! je mpmif_cconattch
+	cmp cx,f_conout ! je mpmif_conout
+	cmp cx,f_conprint ! je mpmif_conprint
+	cmp cx,f_parsefilename ! je mpmif_parsefilename
+	ret
+mpmif_fopen:		mov bx,00ffh ! ret	; f_fopen -- fixed, always-failing
+					; result (BL=0ffh hard open failure,
+					; BH=0 not extended), same convention
+					; command.c's own fileopen uses (see
+					; its own header comment)
+mpmif_qopen:		jmp openq_entry
+mpmif_qread:		jmp readq_entry
+mpmif_qwrite:		jmp writeq_entry
+mpmif_cqwrite:		jmp cwriteq_entry
+mpmif_cconattch:	jmp cconattch_entry
+mpmif_conout:		jmp conout_entry
+mpmif_conprint:		jmp conprint_entry
+mpmif_parsefilename:	jmp parse_entry
+	include que1.rtm
+	include que2.rtm
+	include console.cio
+	include chario.cio
+getccbadr:
+;---------
+; get CCB for calling proc's default console
+;	input:	DH = console number
+;		DL = character
+;	output:	SI = address of ccb
+;		BX = PD address
+;		DX unchanged
+
+	mov bx,rlr
+	sub ax,ax ! mov al,dh
+	shl ax,1 ! shl ax,1
+	mov si,ccb ! add si,ax
+	add si,ax ! add si,ax		;ccb+12(ccbnum)
+	ret
+	include parse.sup
 	include command.sup
 	end

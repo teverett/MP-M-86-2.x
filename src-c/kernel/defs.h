@@ -95,6 +95,7 @@
 #define e_no_cseg          33 /* no CSEG in load file */
 #define e_pd_noterm        35 /* could not terminate process */
 #define e_bad_read         29 /* bad ret. from BDOS read */
+#define e_bad_open         30 /* bad ret. from BDOS open */
 #define e_abort            40 /* external termination occurred */
 
 /* src/kernel/XIOSCB.DEF */
@@ -206,6 +207,7 @@
 
 /* src/kernel/QD.DEF -- Queue Parameter Block */
 #define qpb_qaddr   0x02 /* word: address of QD */
+#define qpb_nmsgs   0x04 /* word: number of messages to read/write */
 #define qpb_buffptr 0x06 /* word */
 #define qpb_name    0x08 /* byte[qnamsiz] */
 
@@ -298,6 +300,17 @@
 /* src/kernel/MPB.DEF */
 #define mf_load 0x01 /* bit in ms_flags/mpb_flags: loaded from a disk file */
 #define mf_share 0x02 /* bit in mpb_flags: share an existing allocation */
+#define mf_code  0x04 /* bit in mpb_flags/ms_flags: a Code segment */
+
+/* src/kernel/CMDH.DEF -- Command Header Entry Format, src-c/kernel/
+ * load.c's own get_ch_info */
+#define ch_form   0x00 /* byte */
+#define ch_length 0x01 /* word */
+#define ch_base   0x03 /* word */
+#define ch_min    0x05 /* word */
+#define ch_max    0x07 /* word */
+#define chlen     0x09
+#define ch_entmax 8
 
 /* src/kernel/MPB.DEF -- Memory Alloc Free parameter block (maufree_entry's
  * own input, reached through u_wrkseg same as every other *PB above) */
@@ -692,6 +705,12 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
 #define SD_LOAD_DISK_RECS   0xA9E9 /* word: # of 128-byte records in SD_LOAD_DISK */
 #define SD_LOAD_DISK        0xB000 /* record 0 starts here, 128 bytes/record */
 
+/* `load`'s own `load_giveup` cleanup builds a throwaway MFPB (see
+ * MPB.DEF: {start, pd}) on the real stack to call mfree_entry with;
+ * this port uses a small fixed scratch area instead, same spirit as
+ * every other SD_* constant here. */
+#define SD_LOAD_MFPB        0xA9EB /* mfpb_start/mfpb_pd, 4 bytes */
+
 /* src/kernel/APB.DEF -- Abort Parameter Block (abort_spec_entry's own
  * input, reached through u_wrkseg same as every other *PB above) */
 #define abt_prior   32
@@ -712,5 +731,50 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
 #define CLI_PCB        0xB350 /* word[2] */
 #define CLI_CMDTAIL    0xB360 /* byte[130] */
 #define MXCLIQPB       0xB400 /* byte[16] */
+
+#define fcb_pptr 0x18 /* word: password-length word's own address, src/kernel/FCB.DEF */
+
+/* src/kernel/COMMAND.SUP's own remaining SYSDAT scratch fields
+ * src-c/kernel/command.c's own clicmd_entry touches (SD_CLI_CNS/USER/
+ * DSK above are the same convention, prepared earlier but unused
+ * until now). `CLI_PCB`'s own two words (`pcb_flnmptr`/`pcb_fcbptr`)
+ * are set explicitly by this port's own `cli_pfn` helper on every
+ * call, standing in for the real system's own boot-time SYSDAT init
+ * (COMMAND.SUP's own code never writes `pcb_fcbptr` at all, and only
+ * ever adjusts `pcb_flnmptr` temporarily for the "2nd argument"
+ * parse, restoring it right after -- see that file's own header
+ * comment). */
+#define SD_DAYFILE      0xA068 /* byte: 0xFF -- display command info (dayfile mode) */
+#define SD_SRCHDISK     0xA069 /* byte: default search disk */
+#define SD_CLI_PD       0xA053 /* word: the newly-allocated PD, if any */
+#define SD_CLI_CHAIN    0xA055 /* byte: true if this is a chain load */
+#define SD_CLI_TERM     0xA056 /* byte: true if this process should terminate on exit */
+#define SD_CLI_DFIL     0xA057 /* byte: true if dayfile info is being shown */
+#define SD_CLI_ERR      0xA058 /* word: error code to report at cli_exit */
+#define SD_CLI_ERR_MODE 0xA05A /* byte: the calling process's own saved u_error_mode */
+#define SD_CLI_DMA_OFST 0xA05B /* word: the calling process's own saved u_dma_ofst */
+#define SD_CLI_DMA_SEG  0xA05D /* word: the calling process's own saved u_dma_seg */
+/* SD_CLI_PFLAG/PPD/LDDSK/BPAGE land past SD_CLI_NET/DAYFILE/SRCHDISK
+ * (0xA072+, not 0xA05F+) because that lower range overlaps
+ * UDA_DMA_OFST/UDA_DMA_SEG/UDA_ERROR_MODE/UDA_MULT_CNT (0xA060-0xA065)
+ * -- both this process's own saved copy and the live UDA field are
+ * touched in the same clicmd_exit call, so they can't share bytes */
+#define SD_CLI_PFLAG    0xA072 /* word: the calling process's own saved p_flag */
+#define SD_CLI_PPD      0xA074 /* word: the calling (parent) process's own PD */
+#define SD_CLI_LDDSK    0xA076 /* byte: the FCB's own disk letter, for the Base Page */
+#define SD_CLI_BPAGE    0xA077 /* word: the newly-loaded program's own Base Page segment */
+#define SD_CLI_NET      0xA066 /* byte: clicb_net, copied from the command buffer */
+
+#define questr_addr  0xB410 /* byte[10]: " Msg Qued\0" literal, write_cstr'd on demand */
+#define userstr_addr 0xB420 /* byte[9]: "(User 0)\0" literal, write_cstr'd on demand */
+
+/* src/kernel/CLICB.DEF -- the UDA_WRKSEG-relative command buffer
+ * clicmd_entry's own `cli_copy` reads from (via mem_r8_seg). Named
+ * cmdcb_* (not clicb_*) because tmp.c already uses `clicb_cmd` as a
+ * local pointer variable name of its own (TMP.A86's own, unrelated,
+ * DSEG-offset constant of the same name -- see SD_TMP_CLICB_CMD). */
+#define cmdcb_net  0 /* byte */
+#define cmdcb_cmd  1 /* byte */
+#define cmdcblen   130 /* byte: cmdcb_cmd + 129 */
 
 #endif

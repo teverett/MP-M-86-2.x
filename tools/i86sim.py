@@ -362,6 +362,23 @@ class I86Sim:
         elif op == 0x8B:  # MOV r16, r/m16
             _, reg, rm = self._modrm()
             self.regs[_R16[reg]] = self._load(rm, 16)
+        elif op == 0xA0:  # MOV AL, [imm16] -- accumulator short form of the
+                           # same direct ("mod=00,rm=110") addressing mode
+                           # as _modrm's own `mem` case, just without a
+                           # ModRM byte (one of the assembler's own size
+                           # optimizations for AL/AX, first seen in
+                           # src-c/kernel/command.c's own differential test)
+            addr = self._fetch16()
+            self._set_r8(0, self._r8(self._seg_addr(addr, 'ds')))
+        elif op == 0xA1:  # MOV AX, [imm16]
+            addr = self._fetch16()
+            self.regs['ax'] = self._r16(self._seg_addr(addr, 'ds'))
+        elif op == 0xA2:  # MOV [imm16], AL
+            addr = self._fetch16()
+            self._w8(self._seg_addr(addr, 'ds'), self._get_r8(0))
+        elif op == 0xA3:  # MOV [imm16], AX
+            addr = self._fetch16()
+            self._w16(self._seg_addr(addr, 'ds'), self.regs['ax'])
         elif op == 0x89:  # MOV r/m16, r16
             _, reg, rm = self._modrm()
             self._store(rm, 16, self.regs[_R16[reg]])

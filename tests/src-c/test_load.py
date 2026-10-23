@@ -25,13 +25,15 @@ from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
 WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'load_wrapper.A86')
-LOAD_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', 'load.c')]
+LOAD_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f) for f in
+          ('load.c', 'memory.c', 'util_mem.c', 'mau.c', 'ml.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 KERNEL_DIR = os.path.join(REPO_ROOT, 'src', 'kernel')
 
 STACK_TOP = 0xFFF0
 
 SD_RLR = 0xA000
+SD_MDUL, SD_MAL, SD_MFL = 0xA028, 0xA02A, 0xA02C
 SD_LOAD_PD, SD_LOAD_FCB, SD_LOAD_NLDTABENTS = 0xA900, 0xA902, 0xA904
 SD_LOAD_BASEP, SD_LOAD_8080, SD_LOAD_UDA, SD_LOAD_LSTK = 0xA906, 0xA908, 0xA909, 0xA90B
 SD_LOAD_LDTAB = 0xA910
@@ -43,7 +45,7 @@ LDTABLEN = 17
 P_UDA, P_STAT, P_PRIOR, P_USER, P_DSK, P_LDSK, P_LUSER = 0x10, 4, 5, 0x13, 0x12, 0x14, 0x15
 PS_RUN = 0
 
-BPG_CSEG, BPG_8080, BPG_ESEG = 3, 5, 15
+BPG_CSEG, BPG_8080, BPG_ESEG, BPG_DMA = 3, 5, 15, 0x80
 U_DMA_OFST, U_DMA_SEG, U_INITCS, U_INITDS, U_INITES, U_INITSS, U_STACK_SP = 0, 4, 0x50, 0x52, 0x54, 0x56, 0x34
 LS_OFFSET, LS_FLAGS, LS_ROFFSET, LS_RCSEG = 0x56, 0x5A, 0x5C, 0x5E
 
@@ -86,11 +88,10 @@ def assemble_reference():
     asm = Assembler()
     asm.assemble(WRAPPER, [KERNEL_DIR])
     code = asm.segment_bytes('cseg')
-    lb_more = asm.symtab['lb_more'].value
-    user_retf = asm.symtab['user_retf'].value
-    diskread_entry = asm.symtab['diskread'].value
-    load_group_entry = asm.symtab['load_group'].value
-    return code, lb_more, user_retf, diskread_entry, load_group_entry
+    names = ('lb_more', 'user_retf', 'diskread', 'load_group', 'load', 'load_entry',
+             'malloc_entry', 'mfree_entry', 'maualloc_entry', 'mlalloc_entry')
+    entries = {name: asm.symtab[name].value for name in names}
+    return code, entries
 
 
 def build_c_library():
@@ -113,6 +114,8 @@ def base_memory(nldtabents):
 
 MPMIF_STUB = 0x9000
 F_SETDMA, F_SETDMAB, F_FREADSEQ = 0x1A, 0x33, 0x14
+F_MALLOC, F_MEMFREE, F_MAUALLOC, F_MLALLOC = 0x80, 0x82, 0x309, 0x30B
+F_QREAD, F_QWRITE = 0x89, 0x8B  # load's own mxloadqpb calls -- result unused, true no-ops
 FCB_NXTREC = 0x20
 SD_LOAD_DISK_RECS, SD_LOAD_DISK = 0xA9E9, 0xB000
 
@@ -131,13 +134,26 @@ def run_reference(code, entry, mem, regs, call_hooks=None):
     return sim.regs, image
 
 
-def make_freadseq_hook():
+def make_freadseq_hook(real_targets=None):
     """mpmif(f_setdmab)/mpmif(f_setdma)/mpmif(f_freadseq) hook for
     diskread's own 3-call sequence -- see load.c's own header comment
     for the "virtual disk" model this reproduces exactly (same
     fcb_nxtrec-indexed single-extent read, same SD_LOAD_DISK/
-    SD_LOAD_DISK_RECS scratch layout)."""
+    SD_LOAD_DISK_RECS scratch layout).
+
+    `real_targets`, if given, is {function_code: absolute_address} for
+    any OTHER mpmif function code that should instead run for real --
+    needed when the same "call mpmif" site is shared with routines
+    (malloc_entry's own mpmif(f_malloc)/mpmif(f_memfree), and in turn
+    mpmif(f_maualloc)/mpmif(f_mlalloc)) whose own real effect matters.
+    Since i86sim.py's own call_hooks mechanism always treats the call
+    as a no-op return, redirecting into real code instead needs doing
+    by hand here: push the return address (sim.ip, already advanced
+    past the call's own encoding by the time a hook runs) and jump
+    sim.ip to the real target -- exactly what a real near CALL does,
+    just performed from Python instead of the opcode handler."""
     state = {'dma_seg': 0, 'dma_ofst': 0}
+    real_targets = real_targets or {}
 
     def hook(sim):
         cx = sim.regs['cx']
@@ -161,6 +177,12 @@ def make_freadseq_hook():
                 sim.mem[nxt_addr] = (nxtrec + 1) & 0xFF
                 bl = 0
             sim.regs['bx'] = (sim.regs['bx'] & 0xFF00) | bl
+        elif cx in real_targets:
+            ret_addr = sim.ip
+            sim._push16(ret_addr)
+            sim.ip = real_targets[cx]
+        elif cx in (F_QREAD, F_QWRITE):
+            pass  # true no-op -- load's own mxloadqpb result is never read
         else:
             raise AssertionError(f"unexpected mpmif function code {cx:#x}")
 
@@ -179,7 +201,9 @@ def to_ctypes(mem):
 
 
 def main():
-    code, lb_more, user_retf, diskread_entry, load_group_entry = assemble_reference()
+    code, entries = assemble_reference()
+    lb_more, user_retf = entries['lb_more'], entries['user_retf']
+    diskread_entry, load_group_entry = entries['diskread'], entries['load_group']
     lib_path = build_c_library()
     try:
         lib = ctypes.CDLL(lib_path)
@@ -411,6 +435,77 @@ def main():
         ref = (ref_regs['cx'], bytes(ref_img[dest_base:dest_base + 48]))
         port = (got_cx, bytes(port_img[dest_base:dest_base + 48]))
         check("load_group: already-in-dma transfer, no new read needed", ref, port)
+
+        # ================= load (full end-to-end) =================
+        # A real success case: one relative Code group (8080-model,
+        # since there's no Data group), load_pd=0 (no PD init -- just
+        # returns the Base Page). Exercises the whole chain for real:
+        # diskread (header + content), get_ch_info, malloc_entry (via
+        # a freshly-created MAU off the MFL), load_group, load_finish.
+        lib.load.restype = BxCx
+        lib.load.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16,
+                              ctypes.c_uint16, ctypes.c_uint16]
+
+        P_MEM = 0x16
+        LOAD_WRKSEG, LOAD_FCB = 0x4000, 0x2000  # phys(LOAD_WRKSEG) == 0, matching
+            # malloc_entry's/maualloc_entry's own flat-vs-segmented convention
+            # mismatch the same way test_memory.py's own SYSDAT choice does
+        RLR_PD = 0x8000
+        MD_FREE, MFL_MD = 0x4300, 0x4400
+        CODE_SEG_WANT = 0x0500
+
+        def build_ch_header(entries):
+            rec = bytearray(128)
+            for i, (form, length, base, minv, maxv) in enumerate(entries):
+                off = i * 9
+                rec[off] = form
+                mem_w16(rec, off + 1, length)
+                mem_w16(rec, off + 3, base)
+                mem_w16(rec, off + 5, minv)
+                mem_w16(rec, off + 7, maxv)
+            return bytes(rec)
+
+        mem = bytearray(0x10000)
+        mem_w16(mem, UDA_WRKSEG, LOAD_WRKSEG)
+        mem[phys(LOAD_WRKSEG) + LOAD_FCB + FCB_NXTREC] = 0
+        mem_w16(mem, SD_RLR, RLR_PD)
+        mem_w16(mem, RLR_PD + P_MEM, 0)  # the calling process's own p_mem list is empty
+        mem_w16(mem, SD_MDUL, MD_FREE)  # one free MD for getmd
+        mem_w16(mem, SD_MFL, MFL_MD)    # one free region for mlalloc_entry
+        mem_w16(mem, MFL_MD + 0, 0)            # m_link -- end of list
+        mem_w16(mem, MFL_MD + 2, CODE_SEG_WANT)  # m_start
+        mem_w16(mem, MFL_MD + 4, 20)            # m_length (paragraphs) -- plenty
+        mem_w16(mem, SD_MAL, 0)  # no active MAUs yet
+
+        header = build_ch_header([(1, 8, 0, 8, 8)])  # one relative Code group, 1 record
+        content = bytes([0xCC]) * 128
+        put_disk_records(mem, [header, content])
+
+        ref_regs, ref_img = run_reference(
+            code, entries['load'], mem, {'dx': LOAD_FCB, 'bx': 0},
+            call_hooks={MPMIF_STUB: make_freadseq_hook({
+                F_MALLOC: entries['malloc_entry'], F_MEMFREE: entries['mfree_entry'],
+                F_MAUALLOC: entries['maualloc_entry'], F_MLALLOC: entries['mlalloc_entry'],
+            })})
+        buf = to_ctypes(mem)
+        got = lib.load(ctypes.cast(buf, c_u8p), ctypes.c_uint16(LOAD_FCB), ctypes.c_uint16(0),
+                        ctypes.c_uint16(SYSDAT), ctypes.c_uint16(user_retf), ctypes.c_uint16(CS_VAL))
+        port_img = bytes(buf)
+
+        def load_snapshot(img, basep_seg):
+            base = phys(basep_seg)
+            # the group's own 8-paragraph (128-byte) allocation holds
+            # the Base Page itself (bpg_8080/bpg_cseg) in its first
+            # ~0x5C bytes, with the loaded content (0xCC) surviving in
+            # the remainder -- BPG_DMA (a field *offset*, not "end of
+            # struct") would read past this single-group allocation
+            # into unrelated, always-zero memory, so it's not checked
+            return (img[base + BPG_8080], mem_r16(img, base + BPG_CSEG),
+                    bytes(img[base + 0x5C:base + 128]))
+
+        ref = ((ref_regs['bx'], ref_regs['cx']), load_snapshot(ref_img, ref_regs['bx']))
+        port = ((got.bx, got.cx), load_snapshot(port_img, got.bx))
+        check("load: one relative Code group, full success end-to-end", ref, port)
 
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")

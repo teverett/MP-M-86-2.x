@@ -1,8 +1,16 @@
-; Standalone wrapper for a tail portion of src/kernel/LOAD.SUP's
-; `load:` routine (`lb_more` through `load_exit`), ported as src-c/
-; kernel/load.c's own `load_finish`. See that file's own header
-; comment for why only this portion is ported (the front half depends
-; on real, not-yet-ported disk I/O).
+; Standalone wrapper for src/kernel/LOAD.SUP's `load:`/`load_entry`
+; (cload_entry's own chain-load mode excluded -- see src-c/kernel/
+; load.c's own header comment) plus `diskread`/`load_group`/
+; `load_finish`. Bundles the real MEMORY.MEM/MAU.MEM/ML.MEM/UTIL.MEM
+; too, so `load`'s own real `mpmif(f_malloc)`/`mpmif(f_memfree)` calls
+; (and their own real `mpmif(f_maualloc)`/`mpmif(f_mlalloc)` calls in
+; turn) have real code to redirect into -- `tests/src-c/test_load.py`'s
+; own combined `mpmif` hook does that redirect in Python (manually
+; pushing a return address and jumping into the real routine's own
+; resolved symbol address) rather than writing a real dispatcher here,
+; since `mpmif` also needs to keep Python-simulating `f_setdmab`/
+; `f_setdma`/`f_freadseq` (see load.c's own header comment on
+; `freadseq`) through that exact same shared call site.
 ;
 ; Needs tools/i86sim.py's `segmented=True` mode (see src-c/kernel/
 ; ml.c's own header comment): the chosen group's own Base Page
@@ -84,6 +92,12 @@ u_stack_sp	dw	0
 	dseg
 	org	0A000h
 rlr		dw	0
+	org	0A028h
+mdul		dw	0
+mal		dw	0
+mfl		dw	0
+	org	0A032h
+thrdrt		dw	0
 	org	0A900h
 load_pd		dw	0
 load_fcb	dw	0
@@ -113,4 +127,8 @@ user_retf:	ret		; dummy stand-in: the real label lives in
 				; COMMAND.SUP, which this port has no use
 				; for beyond its own resolved address
 	include load.sup
+	include memory.mem
+	include mau.mem
+	include ml.mem
+	include util.mem
 	end

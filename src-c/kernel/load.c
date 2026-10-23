@@ -1,10 +1,10 @@
 /*
- * load.c -- C port of a self-contained tail portion of src/kernel/
- * LOAD.SUP's `load:` routine: from "init Base Page" through
- * `load_exit` (the real asm's own `lb_more`..`load_exit`), ported
- * here as `load_finish` -- plus, now, the two routines that actually
- * do the real disk I/O that tail depends on: `diskread` and
- * `load_group`.
+ * load.c -- C port of src/kernel/LOAD.SUP's `load:`/`load_entry`
+ * (the whole intermodule load path except `cload_entry`'s own
+ * chain-load mode, see below), plus the real disk I/O and memory
+ * allocation it depends on: `diskread`, `load_group`, `get_ch_info`,
+ * and the tail portion (`lb_more` through `load_exit`) ported as
+ * `load_finish`.
  *
  * `diskread`'s real `mpmif(f_freadseq)` call (a sequential BDOS file
  * read) is modeled by `freadseq` below against a deliberately
@@ -28,18 +28,27 @@
  * port passes them straight into `freadseq` instead of maintaining
  * separate "current DMA" state.
  *
- * `load:`'s own remaining front half -- `get_ch_info`'s own CMD
- * header parsing into `ldtab`, and allocating/spreading memory across
- * `ldtab`'s entries (`lt_more` onward) -- is still NOT ported: unlike
- * disk I/O above, those branches depend on a *real* `mpmif(f_malloc)`
- * allocation result, and while `f_malloc`'s own real target
- * (`MEMORY.MEM`'s `malloc_entry`) is already ported (`memory.c`), that
- * port's own `mlalloc`/`maualloc` calls are themselves still boundary
- * stubs (see `memory.c`'s own header comment) -- so calling it for
- * real here would only ever observe the same deterministic "no memory
- * found" outcome the plain no-op convention already gives, not
- * meaningfully un-defer anything. A separate blocker from disk I/O,
- * left for another pass.
+ * `load`'s own `get_ch_info`/`lt_more`/`lt_spread` memory allocation
+ * now calls `memory.c`'s own `malloc_entry`/`mfree_entry` for real --
+ * both genuinely allocate/free now that `malloc_entry`'s own
+ * `mlalloc`/`maualloc` calls are real internal calls too (see
+ * `memory.c`'s own header comment). `ch_alloc`'s/the combined
+ * relative-request malloc's own `mpmif(f_malloc)` reuses the target
+ * `ldtab` entry itself as the MPB passed to `malloc_entry` directly --
+ * faithful to the real asm, which does the exact same thing (`ldtab`'s
+ * own `start`/`min`/`max`/`pd`/`attrib` fields share the real MPB's
+ * layout byte-for-byte).
+ *
+ * `cload_entry`'s own chain-load mode (`bx==1` into `load:`) is NOT
+ * ported: its own real memory-transfer cleanup (`ld_fnext`/
+ * `ld_freeit`) depends on `CPMMEM.MEM`'s own `cpmfree_entry`
+ * succeeding for a real MAU release, which that file's own port
+ * still can't do faithfully (see `cpmmem.c`'s own header comment on
+ * why its own `free_seg` retry is real-but-unexercisable) -- a
+ * separate, deeper blocker than either disk I/O or allocation. `load`
+ * below is `load_entry`'s own path (`bx=0`) plus an intermodule
+ * caller supplying a real, uninitialized PD to init (`bx`=that PD's
+ * own address) -- never `bx=1`.
  *
  * This tail portion has no `mpmif` dependency of its own: it just
  * builds a Base Page and initializes a new PD's own UDA/LDSTK from an
@@ -187,6 +196,206 @@ uint16_t load_group(uint8_t *mem, uint16_t si, uint16_t sysdat) {
         if (r.cx != 0) return r.cx;
         mem_w16(mem, SD_LOAD_INDMA, mem_r16(mem, (uint16_t)(bx + ldtab_fstrt)));
     }
+}
+
+extern load_bxcx malloc_entry(uint8_t *mem, uint16_t dx);
+extern load_bxcx mfree_entry(uint8_t *mem, uint16_t dx);
+load_bxcx load_finish(uint8_t *mem, uint16_t sysdat, uint16_t user_retf_offset, uint16_t cs);
+
+/*
+ * load_giveup -- release every ldtab entry (0..n inclusive -- n+1 of
+ * them, since the caller's own combined-relative-request scratch
+ * entry at ldtab[n] counts too) that was actually allocated
+ * (`ldtab_id != 0`), via mfree_entry, then report the given failure.
+ *	input:	n = load_nldtabents; bx_fail/cx_fail = what to return
+ */
+static load_bxcx load_giveup(uint8_t *mem, uint16_t n, uint16_t bx_fail, uint16_t cx_fail) {
+    for (uint16_t i = 0, bx = SD_LOAD_LDTAB; i <= n; i++, bx = (uint16_t)(bx + ldtablen)) {
+        uint16_t id = mem_r16(mem, (uint16_t)(bx + ldtab_id));
+        if (id == 0) continue;
+        mem_w16(mem, SD_LOAD_MFPB + mfpb_start, id);
+        mem_w16(mem, SD_LOAD_MFPB + mfpb_pd, mem_r16(mem, (uint16_t)(bx + ldtab_pd)));
+        mfree_entry(mem, SD_LOAD_MFPB);
+    }
+    return (load_bxcx){bx_fail, cx_fail};
+}
+
+/*
+ * get_ch_info -- parse the .CMD header (already sitting in
+ * SD_LOAD_DMA from load's own earlier diskread) into ldtab, one
+ * entry per non-empty header slot; absolute-start and shared-code
+ * (type 9) entries are allocated immediately via malloc_entry
+ * (ch_alloc).
+ *	input/output: *n (load_nldtabents) is read for the starting
+ *		ldtab slot (si = SD_LOAD_LDTAB + *n*ldtablen, matching
+ *		form_uda's own possible ldtab[0]) and updated as entries
+ *		are added
+ *	output: returns the error code (0 = ok); on failure, *n is left
+ *		as load_giveup's own already-released state (0xFFFF/cx)
+ */
+static uint16_t get_ch_info(uint8_t *mem, uint16_t *n, uint16_t *bx_fail, uint16_t *cx_fail) {
+    uint16_t si = (uint16_t)(SD_LOAD_LDTAB + *n * ldtablen);
+    uint16_t load_pd = mem_r16(mem, SD_LOAD_PD);
+    uint16_t filepos = 8;
+
+    for (uint16_t i = 0; i < ch_entmax; i++) {
+        uint16_t hdr = (uint16_t)(SD_LOAD_DMA + i * chlen);
+        uint8_t form = mem[hdr + ch_form];
+        if (form == 0) continue;
+
+        mem[si + ldtab_type] = form;
+        uint16_t length = mem_r16(mem, (uint16_t)(hdr + ch_length));
+        mem_w16(mem, (uint16_t)(si + ldtab_flen), length);
+        mem_w16(mem, (uint16_t)(si + ldtab_fstrt), filepos);
+        filepos = (uint16_t)(filepos + length);
+        uint16_t base = mem_r16(mem, (uint16_t)(hdr + ch_base));
+        mem_w16(mem, (uint16_t)(si + ldtab_start), base);
+        uint16_t minv = mem_r16(mem, (uint16_t)(hdr + ch_min));
+        mem_w16(mem, (uint16_t)(si + ldtab_min), minv);
+        uint16_t maxv = mem_r16(mem, (uint16_t)(hdr + ch_max));
+        if (maxv == 0) maxv = minv;
+        mem_w16(mem, (uint16_t)(si + ldtab_max), maxv);
+        mem_w16(mem, (uint16_t)(si + ldtab_pd), load_pd);
+
+        uint16_t attrib = (load_pd != 0) ? mf_load : 0;
+        if (form == 1) {
+            attrib = (uint16_t)(attrib + mf_code);
+        } else if (form == 9) {
+            attrib = (uint16_t)(attrib + mf_code + mf_share);
+        }
+        mem_w16(mem, (uint16_t)(si + ldtab_attrib), attrib);
+
+        if (base != 0 || form == 9) {
+            /* ch_alloc -- an absolute request, or shared code: allocate
+             * right now, using this ldtab entry itself as the MPB */
+            load_bxcx alloc = malloc_entry(mem, si);
+            mem_w16(mem, (uint16_t)(si + ldtab_id), mem_r16(mem, (uint16_t)(si + ldtab_start)));
+            if (alloc.cx != 0) {
+                *bx_fail = 0xFFFF;
+                *cx_fail = e_no_memory;
+                return alloc.cx;
+            }
+        }
+        si = (uint16_t)(si + ldtablen);
+        (*n)++;
+    }
+    return 0;
+}
+
+load_bxcx load(uint8_t *mem, uint16_t dx, uint16_t bx, uint16_t sysdat, uint16_t user_retf_offset, uint16_t cs) {
+    uint16_t load_pd = bx;
+    uint16_t load_fcb = dx;
+    mem_w16(mem, SD_LOAD_PD, load_pd);
+    mem_w16(mem, SD_LOAD_FCB, load_fcb);
+
+    /* ld_read -- read the header into SD_LOAD_DMA */
+    uint16_t wrkseg = mem_r16(mem, UDA_WRKSEG);
+    mem_w8_seg(mem, wrkseg, (uint16_t)(load_fcb + fcb_nxtrec), 0);
+    load_bxcx hdr_r = diskread(mem, SD_LOAD_DMA, sysdat);
+    if (hdr_r.cx != 0) {
+        return (load_bxcx){0xFFFF, hdr_r.cx};
+    }
+    mem_w16(mem, SD_LOAD_INDMA, 0);
+
+    /* zero ldtab -- the whole reserved region, same as the real asm's
+     * own "mov cx,ldtabsiz/2" word-fill */
+    for (uint16_t i = 0; i < 10 * ldtablen; i++) {
+        mem[(uint16_t)(SD_LOAD_LDTAB + i)] = 0;
+    }
+
+    uint16_t n = 0;
+    if (load_pd != 0) {
+        /* form_uda -- ldtab[0] is the UDA+LDSTK group; load_chain's
+         * own cleanup (ld_fnext/ld_freeit) is NOT reached here since
+         * this port never sets load_chain -- see header comment */
+        uint16_t si0 = SD_LOAD_LDTAB;
+        mem_w16(mem, (uint16_t)(si0 + ldtab_min), (lstklen + ulen) / 16);
+        mem_w16(mem, (uint16_t)(si0 + ldtab_max), (lstklen + ulen) / 16);
+        mem_w16(mem, (uint16_t)(si0 + ldtab_pd), load_pd);
+        mem_w16(mem, (uint16_t)(si0 + ldtab_attrib), mf_load);
+        n = 1;
+    }
+
+    uint16_t bx_fail, cx_fail;
+    uint16_t gc_cx = get_ch_info(mem, &n, &bx_fail, &cx_fail);
+    if (gc_cx != 0) {
+        return load_giveup(mem, n, bx_fail, cx_fail);
+    }
+    mem_w16(mem, SD_LOAD_NLDTABENTS, n);
+
+    /* alloc all other (relative) memory -- si is the scratch slot
+     * right after the n real entries, reused as a combined MPB */
+    uint16_t si = (uint16_t)(SD_LOAD_LDTAB + n * ldtablen);
+    uint16_t nrelsegs = 0;
+    for (uint16_t i = 0, b = SD_LOAD_LDTAB; i < n; i++, b = (uint16_t)(b + ldtablen)) {
+        if (mem_r16(mem, (uint16_t)(b + ldtab_min)) == 0) continue;
+        if (mem_r16(mem, (uint16_t)(b + ldtab_start)) != 0) continue;
+        mem_w16(mem, (uint16_t)(si + ldtab_min),
+                (uint16_t)(mem_r16(mem, (uint16_t)(si + ldtab_min)) + mem_r16(mem, (uint16_t)(b + ldtab_min))));
+        mem_w16(mem, (uint16_t)(si + ldtab_max),
+                (uint16_t)(mem_r16(mem, (uint16_t)(si + ldtab_max)) + mem_r16(mem, (uint16_t)(b + ldtab_max))));
+        nrelsegs++;
+    }
+
+    if (load_pd != 0) {
+        mem_w16(mem, (uint16_t)(si + ldtab_attrib), mf_load);
+    }
+    mem_w16(mem, (uint16_t)(si + ldtab_pd), load_pd);
+    load_bxcx alloc = malloc_entry(mem, si);
+    mem_w16(mem, (uint16_t)(si + ldtab_id), mem_r16(mem, (uint16_t)(si + ldtab_start)));
+    if (alloc.bx == 0xFFFF) {
+        return load_giveup(mem, n, 0xFFFF, alloc.cx);
+    }
+
+    /* lt_spread -- give every relative entry its own share */
+    for (uint16_t i = 0, b = SD_LOAD_LDTAB; i < n; i++, b = (uint16_t)(b + ldtablen)) {
+        if (mem_r16(mem, (uint16_t)(b + ldtab_start)) != 0) continue;
+        uint16_t minv = mem_r16(mem, (uint16_t)(b + ldtab_min));
+        mem_w16(mem, (uint16_t)(si + ldtab_min), (uint16_t)(mem_r16(mem, (uint16_t)(si + ldtab_min)) - minv));
+        if (minv == mem_r16(mem, (uint16_t)(b + ldtab_max))) {
+            uint16_t start = mem_r16(mem, (uint16_t)(si + ldtab_start));
+            mem_w16(mem, (uint16_t)(b + ldtab_start), start);
+            mem_w16(mem, (uint16_t)(si + ldtab_start), (uint16_t)(start + minv));
+            nrelsegs--;
+        }
+    }
+    for (uint16_t i = 0, b = SD_LOAD_LDTAB; i < n; i++, b = (uint16_t)(b + ldtablen)) {
+        if (mem_r16(mem, (uint16_t)(b + ldtab_start)) != 0) continue;
+        uint16_t start = mem_r16(mem, (uint16_t)(si + ldtab_start));
+        mem_w16(mem, (uint16_t)(b + ldtab_start), start);
+        uint16_t extra = mem_r16(mem, (uint16_t)(si + ldtab_min));
+        if (extra != 0) {
+            uint16_t q = (uint16_t)(extra / nrelsegs);
+            uint16_t rem = (uint16_t)(extra % nrelsegs);
+            if (rem != 0) q = (uint16_t)(q + 1);
+            uint16_t room = (uint16_t)(mem_r16(mem, (uint16_t)(b + ldtab_max)) - mem_r16(mem, (uint16_t)(b + ldtab_min)));
+            if (q > room) q = room;
+            mem_w16(mem, (uint16_t)(b + ldtab_min), (uint16_t)(mem_r16(mem, (uint16_t)(b + ldtab_min)) + q));
+            mem_w16(mem, (uint16_t)(si + ldtab_min), (uint16_t)(mem_r16(mem, (uint16_t)(si + ldtab_min)) - q));
+        }
+        mem_w16(mem, (uint16_t)(si + ldtab_start),
+                (uint16_t)(start + mem_r16(mem, (uint16_t)(b + ldtab_min))));
+        nrelsegs--;
+    }
+
+    /* fill memory from file -- load_group's own internal bookkeeping
+     * (xfer_direct's/xfer_1's own "add ldtab_start[bx],8") advances
+     * ldtab_start as it consumes the group's own destination; the
+     * real asm's own "push ldtab_start[si] ! call load_group ! pop
+     * ldtab_start[si]" deliberately throws that drift away afterward,
+     * since everything downstream (load_finish) needs ldtab_start to
+     * keep meaning "this group's own fixed destination segment" */
+    for (uint16_t i = 0, b = SD_LOAD_LDTAB; i < n; i++, b = (uint16_t)(b + ldtablen)) {
+        if (mem_r16(mem, (uint16_t)(b + ldtab_flen)) == 0) continue;
+        uint16_t saved_start = mem_r16(mem, (uint16_t)(b + ldtab_start));
+        uint16_t lg_cx = load_group(mem, b, sysdat);
+        mem_w16(mem, (uint16_t)(b + ldtab_start), saved_start);
+        if (lg_cx != 0) {
+            return load_giveup(mem, n, 0xFFFF, lg_cx);
+        }
+    }
+
+    return load_finish(mem, sysdat, user_retf_offset, cs);
 }
 
 load_bxcx load_finish(uint8_t *mem, uint16_t sysdat, uint16_t user_retf_offset, uint16_t cs) {

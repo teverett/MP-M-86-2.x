@@ -9218,3 +9218,118 @@ were missing the bias term entirely, and `mfree_it`'s C port had its
 `cmp cx,0 ! jne mfree_r` check inverted plus a hardcoded `bx = 0` in its
 return where the real routine always returns its own input `bx`
 unchanged.
+
+## 102. `src/kernel/MAU.MEM` — `maualloc_entry`'s exact-absolute-split path clobbers `BX` before calling `mau_split` — FIXED
+
+Found while writing `/src-c`'s C port of this file (`src-c/kernel/
+mau.c`, see `docs/src-c.md`) — a logic bug, not a syntax one, and a
+genuinely old one: present identically in both `orig/mpm862sr/02/
+MAU.MEM` and `orig/lastdri/19/MAU.MEM`, so this has been wrong since
+the original 1981/1986 DRI source, not something this project's own
+transcription introduced.
+
+`maualloc_entry`'s absolute-address path, when the requested address
+falls inside a free SAT entry but not exactly at its start, has to
+split that entry at the requested boundary:
+
+```
+			    mov dl,.0
+			    cmp cx,sat_start[bx] ! je maua_nabs ;?exact?
+				sub cx,sat_start[bx]
+				mov bx,cx ! call mau_split	;make exact
+				jmps maua_start
+```
+
+`mau_split`'s own documented calling convention is `BX = address of
+SAT element` (the entry being split), `CX = length to split at`. Right
+before the call, `BX` correctly holds the target SAT entry's own
+address (unchanged since the comparisons above it) and `sub cx,
+sat_start[bx]` correctly computes the split length into `CX` — but the
+following `mov bx,cx` then overwrites that correct `BX` with the very
+same length value, so `mau_split` is entered with `BX == CX` (both the
+split length), not the SAT entry's address. `mau_split`'s own body
+immediately does `add bx,satlen ! call mau_insert` to make room for
+the new entry right after the one being split — with `BX` holding a
+small length instead of a real table address, this inserts (or tries
+to) at a essentially arbitrary offset, corrupting whatever happens to
+sit there instead of the SAT table.
+
+Confirmed this is a real mismatch, not an intentional alternate
+calling convention, by checking `maufree_entry`'s own call to
+`mau_split` a few lines later in the same file: `sub cx,dx ! call
+mau_split` — the identical "compute the split length into CX" step,
+with no `mov bx,...` afterward, leaving `BX` as the SAT entry address
+`mau_split` actually needs. `maualloc_entry`'s path is the one call
+site that gets this wrong.
+
+Only reachable when an absolute (`mpb_start != 0`) allocation request
+lands inside a free SAT entry without landing exactly on its start —
+a narrow enough case that it likely went unnoticed (or unconfirmed) in
+practice, same as several other bugs in this tree found only once a
+routine was finally exercised directly.
+
+**Patched**: deleted the `mov bx,cx` between the `sub` and the `call`.
+`src-c/kernel/mau.c`'s own port implements the corrected behavior (it
+is a from-scratch C translation, not translated-then-fixed), matching
+`maufree_entry`'s already-correct pattern.
+
+**A second, related bug found at the exact same call site**, only
+exposed once the `BX` bug above was fixed and the differential test's
+reference run could actually get far enough to reach it: the same
+`push si ! call mau_split ! pop si` protection `maua_splitit`'s own
+call to `mau_split` (a few lines below) already has is missing here.
+`mau_insert` (called transitively via `mau_split`'s own `add bx,satlen
+! call mau_insert`) uses `SI` freely as scratch and never restores it.
+`maualloc_entry`'s own `SI` holds its MPB offset (set once, `mov
+si,dx`, at the very top) and is still needed afterward: this call site
+`jmps maua_start` right after, restarting the whole scan, which reads
+`es:mpb_start[si]` again on its very first iteration — with `SI`
+clobbered by the `mau_insert` call that just ran, that re-read lands
+on the wrong address (confirmed directly: `SI` read back as the
+*target absolute address itself*, `0x305` in the test case that
+caught this, not the original MPB offset `0x10` — coincidental in
+that one case, since `mau_insert`'s own internal `REP MOVSB` happened
+to leave `SI` pointing into the SAT table near a byte pattern that
+summed to the same value, but wrong regardless of what it happens to
+read). The practical effect: the restarted scan reads a garbage
+"requested absolute address" of 0, taking the non-absolute allocation
+path instead of finding and taking the newly-split exact-match entry.
+
+Also present identically in `orig/mpm862sr/02/MAU.MEM` and `orig/
+lastdri/19/MAU.MEM` — likely never reached cleanly in the original
+system either, since the `BX` bug above would have corrupted the SAT
+table before execution ever got far enough for this one to matter on
+its own.
+
+**Patched**: wrapped the call in `push si ! ... ! pop si`, matching
+`maua_splitit`'s own already-correct pattern. `src-c/kernel/mau.c`
+was never affected (its `maualloc_entry` port never had a "SI
+register" to begin with — `wrkseg`/`si` there are plain C locals, not
+aliased with whatever `mau_split`'s own internal calls touch).
+
+**A pre-existing `tools/i86sim.py` bug, not specific to this file,
+caught while first investigating the `BX` fix above** (before the
+`SI` bug was found): `LEA` (opcode `8D`) returned the ModRM decode's
+already-segment-adjusted address under `segmented=True` mode, instead
+of the raw effective offset LEA is actually defined to compute (a real
+physical address only for ordinary loads/stores, which go through the
+same ModRM decode) -- so `mau_collapse`'s own `lea di,satlen[bx]`
+(used to locate the next SAT entry) ended up with a nonsensical,
+doubly-segmented `DI`. Latent since segmented addressing itself was
+only added for `src-c/kernel/ml.c`: every file since then happened to
+only ever execute a `LEA` with `DS=0` (where the bug is a no-op,
+`0*16+offset == offset`), until `src-c/kernel/mau.c` became the first
+to execute one with a real, nonzero `DS` (the MAU's own segment).
+**Fixed**: `_modrm()` now records the raw pre-segmentation offset
+(`self._last_ea_offset`) alongside the segmented address it already
+returned, and `LEA` reads that instead of the ModRM tuple's own
+(segmented) value.
+
+**A second `tools/i86sim.py` gap, same investigation**: `STD`/`CLD`
+(opcodes `FD`/`FC`) weren't implemented at all — every file ported
+before this one only ever did a forward string copy/scan. `src-c/
+kernel/mau.c`'s own `mau_insert` needs a real backward `REP MOVSB`
+(`STD`) to shift a SAT table up without self-clobbering the
+overlapping region it's shifting into. **Fixed**: added a tracked
+direction flag (`self.df`), `STD`/`CLD` opcode handlers, and made
+`_string_op_once`'s own SI/DI step negative when `self.df` is set.

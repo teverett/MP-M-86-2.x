@@ -1,0 +1,38 @@
+; Standalone wrapper for src/kernel/ML.MEM: the whole file --
+; mlalloc_entry (+ internal mla_value, mla_makemau, mla_initmau),
+; mlfree_entry (+ internal ml_insert). Now portable thanks to
+; tools/i86sim.py's new opt-in `segmented=True` mode (see ml.c's own
+; header comment): `mla_value` reads its caller's MPB through
+; `u_wrkseg`'s own dynamically-supplied segment, and `mla_initmau`
+; writes a brand-new MAU's own SAT through `m_start[bx]`'s own
+; dynamically-supplied segment.
+;
+; `satlen`/`sat_start`/`sat_length`/`sat_nall` (normally MAU.MEM's own
+; equates, included ahead of ML.MEM in the real build) are redeclared
+; directly here instead of pulling in the whole of MAU.MEM, which
+; would need its own unrelated external dependencies (mpmif, a
+; reverse-direction `std`/`rep movsb` tools/i86sim.py doesn't support)
+; this port doesn't need.
+;
+; `rlr`/`mdul`/`u_wrkseg` are DSEG labels at the scratch addresses
+; src-c/kernel/defs.h and tests/src-c/test_ml.py both use (see
+; idle_wrapper.A86's comment for why, same reasoning as there).
+	include system.def
+	include pd.def
+	include err.def
+	include mem.def
+	include mpb.def
+sat_start	equ	word ptr 0
+sat_length	equ	word ptr sat_start + word
+sat_nall	equ	byte ptr sat_length + word
+satlen		equ	sat_nall + byte
+	dseg
+	org	0A012h
+u_wrkseg	dw	0
+	org	0A028h
+mdul		dw	0
+	cseg
+sysdat	dw	0		; normally supplied by this module's own init
+	include util.mem
+	include ml.mem
+	end

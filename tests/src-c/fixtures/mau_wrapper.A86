@@ -1,0 +1,26 @@
+; Standalone wrapper for src/kernel/MAU.MEM: the whole file --
+; maualloc_entry, maufree_entry (+ internal mau_split, mau_insert,
+; mau_release, mau_collapse). Needs tools/i86sim.py's opt-in
+; `segmented=True` mode (see src-c/kernel/ml.c's own header comment):
+; every SAT field lives inside a MAU's own dynamically-computed
+; segment (`m_start[bx]`).
+;
+; `u_wrkseg` is a DSEG label at the scratch address src-c/kernel/
+; defs.h and tests/src-c/test_mau.py both use (see idle_wrapper.A86's
+; comment for why, same reasoning as there).
+;
+; This assembles the already-fixed MAU.MEM (docs/bugs.md #102:
+; maualloc_entry's exact-absolute-split path no longer clobbers BX
+; before calling mau_split).
+	include system.def
+	include pd.def
+	include err.def
+	include mem.def
+	include mpb.def
+	dseg
+	org	0A012h
+u_wrkseg	dw	0
+	cseg
+sysdat	dw	0		; normally supplied by this module's own init
+	include mau.mem
+	end

@@ -97,7 +97,27 @@ maua_nsat:
 			    mov dl,.0
 			    cmp cx,sat_start[bx] ! je maua_nabs ;?exact?
 				sub cx,sat_start[bx]
-				mov bx,cx ! call mau_split	;make exact
+				push si ! call mau_split ! pop si
+							;make exact -- NOT "mov
+							;bx,cx" first: BX must
+							;stay the target SAT
+							;entry's own address for
+							;mau_split's own "add
+							;bx,satlen ! call
+							;mau_insert"; and SI
+							;(this routine's own MPB
+							;offset, needed again
+							;right after the
+							;"jmps maua_start" below)
+							;must be saved first,
+							;since mau_insert uses it
+							;as scratch and never
+							;restores it (see docs/
+							;bugs.md #102); maua_
+							;splitit's own call a
+							;few lines down already
+							;gets both of these
+							;right
 				jmps maua_start
 maua_err:
 	mov bx,0ffffh ! mov cx,e_no_memory

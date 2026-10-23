@@ -45,10 +45,13 @@ PLM_UTILS := ABORT ATTACH CONS DIR DSKRST ED ERA ERAQ PIP REN SET SHOW \
 PLM_TOOLCHAIN_OK := INS86
 PLM_TOOLCHAIN_PARTIAL := ASS86 DIS86
 
-# --- RSPs: only ECHO.A86 assembles cleanly. CLOCK.A86/TMP.A86/
-# SUBMIT.A86 are genuine, undisturbed 1981 source bugs (docs/bugs.md
-# #1-3) and are deliberately not attempted here.
-RSP_OK := ECHO
+# --- RSPs: ECHO.A86 always assembled cleanly. CLOCK.A86/TMP.A86/
+# SUBMIT.A86 each had a genuine 1981 source bug (docs/bugs.md #1-3) --
+# all 3 are now FIXED directly in these files (needed so /src-c could
+# assemble the real thing as a differential-test reference; see
+# docs/src-c.md's own entries for each), so all 4 RSPs assemble
+# cleanly now.
+RSP_OK := ECHO CLOCK TMP SUBMIT
 
 # --- Kernel: CIO.A86/SYSDAT.A86/BDOS.A86/MEM.A86/RTM.A86/SUP.A86 all
 # assemble cleanly now that the name-mismatch bugs are fixed (docs/bugs.md

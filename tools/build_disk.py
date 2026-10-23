@@ -90,11 +90,13 @@ and its stack, which both stay below 7C00h), MPM.SYS's code at 1000h,
 its data immediately after at a paragraph-aligned offset.
 
 After MPM.SYS's own blocks, each of the 19 src/utils/ binaries the
-Makefile's own PLM_UTILS list builds, plus src/rsp/ECHO.A86 (the only
-RSP that assembles cleanly -- see RSP_OK in the Makefile), is written
-as its own CP/M directory entry: <NAME>.CMD for the utilities, ECHO.RSP
-for ECHO -- plain 8.3 names matching the Makefile's own basenames, not
-the docs/build.md section-5 renames (STSCMD/STSRSP -> STAT.CMD/
+Makefile's own PLM_UTILS list builds, plus ECHO/CLOCK/SUBMIT.A86 (see
+RSP_OK in the Makefile; TMP.A86 isn't placed here at all -- it's baked
+directly into MPM.bin by build_mpmsys.py instead), is written as its
+own CP/M directory entry: <NAME>.CMD for the utilities (and for
+SUBMIT), <NAME>.RSP for ECHO/CLOCK -- plain 8.3 names matching the
+Makefile's own basenames, not the docs/build.md section-5 renames
+(STSCMD/STSRSP -> STAT.CMD/
 MPMSTAT.RSP): that mapping disagrees with the STSCMD.PLM/STSRSP.PLM
 header comments themselves (mpmstat.cmd=stscmd.cmd, mpmstat.rsp=
 stsrsp.cmd) on which file becomes which name, so STSCMD/STSCOM/STSRSP
@@ -115,11 +117,6 @@ list), so there is no real convention here to match yet, only MPM.SYS's
 own confirmed-by-LDMPM.A86 header format to stay consistent with.
 
 KNOWN LIMITATIONS:
-  - No SUBMIT.CMD (src/rsp/SUBMIT.A86 has 3 genuine, deliberately
-    unpatched 1981 source bugs -- docs/bugs.md #3 -- and doesn't
-    assemble) or the other RSPs (CLOCK/TMP, docs/bugs.md #1/#2, same
-    reason). Only ECHO.RSP is placed, since it's the only one in
-    RSP_OK.
   - Nothing in this tree yet actually loads a `.CMD`/`.RSP` file from
     disk and runs it -- these are placed in the filesystem in a format
     modeled on MPM.SYS's own, but unconfirmed against any real loader.
@@ -187,10 +184,16 @@ UTIL_NAMES = ['ABORT', 'ATTACH', 'CONS', 'DIR', 'DSKRST', 'ED', 'ERA',
               'ERAQ', 'PIP', 'REN', 'SET', 'SHOW', 'SPOOL', 'SSPOOL',
               'STSCMD', 'STSCOM', 'STSRSP', 'TOD', 'TYPE']
 
-# Same reasoning as RSP_OK in the Makefile -- only ECHO.A86 assembles
-# cleanly (CLOCK/TMP/SUBMIT all have genuine, deliberately unpatched
-# 1981 source bugs -- docs/bugs.md #1-#3).
-RSP_NAMES = ['ECHO']
+# Same reasoning as RSP_OK in the Makefile -- all 4 of ECHO/CLOCK/TMP/
+# SUBMIT.A86 assemble cleanly now that docs/bugs.md #1-#3 are fixed.
+# TMP is deliberately excluded here: unlike the other 3, it's not a
+# loadable disk file at all -- build_mpmsys.py bakes it directly into
+# MPM.bin itself as the default console RSP (see that script's own
+# comments on why). ECHO/CLOCK become <NAME>.RSP; SUBMIT becomes
+# SUBMIT.CMD instead (docs/build.md's own mapping -- it's invoked as
+# a CLI command, not attached to a console the way the other 2 are).
+RSP_NAMES = ['ECHO', 'CLOCK', 'SUBMIT']
+RSP_EXT = {'ECHO': 'RSP', 'CLOCK': 'RSP', 'SUBMIT': 'CMD'}
 
 # Placeholder load segment shared by every utility/RSP body below --
 # see this script's own docstring for why there's no real convention
@@ -342,14 +345,15 @@ def main():
             f"than this disk's DPB has ({TOTAL_BLOCKS - DIR_BLOCKS} "
             "available for data)")
 
-    # -- the 19 src/utils/ utilities (as <NAME>.CMD) and ECHO.RSP,
-    # each code+data combined the same way as MPM.SYS above, one
-    # directory entry per file (more if > 16KB, same multi-extent
-    # logic), continuing on from MPM.SYS's own entries/blocks --
+    # -- the 19 src/utils/ utilities (as <NAME>.CMD) and ECHO.RSP/
+    # CLOCK.RSP/SUBMIT.CMD, each code+data combined the same way as
+    # MPM.SYS above, one directory entry per file (more if > 16KB,
+    # same multi-extent logic), continuing on from MPM.SYS's own
+    # entries/blocks --
     util_bodies = []
     for name, ext, build_dir in (
         [(n, 'CMD', 'utils') for n in UTIL_NAMES] +
-        [(n, 'RSP', 'rsp') for n in RSP_NAMES]
+        [(n, RSP_EXT[n], 'rsp') for n in RSP_NAMES]
     ):
         stem = os.path.join(ROOT, 'build', build_dir, name)
         with open(f'{stem}.cseg.bin', 'rb') as f:

@@ -36,12 +36,17 @@
 #define p_scratch 0x2E /* byte: scratch word (low byte) */
 #define p_dsk     0x12 /* byte: current default disk */
 #define p_user    0x13 /* byte: current default user number */
+#define p_ldsk    0x14 /* byte: disk program loaded from */
+#define p_luser   0x15 /* byte: user number loaded from */
 #define p_cns     0x20 /* byte: default console */
 #define p_lst     0x24 /* byte: default list device */
 #define p_wait    0x1A /* word: ticks remaining before delay expires */
+#define p_parent  0x1E /* word: process that created this process */
 
 #define pf_sys      0x0001 /* system process */
 #define pf_keep     0x0002 /* do not terminate */
+#define pf_table    0x0010 /* from pd table */
+#define pf_resource 0x0020 /* waiting for resource */
 #define pf_raw      0x0040 /* raw console i/o */
 #define pf_ctlc     0x0080 /* abort pending */
 #define pf_tempkeep 0x0200 /* don't terminate yet... */
@@ -82,6 +87,8 @@
 #define e_no_memory        0x03
 #define e_active_pd        0x22
 #define e_no_umd           0x12
+#define e_no_pd            0x0C
+#define e_no_cseg          33 /* no CSEG in load file */
 
 /* src/kernel/XIOSCB.DEF */
 #define io_idle 0x17
@@ -125,6 +132,7 @@
 #define SD_NCNS       0xA034 /* byte: number of system console devices */
 #define SD_NLSTDEV    0xA035 /* byte: number of XIOS list devices */
 #define SD_NCONDEV    0xA036 /* byte: number of XIOS console devices */
+#define SD_PUL        0xA038 /* word: Process Descriptor Unused List */
 
 /* src/kernel/CHAR.DEF */
 #define ctlc   0x03
@@ -250,6 +258,13 @@
 #define m_plist   0x06 /* word */
 #define m_unused  0x08 /* word */
 #define mdlen     0x0A
+/* src/kernel/MEM.DEF -- Share Parameter Block (share_entry's own input,
+ * reached through u_wrkseg same as every other *PB above) */
+#define spb_opd   0x00 /* word: Owner PD */
+#define spb_rpd   0x02 /* word: Requestor PD */
+#define spb_start 0x04 /* word: start paragraph */
+#define spblen    0x06
+
 #define ms_link   0x00 /* word */
 #define ms_start  0x02 /* word */
 #define ms_length 0x04 /* word */
@@ -265,6 +280,14 @@
 
 /* src/kernel/MPB.DEF */
 #define mf_load 0x01 /* bit in ms_flags/mpb_flags: loaded from a disk file */
+#define mf_share 0x02 /* bit in mpb_flags: share an existing allocation */
+
+/* src/kernel/MPB.DEF -- Memory Alloc Free parameter block (maufree_entry's
+ * own input, reached through u_wrkseg same as every other *PB above) */
+#define maf_mau   0x00 /* word: MD address of the MAU to free from */
+#define maf_sat   0x02 /* word: the SAT entry's own sat_start value */
+#define maf_start 0x04 /* word: start of the region actually being freed */
+#define maflen    0x06
 
 /* src/kernel/MODFUNC.DEF -- mpmif function codes CPMMEM.MEM's own
  * getmemory/free_memory use ((user*0x100)+128/130, user=0) */
@@ -384,9 +407,84 @@ static inline void mem_w16(uint8_t *mem, uint16_t addr, uint16_t val) {
     mem[(uint16_t)(addr + 1)] = (uint8_t)(val >> 8);
 }
 
+/* A real segment:offset read/write -- for the first time, a port
+ * genuinely needs this (src-c/kernel/ml.c's own mla_value, reading its
+ * caller's MPB through a dynamically-supplied segment, `u_wrkseg`'s
+ * own stored value -- not a fixed scratch address the way every other
+ * ES/DS-switch elsewhere in this project turned out to be moot).
+ * tools/i86sim.py's own `segmented=True` mode performs the identical
+ * `(seg * 16 + offset) & 0xFFFF` computation for the real asm
+ * reference run -- see that module's own docstring. */
+static inline uint16_t mem_r16_seg(const uint8_t *mem, uint16_t seg, uint16_t offset) {
+    return mem_r16(mem, (uint16_t)((uint16_t)(seg * 16) + offset));
+}
+
+static inline void mem_w16_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint16_t val) {
+    mem_w16(mem, (uint16_t)((uint16_t)(seg * 16) + offset), val);
+}
+
+static inline uint8_t mem_r8_seg(const uint8_t *mem, uint16_t seg, uint16_t offset) {
+    return mem[(uint16_t)((uint16_t)(seg * 16) + offset)];
+}
+
+static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8_t val) {
+    mem[(uint16_t)((uint16_t)(seg * 16) + offset)] = val;
+}
+
+/* src/kernel/MAU.MEM's own SAT (suballocation table) header offsets,
+ * needed by src-c/kernel/ml.c's own mla_initmau (the first entry of
+ * a brand-new MAU's own SAT, at offset `satlen` within the MAU's own
+ * segment -- see that file's own header comment). */
+#define sat_start  0 /* word */
+#define sat_length 2 /* word */
+#define sat_nall   4 /* byte */
+#define satlen     5
+
 /* src/kernel/QD.DEF -- the one bit src-c/kernel/command.c's own
  * cli_checkque touches (ms_flags/mpb_flags' own q_flags alias) */
 #define qf_rsp 0x08
+
+/* src/kernel/UDA.FMT -- real field offsets (NOT fixed scratch
+ * addresses -- unlike UDA_WRKSEG/UDA_DMA_SEG/etc. above, which stand
+ * in for "the one ambient current process's own UDA field" when a
+ * routine never needs more than one UDA at a time). src-c/kernel/
+ * proc.c's own proc_creat writes through a brand-new child process's
+ * own dynamically-computed UDA segment -- a genuinely different
+ * segment each call, the same real infrastructure gap src-c/kernel/
+ * ml.c's own sat_start/sat_length/sat_nall above exist for -- so these
+ * are used with defs.h's mem_r16_seg/mem_w16_seg/mem_r8_seg/mem_w8_seg
+ * helpers against that dynamic segment, never as a fixed address. */
+#define u_dparam      0x00 /* word: arg to dispatch */
+#define u_dma_ofst    0x02 /* word: BDOS dma offset */
+#define u_dma_seg     0x04 /* word: BDOS dma segment */
+#define u_error_mode  0x10 /* byte: BDOS error mode */
+#define u_mult_cnt    0x11 /* byte: BDOS multi-sector count */
+#define u_df_password 0x12 /* byte[8]: BDOS default password */
+#define u_pd_cnt      0x1A /* byte: BDOS process count */
+#define u_in_int      0x1B /* byte */
+#define u_sp          0x1C /* word: save register area -- sp */
+#define u_ss          0x1E /* word: save register area -- ss */
+#define u_ds_sav      0x32 /* word */
+#define u_stack_sp    0x34 /* word: usr stack pointer */
+#define u_ivectors    0x38 /* word[10]: save int 0-4 */
+#define u_es_sav      0x4C /* word */
+#define u_flag_sav    0x4E /* word */
+#define u_initcs      0x50 /* word */
+#define u_initds      0x52 /* word */
+#define u_inites      0x54 /* word */
+#define u_initss      0x56 /* word */
+#define u_mpm_ip      0x58 /* word: MPM vec save (+ mpm_cs/debug_ip/
+                               debug_cs immediately following, copied
+                               together as one 4-word block) */
+#define u_insys       0x60 /* byte: # times through user_entry */
+
+/* src/kernel/VEC.FMT -- i_mpm_ip, overlaying the real (absolute,
+ * segment-0) interrupt vector table at mpmint*4 (src/kernel/
+ * SYSTEM.DEF: mpmint equ 224) -- see that file's own header comment
+ * for why this doesn't just equal mpmint*4 when assembled inline (it
+ * does here: this is the already-resolved real address, confirmed
+ * against `--symbols` when VEC.FMT is assembled on its own, org 0) */
+#define i_mpm_ip      0x380
 
 /* src/kernel/MODFUNC.DEF -- mpmif function codes src-c/kernel/command.c
  * uses ((user*0x100)+n unless noted) */
@@ -475,6 +573,56 @@ static inline void mem_w16(uint8_t *mem, uint16_t addr, uint16_t val) {
 #define SD_SUBMIT_PROMPTUTENS 0xA8E3 /* byte: prompt's own user-number tens digit (or 13 if none) */
 #define SD_SUBMIT_PROMPTUONES 0xA8E4 /* byte: prompt's own user-number ones digit */
 #define SD_SUBMIT_PROMPTDISK  0xA8E5 /* byte: prompt's own disk-letter character */
+
+/* src/kernel/SYSTEM.DEF */
+#define ulen    0x100 /* size of uda */
+#define lstklen 96    /* size of load stack */
+
+/* src/kernel/LDTAB.DEF -- one Load Table entry (src-c/kernel/load.c's
+ * own load_finish) */
+#define ldtab_start  0x00 /* word */
+#define ldtab_min    0x02 /* word */
+#define ldtab_max    0x04 /* word */
+#define ldtab_pd     0x06 /* word */
+#define ldtab_attrib 0x08 /* word */
+#define ldtab_fstrt  0x0A /* word */
+#define ldtab_flen   0x0C /* word */
+#define ldtab_type   0x0E /* byte */
+#define ldtab_id     0x0F /* word */
+#define ldtablen     0x11
+
+/* src/kernel/BASEP.FMT -- Base Page Format offsets (real, small,
+ * dynamically-segment-relative like UDA.FMT's own u_* block above --
+ * reached through load_basep's own dynamically-computed segment) */
+#define bpg_cseg 0x03 /* word */
+#define bpg_8080 0x05 /* byte */
+#define bpg_eseg 0x0F /* word */
+#define bpg_dma  0x80 /* offset constant, not a field read/written here */
+
+/* src/kernel/LSTK.FMT -- Load Stack Format offsets, relative to the
+ * same dynamically-computed segment as u_initss/load_lstk (ls_sp is
+ * zero-width, coinciding with ls_offset's own start -- see src-c/
+ * kernel/load.c's own header comment for how this ties into src-c/
+ * kernel/proc.c's own u_sp-relative IRET-frame write) */
+#define ls_sp       0x56 /* offset constant: lstklen-10 */
+#define ls_offset   0x56 /* word */
+#define ls_cseg     0x58 /* word (filled in later, by proc_creat) */
+#define ls_flags    0x5A /* word */
+#define ls_roffset  0x5C /* word */
+#define ls_rcseg    0x5E /* word */
+
+/* src/kernel/SYSDAT.FMT -- "Data Used by Load Program", the subset
+ * src-c/kernel/load.c's own load_finish touches, at fixed
+ * harness-chosen scratch addresses (same reasoning as every other
+ * SD_* constant above) */
+#define SD_LOAD_PD          0xA900 /* word: pd of load prog */
+#define SD_LOAD_FCB         0xA902 /* word: addr of open FCB in u_wrkseg */
+#define SD_LOAD_NLDTABENTS  0xA904 /* word */
+#define SD_LOAD_BASEP       0xA906 /* word */
+#define SD_LOAD_8080        0xA908 /* byte */
+#define SD_LOAD_UDA         0xA909 /* word */
+#define SD_LOAD_LSTK        0xA90B /* word */
+#define SD_LOAD_LDTAB       0xA910 /* ldtab[], ldtablen bytes per entry */
 
 #define CLI_FCB        0xB300 /* byte[fcblen+1] */
 #define CLI_CUSPQPB    0xB320 /* byte[16] */

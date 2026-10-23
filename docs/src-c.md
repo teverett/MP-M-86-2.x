@@ -99,6 +99,7 @@ immediate load instead of a memory read.
 | `src/kernel/TICK.SUP` | `notick_once`, `tick_once` | — (both of this file's real labels are ported) |
 | `src/kernel/QUE1.RTM` | `makeq_entry`, `openq_entry`, `deleteq_entry`, `queverify` | `readq_entry`/`creadq_entry`/`readq`, `writeq_entry`/`cwriteq_entry`/`writeq` — retry in a loop after a boundary-stubbed `mpmif(f_sleep)` call, see below |
 | `src/kernel/QUE2.RTM` | `rlsmx`, `getqdaddr`, `remqd`, `qspace`, `qrelease` | — (all 5 of this file's routines are ported) |
+| `src/kernel/PROC.RTM` | `freepd`, `proc_creat` (+ internal `getpdadr`) | — (all 3 of this file's routines are ported, using `tools/i86sim.py`'s `segmented=True` mode plus a CSEG_BASE-shifted reference run — see below) |
 | `src/kernel/CONSOLE.CIO` | all 15 routines (`lstattach_entry`, `clstattch_entry`, `cconattch_entry`, `conattach_entry`, `cioattach`, `lstdetach_entry`, `condetach_entry`, `ciodetach`, `conassign_entry`, `getdefcon_entry`, `getdeflst_entry`, `setdefcon_entry`, `setdeflst_entry`, `mimic_entry`, `unmimic_entry`) + `CHARIO.CIO`'s `getccbadr` (a small dependency, pulled in on its own) | — |
 | `src/kernel/CHARIO.CIO` | all 9 entry points (`conin_entry`, `conout_entry`, `rconin_entry`, `rconout_entry`, `listout_entry`, `constat_entry`, `dirio_entry`, `conwrite_entry`, `conprint_entry`, `conread_entry`) + 20 internal routines (`rawinit`, `coninit`, `getconnum`, `attach`, `echoc`, `conbrk`, `chkctl`, `control_p`, `prcsmsg`, `prname`, `conout`, `compout`, `ctlout`, `tabout`, `pspace`, `pbacksp`, `pcr`, `crlf`, `crlfp`, `conin`) | `stdout` — its own `conoutf`/`listf` calls are both no-ops under the boundary-stub convention regardless of which branch is taken, so it collapses to nothing observable; inlined as a comment in `conout`'s own mimic-forwarding branch instead of a separate function, see that file's own header comment |
 | `src/kernel/COMMAND.SUP` | `shifttail`, `fileopen`, `user_retf` | `chain_entry`/`clicmd_entry` (the file's own two real entry points) and everything only they call (`cli_cli`, `cli_copy`, `cli_parse`, `cli_fload`'s own chain-mode UDA copy, etc.) — real segment-relative addressing, same class as `PROC.RTM`/`ML.MEM`; `crlf`/`prchar`/`prtime`/`prnum`/`prdisk`/`prcusp`/`prcsm`/`prtyp`/`prnam`/`prn1`/`cprnt`/`pruser`/`prfilnam`/`mxwrite`/`mxread`/`mxw1`/`jmpm`/`pfn`/`conasn`/`fileclose` — each collapses entirely to register setup before a boundary-stub tail call with nothing downstream ever reading the result: nothing to port, same reasoning as `freeall_entry` (`src-c/kernel/cpmmem.c`) |
@@ -107,6 +108,10 @@ immediate load instead of a memory read.
 | `src/kernel/FILE3.BDO` | `PACK_SDCNT`, `COMPARE`, `SEARCH_OLIST`/`SEARCH_LLIST`/`SEARCHN_LIST` (+ internal `search_listo`), `DELETE_ITEM`, `CREATE_ITEM`, `SET_OLIST_ITEM` | `TST_OLIST`/`CHK_OLIST`/`PR_TERM` — on closer reading (not as clean as an earlier pass of this file claimed) `CHK_OLIST` calls the still-unported `openx06`/`compare_pds` and relies on its own caller having pushed a word for it to `pop` partway through (an implicit calling convention, not a boundary stub); `PR_TERM` calls the still-unported `tst_tbl_lmt`/`remove_locks`/`func48`; the rest of the file — not reconned this pass; `FLUSH_FILES`/`FLUSH_FILE0` — `FLUSH_FILE0` dynamically switches `ES` to a PD's own UDA segment (`mov es,p_uda[bx]`) then reads a fixed offset off it, the same real segment-relative-addressing gap as `PROC.RTM`/`ML.MEM`; one further routine (not identified by name) uses `std`, the same gap as `MAU.MEM` |
 | `src/kernel/FILE4.BDO` | `func24`, `func25`, `func29`, `func32`, `FUNC44`, `FUNC45`, `func51`, `func52` | `func13`-`func23`, `func30`, `func33`-`func43`, `FUNC46`, `FUNC48` — all route through `srch`/`rddir`, `CURSELECT`/`initialize`, `CHECK_FCB`, or `FLUSH_FILES`, all transitively blocked by `FLUSH_FILE0`'s real segment-relative-addressing gap (`FILE3.BDO`); `GOBACK` — a 2-instruction tail jump into `BDOSIF.BDO`'s own module-dispatch epilogue (`BDOS_RETURN`), the same jump-table-dispatcher class already deferred elsewhere, not worth porting alone; the rest of the file not reconned this pass |
 | `src/kernel/UTIL.MEM` | `getmd`, `freemd` | — (both of this file's routines are ported) |
+| `src/kernel/ML.MEM` | `mlalloc_entry` (+ internal `mla_value`, `mla_makemau`, `mla_initmau`), `mlfree_entry` (+ internal `ml_insert`) | — (all of this file's routines are ported, using `tools/i86sim.py`'s new `segmented=True` mode — see below) |
+| `src/kernel/MAU.MEM` | `maualloc_entry`, `maufree_entry` (+ internal `mau_split`, `mau_insert`, `mau_release`, `mau_collapse`) | — (all 6 of this file's routines are ported; see below for 2 real bugs found and fixed in `/src`, and 2 `tools/i86sim.py` gaps fixed along the way: a `LEA`-under-`segmented=True` bug and missing `STD`/`CLD` support) |
+| `src/kernel/SHARE.MEM` | `share_entry` | — (this file's one routine is ported) |
+| `src/kernel/LOAD.SUP` | `load_finish` (a named tail portion of `load:` — see below) | `cload_entry`/`load_entry`/`load:`'s own front half (header disk-read, memory allocation/spreading), `load_group`, `diskread` — unlike every file ported so far, nearly every branch here depends on a *real* disk-read/allocation result from `mpmif`, not a decorative one; disk I/O (`f_freadseq`) isn't ported anywhere in this tree yet |
 | `src/kernel/MEMORY.MEM` | `malloc_entry`, `mfree_entry` (+ internal `mall_try_mau`, `mfree_it`) | — |
 | `src/kernel/CPMMEM.MEM` | `maxmem_entry`, `absmax_entry`, `cpmalloc_entry`, `cpmabsa_entry`, `cpmfree_entry` (+ internal `getmemory`, `free_memory`) | `freeall_entry` — one line (`mov cx,f_terminate ! sub dx,dx ! jmp mpmif`), same as `SYSENT.RTM`'s `creat_proc_entry`: nothing to port |
 | `src/loader/LBDOSIO.A86` | `conbrk`, `conout`, `tabout`, `crlf`, `print`, `func9`, `staret`, `funcret`, `setlret1` | `func1`/`func3`/`func6`/`func7`/`func8`/`func10`/`func11` — each just an `EQU` alias for the bare `return:` label: nothing to port. `func2` is likewise just an alias for `tabout` itself, already ported under its own name |
@@ -239,41 +244,8 @@ routine translation — revisit once that machinery exists):
   far-call/far-ret needs as `RPL.SUP` above. `SUPIF.SUP`'s `user_entry`
   additionally needs a real `IRET` and interrupt-entry convention this
   tree has nowhere else yet.
-- `src/kernel/PROC.RTM` (`proc_creat`, `getpdadr`, `freepd`) and
-  `src/kernel/ML.MEM` (`mlalloc_entry`, `mla_makemau`/`mla_initmau`,
-  `mlfree_entry`) — these genuinely need real segment-relative
-  addressing, not just the boundary-stub convention. Both routines
-  dynamically compute a *different* memory segment at runtime (a newly
-  created process's own UDA in `proc_creat`'s `cp_uda`; a newly allocated
-  MAU's own segment in `mla_initmau`) and then switch `DS`/`ES` to it so
-  that an ordinary *fixed* field offset (`u_initcs`, `sat_start[si]`, ...)
-  resolves to the right place in *that* segment specifically. `tools/
-  i86sim.py` models one flat 64KB array with segment overrides as no-ops
-  (see its own docstring) — correct for every file ported so far, where a
-  fixed symbolic offset only ever means one unchanging absolute address,
-  but wrong here, where the same symbolic offset must resolve to a
-  *different* absolute address depending on which segment was just
-  switched into. (`src/kernel/QUE2.RTM`'s `qspace`/`qrelease` looked like
-  they might hit the same wall at first glance — they also juggle `DS`/`SS`
-  — but don't, and are ported above: they're building a temporary
-  on-stack parameter block, the same address either way, not switching to
-  a genuinely different segment's own data. The ML.MEM/PROC.RTM case is a
-  real, different problem.)
 **Tier 3 additions, same two categories as above:**
 
-- `src/kernel/MAU.MEM`, `src/kernel/SHARE.MEM` — the *same* real
-  segment-relative-addressing gap as `PROC.RTM`/`ML.MEM`: both
-  dynamically switch `DS` to a MAU's own segment (`mov ds,m_start[bx]`)
-  and then access fixed suballocation-table offsets (`sat_start[bx]`,
-  `sat_length[bx]`, ...) that only resolve correctly relative to *that*
-  segment. `MAU.MEM`'s `mau_insert` also uses `std`/`rep movsb` (reverse
-  direction), a second, independent gap -- `tools/i86sim.py`'s string
-  instructions are forward-only (see its own docstring).
-- `src/kernel/LOAD.SUP` — the *same* real segment-relative-addressing
-  gap as `PROC.RTM`/`ML.MEM` again: `mov es,ldtab_start[si]` switches
-  `ES` to a load table entry's own dynamically-chosen segment, then
-  writes fixed offsets off it (`es:.5`, `es:2[bx]`, `es:3[bx]`, ...) to
-  build that segment's base page.
 - `src/kernel/DSPTCH.RTM` (`jmp cs:dsp_table[bx]`), `src/kernel/
   ABORT.RTM` (`call cs:abort_tab[di]`), `src/kernel/BDOSIF.BDO` (`call
   cs:btab_addr[si]`) — each one's own central jump-table dispatch, the
@@ -283,10 +255,10 @@ routine translation — revisit once that machinery exists):
   switching between processes, `switch:`) -- also the direct subject of
   the live, ongoing scheduler-hang investigation in this doc's #83-#98;
   porting it now would duplicate that work, not help it.
-- `src/kernel/LOAD.SUP`, `src/kernel/DATA.BDO`, `src/kernel/
-  FILE2.BDO`, `src/kernel/FILE4.BDO` — not reconned in depth this pass
-  (only a grep-level pattern check for the known blockers above, which
-  didn't trip on these). `src/kernel/CHARIO.CIO` (the large, deeply
+- `src/kernel/DATA.BDO`, `src/kernel/FILE2.BDO`, `src/kernel/
+  FILE4.BDO` — not reconned in depth this pass (only a grep-level
+  pattern check for the known blockers above, which didn't trip on
+  these). `src/kernel/CHARIO.CIO` (the large, deeply
   interdependent console-input state machine this bucket used to defer
   — `coninit`/`attach`/`conbrk`/`conin`/`chkctl`/`echoc`/`tabout`/...),
   `src/kernel/COMMAND.SUP` (its own `chain_entry`/`clicmd_entry`
@@ -1050,3 +1022,222 @@ committing to the ~21k total lines across `src/kernel`+`src/loader`+
   own `and al,5fh`, whose *result* is what persists afterward, not the
   raw value). All 23 differential-test cases pass (7 new, 16
   pre-existing); no new opcode gaps.
+- **`tools/i86sim.py`: real (opt-in) segment-relative addressing.**
+  Added a `segmented: bool = False` constructor parameter. Off (the
+  default), behavior is byte-for-byte identical to before -- segment
+  override prefixes are still parsed (for correct instruction length)
+  but still addressing no-ops, exactly as every existing test already
+  relies on (confirmed: all ~340 pre-existing cases re-ran clean after
+  this change). On, every effective address becomes `(segment_value *
+  16 + offset) & 0xFFFF` -- the usual 8086 rule (`SS` for a BP-based
+  EA, `DS` otherwise, both overridable by a prefix; `ES` for a string
+  op's own `DI`, never overridable, same as real hardware) -- still
+  wrapped into the same flat 64KB array rather than a real 20-bit/1MB
+  address space, so a test using it has to pick segment values that
+  don't collide once wrapped (same spirit as `CSEG_BASE`-shifting a
+  reference run elsewhere in this project). Kept opt-in specifically
+  because `echo.c`'s own test explicitly documents relying on a
+  segment override being a no-op; turning this on unconditionally
+  risked silently changing what that (or some other undocumented)
+  existing test actually exercises.
+
+  This was scoped, not just implemented blind: a deeper read of
+  `PROC.RTM` (one of the two files motivating this) found it needs
+  more than segmentation alone -- `proc_creat` nests 3 different
+  segments in one routine and loops to drain a whole chain of pending
+  process creations, and `getpdadr` does real cross-segment
+  *arithmetic*, not just a switch-and-read -- so it's left for its own
+  dedicated pass (see its own status-table row). `ML.MEM` turned out
+  to be the clean fit, ported in full below.
+- **`src/kernel/ML.MEM`: the whole file.** `mlalloc_entry` scores every
+  possible contiguous Memory-List window against an MPB (reached
+  through `u_wrkseg`'s own dynamically-supplied segment -- the new
+  `mem_r16_seg`/`mem_w16_seg`/`mem_r8_seg`/`mem_w8_seg` helpers in
+  `defs.h` do the same `seg*16+offset` arithmetic explicitly on the
+  port's own side), keeping the lowest-scoring (best) one and stopping
+  early on a perfect (0) score; `mla_makemau` turns the winning window
+  into one MAU (either the single element itself, or -- via `getmd`,
+  already ported in `util_mem.c` -- a fresh "partition list" MD
+  spanning several merged elements); `mla_initmau` lays out a brand
+  new MAU's own SAT by writing through *its* own dynamically-supplied
+  segment (`m_start[bx]`); `mlfree_entry`/`ml_insert` reverse the
+  process, keeping the Memory List sorted by `m_start`. Needed a new
+  wrapper (`tests/src-c/fixtures/ml_wrapper.A86`) since this file has
+  no DSEG/EQUs of its own; `satlen`/`sat_start`/`sat_length`/
+  `sat_nall` (normally `MAU.MEM`'s own equates, assembled ahead of
+  `ML.MEM` in the real build) are redeclared directly in the wrapper
+  rather than pulling in the whole of `MAU.MEM`, which would need its
+  own unrelated external dependencies this port doesn't.
+
+  Caught two real translation bugs while writing the differential test
+  (not `/src` bugs, fixed before being reported done): `mla_value`'s
+  own `cmp cx,dx ! jbe mlav_ab ! xchg dx,cx` swaps `dx`/`cx` only on
+  the *not-taken* branch of `jbe` (i.e. when `cx > dx`) -- the first
+  draft had the C `if` condition backwards (swapping on `cx <= dx`
+  instead). That alone happened to not matter for a scenario with
+  only one viable candidate (the wrong intermediate score still ended
+  up "the best of one"), but surfaced immediately on a single-element,
+  exact-fit case that depends on the score coming out to exactly 0.
+  Chasing it down further also caught a second, related bug: the
+  following `(dx - cx) >> 4` was computed in *signed* `int` arithmetic
+  (since both operands promote to `int` and can subtract negative)
+  before truncating back to `uint16_t`, instead of truncating to
+  `uint16_t` *before* the shift the way the real `shr`'s own unsigned
+  16-bit semantics require -- harmless once the first bug was fixed
+  (a correct swap guarantees `dx >= cx` going into the subtraction),
+  but fixed explicitly rather than left relying on that invariant by
+  coincidence. All 5 differential-test cases pass.
+- **`src/kernel/PROC.RTM`: the whole file.** `freepd` unlinks a PD from
+  the Process Thread Root list (the same bias-and-walk trick as
+  `src-c/kernel/memory.c`'s own `mall_try_mau`) and, if it came from the
+  PD table (`pf_table`), returns it to the PD-Unused-List (`pul`, a new
+  `SD_PUL` scratch constant). `getpdadr` is `que2.c`'s own `getqdaddr`
+  sibling (same `cs:sysdat`/`endseg` bounds check, same "grab a free
+  table entry otherwise" fallback) -- unlike that port, its fallback
+  copy genuinely needs a real dynamically-supplied source segment
+  (`mem_r8_seg(mem, wrkseg, ...)`), since this is the routine
+  docs/src-c.md had flagged as the real gap, not a moot DS-switch.
+  `proc_creat` writes through three different segments in one call: the
+  newly created child's own UDA (computed fresh each call, the same
+  gap `ml.c`'s own `mla_initmau` exists for -- new `u_*` UDA.FMT offset
+  constants in `defs.h`, used with the existing `mem_*_seg` helpers),
+  that child's own user-stack segment (for its IRET-frame setup), and
+  the real, absolute interrupt-vector-table segment 0. It also drains
+  a whole chain of pending creations (`jmp proc_creat`'s own tail loop)
+  and calls the still-unported `mpmif(f_share)` in a loop with no
+  observable effect (same convention as `que2.c`'s own `rlsmx`).
+
+  Needed two pieces of new test infrastructure, not just
+  `segmented=True`: `tests/src-c/fixtures/proc_wrapper.A86` redeclares
+  UDA.FMT as a real `eseg`/`org 0` block (an `EQU` doesn't assemble --
+  `cmp ds:EQUconst,dx` mis-encodes as an unsupported mem,mem combo,
+  confirmed directly), and the reference run loads `cseg` at a
+  CSEG_BASE shift (same technique as `tests/src-c/test_tmp.py`), since
+  `proc_creat` is the first routine to actually read the real, absolute
+  IVT at segment 0 as data -- every earlier file only ever touched
+  scratch/SYSDAT-relative fields that could be placed anywhere. Shifting
+  cseg also means `cs:sysdat`'s own segmented-mode address needs a real
+  `cs` register value (`CSEG_BASE >> 4`), and any absolute `call_stub_addrs`
+  target (`mpmif`) needs the same CSEG_BASE offset added, since the
+  assembler resolves that displacement assuming cseg loads at 0.
+
+  Caught one real misunderstanding while writing the differential test
+  (not a `/src` bug): the IRET-frame setup's own bare `u_sp`/`u_initcs`
+  references are *not* DS-relative despite DS having just been switched
+  to the user's stack segment on the line above -- UDA.FMT's own `eseg`
+  declaration makes every bare (non-`ds:`-prefixed) reference to one of
+  its fields implicitly ES-relative, confirmed directly against the
+  assembler's own encoding (an implicit ES: prefix byte on both). Every
+  *other* UDA field access in this routine uses an explicit `ds:`
+  override for exactly this reason; these two don't, and a first
+  reading of the real asm missed why that mattered. All 6
+  differential-test cases pass (including a 2-long creation chain and
+  the no-op `mpmif(f_share)` loop).
+- **`src/kernel/MAU.MEM`: the whole file.** `maualloc_entry`/
+  `maufree_entry` (+ internal `mau_split`/`mau_insert`/`mau_release`/
+  `mau_collapse`) all operate on a MAU's own suballocation table (SAT),
+  reached through `m_start[bx]`'s own dynamically-supplied segment --
+  the same real gap `ml.c`/`proc.c` exist for, resolved the same way
+  (the existing `mem_*_seg` helpers and `sat_*`/`satlen` constants).
+  The real asm's own bare `.0` (e.g. `cmp dl,.0`) is this assembler's
+  "a leading dot forces a memory operand" convention applied to a
+  literal 0 -- the byte at offset 0 of the ambient DS (the MAU's own
+  segment), i.e. SAT0's own `ents` field; ported as `mem_r8_seg(mem,
+  seg, 0)` everywhere it appears.
+
+  **Found and fixed 2 real, 40-year-old `/src` bugs** (both present
+  identically in `orig/mpm862sr/02/MAU.MEM` and `orig/lastdri/19/
+  MAU.MEM` -- see docs/bugs.md #102 for the full writeup): at the exact
+  same call site (`maualloc_entry`'s exact-absolute-split path),
+  `mov bx,cx` clobbered `BX` right before `call mau_split` (`mau_split`
+  needs `BX` to stay the target SAT entry's own address), and the call
+  was also missing the `push si ! ... ! pop si` protection its sibling
+  call site (`maua_splitit`) already has, letting `mau_insert`'s own
+  free use of `SI` as scratch corrupt this routine's own MPB offset.
+  Confirmed both by direct comparison against the file's own other,
+  correct call sites to the same routine. `src-c/kernel/mau.c`'s own
+  port was never affected by either (no shared "SI register" to
+  clobber in a from-scratch C translation) -- it implements the
+  corrected behavior directly.
+
+  **Also found and fixed 2 real `tools/i86sim.py` bugs**, both latent
+  since `segmented=True` was added for `ml.c` and both only now
+  exposed because this is the first file to execute the relevant
+  instruction with a real, nonzero segment register: `LEA` returned
+  the ModRM decode's already-segment-adjusted address instead of the
+  raw effective offset LEA is actually defined to compute (fixed via
+  a new `self._last_ea_offset`, the pre-segmentation value, which LEA
+  now reads instead); and `STD`/`CLD` (direction flag) weren't
+  implemented at all, needed by `mau_insert`'s own real backward
+  `REP MOVSB` (every earlier file only ever copied forward) -- fixed
+  by tracking `self.df` and negating the string-op step when set.
+
+  All 8 differential-test cases pass, including a direct regression
+  case for the `/src` bug pair above.
+- **`src/kernel/SHARE.MEM`: the whole file.** `share_entry` locates
+  the owner PD's own `p_mem` entry at the requested start paragraph,
+  builds a matching new entry for the requestor (via `getmd`), bumps
+  the underlying MAU's own SAT share count (the same real segment gap
+  as `ml.c`/`mau.c`, resolved the same way), and threads the new entry
+  onto the requestor's own `p_mem` list next to any existing entry
+  that already shares the same MAU.
+
+  One asymmetry ported faithfully, not fixed: the real asm's own
+  freshly-`getmd`'d MD leaks on the "owner has no MS at this start"
+  failure path (`se_err`, no `call freemd`), but *is* freed on the
+  "MAU's own SAT has no matching entry" path (`se_err1`). Unlike
+  docs/bugs.md #102's own two findings, there's no parallel call site
+  in this file to compare against to confirm this is a genuine bug
+  rather than an intentional asymmetry (e.g. the first case may be
+  considered "can't happen" under normal operation, the second a real
+  runtime possibility worth guarding), so left as-is.
+
+  All 5 differential-test cases pass.
+- **`src/kernel/LOAD.SUP`: a named tail portion of `load:`, as
+  `load_finish`.** Scoped deliberately, not a full port: `load:`'s own
+  front half (`get_ch_info`'s own `diskread` calls to read the `.CMD`
+  header, then `lt_more` onward spreading real `mpmif(f_malloc)`
+  allocation results across `ldtab`) is fundamentally different from
+  every file ported so far -- its branches depend on *real* disk-read/
+  allocation results, not decorative ones a boundary-stub no-op can
+  stand in for, and disk I/O (`f_freadseq`, via `load_group`/
+  `diskread`) isn't ported anywhere in this tree yet. `load_finish`
+  covers the real asm's own `lb_more` through `load_exit`: finding the
+  Base Page's own group (Data, or Code for an 8080-model program),
+  building it from every populated `ldtab` entry, and (when a PD was
+  given) initializing that PD's own UDA/LDSTK from it -- all pure data
+  manipulation over an already-populated `ldtab`, no `mpmif` of its
+  own. Takes `ldtab`/`load_pd`/`load_nldtabents`/`load_fcb` as given
+  input (fixed scratch addresses, same convention as every other
+  SYSDAT-resident table this project ports), the same way other tests
+  here pre-build PD/MD/SAT structures by hand rather than deriving
+  them from a still-unported pipeline.
+
+  Hits the same real segment-relative-addressing gap as `ml.c`/
+  `proc.c`/`mau.c`/`share.c` three times over: the chosen group's own
+  Base Page segment, the new process's own UDA segment, and that
+  process's own user-stack segment are all dynamically computed.
+  `ls_sp`/`ls_offset`/`ls_flags`/`ls_roffset`/`ls_rcseg` (LSTK.FMT)
+  form the *other* half of a two-file relationship with `proc.c`'s own
+  `proc_creat`: this routine sets `u_stack_sp = offset(ls_sp)` and
+  fills in everything but `ls_cseg`; `proc_creat`'s own later, more
+  generic IRET-frame step (which knows nothing LOAD.SUP-specific)
+  reads that same `u_stack_sp` value back and fills in `ls_cseg`/
+  `ls_flags` a second time -- confirmed by direct arithmetic (`0x56+2
+  = 0x58`, `0x56+4 = 0x5A`, and the `0x0200` flags literal matches
+  exactly), cross-confirming both ports.
+
+  Needed two `tools/i86sim.py` opcodes that had never come up before:
+  `SUB r/m8,r8` (`0x28`) and `SUB r/m16,r16` (`0x29`) -- every earlier
+  file's own `SUB` always used a register destination (`0x2A`/`0x2B`,
+  already implemented); `sub p_uda[bx],ax` here is the first to
+  subtract *into* memory.
+
+  Also caught a real test-authoring mistake while writing the
+  differential test (not a `/src` or `/src-c` bug): a first pass fed
+  the test a Data-group `ldtab` entry with no accompanying Code-group
+  entry, expecting `bpg_cseg` to just be test-injected -- but
+  `lbb_mre`'s own scan is what populates every group's own Base Page
+  slot (`bpg_cseg` from the Code-group entry, `bpg_dseg` from the
+  Data-group one, same base page either way), so a realistic `.CMD`
+  always needs both. All 6 differential-test cases pass.

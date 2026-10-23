@@ -11,20 +11,35 @@ Scope, deliberately narrow and grown lazily file-by-file:
   (register direct) and mod=00/10 with a disp16 (tools/asm86's own README
   documents that it always uses disp16, never the disp8 ModRM form, so
   mod=01 is unreachable in practice but decoded anyway since it's free).
-- Only one flat 64KB memory array is modeled. Segment override prefixes
-  (26h/2Eh/36h/3Eh) are parsed (so instruction length stays correct) but
-  have no effect on addressing -- there is no multi-segment memory model
-  here. This is adequate for differentially testing a single routine in
-  isolation, where the test harness places every operand the routine
-  touches in that one array; it would NOT be adequate for simulating two
-  routines that rely on a real segment boundary between them.
+- Only one flat 64KB memory array is modeled. By default, segment
+  override prefixes (26h/2Eh/36h/3Eh) are parsed (so instruction length
+  stays correct) but have no effect on addressing. This is adequate for
+  differentially testing a single routine in isolation, where the test
+  harness places every operand the routine touches in that one array.
+  Pass `segmented=True` to turn on real (opt-in) segment arithmetic
+  instead, for a routine that dynamically switches DS/ES to a *different*
+  segment and then accesses fixed offsets relative to it (e.g. PROC.RTM's
+  own newly-created UDA, ML.MEM's own newly-allocated MAU) -- every
+  effective address becomes `(segment_value * 16 + offset) & 0xFFFF`
+  (the usual 8086 rule: SS for a BP-based EA, DS otherwise, both
+  overridable by a prefix; ES for a string op's own DI, not overridable,
+  same as real hardware), still wrapped into this same 64KB array rather
+  than a real 20-bit/1MB address space -- the test just has to pick
+  segment values that don't collide once wrapped, same spirit as
+  `CSEG_BASE`-shifting a reference run elsewhere in this project. Kept
+  off by default since at least one existing test (`src-c/kernel/
+  echo.c`'s own `test_echo.py`) explicitly relies on a segment override
+  being a no-op; turning this on unconditionally could silently change
+  what an existing test actually exercises.
 - Only the flags a decoded instruction actually needs are modeled (so far:
   ZF, CF, SF and OF -- enough for every unsigned and signed conditional
   jump). Add more as a future routine needs them.
 - String instructions (MOVS/STOS/LODS/CMPS/SCAS, with or without a REP/
-  REPE/REPNE prefix) always increment SI/DI -- the direction flag (DF,
-  set/cleared by STD/CLD) isn't tracked, since every file seen so far
-  only ever does a forward copy/scan (and explicitly CLDs first where it
+  REPE/REPNE prefix) increment SI/DI by default, decrement when the
+  direction flag (DF, CLD/STD) is set -- tracked as `self.df`. Added for
+  `src-c/kernel/mau.c`'s own `mau_insert`, the first routine seen doing a
+  real backward shift (opening a gap in a SAT table); every earlier file
+  only ever did a forward copy/scan (and explicitly CLDs first where it
   matters, e.g. SUPIF.SUP's `user_entry`).
 - CALL/RET use a real stack-based return address, with a sentinel the
   harness pushes before the first instruction: a routine's own outermost
@@ -107,7 +122,7 @@ class I86Sim:
 
     def __init__(self, mem: bytearray, regs: dict, code_addr: int,
                  stop_addrs=frozenset(), call_stub_addrs=frozenset(),
-                 int_stub_nums=frozenset()):
+                 int_stub_nums=frozenset(), segmented: bool = False):
         if len(mem) != 0x10000:
             raise I86SimError(f"mem must be exactly 64KB, got {len(mem)} bytes")
         self.mem = mem
@@ -117,12 +132,18 @@ class I86Sim:
         self.stop_addrs = set(stop_addrs)
         self.call_stub_addrs = set(call_stub_addrs)
         self.int_stub_nums = set(int_stub_nums)
+        self.segmented = segmented
+        self.seg_override = None  # set per-instruction by a 26h/2Eh/36h/3Eh prefix
+        self._last_ea_offset = 0  # raw (pre-segmentation) offset from the most
+                                  # recent _modrm() mem operand -- LEA's own
+                                  # value, see its own opcode handler
         self._push16_into(self.regs, RET_SENTINEL)
         self.ip = code_addr
         self.zf = 0
         self.cf = 0
         self.sf = 0
         self.of = 0
+        self.df = 0  # direction flag -- CLD/STD; see string-op handling below
         self.halted = False
 
     # -- memory helpers -----------------------------------------------
@@ -163,6 +184,16 @@ class I86Sim:
     def _fetch_simm16(self) -> int:
         return struct.unpack('<h', struct.pack('<H', self._fetch16()))[0]
 
+    # -- segmentation (opt-in, see module docstring) ----------------------
+
+    def _seg_addr(self, offset: int, default_seg: str, overridable: bool = True) -> int:
+        """Resolve an effective (segment:offset) address. A no-op --
+        returns `offset` unchanged -- unless self.segmented."""
+        if not self.segmented:
+            return offset & 0xFFFF
+        seg_name = self.seg_override if (overridable and self.seg_override) else default_seg
+        return (self.regs[seg_name] * 16 + offset) & 0xFFFF
+
     # -- ModRM decode -----------------------------------------------------
     # Returns (mod, reg_field, operand) where operand is either
     # ('reg', regname) for mod==11, or ('mem', address) otherwise.
@@ -176,7 +207,8 @@ class I86Sim:
             return mod, reg, ('reg', rm)
         if mod == 0b00 and rm == 0b110:
             addr = self._fetch16()  # direct address, no base register
-            return mod, reg, ('mem', addr)
+            self._last_ea_offset = addr & 0xFFFF
+            return mod, reg, ('mem', self._seg_addr(addr, 'ds'))
         base, index = _RM_MEM[rm]
         addr = 0
         if base is not None:
@@ -187,7 +219,9 @@ class I86Sim:
             addr += self._fetch_simm8()
         elif mod == 0b10:
             addr += self._fetch16()
-        return mod, reg, ('mem', addr & 0xFFFF)
+        default_seg = 'ss' if base == 'bp' else 'ds'
+        self._last_ea_offset = addr & 0xFFFF
+        return mod, reg, ('mem', self._seg_addr(addr, default_seg))
 
     def _get_r8(self, idx: int) -> int:
         parent, high = _R8_PARENT[idx]
@@ -233,11 +267,14 @@ class I86Sim:
 
     def step(self) -> None:
         start_ip = self.ip
+        self.seg_override = None
         op = self._fetch8()
 
-        # Segment override prefixes: parsed for correct instruction length,
-        # but have no addressing effect -- see module docstring.
+        # Segment override prefixes: parsed for correct instruction length
+        # always; only affect addressing when self.segmented -- see module
+        # docstring and _seg_addr.
         if op in (0x26, 0x2E, 0x36, 0x3E):
+            self.seg_override = _SREG[{0x26: 0, 0x2E: 1, 0x36: 2, 0x3E: 3}[op]]
             op = self._fetch8()
 
         if op == 0x9C:  # PUSHF
@@ -319,17 +356,37 @@ class I86Sim:
         elif op == 0x88:  # MOV r/m8, r8
             _, reg, rm = self._modrm()
             self._store(rm, 8, self._get_r8(reg))
-        elif op == 0x8D:  # LEA r16, r/m16 (rm must be 'mem'; address itself is the value)
+        elif op == 0x8D:  # LEA r16, r/m16 (rm must be 'mem'; the *raw offset* is
+                          # the value -- never segment-adjusted, even under
+                          # segmented=True: LEA computes an effective address,
+                          # not a physical one. rm[1] (from _modrm) is the
+                          # already-segmented address used by ordinary loads/
+                          # stores, so this must use self._last_ea_offset
+                          # (the same ModRM decode's pre-segmentation value)
+                          # instead -- confirmed as a real bug via src-c/
+                          # kernel/mau.c's own differential test, the first
+                          # file to exercise LEA with a non-zero DS under
+                          # segmented=True (every earlier one happened to
+                          # have DS=0 at its own LEA, masking this).
             _, reg, rm = self._modrm()
             if rm[0] != 'mem':
                 raise I86SimError(f"LEA with a register operand at {start_ip:#06x}")
-            self.regs[_R16[reg]] = rm[1]
+            self.regs[_R16[reg]] = self._last_ea_offset
         elif op == 0xC6:  # MOV r/m8, imm8
             _, _reg, rm = self._modrm()
             self._store(rm, 8, self._fetch8())
         elif op == 0xC7:  # MOV r/m16, imm16
             _, _reg, rm = self._modrm()
             self._store(rm, 16, self._fetch16())
+        elif op == 0x28:  # SUB r/m8, r8 -- src-c/kernel/load.c's own
+                          # differential test is the first to need this
+                          # direction (every earlier SUB seen used a
+                          # register destination, 0x2A/0x2B below)
+            _, reg, rm = self._modrm()
+            self._store(rm, 8, self._sub(self._load(rm, 8), self._get_r8(reg), 8))
+        elif op == 0x29:  # SUB r/m16, r16 -- same as 0x28, word form
+            _, reg, rm = self._modrm()
+            self._store(rm, 16, self._sub(self._load(rm, 16), self.regs[_R16[reg]], 16))
         elif op == 0x2A:  # SUB r8, r/m8  (al = al - [di], etc.)
             _, reg, rm = self._modrm()
             self._set_r8(reg, self._sub(self._get_r8(reg), self._load(rm, 8), 8))
@@ -569,6 +626,14 @@ class I86Sim:
             pass
         elif op == 0xFB:  # STI -- ditto
             pass
+        elif op == 0xFC:  # CLD
+            self.df = 0
+        elif op == 0xFD:  # STD -- src-c/kernel/mau.c's own mau_insert is the
+                          # first routine seen needing a real backward
+                          # string copy (shifting a SAT table up to make
+                          # room) -- see the string-instructions section's
+                          # own updated docstring note below
+            self.df = 1
         else:
             raise I86SimError(f"unimplemented opcode 0x{op:02X} at {start_ip:#06x}")
 
@@ -602,34 +667,42 @@ class I86Sim:
         return result
 
     # -- string instructions ---------------------------------------------
-    # See the module docstring: DF (direction) isn't tracked, SI/DI always
-    # advance forward.
+    # DF (direction, CLD/STD) is tracked (self.df) -- SI/DI advance forward
+    # by default, backward when DF=1 (src-c/kernel/mau.c's own mau_insert
+    # needs a real backward shift to open a gap in a SAT table without
+    # self-clobbering the overlapping region; every earlier file only
+    # ever did a forward copy/scan).
 
     def _string_op_once(self, op: int) -> None:
         width = 16 if op & 1 else 8  # byte/word forms are adjacent opcodes
-        step = 2 if width == 16 else 1
+        step = (2 if width == 16 else 1) * (-1 if self.df else 1)
+        # SI's own segment is DS by default, overridable; DI's is always
+        # ES, never overridable -- same as real hardware (only matters
+        # when self.segmented; a no-op plain offset otherwise).
+        si_addr = self._seg_addr(self.regs['si'], 'ds')
+        di_addr = self._seg_addr(self.regs['di'], 'es', overridable=False)
         if op in (0xA4, 0xA5):  # MOVS
-            self._store(('mem', self.regs['di']), width, self._load(('mem', self.regs['si']), width))
+            self._store(('mem', di_addr), width, self._load(('mem', si_addr), width))
             self.regs['si'] = (self.regs['si'] + step) & 0xFFFF
             self.regs['di'] = (self.regs['di'] + step) & 0xFFFF
         elif op in (0xAA, 0xAB):  # STOS
             src = self._get_r8(0) if width == 8 else self.regs['ax']  # _R8_PARENT[0] is 'al'
-            self._store(('mem', self.regs['di']), width, src)
+            self._store(('mem', di_addr), width, src)
             self.regs['di'] = (self.regs['di'] + step) & 0xFFFF
         elif op in (0xAC, 0xAD):  # LODS
-            val = self._load(('mem', self.regs['si']), width)
+            val = self._load(('mem', si_addr), width)
             if width == 8:
                 self._set_r8(0, val)
             else:
                 self.regs['ax'] = val
             self.regs['si'] = (self.regs['si'] + step) & 0xFFFF
         elif op in (0xA6, 0xA7):  # CMPS
-            self._sub(self._load(('mem', self.regs['si']), width), self._load(('mem', self.regs['di']), width), width)
+            self._sub(self._load(('mem', si_addr), width), self._load(('mem', di_addr), width), width)
             self.regs['si'] = (self.regs['si'] + step) & 0xFFFF
             self.regs['di'] = (self.regs['di'] + step) & 0xFFFF
         elif op in (0xAE, 0xAF):  # SCAS
             a = self._get_r8(0) if width == 8 else self.regs['ax']
-            self._sub(a, self._load(('mem', self.regs['di']), width), width)
+            self._sub(a, self._load(('mem', di_addr), width), width)
             self.regs['di'] = (self.regs['di'] + step) & 0xFFFF
         else:
             raise I86SimError(f"unimplemented string opcode 0x{op:02X}")

@@ -214,7 +214,7 @@ mechanism). All five files named above — `BDOS.A86`, `MEM.A86`,
 `RTM.A86`, `SUP.A86`, `LDBIOS.A86` — now assemble end-to-end with no
 remaining blocker at all.
 
-## 7. `src/kernel/XIOS.A86` — one more underscore typo (FIXED), plus one genuinely unresolved symbol
+## 7. `src/kernel/XIOS.A86` — two underscore typos — FIXED
 
 Line 611, `mov word ptr .088h,offset tick_int`, used `tick_int` where
 the label actually declared (line 349) is `tickint` (no underscore) —
@@ -222,13 +222,23 @@ the same bug class as everywhere else on this page. **Patched.**
 
 Separately, line 897's `add ax,offset dp_base` references `dp_base`,
 which is **not** declared anywhere in `XIOS.A86` itself, nor anywhere
-else in the whole 11-disk tree under that spelling. Unlike every other
-finding on this page, no squashed-name match (`dpbase`, `dp_base`, etc.)
-exists in this file to point to as "the real" declaration, so this is
-left as a genuinely unresolved symbol rather than guessed at — **not
-patched**. Since `docs/build.md` already excludes `XIOS.A86`/`ROM.A86`
-from the QEMU-bootable target (they're written for the Intel iSBC 86/12
-+ SBC 204 specifically), this wasn't investigated further.
+else in the whole 11-disk tree under that spelling. The real
+declaration is `dpbase equ $` in `src/kernel/SINGLES.LIB` line 2 (base
+of the Disk Parameter Blocks), which `XIOS.A86` already pulls in via
+`include singles.lib` (line 1551) — the exact same added-underscore bug
+class as bug #8's `dp_base`/`dpbase` fix in `LDBIOS.A86`, just never
+caught in this sibling file until `XIOS.A86` was actually assembled on
+its own. Cross-confirmed against `LDBIOS.A86`'s own correct usage
+(`add bx,offset dpbase` at line 244, `dpbase equ $` at line 531).
+**Patched**: line 897 now reads `add ax,offset dpbase`.
+
+With both typos fixed, `XIOS.A86` assembles cleanly on its own
+(confirmed via `tools/asm86`, `dpbase = 0x16d1`) and has been added to
+`src/Makefile`'s `KERNEL_OK` validation list. Since `docs/build.md`
+already excludes `XIOS.A86`/`ROM.A86` from the QEMU-bootable target
+(they're written for the Intel iSBC 86/12 + SBC 204 specifically,
+replaced there by `XIOS86Q.A86`), it is validated standalone but still
+not combined into the actual `MPM.bin`.
 
 ## 8. `src/loader/LDBIOS.A86` — four more dropped/added underscores, one file — FIXED
 

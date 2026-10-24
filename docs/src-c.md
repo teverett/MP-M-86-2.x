@@ -109,6 +109,7 @@ immediate load instead of a memory read.
 | `src/rsp/CLOCK.A86` | `clockloop` (one full pass — see below) | — (`clock`'s own one-time setup, `mov ds,sysdat`/`mov bx,tod_offset`, is moot under the flat memory model, same as the DS/ES-switch convention elsewhere — the test starts directly at `clockloop` with `bx` preset instead) |
 | `src/rsp/TMP.A86` | `nextcommand_once` (one full pass through `nextcommand:`/`clicall:`/`goodparse:`/`try_builtin:`/`not_builtin:`/`clierror:` — see below), `a_to_b` | `tmp:`'s own one-time setup — moot, every operation in it is a boundary-stub call or a register load feeding one; `setuser`/`setlist` — never identified, moot regardless (see below) |
 | `src/rsp/SUBMIT.A86` | `deblank`+`fill_argtable` (unlabeled code after `submit:`'s own `call openfile`), `expand_command`, `readbuffer`, `readchar`, `topofcmdloop_once` (one full pass through `topofcmdloop:`/`notdrive:`/`goodparse:`/`try_builtin:`/`notbuiltin:`/`clierror:` — see below), `a_to_b` | `submit:`'s own one-time version-check/priority/FCB-open preamble — no observable effect under the boundary-stub convention beyond what `deblank`/`fill_argtable` already cover; `$INCLUDE`'s own real body — needs `sysdatseg`, a real segment value only `submit:`'s own un-ported one-time setup captures, not available in this reduced scope (the comparison against it still runs for real, so this only matters if a real `$INCLUDE` command is typed); `setuser`/`setlist` — never identified, moot regardless (see below) |
+| `src/kernel/XIOS.A86` | `SETTRK`/`SETSEC`/`SETDMA`/`SETDMAB`/`SECTRAN`/`SELDSK`, `maxconsole`/`maxlist`/`getsegt`/`selmemory`/`flushbuf`/`strtclk`/`stopclk` (`src-c/kernel/xios.c`) | `entry`/`supif` — far-call trampolines, same convention as every other module's `entry`/`mpmif`/`xiosif`; `const`/`conin`/`conout`/`plist`/`punch`/`reader`/`listst`/`polldev`/`rtm_poll` — real `in`/`out` port I/O, no C equivalent under this project's flat-memory host model; `HOME`/`READ`/`WRITE`/`execute`/`send_com`/`flpy_*` — real 8271 floppy controller command sequences (every `dskhomtbl`/`dskrdtbl`/`dskwrttbl` entry is a `flpy_*` routine, no non-hardware path exists); `init`/`intdisp`/`int_trap`/`tickint`/`pmsg` — real hardware initialization (DMA controller, 8259 PIC, 8271) and interrupt service, no C equivalent; `idle` — a pure `mov cl,f_dispatch ! call supif ! jmp idle` passthrough with zero data transformation of its own (the call is a boundary stub), so porting it would add no real logic — see `xios.c`'s own header comment for the full list and reasoning |
 | `src/kernel/TICK.SUP` | `notick_once`, `tick_once` | — (both of this file's real labels are ported) |
 | `src/kernel/QUE1.RTM` | all 10 routines: `makeq_entry`, `openq_entry`, `deleteq_entry`, `queverify`, `readq_entry`/`creadq_entry`/`readq`, `writeq_entry`/`cwriteq_entry`/`writeq` | — (the whole file is ported; `readq`'s/`writeq`'s own real "wait forever" retry — unconditional call, queue empty/full — is translated faithfully but not exercised by the test, same unexercisable-but-real shape as `cioattach` below/`CPMMEM.MEM`'s `cpmfree_entry`; every other path, including the conditional-and-empty/full immediate-error case, is fully portable and exercised) |
 | `src/kernel/QUE2.RTM` | `rlsmx`, `getqdaddr`, `remqd`, `qspace`, `qrelease` | — (all 5 of this file's routines are ported) |
@@ -360,8 +361,14 @@ started**.
   problem (`tools/plmc.py` already compiles it).
 - Only files that currently assemble cleanly (the `*_OK` lists in the
   `Makefile`) are candidates. `XIOS.A86` (bug #7) and the three broken RSPs
-  (`CLOCK`/`TMP`/`SUBMIT`, bugs #1–#3, see `docs/bugs.md`) stay out until/
-  unless those are fixed independently.
+  (`CLOCK`/`TMP`/`SUBMIT`, bugs #1–#3, see `docs/bugs.md`) were kept out
+  until those were fixed — all four now assemble cleanly and are in
+  `RSP_OK`/`KERNEL_OK`, and each has its own ported routines (see the
+  table above): `CLOCK.A86`/`TMP.A86`/`SUBMIT.A86` in full (modulo the
+  usual boundary-stub/one-time-setup carve-outs every RSP has), and
+  `XIOS.A86`'s own portable function-set routines (its real hardware I/O
+  and interrupt code stay out for a different reason — no C equivalent,
+  not a blocked bug — see `xios.c`'s own header comment).
 - The goal is a real, bootable MP/M-86 kernel built from this C port —
   not just a verified reference for readability/documentation. Each
   routine is still ported and differentially tested in isolation first,

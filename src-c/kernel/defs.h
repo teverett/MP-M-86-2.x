@@ -1031,6 +1031,25 @@ static inline uint16_t mem_seg_addr(uint16_t seg, uint16_t offset) {
 #define questr_addr  0xB410 /* byte[10]: " Msg Qued\0" literal, write_cstr'd on demand */
 #define userstr_addr 0xB420 /* byte[9]: "(User 0)\0" literal, write_cstr'd on demand */
 
+/* src/kernel/XIOS.A86's own private DSEG fields src-c/kernel/xios.c
+ * touches, at fixed harness-chosen scratch addresses (XIOS.A86 is a
+ * standalone module with no shared SYSDAT storage of its own -- same
+ * "fixed scratch address" reasoning as TMP.A86's own SD_TMP_* fields,
+ * see that comment above) */
+#define XIOS_TRK     0xAC00 /* byte: current track (SETTRK) */
+#define XIOS_SECT    0xAC01 /* byte: current sector (SETSEC) */
+#define XIOS_DMA_ADR 0xAC02 /* word: current DMA offset (SETDMA) */
+#define XIOS_DMA_SEG 0xAC04 /* word: current DMA segment (SETDMAB) */
+#define XIOS_DISK    0xAC06 /* byte: physical disk selected (SELDSK) */
+#define XIOS_CLOCKON 0xAC07 /* byte: tick flag enable (STRTCLK/STOPCLK) */
+
+/* XIOS.A86's own `offset dpbase` -- the compile-time base address of
+ * its Disk Parameter Header table (`include singles.lib`, right after
+ * dskwrttbl), not a runtime field; SELDSK just adds a disk's own
+ * 16-byte stride to it. A fixed harness-chosen stand-in address, same
+ * reasoning as questr_addr/userstr_addr above. */
+#define XIOS_DPBASE  0xAC20
+
 /* src/kernel/CLICB.DEF -- the UDA_WRKSEG-relative command buffer
  * clicmd_entry's own `cli_copy` reads from (via mem_r8_seg). Named
  * cmdcb_* (not clicb_*) because tmp.c already uses `clicb_cmd` as a

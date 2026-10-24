@@ -307,13 +307,19 @@ routine translation — revisit once that machinery exists):
   functions (fully ported now) are what that dispatch table calls
   *into*, not the other way around, so nothing there is blocked by it.
   See this file's own status-table row above for the full detail.
-- `src/kernel/FILE2.BDO`, `src/kernel/FILE4.BDO` — their own
-  remaining routines all route through `srch`/`rddir`, transitively
-  blocked by `FLUSH_FILE0`'s real segment-relative-addressing gap in
-  `FILE3.BDO` — now resolved in principle (same `mem_*_seg` helpers as
-  `ml.c`/`proc.c`/`mau.c`/`share.c`/`load.c`), but `FLUSH_FILE0`
-  itself isn't ported yet, so neither file has anything new to port
-  until that happens. (`DATA.BDO` is confirmed pure data, see its own
+- `src/kernel/FILE2.BDO`, `src/kernel/FILE4.BDO` — **stale**:
+  `FLUSH_FILE0`'s real segment-relative-addressing gap in
+  `FILE3.BDO` is long since resolved (`mem_r8_seg`/`mem_w8_seg`, the
+  same helpers already used in `ml.c`/`proc.c`/`mau.c`/`share.c`/
+  `load.c`), and `FILE2.BDO`/`FILE4.BDO` are both now **fully ported**
+  (see their own status-table rows above) — this bullet used to
+  describe a real blocker but no longer reflects the tree. Their only
+  genuinely remaining gap is the `DATA.BDO` cseg/dseg test-harness
+  collision, which blocks *differential testing* of a handful of
+  already-ported clusters (`close`/`close1`/`search`/`searchn`,
+  `open`/`opencopy`, `copy_dir0-2`, `SWAP`, plus a few `FILE3.BDO`/
+  `FILE4.BDO` thin wrappers that call into them transitively), not any
+  further C code. (`DATA.BDO` is confirmed pure data, see its own
   status-table row above.) `src/kernel/CHARIO.CIO` (the large, deeply
   interdependent console-input state machine this bucket used to defer
   — `coninit`/`attach`/`conbrk`/`conin`/`chkctl`/`echoc`/`tabout`/...),

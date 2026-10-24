@@ -55,10 +55,16 @@ RSP_OK := ECHO CLOCK TMP SUBMIT
 
 # --- Kernel: CIO.A86/SYSDAT.A86/BDOS.A86/MEM.A86/RTM.A86/SUP.A86 all
 # assemble cleanly now that the name-mismatch bugs are fixed (docs/bugs.md
-# #4/#5) and tools/asm86 does real jump-size relaxation (#6). XIOS.A86 is
-# still blocked on one genuinely unresolved symbol (#7) with no confident
-# fix available and is deliberately not attempted here.
-KERNEL_OK := CIO SYSDAT BDOS MEM RTM SUP
+# #4/#5) and tools/asm86 does real jump-size relaxation (#6). XIOS.A86's
+# own last blocker (docs/bugs.md #7's "dp_base" -- the same added-
+# underscore bug class as everywhere else on that page, the real label
+# is "dpbase", declared in SINGLES.LIB, which this file already
+# includes) is now fixed too, so it assembles cleanly as well -- it's
+# still not part of MPM.bin itself (XIOS86Q.A86 below replaces it
+# there, targeting QEMU instead of the Intel SBC 204/534 hardware
+# XIOS.A86's own drivers are written for), just validated here like
+# every other file in this list.
+KERNEL_OK := CIO SYSDAT BDOS MEM RTM SUP XIOS
 
 # --- XIOS86Q.A86: a new, from-scratch XIOS targeting QEMU (serial
 # console + floppy disk), replacing the real XIOS.A86's Intel SBC

@@ -894,7 +894,7 @@ SELDSK:	    ; Function 7:  Select Disk
 	    mov disk,al	;save physical drive no.
 	    mov cl,4
 	    shl al,cl	;multiply by 16
-	    add ax,offset dp_base
+	    add ax,offset dpbase
 	    mov bx,ax
 sel_ret:
 	mov ax,bx

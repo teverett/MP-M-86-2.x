@@ -134,26 +134,26 @@ def main():
         lib = ctypes.CDLL(lib_path)
         c_u8p = ctypes.POINTER(ctypes.c_uint8)
 
-        lib.pack_sdcnt.argtypes = [c_u8p]
+        lib.pack_sdcnt.argtypes = [c_u8p, ctypes.c_uint16]
         lib.compare.restype = ctypes.c_uint8
         lib.compare.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint8]
         lib.search_olist.restype = ctypes.c_uint8
-        lib.search_olist.argtypes = [c_u8p, ctypes.c_uint8]
+        lib.search_olist.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint8]
         lib.search_llist.restype = ctypes.c_uint8
-        lib.search_llist.argtypes = [c_u8p, ctypes.c_uint8]
+        lib.search_llist.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint8]
         lib.searchn_list.restype = ctypes.c_uint8
-        lib.searchn_list.argtypes = [c_u8p, ctypes.c_uint8]
-        lib.delete_item.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.searchn_list.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint8]
+        lib.delete_item.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16]
         lib.create_item.restype = ctypes.c_uint8
-        lib.create_item.argtypes = [c_u8p, ctypes.POINTER(ctypes.c_uint16)]
-        lib.set_olist_item.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint8]
-        lib.flush_files.argtypes = [c_u8p]
-        lib.flush_file0.argtypes = [c_u8p]
-        lib.remove_locks.argtypes = [c_u8p, ctypes.c_uint16]
-        lib.inc_pdcnt.argtypes = [c_u8p]
-        lib.pr_term.argtypes = [c_u8p]
-        lib.xcurselect.argtypes = [c_u8p]
-        lib.reselectx.argtypes = [c_u8p]
+        lib.create_item.argtypes = [c_u8p, ctypes.c_uint16, ctypes.POINTER(ctypes.c_uint16)]
+        lib.set_olist_item.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint8]
+        lib.flush_files.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.flush_file0.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.remove_locks.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16]
+        lib.inc_pdcnt.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.pr_term.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.xcurselect.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.reselectx.argtypes = [c_u8p, ctypes.c_uint16]
 
         failures = []
 
@@ -174,7 +174,7 @@ def main():
         mem[BD_BLKMSK] = 0x07
         ref_regs, ref_img = run_reference(code, dseg, entries['pack_sdcnt'], mem, {})
         buf = to_ctypes(mem)
-        lib.pack_sdcnt(ctypes.cast(buf, c_u8p))
+        lib.pack_sdcnt(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = bytes(ref_img[BD_PACKED_DCNT:BD_PACKED_DCNT + 3])
         port = bytes(bytes(buf)[BD_PACKED_DCNT:BD_PACKED_DCNT + 3])
         check("pack_sdcnt: sdblk == 0", ref, port)
@@ -187,7 +187,7 @@ def main():
         mem[BD_BLKMSK] = 0x0F
         ref_regs, ref_img = run_reference(code, dseg, entries['pack_sdcnt'], mem, {})
         buf = to_ctypes(mem)
-        lib.pack_sdcnt(ctypes.cast(buf, c_u8p))
+        lib.pack_sdcnt(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = bytes(ref_img[BD_PACKED_DCNT:BD_PACKED_DCNT + 3])
         port = bytes(bytes(buf)[BD_PACKED_DCNT:BD_PACKED_DCNT + 3])
         check("pack_sdcnt: sdblk != 0", ref, port)
@@ -203,7 +203,7 @@ def main():
         mem_w16(mem, BD_OPEN_ROOT, 0)
         ref_regs, ref_img = run_reference(code, dseg, entries['search_olist'], mem, {'cx': 0x0100})
         buf = to_ctypes(mem)
-        got = lib.search_olist(ctypes.cast(buf, c_u8p), ctypes.c_uint8(1))
+        got = lib.search_olist(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint8(1))
         ref = (mem_r16(ref_img, BD_PRV_POS),)
         port = (mem_r16(bytes(buf), BD_PRV_POS),)
         check("search_olist: empty list, prv_pos stays at root", ref, port)
@@ -215,7 +215,7 @@ def main():
         mem_w16(mem, BD_OPEN_ROOT, ITEM)
         ref_regs, ref_img = run_reference(code, dseg, entries['search_olist'], mem, {'cx': 0x0000})
         buf = to_ctypes(mem)
-        got = lib.search_olist(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0))
+        got = lib.search_olist(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint8(0))
         ref = mem_r16(ref_img, BD_CUR_POS)
         port = mem_r16(bytes(buf), BD_CUR_POS)
         check("search_olist: ch == 0 returns the next item", ref, port)
@@ -228,7 +228,7 @@ def main():
         mem[BD_CURDSK] = 5
         ref_regs, ref_img = run_reference(code, dseg, entries['search_olist'], mem, {'cx': 0x0100})
         buf = to_ctypes(mem)
-        got = lib.search_olist(ctypes.cast(buf, c_u8p), ctypes.c_uint8(1))
+        got = lib.search_olist(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint8(1))
         ref = mem_r16(ref_img, BD_CUR_POS)
         port = mem_r16(bytes(buf), BD_CUR_POS)
         check("search_olist: ch == 1, drive matches", ref, port)
@@ -242,7 +242,7 @@ def main():
         mem[BD_CURDSK] = 9
         ref_regs, ref_img = run_reference(code, dseg, entries['search_olist'], mem, {'cx': 0x0100})
         buf = to_ctypes(mem)
-        got = lib.search_olist(ctypes.cast(buf, c_u8p), ctypes.c_uint8(1))
+        got = lib.search_olist(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint8(1))
         ref = (mem_r16(ref_img, BD_CUR_POS), mem_r16(ref_img, BD_PRV_POS))
         port = (mem_r16(bytes(buf), BD_CUR_POS), mem_r16(bytes(buf), BD_PRV_POS))
         check("search_olist: walks past a lower drive to find a match", ref, port)
@@ -255,7 +255,7 @@ def main():
         mem[BD_CURDSK] = 2
         ref_regs, ref_img = run_reference(code, dseg, entries['search_olist'], mem, {'cx': 0x0100})
         buf = to_ctypes(mem)
-        got = lib.search_olist(ctypes.cast(buf, c_u8p), ctypes.c_uint8(1))
+        got = lib.search_olist(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint8(1))
         ref = mem_r16(ref_img, BD_CUR_POS)
         port = mem_r16(bytes(buf), BD_CUR_POS)
         check("search_olist: not found, cur_pos is the insertion point", ref, port)
@@ -270,7 +270,7 @@ def main():
         mem_w16(mem, BD_PACKED_DCNT + 3, 0x7777)  # pdaddr, right after packed_dcnt
         ref_regs, ref_img = run_reference(code, dseg, entries['search_olist'], mem, {'cx': 0x0500})
         buf = to_ctypes(mem)
-        got = lib.search_olist(ctypes.cast(buf, c_u8p), ctypes.c_uint8(5))
+        got = lib.search_olist(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint8(5))
         ref = mem_r16(ref_img, BD_CUR_POS)
         port = mem_r16(bytes(buf), BD_CUR_POS)
         check("search_olist: ch == 5, full match", ref, port)
@@ -279,7 +279,7 @@ def main():
         mem[BD_PACKED_DCNT] = 0xFF  # mismatch
         ref_regs, ref_img = run_reference(code, dseg, entries['search_olist'], mem, {'cx': 0x0500})
         buf = to_ctypes(mem)
-        got = lib.search_olist(ctypes.cast(buf, c_u8p), ctypes.c_uint8(5))
+        got = lib.search_olist(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint8(5))
         ref = mem_r16(ref_img, BD_CUR_POS)
         port = mem_r16(bytes(buf), BD_CUR_POS)
         check("search_olist: ch == 5, drive matches, packed_dcnt doesn't", ref, port)
@@ -292,7 +292,7 @@ def main():
         mem[BD_CURDSK] = 7
         ref_regs, ref_img = run_reference(code, dseg, entries['search_llist'], mem, {'cx': 0x0100})
         buf = to_ctypes(mem)
-        got = lib.search_llist(ctypes.cast(buf, c_u8p), ctypes.c_uint8(1))
+        got = lib.search_llist(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint8(1))
         ref = mem_r16(ref_img, BD_CUR_POS)
         port = mem_r16(bytes(buf), BD_CUR_POS)
         check("search_llist: matching drive", ref, port)
@@ -306,7 +306,7 @@ def main():
         mem[BD_CURDSK] = 6
         ref_regs, ref_img = run_reference(code, dseg, entries['searchn_list'], mem, {'cx': 0x0100})
         buf = to_ctypes(mem)
-        got = lib.searchn_list(ctypes.cast(buf, c_u8p), ctypes.c_uint8(1))
+        got = lib.searchn_list(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint8(1))
         ref = mem_r16(ref_img, BD_CUR_POS)
         port = mem_r16(bytes(buf), BD_CUR_POS)
         check("searchn_list: resumes from cur_pos", ref, port)
@@ -320,7 +320,7 @@ def main():
         mem_w16(mem, BD_FREE_ROOT, OLD_FREE)
         ref_regs, ref_img = run_reference(code, dseg, entries['delete_item'], mem, {'bx': ITEM})
         buf = to_ctypes(mem)
-        lib.delete_item(ctypes.cast(buf, c_u8p), ctypes.c_uint16(ITEM))
+        lib.delete_item(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(ITEM))
         port_img = bytes(buf)
         ref = (mem_r16(ref_img, PRV), mem_r16(ref_img, BD_FREE_ROOT), mem_r16(ref_img, ITEM),
                mem_r16(ref_img, BD_CUR_POS))
@@ -334,7 +334,7 @@ def main():
         ref_regs, ref_img = run_reference(code, dseg, entries['create_item'], mem, {})
         buf = to_ctypes(mem)
         bx_out = ctypes.c_uint16(0)
-        got = lib.create_item(ctypes.cast(buf, c_u8p), ctypes.byref(bx_out))
+        got = lib.create_item(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.byref(bx_out))
         ref = mem_r16(ref_img, BD_FREE_ROOT)  # unchanged (still 0) either way
         port = mem_r16(bytes(buf), BD_FREE_ROOT)
         check("create_item: empty free list, nothing changes", (ref, 0), (port, 0 if got == 0 else 1))
@@ -349,7 +349,7 @@ def main():
         ref_regs, ref_img = run_reference(code, dseg, entries['create_item'], mem, {})
         buf = to_ctypes(mem)
         bx_out = ctypes.c_uint16(0)
-        got = lib.create_item(ctypes.cast(buf, c_u8p), ctypes.byref(bx_out))
+        got = lib.create_item(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.byref(bx_out))
         port_img = bytes(buf)
         ref = (mem_r16(ref_img, BD_FREE_ROOT), mem_r16(ref_img, PRV), mem_r16(ref_img, FREE),
                mem_r16(ref_img, BD_CUR_POS))
@@ -368,7 +368,7 @@ def main():
         ref_regs, ref_img = run_reference(code, dseg, entries['set_olist_item'], mem,
                                            {'bx': ITEM, 'ax': 0x0080})
         buf = to_ctypes(mem)
-        lib.set_olist_item(ctypes.cast(buf, c_u8p), ctypes.c_uint16(ITEM), ctypes.c_uint8(0x80))
+        lib.set_olist_item(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(ITEM), ctypes.c_uint8(0x80))
         ref = bytes(ref_img[ITEM:ITEM + 11])
         port = bytes(bytes(buf)[ITEM:ITEM + 11])
         check("set_olist_item: attrs|drive, packed_dcnt/pdaddr copy, opncnt zeroed", ref, port)
@@ -378,7 +378,7 @@ def main():
         mem[BD_PD_CNT] = 0x10
         ref_regs, ref_img = run_reference(code, dseg, entries['inc_pdcnt'], mem, {})
         buf = to_ctypes(mem)
-        lib.inc_pdcnt(ctypes.cast(buf, c_u8p))
+        lib.inc_pdcnt(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("inc_pdcnt: ordinary bump", ref_img[BD_PD_CNT], bytes(buf)[BD_PD_CNT])
 
         # -- inc_pdcnt: wraps past 0 --
@@ -386,7 +386,7 @@ def main():
         mem[BD_PD_CNT] = 0xF8
         ref_regs, ref_img = run_reference(code, dseg, entries['inc_pdcnt'], mem, {})
         buf = to_ctypes(mem)
-        lib.inc_pdcnt(ctypes.cast(buf, c_u8p))
+        lib.inc_pdcnt(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("inc_pdcnt: wraps past 0", ref_img[BD_PD_CNT], bytes(buf)[BD_PD_CNT])
 
         # -- remove_locks: olist item without the lock bit -> no-op --
@@ -395,7 +395,7 @@ def main():
         mem[ITEM:ITEM + 11] = olist_entry(0, 0, b'\x00\x00\x00', 0)  # attrs byte has no 0x40 bit
         ref_regs, ref_img = run_reference(code, dseg, entries['remove_locks'], mem, {'bx': ITEM})
         buf = to_ctypes(mem)
-        lib.remove_locks(ctypes.cast(buf, c_u8p), ctypes.c_uint16(ITEM))
+        lib.remove_locks(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(ITEM))
         check("remove_locks: no lock bit -> no-op", mem_r16(ref_img, BD_LOCK_ROOT),
               mem_r16(bytes(buf), BD_LOCK_ROOT))
 
@@ -412,7 +412,7 @@ def main():
         mem_w16(mem, BD_FREE_ROOT, 0)
         ref_regs, ref_img = run_reference(code, dseg, entries['remove_locks'], mem, {'bx': ITEM})
         buf = to_ctypes(mem)
-        lib.remove_locks(ctypes.cast(buf, c_u8p), ctypes.c_uint16(ITEM))
+        lib.remove_locks(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(ITEM))
         port_img = bytes(buf)
         ref = (mem_r16(ref_img, BD_LOCK_ROOT), mem_r16(ref_img, BD_FREE_ROOT))
         port = (mem_r16(port_img, BD_LOCK_ROOT), mem_r16(port_img, BD_FREE_ROOT))
@@ -432,7 +432,7 @@ def main():
         mem_w16(mem, BD_FREE_ROOT, 0)
         ref_regs, ref_img = run_reference(code, dseg, entries['flush_file0'], mem, {}, segmented=True)
         buf = to_ctypes(mem)
-        lib.flush_file0(ctypes.cast(buf, c_u8p))
+        lib.flush_file0(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         port_img = bytes(buf)
 
         def flush_snapshot(img):
@@ -447,7 +447,7 @@ def main():
         mem_w16(mem, BD_OPEN_ROOT, 0x4100)  # would crash if flush_file0 ran for real
         ref_regs, ref_img = run_reference(code, dseg, entries['flush_files'], mem, {}, segmented=True)
         buf = to_ctypes(mem)
-        lib.flush_files(ctypes.cast(buf, c_u8p))
+        lib.flush_files(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("flush_files: already flushed -> no-op", mem_r16(ref_img, BD_OPEN_ROOT),
               mem_r16(bytes(buf), BD_OPEN_ROOT))
 
@@ -465,7 +465,7 @@ def main():
                                            stop_addrs={entries['goback']}, segmented=True,
                                            jmp_stub_addrs={entries['xiosif']})
         buf = to_ctypes(mem)
-        lib.pr_term(ctypes.cast(buf, c_u8p))
+        lib.pr_term(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         port_img = bytes(buf)
         check("pr_term: removes only the target PD's own open file",
               mem_r16(ref_img, BD_OPEN_ROOT), mem_r16(port_img, BD_OPEN_ROOT))
@@ -485,7 +485,7 @@ def main():
         ref_regs, ref_img = run_reference(code, dseg, entries['xcurselect'], mem, {},
                                            stop_addrs={entries['goback']})
         buf = to_ctypes(mem)
-        lib.xcurselect(ctypes.cast(buf, c_u8p))
+        lib.xcurselect(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         port_img = bytes(buf)
 
         def xcurselect_snapshot(img):
@@ -509,7 +509,7 @@ def main():
         mem[BD_ACTUAL_RC] = 0xBB
         ref_regs, ref_img = run_reference(code, dseg, entries['reselectx'], mem, {})
         buf = to_ctypes(mem)
-        lib.reselectx(ctypes.cast(buf, c_u8p))
+        lib.reselectx(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         port_img = bytes(buf)
 
         def reselectx_snapshot(img):

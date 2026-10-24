@@ -115,10 +115,10 @@ immediate load instead of a memory read.
 | `src/kernel/PROC.RTM` | `freepd`, `proc_creat` (+ internal `getpdadr`) | — (all 3 of this file's routines are ported, using `tools/i86sim.py`'s `segmented=True` mode plus a CSEG_BASE-shifted reference run — see below) |
 | `src/kernel/CONSOLE.CIO` | all 15 routines (`lstattach_entry`, `clstattch_entry`, `cconattch_entry`, `conattach_entry`, `cioattach`, `lstdetach_entry`, `condetach_entry`, `ciodetach`, `conassign_entry`, `getdefcon_entry`, `getdeflst_entry`, `setdefcon_entry`, `setdeflst_entry`, `mimic_entry`, `unmimic_entry`) + `CHARIO.CIO`'s `getccbadr` (a small dependency, pulled in on its own) | — |
 | `src/kernel/CHARIO.CIO` | all 9 entry points (`conin_entry`, `conout_entry`, `rconin_entry`, `rconout_entry`, `listout_entry`, `constat_entry`, `dirio_entry`, `conwrite_entry`, `conprint_entry`, `conread_entry`) + 20 internal routines (`rawinit`, `coninit`, `getconnum`, `attach`, `echoc`, `conbrk`, `chkctl`, `control_p`, `prcsmsg`, `prname`, `conout`, `compout`, `ctlout`, `tabout`, `pspace`, `pbacksp`, `pcr`, `crlf`, `crlfp`, `conin`) | `stdout` — its own `conoutf`/`listf` calls are both no-ops under the boundary-stub convention regardless of which branch is taken, so it collapses to nothing observable; inlined as a comment in `conout`'s own mimic-forwarding branch instead of a separate function, see that file's own header comment |
-| `src/kernel/COMMAND.SUP` | `shifttail`, `fileopen` (a real call into `FILE4.BDO`'s own `func15`), `user_retf`, `clicmd_entry` (+ internal `cli_pfn`, `cli_checkque`, `cli_fload`, `cli_gopen` — now fully translated, a real call into `load.c`'s `load` plus the whole Base Page cmdtail/default-FCB/argument-parse setup, see below —, `cli_rmpd`, `clicmd_exit`, `prchar`/`crlf`/`prnum`/`prtime`/`prdisk`/`write_cstr`/`prcsm`/`prnam`/`prtyp`/`pruser`/`prcusp`/`prfilnam`/`conasn`) — see below | `chain_entry` itself, always `dx==0` into `clicmd_entry` (i.e. always `cli_chain==true`) — its own chain-mode UDA copy (`cli_fload`'s own `cli_ld1` block) dynamically switches `DS`/`ES` to the newly loaded process's own UDA segment, the same real segment-relative-addressing gap already solved for `PROC.RTM`/`ML.MEM`/`MAU.MEM`/`SHARE.MEM`, just not applied here, since `clicmd_entry`'s own ordinary (non-chain) path is the far more common case and needs none of it; `f_createproc`/`f_setprior` stay plain boundary stubs (their own results are never read by anything downstream, so this doesn't truncate anything, see `command.c`'s own header comment) |
+| `src/kernel/COMMAND.SUP` | `shifttail`, `fileopen` (a real call into `FILE4.BDO`'s own `func15`), `user_retf`, `chain_entry` (now ported too, a thin wrapper), `clicmd_entry` (both the ordinary and chain-mode paths — + internal `cli_pfn`, `cli_checkque`, `cli_fload`, `cli_gopen` (a real call into `load.c`'s `load` plus the whole Base Page cmdtail/default-FCB/argument-parse setup, see below), `cli_rmpd`, `clicmd_exit`, `prchar`/`crlf`/`prnum`/`prtime`/`prdisk`/`write_cstr`/`prcsm`/`prnam`/`prtyp`/`pruser`/`prcusp`/`prfilnam`/`conasn`) — see below | `f_createproc`/`f_setprior` stay plain boundary stubs (their own results are never read by anything downstream, so this doesn't truncate anything, see `command.c`'s own header comment); `cli_gopen`'s own chain-mode `cli_ld1` UDA hand-off block (real segment-relative addressing, resolved the same way as `PROC.RTM`/`ML.MEM`/`MAU.MEM`/`SHARE.MEM`) has no differential test, same reason as its own non-chain continuation past `prfilnam` — both need a real, matching directory entry `fileopen` can't be made to produce in any test in this project |
 | `src/kernel/FILE1.BDO` | `pererror`/`roderror`/`roferror`/`selerror` (+ internal `goerr`), `move`, `selectdisk`, `home`, `PASS_ARECORD`, `rdbuff`, `wrbuff`/`wrbufflg` (+ internal `diocomp`), `seekdir`/`seek`, `dmposition`, `GET_DMA`, `getdm`, `bdos_index`, `alloct`, `atran`, `GET_ATTS`, `GET_S1`, `GET_RRA`, `GET_RCNTA`, `getexta`, `gtfcba`, `getfcb`, `setfcb`, `cmpecs`/`CMPEC0`, `CHKSUM_FCB`, `SET_CHKSUM_FCB`, `RESET_CHECKSUM_FCB`, `CHEK_FCB`, `setcdisk`, `nowrite`, `setro`, `ckrodir`/`ckrofile`/`RO_TEST`, `checkwrite`, `getdptra`, `getmodnum`, `clrmodnum`, `CLR_EXT`, `setfwf`, `compcdr`, `setcdr`, `rddirbuf`, `setdata`/`setdir`/`setdma`, `dirtouser`, `MAKE_FCB_INV`, `CHK_INV_FCB`, `TST_INV_FCB`, `endofdir`, `setenddir`, `getallocbit`, `setallocbit`, `checksum`/`newchecksum`, `rddir`/`rddir0`, `wrdir` (the last 3 were blocked on `FILE3.BDO`'s own `FLUSH_FILE0`/`FLUSH_FILES`, now resolved — see that file's own status-table row; `subdh`, `checksum`'s own size check, folds directly into an `if` there instead of a standalone function), `check_fcb1`/`check_fcb` (`CHECK_FCB1`/`CHECK_FCB` — `CLOSE1` is ported now too, `src-c/kernel/file2.c`; `CHECK_FCB1`'s own `POP BX ;DISCARD RETURN ADDRESS` trick, same category as `PARSE.SUP`'s own `delim`, is translated as a plain boolean return instead — see `check_fcb1`'s own header comment for the full calling-convention writeup; `CHECK_FCB` is NOT dead, contrary to an earlier revision of this comment — `FILE4.BDO`'s own `func20`/`func21` are its own two real callers, both ported now too), non-`static` `dmposition`/`getdm`/`diocomp` (cross-file calls from `file3.c`'s own `diskwrite`/`func48`), and now `set_cdisk1`/`test_vector1` (split out of `setcdisk`/`test_vector` to take an explicit bit-position/shift-amount instead of always reading `BD_SELDSK`, for `file3.c`'s own `diskreset`) | — (every routine in this file is now ported) |
-| `src/kernel/FILE2.BDO` | `GET_NALBS`, `getblock` (+ internal `lefttst`/`righttst`/`rblok`/`rblok0`), `SEARCH`/`SEARCHN` (`search`/`search1`/`searchn`, + internal `searchi`/`searchi1`/`compext`/`swap_sdcnt`), `CLOSE`/`CLOSE1` (`close`/`close1`/`close_fcb`/`seekcopy`, + internal `get_dir_ext`/`restore_rc`/`set_rc`/`merge_word`/`merge_byte`, the last 3 now non-`static` for `FILE3.BDO`'s own `rseek`) — these 3 clusters ported but **not exercised by a differential test**, see `file2.c`'s own header comment: their own real cseg footprint, in the combined FILE1-4.BDO wrapper, runs well past 0xc00, directly overlapping where DATA.BDO's own dseg-relative fields (`BD_INFO`/`BD_SRCHA`/etc, the very fields these routines read/write) resolve to — code and the data it operates on colliding at the same flat address, not fixable by relocating just one side the way every earlier SD_RLR-style gap was; `initialize` (+ internal `scndm`/`test_dir`), `MAKE` (`make`, + internal `set_dcnt_dblk`/`copy_dir0`/`copy_dir2`), `DELETE` (`delet`, + internal `cpydirloc`/`init_xfcb_search`/`init_xfcb_search1`/`chk_wild`/`does_xfcb_exist`/`delete1_entry`/`delete2_entry`), `RENAME` (`rename_`, + internal `check_wild`/`check_wild0`/`copy_user_no`/`copy_dir`), `OPEN`/`OPEN1`/`opencopy` (its real top-level entry point is `FILE4.BDO`'s own `func15`, see that file's own row below), `openreel` (+ internal `sdcnt_eq_xdcnt`, non-`static` for `FILE3.BDO`'s own `fix_olist_item`), `delet0` (non-`static` for `FILE4.BDO`'s own `func22`/MAKE), and now `indicators` (non-`static` for `FILE4.BDO`'s own `func30`) — `initialize`/`make`/`set_dcnt_dblk`/`openreel`/`sdcnt_eq_xdcnt` confirmed clear of the DATA.BDO collision via `--symbols` (0x0a8a-0x0b74, 0x10b8-0x112c, 0x114d-0x11ed, and 0x10ce respectively, all outside dseg's own 0-0x1000 span), but `copy_dir0`/`copy_dir1`/`copy_dir2` (0xe50-0xe6d) and `open`/`OPEN1`/`opencopy` (0xf34-0xf3d) and `SWAP` (0xd1d) land inside it, same as `CLOSE1`'s own cluster, and `delet`/`rename_` weren't checked either way; no differential tests written for any of these yet either way (time, not always a technical blocker). `delet`'s own single-pass branch does `jmps delet0` right after `ckrodir`, relying on `ckrodir`'s own real ZF there being an incidental side effect of `RO_TEST`'s own `ADD BX,ROFILE` (always leaves ZF clear in practice) rather than a real not-found check -- not modeled as a flag, this port just always takes that branch's own fixed destination directly, see `delet`'s own header comment. `delet`'s own `DELETE1` label became its own function, `delete1_entry` (+ `DELETE2`'s own `delete2_entry`), since `rename_`'s own real asm calls straight into the middle of `DELETE`'s body as an ordinary subroutine. `searchi`/`SET_DCNT_DBLK`/`CHECK_WILD`/`SWAP`/`sdcnt_eq_xdcnt`/`COMPEXT`/`GET_DIR_EXT`/`RESTORE_RC`/`SET_RC` all made non-`static` for cross-file calls into them (the last 4 for `FILE3.BDO`'s own `rseek`). `openreel`'s own real `call make` is followed by a `jz openerr` that tests a flag `make`'s own tail (`setfwf`'s `or al,fwfmsk`) can never leave clear -- not modeled, same "unreachable" precedent as `cli_gopen`. **`FILE2.BDO` is now ported in full** -- the "30+ remaining labels" this row's own "missing" column used to list were re-audited label by label against every real one in the file (111 total) and every single one turned out to already map onto an already-ported cluster above (`DRV_LBL`/`INITIAL3`/`TEST_DIR*`/`scndm*` into `initialize`; `GET_DE1`-`3` into `GET_DIR_EXT`; `SAVE_DCNT_POS*`/`SWAP`/`SRCHN1`/`SEARCHNM`/`srch*` into `search`/`searchn` -- `srch`/`srchn` are literally the real-asm names already-ported `search`/`searchn` use; `dmset`/`DMSET1`/`fcbnzero`/`buffnzero`/`merge*` into `close_fcb`'s own merge logic; `openr0`-`2`/`OPENR3`/`openmod`/`openerr` into `openreel`'s own body; `RET8A`/`ret8b`-`ret13`/`LRET_EQ_FF`/`DONT_SAVE` are trivial internal return labels inside `DELETE`/`SEARCHN`) -- the count was simply never recomputed as each incremental pass (`initialize`, `MAKE`, `DELETE`, `RENAME`, `openreel`, `indicators`) chipped away at the original tally | — (every real routine in this file is ported; the DATA.BDO collision above is a *test-harness* gap, not missing C code) |
-| `src/kernel/FILE3.BDO` | `PACK_SDCNT`, `COMPARE`, `SEARCH_OLIST`/`SEARCH_LLIST`/`SEARCHN_LIST` (+ internal `search_listo`), `DELETE_ITEM`, `CREATE_ITEM`, `SET_OLIST_ITEM`, `TST_TBL_LMT`, `REMOVE_LOCKS`, `FLUSH_FILES`/`FLUSH_FILE0`, `INC_PDCNT`, `CURSELECT` (+ internal `select_`), `TST_OLIST`/`CHK_OLIST` (+ internal `chk_olist0`), `COMPARE_PDS`, `CHK_PASSWORD`/`CHK_PWS` (+ internal `get_dir_mode`/`cmp_pw`/`get_xfcb`/`get_xfcb0`/`chk_pw`), and now `OPEN`'s own remaining dependencies: `SET_SELDSK`, `reselect`, `parsave`/`parsave33`/`parsave33r` (the first two really BDOSIF.BDO's own, ported here for lack of a `bdosif.c`), `COPY_DMA_IN`/`COPY_DMA_OUT`, `STAMP1`/`STAMP2` (+ internal `stamp3`), `COUNT_OPENS`, `CREATE_OLIST_ITEM`, `FIX_OLIST_ITEM` (`MAKE`'s own `openreel`, `file2.c`), and now `diskread`/`sqread`, `diskwrite`/`sqwrite` (+ internal `test_disk_fcb`/`test_lock`/`move_arecord`/`reset_fwf`), `chk_xfcb_password1`, `init_xfcb`/`init_xfcb0`, and `set_pw` (`FILE4.BDO`'s own `func19`-`func23`, see that file's own row below), `diskreset` (`func13`/`func14`/`func37`), `rseek`/`rseek1` (the latter now split out for `FILE4.BDO`'s own `func40`), `parsave36`/`parsave36r`, `rdread`, `rdwrite` (`FILE4.BDO`'s own `func33`/`func34`), `getfilesize`/`setrandom` (+ internal `cmperr`, `FILE4.BDO`'s own `func35`/`func36`), `tmp_select` (`FILE4.BDO`'s own `func46`), and now `lock_` (+ internal `incr_rr`/`save_rr`/`reset_rr`, `count_locks`, `check_free`, `get_lockadd`, `lock_err_apply`, `free_lock`, `set_lock`, `FILE4.BDO`'s own `func42`/`func43`) — `CURSELECT` checked clear of the DATA.BDO collision (resolves to 0x15e3+, past dseg's own 0x1000-byte length entirely), and so is this pass's entire new cluster (`func15`'s own row below has the detail), but none of these have a differential test yet. An earlier revision of this comment claimed `CHK_OLIST` "relies on its own caller having pushed a word for it to pop partway through" -- re-reading it closely this pass, that's wrong: the `pop dx`/`push dx` pair around its own `compare_pds` call is just ordinary register-save plumbing (freeing a register across a call, then restoring it before any real `ret`), not an implicit-caller convention; `openx06` (`FILE4.BDO`) and `compare_pds` are both ported now; `chk_pw`'s own `CHK_PW1` tail never returns normally (same as `openx06`), so `chk_pw`/`chk_password`/`chk_pws` all return a plain boolean instead of literally discarding anything, same convention `check_fcb1` established; `get_dir_mode`/`get_xfcb`/`cmp_pw` all made non-`static` for `func15`'s own cross-file calls into them; and now `PR_TERM` (ported as `pr_term`; its own `call func48` resolves fine — `func48` is a real label, `FILE4.BDO`'s own `FUNC48`, uppercase; a first, case-sensitive grep for lowercase `func48` across `/src` turned up nothing and briefly looked like a genuine DRI-source bug before rechecking case), `XCURSELECT` (`xcurselect`, genuinely reaches `selerror`/`goerr` for real — unlike `select_`'s own always-unreachable-past-`selectdisk` tail, `CURSELECT`'s `TEST_FF_DISK` branch calls `selerror` directly whenever `BD_SELDSK+1==0`, independent of any boundary-stub artifact), and `RESELECTX` (`reselectx`, a second entry point into `reselect`'s own body via a shared `reselect_tail` helper both now call — see `cmp_pw`'s own `std` note below, which this row's own earlier "not identified by name" caveat was about: `cmp_pw` was already ported in an earlier pass, this was just a stale doc note) | `TMP_SELECT` was already ported (`tmp_select`, `FILE4.BDO`'s own `func46`, see that file's own row); the rest of the file not reconned this pass |
+| `src/kernel/FILE2.BDO` | `GET_NALBS`, `getblock` (+ internal `lefttst`/`righttst`/`rblok`/`rblok0`), `SEARCH`/`SEARCHN` (`search`/`search1`/`searchn`, + internal `searchi`/`searchi1`/`compext`/`swap_sdcnt`), `CLOSE`/`CLOSE1` (`close`/`close1`/`close_fcb`/`seekcopy`, + internal `get_dir_ext`/`restore_rc`/`set_rc`/`merge_word`/`merge_byte`, the last 3 now non-`static` for `FILE3.BDO`'s own `rseek`) — **the underlying DATA.BDO cseg/dseg collision is now resolved for real** (`file1.c`/`file2.c`/`file3.c`/`file4.c` all threaded a new `ds_bdos` parameter through every function touching a `BD_*` field, converting every such access to `mem_*_seg`/`mem_seg_addr` against it -- `defs.h`'s own new `mem_seg_addr` helper, zero behavior change for every existing caller since they all pass `ds_bdos=0`, which degenerates back to the exact flat addresses this project used before). `swap_sdcnt` (the real asm's own `SWAP`, previously the simplest routine in this exact collision range) now has a real differential test proving it (`test_file2.py`'s own `DS_BDOS`/`run_reference_segmented`, `segmented=True` with a genuine non-degenerate `DS`). `close`/`close1`/`search`/`searchn`/`open`/`open1`/`opencopy`/`copy_dir0`-`2` are unblocked the exact same way but don't have their own new differential tests yet -- "resolved in principle, not yet written," same category as several other clusters below. Previously, this gap read: their own real cseg footprint, in the combined FILE1-4.BDO wrapper, runs well past 0xc00, directly overlapping where DATA.BDO's own dseg-relative fields (`BD_INFO`/`BD_SRCHA`/etc, the very fields these routines read/write) resolve to — code and the data it operates on colliding at the same flat address, not fixable by relocating just one side the way every earlier SD_RLR-style gap was; `initialize` (+ internal `scndm`/`test_dir`), `MAKE` (`make`, + internal `set_dcnt_dblk`/`copy_dir0`/`copy_dir2`), `DELETE` (`delet`, + internal `cpydirloc`/`init_xfcb_search`/`init_xfcb_search1`/`chk_wild`/`does_xfcb_exist`/`delete1_entry`/`delete2_entry`), `RENAME` (`rename_`, + internal `check_wild`/`check_wild0`/`copy_user_no`/`copy_dir`), `OPEN`/`OPEN1`/`opencopy` (its real top-level entry point is `FILE4.BDO`'s own `func15`, see that file's own row below), `openreel` (+ internal `sdcnt_eq_xdcnt`, non-`static` for `FILE3.BDO`'s own `fix_olist_item`), `delet0` (non-`static` for `FILE4.BDO`'s own `func22`/MAKE), and now `indicators` (non-`static` for `FILE4.BDO`'s own `func30`) — `initialize`/`make`/`set_dcnt_dblk`/`openreel`/`sdcnt_eq_xdcnt` confirmed clear of the DATA.BDO collision via `--symbols` (0x0a8a-0x0b74, 0x10b8-0x112c, 0x114d-0x11ed, and 0x10ce respectively, all outside dseg's own 0-0x1000 span), but `copy_dir0`/`copy_dir1`/`copy_dir2` (0xe50-0xe6d) and `open`/`OPEN1`/`opencopy` (0xf34-0xf3d) and `SWAP` (0xd1d) land inside it, same as `CLOSE1`'s own cluster, and `delet`/`rename_` weren't checked either way; no differential tests written for any of these yet either way (time, not always a technical blocker). `delet`'s own single-pass branch does `jmps delet0` right after `ckrodir`, relying on `ckrodir`'s own real ZF there being an incidental side effect of `RO_TEST`'s own `ADD BX,ROFILE` (always leaves ZF clear in practice) rather than a real not-found check -- not modeled as a flag, this port just always takes that branch's own fixed destination directly, see `delet`'s own header comment. `delet`'s own `DELETE1` label became its own function, `delete1_entry` (+ `DELETE2`'s own `delete2_entry`), since `rename_`'s own real asm calls straight into the middle of `DELETE`'s body as an ordinary subroutine. `searchi`/`SET_DCNT_DBLK`/`CHECK_WILD`/`SWAP`/`sdcnt_eq_xdcnt`/`COMPEXT`/`GET_DIR_EXT`/`RESTORE_RC`/`SET_RC` all made non-`static` for cross-file calls into them (the last 4 for `FILE3.BDO`'s own `rseek`). `openreel`'s own real `call make` is followed by a `jz openerr` that tests a flag `make`'s own tail (`setfwf`'s `or al,fwfmsk`) can never leave clear -- not modeled, same "unreachable" precedent as `cli_gopen`. **`FILE2.BDO` is now ported in full** -- the "30+ remaining labels" this row's own "missing" column used to list were re-audited label by label against every real one in the file (111 total) and every single one turned out to already map onto an already-ported cluster above (`DRV_LBL`/`INITIAL3`/`TEST_DIR*`/`scndm*` into `initialize`; `GET_DE1`-`3` into `GET_DIR_EXT`; `SAVE_DCNT_POS*`/`SWAP`/`SRCHN1`/`SEARCHNM`/`srch*` into `search`/`searchn` -- `srch`/`srchn` are literally the real-asm names already-ported `search`/`searchn` use; `dmset`/`DMSET1`/`fcbnzero`/`buffnzero`/`merge*` into `close_fcb`'s own merge logic; `openr0`-`2`/`OPENR3`/`openmod`/`openerr` into `openreel`'s own body; `RET8A`/`ret8b`-`ret13`/`LRET_EQ_FF`/`DONT_SAVE` are trivial internal return labels inside `DELETE`/`SEARCHN`) -- the count was simply never recomputed as each incremental pass (`initialize`, `MAKE`, `DELETE`, `RENAME`, `openreel`, `indicators`) chipped away at the original tally | — (every real routine in this file is ported; the DATA.BDO collision above is a *test-harness* gap, not missing C code) |
+| `src/kernel/FILE3.BDO` | `PACK_SDCNT`, `COMPARE`, `SEARCH_OLIST`/`SEARCH_LLIST`/`SEARCHN_LIST` (+ internal `search_listo`), `DELETE_ITEM`, `CREATE_ITEM`, `SET_OLIST_ITEM`, `TST_TBL_LMT`, `REMOVE_LOCKS`, `FLUSH_FILES`/`FLUSH_FILE0`, `INC_PDCNT`, `CURSELECT` (+ internal `select_`), `TST_OLIST`/`CHK_OLIST` (+ internal `chk_olist0`), `COMPARE_PDS`, `CHK_PASSWORD`/`CHK_PWS` (+ internal `get_dir_mode`/`cmp_pw`/`get_xfcb`/`get_xfcb0`/`chk_pw`), and now `OPEN`'s own remaining dependencies: `SET_SELDSK`, `reselect`, `parsave`/`parsave33`/`parsave33r` (the first two really BDOSIF.BDO's own, ported here for lack of a `bdosif.c`), `COPY_DMA_IN`/`COPY_DMA_OUT`, `STAMP1`/`STAMP2` (+ internal `stamp3`), `COUNT_OPENS`, `CREATE_OLIST_ITEM`, `FIX_OLIST_ITEM` (`MAKE`'s own `openreel`, `file2.c`), and now `diskread`/`sqread`, `diskwrite`/`sqwrite` (+ internal `test_disk_fcb`/`test_lock`/`move_arecord`/`reset_fwf`), `chk_xfcb_password1`, `init_xfcb`/`init_xfcb0`, and `set_pw` (`FILE4.BDO`'s own `func19`-`func23`, see that file's own row below), `diskreset` (`func13`/`func14`/`func37`), `rseek`/`rseek1` (the latter now split out for `FILE4.BDO`'s own `func40`), `parsave36`/`parsave36r`, `rdread`, `rdwrite` (`FILE4.BDO`'s own `func33`/`func34`), `getfilesize`/`setrandom` (+ internal `cmperr`, `FILE4.BDO`'s own `func35`/`func36`), `tmp_select` (`FILE4.BDO`'s own `func46`), and now `lock_` (+ internal `incr_rr`/`save_rr`/`reset_rr`, `count_locks`, `check_free`, `get_lockadd`, `lock_err_apply`, `free_lock`, `set_lock`, `FILE4.BDO`'s own `func42`/`func43`) — `CURSELECT` checked clear of the DATA.BDO collision (resolves to 0x15e3+, past dseg's own 0x1000-byte length entirely), and so is this pass's entire new cluster (`func15`'s own row below has the detail), but none of these have a differential test yet. An earlier revision of this comment claimed `CHK_OLIST` "relies on its own caller having pushed a word for it to pop partway through" -- re-reading it closely this pass, that's wrong: the `pop dx`/`push dx` pair around its own `compare_pds` call is just ordinary register-save plumbing (freeing a register across a call, then restoring it before any real `ret`), not an implicit-caller convention; `openx06` (`FILE4.BDO`) and `compare_pds` are both ported now; `chk_pw`'s own `CHK_PW1` tail never returns normally (same as `openx06`), so `chk_pw`/`chk_password`/`chk_pws` all return a plain boolean instead of literally discarding anything, same convention `check_fcb1` established; `get_dir_mode`/`get_xfcb`/`cmp_pw` all made non-`static` for `func15`'s own cross-file calls into them; and now `PR_TERM` (ported as `pr_term`; its own `call func48` resolves fine — `func48` is a real label, `FILE4.BDO`'s own `FUNC48`, uppercase; a first, case-sensitive grep for lowercase `func48` across `/src` turned up nothing and briefly looked like a genuine DRI-source bug before rechecking case), `XCURSELECT` (`xcurselect`, genuinely reaches `selerror`/`goerr` for real — unlike `select_`'s own always-unreachable-past-`selectdisk` tail, `CURSELECT`'s `TEST_FF_DISK` branch calls `selerror` directly whenever `BD_SELDSK+1==0`, independent of any boundary-stub artifact), and `RESELECTX` (`reselectx`, a second entry point into `reselect`'s own body via a shared `reselect_tail` helper both now call — see `cmp_pw`'s own `std` note below, which this row's own earlier "not identified by name" caveat was about: `cmp_pw` was already ported in an earlier pass, this was just a stale doc note) | `TMP_SELECT` was already ported (`tmp_select`, `FILE4.BDO`'s own `func46`, see that file's own row); — (every routine in this file is now ported, confirmed by a fresh full recon rather than assumed; see the deferred-items list's own note on this row) |
 | `src/kernel/FILE4.BDO` | `func24`, `func25`, `func29`, `func32`, `FUNC44`, `FUNC45`, `func51`, `func52`, `SET_ARET`/`openx06`, `func15` (BDOS OPEN) + its own `OPENX`/`OPENX0`-`OPENX09` cascade, `func16` (BDOS CLOSE) + `FUNC48` (flush buffers), `func17`/`func18` (search for first/next occurrence of a file, + internal `csearch`/`reselectx`), and now `func19` (delete), `func20`/`func21` (sequential read/write), `func22` (MAKE), `func23` (RENAME) — `func16` replicates `CHECK_FCB1`'s own push/pop convention by hand too, mapping straight onto `check_fcb1`'s boolean return since its own fallback target (`CLOSE00`) is a trivial `set_aret`-and-return; `func17`/`func18`'s own shared `CSEARCH` always runs `dirtouser` after `search`/`searchn` via a manual stack trick (unconditional, unlike every other such trick in this port); `func20`/`func21` are `CHECK_FCB`'s own two real callers (an earlier revision of this comment wrongly called `CHECK_FCB` dead, see `check_fcb1`'s own header comment, `file1.c`); `func22` reuses `func15`'s own `OPENX1`/`OPENX03`/`OPENX08` cascade directly (refactored into their own functions for this); each of `func19`-`func23` calls into `file2.c`'s own colliding `close`/`close1`/`search`/`searchn`/`delet`/`rename_`/`open` clusters somewhere in its chain, so none of them get a new differential test either, same as `func15`; and now `func13`/`func14` (reset disk system/select disk info) + `func37` (reset drive, + internal `reset_37`) — reuse `FILE3.BDO`'s own new `diskreset` and `file1.c`'s own `TEST_VECTOR1`/`SET_CDISK1`, both split out of `test_vector`/`setcdisk` to take an explicit shift-amount/bit-position instead of always reading `BD_SELDSK`; `func13` calls `RESET_37` directly (`func37`'s own real continuation, same "call into the middle" pattern as `rename_`'s own `CALL DELETE1`); `TEST_VECTOR1`/`SET_CDISK1` land inside the DATA.BDO collision range, so this cluster gets no new differential test either, despite `diskreset`/`func13`/`func14`/`func37` themselves being individually clear of it. `func38`/`func39`/`FUNC41`/`FUNC47`/`FUNC49`/`FUNC50` have no body of their own at all (`EQU FUNCRET`, a dispatch-table alias onto `BDOSIF.BDO`'s own empty `funcret`), nothing to port; and now `func33`/`func34` (random read/write) — thin wrappers (`parsave36r` + `CHECK_FCB`, one of its own real callers too, same as `func20`/`func21`, + a tail call into `FILE3.BDO`'s own `rseek`-based `rdread`/`rdwrite`); clear of the collision themselves, but `parsave36` (lands inside it, same as `parsave`/`parsave33`) doesn't, so no new differential test; and now `func30` (set file indicators) — another thin wrapper (`parsave33`/`copy_dma_in`/`CHECK_WILD`/`RESELECTX`/`CHK_PASSWORD` + a tail call into `FILE2.BDO`'s own `indicators`), clear of the collision itself but `indicators` isn't; and now `func35`/`func36` (file size, set random record) — thin wrappers around `FILE3.BDO`'s own `getfilesize`/`setrandom`; `func35` calls into `file2.c`'s own colliding `search`/`searchn` transitively, but `func36`/`setrandom`/`cmperr` don't touch that cluster at all, a legitimate (if not yet written) differential-test candidate; and now `func40` (write random with zero fill) + `FUNC46` (get disk free space) — `func40` calls `rseek1`/`diskwrite` directly (not `rseek`/`rdwrite`, which would re-zero `BD_SEQIO`); `FUNC46` counts zero bits in the disk's own allocation vector via `FILE2.BDO`'s own `GET_NALBS`, converting block count to record count in a wider type instead of chasing the real asm's own split 16+8-bit shift; both land clear of the collision, but `diskwrite`/`GET_NALBS` don't, so no new differential tests; and now `func42`/`func43` (lock/unlock record) — thin wrappers into `FILE3.BDO`'s own `lock_`; `LOCK_PERR` (the real asm's own `MOV SP,LOCK_SP` stack-unwind entry) turned out to be provably dead code, nothing anywhere calls it, so the whole cluster's own manual-stack trick reduces to the ordinary `POP`/`POP`-discard category already modeled elsewhere, no real stack manipulation needed. **`FILE4.BDO` is now ported in full** — every real BDOS dispatch function has a C counterpart; `func38`/`func39`/`FUNC41`/`FUNC47`/`FUNC49`/`FUNC50` are bare `EQU FUNCRET` dispatch-table aliases with no body of their own (straight onto `BDOSIF.BDO`'s own empty `funcret: ret`), and `GOBACK` is a 2-instruction tail jump into `BDOSIF.BDO`'s own module-dispatch epilogue (`BDOS_RETURN`) — both out of scope by definition, not "remaining work" | — (every routine in this file is now ported) |
 | `src/kernel/DATA.BDO` | — | pure data (BDOS-wide scratch fields + the `XERR_LIST` error-message table) — zero real code, nothing to port |
 | `src/kernel/BDOSIF.BDO` | `init` (`src-c/kernel/bdosif.c`) | `entry`'s own far `RET` (`retf` — entered via a far call from elsewhere) and `mpmif`/`xiosif`'s own indirect far `CALL` through a memory operand (`callf cs:dword ptr .supervisor`/`.xiosmod`) — neither exists in `tools/i86sim.py` yet, but this is narrower than it first looks: `entry:`'s/`CALL_BDOS`'s own `call cs:btab_addr[si]` dispatch into the BDOS function table is an ordinary *near* indirect call, already supported (added for `ABORT.RTM`'s `call cs:abort_tab[di]`/`DSPTCH.RTM`'s own near indirect calls) — and since `FILE1-4.BDO`'s own BDOS functions (`func13`-`func52`, all ported now, see that file's own row) are exactly what that table dispatches *into*, nothing there is blocked by this gap; the dependency runs the other way (`BDOSIF.BDO` calls into them, not vice versa, so porting it just wires up work already done rather than redoing any of it). `init` itself (the module's own `jmp init`/`jmp entry` header's first target) does the same `sysdat`/`supervisor` copy as `CIOIF.CIO`/`MEMIF.MEM`'s own `init`, then creates/opens/writes the MX disk queue via three real `mpmif` calls, traced to `QUE1.RTM`'s own already-ported `makeq_entry`/`openq_entry`/`writeq_entry` (`que1.c`) — see this file's own changelog entry for why `mpmif`'s own real indirect far call couldn't be driven for real in the differential test (a fresh near dispatcher in the test wrapper only, not a gap in `bdosif.c` itself). `getdiskmx`/`CALL_BDOS`/the whole SHELL mechanism (`SHELL`/`CBDOS`/`SHELL_ERR`/`SHELL_RTN`/`INCR_RR`/`SAVE_RR`/`RESET_RR`/`TST_WRT`/`MULT_IO`/`COMPARE_RECS`/`BDOS_RETURN`) — not reconned past the far-call/far-ret gap yet; `parsave`/`parsave33`/`parsave36` are ported now too (`src-c/kernel/file3.c`, for `FILE4.BDO`'s own `func15`/`func33`/`func34` etc. — an earlier revision of this row still listed them as deferred here, which was stale), leaving `XCRLF`/`XPRINT`/`staret`/`funcret`/`setlret1`/`parunsave`/`entryzero`/`mpmif`/`xiosif`/the `bootf`-family boundary stubs (`homef`/`seldskf`/.../`flush`) — each either collapses to register setup before a boundary-stub tail call (already accounted for directly inline in `file1.c`/`file3.c` where it matters) or is itself blocked by the same far-call gap (`mpmif`/`xiosif` themselves); that's the module's own real remaining scope |
@@ -313,23 +313,38 @@ routine translation — revisit once that machinery exists):
   same helpers already used in `ml.c`/`proc.c`/`mau.c`/`share.c`/
   `load.c`), and `FILE2.BDO`/`FILE4.BDO` are both now **fully ported**
   (see their own status-table rows above) — this bullet used to
-  describe a real blocker but no longer reflects the tree. Their only
-  genuinely remaining gap is the `DATA.BDO` cseg/dseg test-harness
-  collision, which blocks *differential testing* of a handful of
-  already-ported clusters (`close`/`close1`/`search`/`searchn`,
-  `open`/`opencopy`, `copy_dir0-2`, `SWAP`, plus a few `FILE3.BDO`/
-  `FILE4.BDO` thin wrappers that call into them transitively), not any
-  further C code. (`DATA.BDO` is confirmed pure data, see its own
-  status-table row above.) `src/kernel/CHARIO.CIO` (the large, deeply
+  describe a real blocker but no longer reflects the tree. The
+  `DATA.BDO` cseg/dseg test-harness collision that used to block
+  *differential testing* of a handful of already-ported clusters
+  (`close`/`close1`/`search`/`searchn`, `open`/`opencopy`,
+  `copy_dir0-2`, `SWAP`, plus a few `FILE3.BDO`/`FILE4.BDO` thin
+  wrappers that call into them transitively) is **also now resolved**
+  -- `file1.c`/`file2.c`/`file3.c`/`file4.c` all thread a real
+  `ds_bdos` segment parameter through every `BD_*`-touching function
+  now (see `FILE2.BDO`'s own status-table row for the detail), so
+  these clusters can get real segmented differential tests same as
+  `swap_sdcnt`'s new one; most of them (`close`/`search`/`open`/
+  `copy_dir0-2`) just don't have one *written* yet. (`DATA.BDO` is
+  confirmed pure data, see its own status-table row above.) `src/kernel/CHARIO.CIO` (the large, deeply
   interdependent console-input state machine this bucket used to defer
   — `coninit`/`attach`/`conbrk`/`conin`/`chkctl`/`echoc`/`tabout`/...),
   `src/kernel/COMMAND.SUP` (its own `chain_entry`/`clicmd_entry`
-  hit the same real segment-relative-addressing gap `PROC.RTM`/`ML.MEM`
-  did, once actually read in depth), `src/kernel/FILE1.BDO` (the
+  **now fully ported, chain mode included** -- see this file's own
+  status-table row and the changelog entry below), `src/kernel/FILE1.BDO` (the
   smallest of the four BDOS filesystem files, reconned and mostly
-  ported), and `src/kernel/FILE3.BDO` (only the one cluster
-  `FILE1.BDO`'s own `CHECK_FCB` needed, not the whole file -- see
-  below) are since reconned — see
+  ported), and `src/kernel/FILE3.BDO` (**stale**: its own status-table
+  row's deferred column still said "the rest of the file not reconned
+  this pass" as of the `PR_TERM`/`XCURSELECT`/`RESELECTX` changelog
+  entry, but a fresh, full recon found nothing left -- every label in
+  the real file is either a routine this row's ported column already
+  names, an internal jump target inside one of them (`SELECT`/
+  `SELECT1`/`SELECT2`, `WRITE`/`WRITE1`, `LOCK`/`LOCK_ERR`, etc. --
+  confirmed via a cross-file-call-target sweep against every other
+  `/src/kernel` file: every label any *other* file calls into is
+  already ported, and no bare `CALL`/`JMPS` to these internal-only
+  names exists anywhere), or ported elsewhere in this tree already
+  (`REMOVE_DRIVE`, `file1.c`). `src/kernel/FILE3.BDO` is now **fully
+  ported**, same as `FILE2.BDO`/`FILE4.BDO`) are since reconned — see
   their own status-table rows and the Tier 3
   rollout note below. The `FILE*.BDO`
   files total ~4900 lines of BDOS file-system internals and are
@@ -3556,3 +3571,179 @@ committing to the ~21k total lines across `src/kernel`+`src/loader`+
   to the same ambient value in the real system anyway. Full existing
   suite stays green; `make clean && make build` stays green (45
   files now, up from 44).
+
+- **`COMMAND.SUP`'s `chain_entry`/chain-mode `clicmd_entry`, closing
+  out the real segment-relative-addressing gap flagged for this file
+  since the `CHARIO.CIO` recon pass.** All three real differences
+  between chain mode and the ordinary (ported-last-session) path are
+  gated on `SD_CLI_CHAIN` (set once in `clicmd_entry`, from `dx==0`):
+
+  1. `cli_copy`'s own command-tail source: chain mode copies 128
+     bytes from the *calling* process's own DMA buffer
+     (`cli_dma_seg:cli_dma_ofst`, genuinely segment-relative on the
+     source side, `mem_r8_seg`) instead of the caller's own
+     `CLICB.DEF`-shaped buffer.
+
+  2. `cli_gopen`'s own `cli_ld1` block: chain mode hands the
+     *current* process's own live UDA memory off to the newly
+     allocated child PD in place, rather than letting `f_load` /
+     `load_entry` allocate fresh UDA memory -- but the *running*
+     process is still executing out of that same memory, so it first
+     copies its own live UDA content onto a shared scratch block
+     (`SYSDAT_INITUDA`, the exact same block `INIT.SUP`'s own `init`
+     reserves for its own init process at cold boot -- probed
+     directly, real raw `SYSDAT.FMT` offset 0x6C0, added to `defs.h`)
+     and relocates its own `p_uda` there, continuing to run from the
+     scratch block while its original memory now belongs entirely to
+     the new child. Both the UDA copy and the relocation are real
+     segment-relative addressing (`mem_r8_seg`/`mem_w8_seg` against a
+     genuine runtime segment, not a fixed `SD_*` flat address) -- the
+     exact gap this file's own header comment used to say chain mode
+     was blocked on, resolved the same way `PROC.RTM`/`ML.MEM`/
+     `MAU.MEM`/`SHARE.MEM` already were. The real asm's own
+     accompanying `mov ss,ax` has no C equivalent (same as every
+     other real stack switch in this port, `init.c`'s own header
+     comment); `load()` is then called with `load_chain=1` and
+     `bx=cli_pd` (not `bx=0`) -- `load.c`'s own `cload_entry` already
+     documents this exact `bx=PD` convention, inlined here directly
+     rather than going through that thin wrapper, same as the
+     ordinary path already inlines `load_entry`'s own `bx=0`.
+
+  3. `clicmd_exit`'s own tail: if chain mode set `SD_CLI_TERM` (via a
+     new `cli_qful` helper, shared by both the success *and*
+     `e_q_full` exits out of `cli_checkque` -- an existing bug in this
+     port, not the real asm: the `e_q_full` exit used to skip straight
+     to `clicmd_exit` without the chain/term check `cli_qful` now
+     applies, harmless before since `cli_chain` was always false),
+     the real asm's own `jmp mpmif(f_terminate)` is a true tail jump
+     that never returns to `clicmd_exit`'s own caller in the real
+     system at all. `f_terminate` is a boundary-stub no-op everywhere
+     else in this project, so this port just clears the documented
+     `p_flag` bits and returns a fixed `(bx,cx)=(0,0)` -- an
+     "undefined artifact, fixed choice" (same category as `init.c`'s
+     own `io_maxconsole`/`io_maxlist`), since no real caller ever
+     actually observes it.
+
+  `tests/src-c/test_command.py` adds `chain_entry` cases against the
+  *existing* `command_wrapper.A86` (no new wrapper needed: neither the
+  DMA-copy source nor the `clicmd_exit` tail needs `segmented=True` --
+  the DMA source's own offset can be freely chosen to avoid colliding
+  with anything under non-segmented testing, same convention as every
+  other flat `SD_*`/`CLI_*` field in this file) covering the no-RSP-
+  match path (through `cli_fload`'s own real `fileopen` failure, same
+  as the existing non-chain case) and the RSP-dispatch-success path
+  (verifying `cli_term` gets set and that `clicmd_exit`'s own chain+
+  term tail genuinely skips `clirls`/`mxwrite` -- not asserting on the
+  post-tail `bx`/`cx`, a documented fixed artifact with no real
+  significance to check). `cli_gopen`'s own `cli_ld1` block itself has
+  no differential test, same reason as its own non-chain continuation
+  past `prfilnam` already didn't: both need a real, matching directory
+  entry `fileopen` can't be made to produce in any test in this
+  project. Full existing suite stays green; `make clean && make
+  build` stays green (45 files, unchanged -- no new files this pass).
+
+- **Documentation fix: `src/kernel/FILE3.BDO` is fully ported, same
+  stale-note pattern as `FLUSH_FILE0`/`SUPIF.SUP` earlier this
+  session.** Its own status-table row's deferred column still read
+  "the rest of the file not reconned this pass," left over from the
+  `PR_TERM`/`XCURSELECT`/`RESELECTX` changelog entry a few passes
+  back. A fresh recon (every real label in the file, cross-checked
+  against both `file3.c`'s own exported names and a sweep of every
+  *other* `/src/kernel` file's own `CALL`/`JMPS` targets into
+  `FILE3.BDO`) found nothing left to port: every externally-called
+  label already has a C counterpart, and every label with no
+  cross-file caller turned out to be an internal jump target inside
+  an already-ported routine (`SELECT`/`SELECT1`/`SELECT2` inside
+  `select_`, `WRITE`/`WRITE1` inside `diskwite`, `LOCK`/`LOCK_ERR`
+  inside `lock_`, etc. -- confirmed by grepping for a bare
+  `CALL`/`JMPS` to each one and finding none outside its own parent
+  routine's body) or ported in a different file already
+  (`REMOVE_DRIVE`, `file1.c`). No code changed here, only the status
+  table and deferred-items list, to bring them back in line with what
+  was actually already in the tree.
+
+- **The `DATA.BDO` cseg/dseg test-harness collision, resolved for
+  real: `file1.c`/`file2.c`/`file3.c`/`file4.c` now take a genuine
+  segment parameter (`ds_bdos`) for every `BD_*`-field access.** This
+  was the user's own explicit choice between two options laid out
+  for them: a cheap fix confined to the test harness alone (relocate
+  the reference assembly's own code bytes to a non-colliding flat
+  address, zero C changes) versus making the C code itself
+  segment-aware for real, since it might matter for the eventual
+  linking/booting work independent of this one test gap -- they chose
+  the latter, twice, after both the cost estimate and a follow-up
+  correctness-risk finding (see below) were raised.
+
+  The collision itself: this combined module's own `cseg` (bundling
+  `BDOSIF.BDO`+`FILE1-4.BDO`, ~0x2659 bytes) and `DATA.BDO`'s own real
+  field data (the `BD_*` constants, real raw offsets within the
+  combined `UDA.FMT`+`SYSDAT.FMT`+`DATA.BDO` dseg, confirmed real via
+  `--symbols`, not harness-chosen like `SD_*`/`CLI_*`/`UDA_*`
+  elsewhere) share one flat address space in every existing wrapper's
+  own non-segmented convention -- any routine whose own code lands
+  inside dseg's `[0, 0x1000)` window gets its own instructions
+  corrupted the moment that window's real field data gets laid over
+  it. Confirmed via a cross-file-call-target sweep (same technique as
+  this session's earlier `FILE3.BDO` staleness fix) that the entire
+  call graph closes within these four files, plus exactly one external
+  call site (`command.c`'s own `fileopen`, into `func15`).
+
+  A genuine data-flow subtlety surfaced along the way and was worked
+  through, not glossed over: some `BD_*` fields (`BD_FREE_ROOT`,
+  `BD_OPEN_ROOT`, `BD_LOCK_ROOT`) are linked-list *roots*, and the
+  obvious worry was that chasing their own stored pointers (`bx =
+  mem_r16(mem, bx)`-style, inside `search_listo`/`create_item`/etc.)
+  would also need `ds_bdos`, since those pointers lead to the actual
+  list nodes. Checked directly against `tests/src-c/test_file3.py`'s
+  own existing, already-passing setup: it places every such node at
+  an ordinary harness-chosen flat scratch address (`0x4100`+), *not*
+  within `DATA.BDO`'s own dseg -- confirmed by `file3.c`'s own header
+  comment too ("MP/M-86's BDOS module has no private DSEG of its own
+  at all... every one of its scratch fields... really is SYSDAT-
+  resident on real hardware"). So the real rule turned out to be
+  exactly the simpler one originally assumed: only a *literal* `BD_*`
+  identifier used as an address needs `ds_bdos`; any value obtained by
+  *dereferencing* one (an FCB pointer from `BD_INFO`, a chased list
+  node from `BD_OPEN_ROOT`, etc.) is already a final, ordinary flat
+  address needing no further adjustment -- these pointed-to buffers
+  simply aren't part of the colliding region, confirmed structurally,
+  not assumed.
+
+  Mechanically: every function touching a `BD_*` field directly or
+  transitively gained a new `uint16_t ds_bdos` parameter (added via a
+  scripted transform across all ~155 affected functions/~580 access
+  sites, then individually verified); every `mem[BD_X]`/`mem_r16(mem,
+  BD_X)`/`mem_w16(mem, BD_X, ...)` became the `_seg` form against it;
+  a handful of generic, already-flat address-taking helpers (`move`/
+  `compare`/`cmpec0`) stayed untouched on purpose -- they operate on
+  addresses their *callers* already resolve, so the few call sites
+  passing a bare `BD_*` constant directly now wrap it with a new,
+  pure address-only helper, `mem_seg_addr` (`defs.h`), instead of
+  threading `ds_bdos` into those generic helpers too. 11 functions
+  that turned out to touch no `BD_*` field at all, directly or
+  transitively (`diocomp`/`seek`/`ro_test`/`chk_wild`/`tst_tbl_lmt`/
+  `cmperr`/`setrandom`/`func48`/`func25_entry`/`func32_entry`/
+  `func44_entry`/`func45_entry`/`func51_entry`), had the otherwise-
+  unused parameter removed again -- caught automatically by
+  `-Wunused-parameter` under this project's own `-Werror` build, the
+  same mechanical safety net that caught every signature/call-site
+  mismatch along the way. `command.c`'s own `fileopen` passes
+  `ds_bdos=0` into `func15` (its one external call site), matching
+  its own existing flat `BD_INFO`/`BD_ARET` convention exactly.
+
+  Every existing differential test across all four files (plus
+  `test_command.py`) needed its own `ds_bdos=0` ctypes argument added
+  to stay consistent with the now-changed C signatures -- confirmed to
+  reproduce every existing result bit-for-bit (degenerate `ds_bdos=0`
+  is definitionally identical to the old flat addressing), not just
+  assumed. One new test was added to prove the fix does something
+  real: `swap_sdcnt` (`test_file2.py`), the simplest routine in the
+  collision range, now gets a genuine `segmented=True` reference run
+  with a real, non-degenerate `DS` (`DS_BDOS=0x300`, chosen clear of
+  this wrapper's own ~0x2659-byte cseg) -- the first differential test
+  this project has ever had for any routine in this cluster.
+  `close`/`close1`/`search`/`searchn`/`open`/`open1`/`opencopy`/
+  `copy_dir0`-`2` are unblocked the identical way but don't have their
+  own new tests written yet (a real follow-up, not a technical
+  blocker). Full existing suite stays green; `make clean && make
+  build` stays green (45 files, unchanged -- no new files this pass).

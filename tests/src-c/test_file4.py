@@ -124,18 +124,18 @@ def main():
         c_u16p = ctypes.POINTER(ctypes.c_uint16)
 
         lib.func24_entry.restype = ctypes.c_uint16
-        lib.func24_entry.argtypes = [c_u8p, c_u16p]
+        lib.func24_entry.argtypes = [c_u8p, ctypes.c_uint16, c_u16p]
         lib.func25_entry.restype = ctypes.c_uint16
         lib.func25_entry.argtypes = [c_u8p, c_u16p]
         lib.func29_entry.restype = ctypes.c_uint16
-        lib.func29_entry.argtypes = [c_u8p, c_u16p]
+        lib.func29_entry.argtypes = [c_u8p, ctypes.c_uint16, c_u16p]
         lib.func32_entry.restype = ctypes.c_uint16
         lib.func32_entry.argtypes = [c_u8p, ctypes.c_uint8, c_u16p]
         lib.func44_entry.argtypes = [c_u8p, ctypes.c_uint8, c_u16p, c_u16p]
         lib.func45_entry.argtypes = [c_u8p, ctypes.c_uint8, c_u16p, c_u16p]
         lib.func51_entry.argtypes = [c_u8p, ctypes.c_uint16, c_u16p, c_u16p]
         lib.func52_entry.restype = ctypes.c_uint16
-        lib.func52_entry.argtypes = [c_u8p, ctypes.c_uint16, c_u16p]
+        lib.func52_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, c_u16p]
 
         failures = []
 
@@ -154,7 +154,7 @@ def main():
         ref_regs, _ = run_reference(code, entries['func24'], mem, {})
         buf = to_ctypes(mem)
         cx = ctypes.c_uint16()
-        got = lib.func24_entry(ctypes.cast(buf, c_u8p), ctypes.byref(cx))
+        got = lib.func24_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.byref(cx))
         check("func24: return the login vector", (ref_regs['bx'], ref_regs['cx']), (got, cx.value))
 
         # -- func25: return selected disk number --
@@ -172,7 +172,7 @@ def main():
         ref_regs, _ = run_reference(code, entries['func29'], mem, {})
         buf = to_ctypes(mem)
         cx = ctypes.c_uint16()
-        got = lib.func29_entry(ctypes.cast(buf, c_u8p), ctypes.byref(cx))
+        got = lib.func29_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.byref(cx))
         check("func29: return r/o bit vector", (ref_regs['bx'], ref_regs['cx']), (got, cx.value))
 
         # -- func32: interrogate current user code (dl == 0xFF) --
@@ -259,7 +259,7 @@ def main():
         ref_regs, ref_img = run_reference(code, entries['func52'], mem, {'ds': 0x1111})
         buf = to_ctypes(mem)
         cx = ctypes.c_uint16()
-        got = lib.func52_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0x1111), ctypes.byref(cx))
+        got = lib.func52_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(0x1111), ctypes.byref(cx))
         ref = (ref_regs['bx'], ref_regs['cx'], mem_r16(ref_img, REAL_U_RETSEG), mem_r16(ref_img, REAL_RETURNSEG))
         port = (got, cx.value, mem_r16(bytes(buf), UDA_RETSEG), mem_r16(bytes(buf), REAL_RETURNSEG))
         check("func52: get dma", ref, port)

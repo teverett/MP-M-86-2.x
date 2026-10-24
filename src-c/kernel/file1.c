@@ -94,8 +94,8 @@ void move(uint8_t *mem, uint16_t dx, uint16_t bx, uint8_t cl) {
  * real curdsk update are translated faithfully but never reached,
  * same class as CPMMEM.MEM's own unreachable allocation-success paths.
  */
-void selectdisk(uint8_t *mem) {
-    mem[BD_CURDSK] = 0xFF;
+void selectdisk(uint8_t *mem, uint16_t ds_bdos) {
+    mem_w8_seg(mem, ds_bdos,BD_CURDSK, 0xFF);
     /* mov cl,seldsk!call seldskf -- boundary stub, bx fixed at 0, which
      * is the real routine's own *error* indication ("bx = 0000 if
      * error"), so "cmp bx,0!jz ret4" always takes the early-out here,
@@ -110,30 +110,30 @@ void selectdisk(uint8_t *mem) {
     /* unreachable under the convention -- translated faithfully */
     uint16_t dx = mem_r16(mem, bx);
     bx = (uint16_t)(bx + 2);
-    mem_w16(mem, BD_CDRMAXA, bx);
+    mem_w16_seg(mem, ds_bdos, BD_CDRMAXA, bx);
     bx = (uint16_t)(bx + 2);
-    mem_w16(mem, BD_DRVLBLA, bx);
+    mem_w16_seg(mem, ds_bdos, BD_DRVLBLA, bx);
     bx = (uint16_t)(bx + 4);
-    mem_w16(mem, BD_TRANV, dx);
-    move(mem, mem_r16(mem, BD_DPBADDR), BD_SECTPT, 0x0F);
-    mem[BD_SINGLE] = (mem[(uint16_t)(BD_MAXALL + 1)] == 0) ? 1 : 0;
-    mem[BD_CURDSK] = mem[BD_SELDSK];
+    mem_w16_seg(mem, ds_bdos, BD_TRANV, dx);
+    move(mem,mem_seg_addr(ds_bdos, mem_r16_seg(mem, ds_bdos, BD_DPBADDR)),mem_seg_addr(ds_bdos, BD_SECTPT), 0x0F);
+    mem_w8_seg(mem, ds_bdos,BD_SINGLE, (mem_r8_seg(mem, ds_bdos,(uint16_t)(BD_MAXALL + 1)) == 0) ? 1 : 0);
+    mem_w8_seg(mem, ds_bdos,BD_CURDSK, mem_r8_seg(mem, ds_bdos,BD_SELDSK));
 }
 
 /*
  * home -- move to home position, reset the directory block
  */
-void home(uint8_t *mem) {
+void home(uint8_t *mem, uint16_t ds_bdos) {
     /* call homef -- boundary stub, no-op */
-    mem_w16(mem, BD_DBLK, 0);
+    mem_w16_seg(mem, ds_bdos, BD_DBLK, 0);
 }
 
 /*
  * PASS_ARECORD -- returns {dx, ch} = BD_ARECORD's own low word/high byte
  */
-static void pass_arecord(const uint8_t *mem, uint16_t *dx_out, uint8_t *ch_out) {
-    *dx_out = mem_r16(mem, BD_ARECORD);
-    *ch_out = mem[BD_ARECORD_HI];
+static void pass_arecord(const uint8_t *mem, uint16_t ds_bdos, uint16_t *dx_out, uint8_t *ch_out) {
+    *dx_out = mem_r16_seg(mem, ds_bdos, BD_ARECORD);
+    *ch_out = mem_r8_seg(mem, ds_bdos,BD_ARECORD_HI);
 }
 
 /*
@@ -149,10 +149,10 @@ uint8_t diocomp(uint8_t *mem) {
 }
 
 /* rdbuff -- read buffer and check if ok */
-void rdbuff(uint8_t *mem) {
+void rdbuff(uint8_t *mem, uint16_t ds_bdos) {
     uint16_t dx;
     uint8_t ch;
-    pass_arecord(mem, &dx, &ch);
+    pass_arecord(mem, ds_bdos, &dx, &ch);
     (void)dx;
     (void)ch;
     /* call readf -- boundary stub, no-op */
@@ -160,10 +160,10 @@ void rdbuff(uint8_t *mem) {
 }
 
 /* wrbuff/wrbufflg -- write buffer and check condition */
-void wrbuff(uint8_t *mem) {
+void wrbuff(uint8_t *mem, uint16_t ds_bdos) {
     uint16_t dx;
     uint8_t ch;
-    pass_arecord(mem, &dx, &ch);
+    pass_arecord(mem, ds_bdos, &dx, &ch);
     (void)dx;
     (void)ch;
     /* or cl,rem_drv!call writef -- boundary stub, no-op; cl's own
@@ -171,39 +171,39 @@ void wrbuff(uint8_t *mem) {
     (void)diocomp(mem);
 }
 
-void wrbufflg(uint8_t *mem) {
+void wrbufflg(uint8_t *mem, uint16_t ds_bdos) {
     /* mov cl,wflag -- no observable effect, see wrbuff's own comment */
-    wrbuff(mem);
+    wrbuff(mem, ds_bdos);
 }
 
 /*
  * goerr -- common tail for pererror/roderror/roferror/selerror
  *	input:	ch = message selector (1-4), unused beyond building aret
  */
-static void goerr(uint8_t *mem, uint8_t ch) {
-    mem_w16(mem, BD_ARET, (uint16_t)(((uint16_t)ch << 8) | 0xFF));
-    if (mem[BD_ERROR_MODE] != 0xFF) {
+static void goerr(uint8_t *mem, uint16_t ds_bdos, uint8_t ch) {
+    mem_w16_seg(mem, ds_bdos, BD_ARET, (uint16_t)(((uint16_t)ch << 8) | 0xFF));
+    if (mem_r8_seg(mem, ds_bdos,BD_ERROR_MODE) != 0xFF) {
         /* REPORT_ERR -- all message formatting is display-only, no
          * observable effect under the convention; the one real side
          * effect on this path: */
-        if (mem[BD_ERROR_MODE] != 0xFE) {
+        if (mem_r8_seg(mem, ds_bdos,BD_ERROR_MODE) != 0xFE) {
             uint16_t rlr = mem_r16(mem, SD_RLR);
             mem_w16(mem, (uint16_t)(rlr + p_flag),
                     (uint16_t)(mem_r16(mem, (uint16_t)(rlr + p_flag)) | pf_ctlc));
         }
     }
     /* RTN_PHY_ERRS */
-    if (mem[BD_RETURN_FFFF] != 0) {
-        mem[BD_RETURN_FFFF] = 0;
-        mem_w16(mem, BD_ARET, 0xFFFF);
+    if (mem_r8_seg(mem, ds_bdos,BD_RETURN_FFFF) != 0) {
+        mem_w8_seg(mem, ds_bdos,BD_RETURN_FFFF, 0);
+        mem_w16_seg(mem, ds_bdos, BD_ARET, 0xFFFF);
     }
     /* jmp GOBACK -- tail into FILE4.BDO, see header comment */
 }
 
-void pererror(uint8_t *mem) { goerr(mem, 1); }
-void roderror(uint8_t *mem) { goerr(mem, 2); }
-void roferror(uint8_t *mem) { goerr(mem, 3); }
-void selerror(uint8_t *mem) { goerr(mem, 4); }
+void pererror(uint8_t *mem, uint16_t ds_bdos) { goerr(mem, ds_bdos, 1); }
+void roderror(uint8_t *mem, uint16_t ds_bdos) { goerr(mem, ds_bdos, 2); }
+void roferror(uint8_t *mem, uint16_t ds_bdos) { goerr(mem, ds_bdos, 3); }
+void selerror(uint8_t *mem, uint16_t ds_bdos) { goerr(mem, ds_bdos, 4); }
 
 void seek(uint8_t *mem);
 
@@ -215,27 +215,27 @@ void seek(uint8_t *mem);
  * and the actual seek), so this calls seek() as a tail, not just a
  * sibling function.
  */
-void seekdir(uint8_t *mem) {
+void seekdir(uint8_t *mem, uint16_t ds_bdos) {
     uint16_t dx = 0xFFFF;
     uint8_t ah = 0;
-    uint16_t bx = mem_r16(mem, BD_DBLK);
+    uint16_t bx = mem_r16_seg(mem, ds_bdos, BD_DBLK);
     if (bx != 0) {
         dx = (uint16_t)(dx + 1); /* inc dx -- wraps to 0 */
-        uint8_t dl = mem[BD_BLKMSK];
+        uint8_t dl = mem_r8_seg(mem, ds_bdos,BD_BLKMSK);
         dx = (uint16_t)((dx & 0xFF00) | dl); /* mov dl,blkmsk */
-        uint8_t cl = mem[BD_BLKSHF];
+        uint8_t cl = mem_r8_seg(mem, ds_bdos,BD_BLKSHF);
         uint8_t al = (uint8_t)(bx >> 8); /* mov al,bh */
         bx = (uint16_t)(bx << cl); /* shl bx,cl */
         uint16_t ax = (uint16_t)((uint16_t)al << cl); /* shl ax,cl (ah was 0) */
         ah = (uint8_t)(ax >> 8);
     }
-    uint16_t si = (uint16_t)(mem_r16(mem, BD_DCNT) >> 2); /* dskshf */
+    uint16_t si = (uint16_t)(mem_r16_seg(mem, ds_bdos, BD_DCNT) >> 2); /* dskshf */
     dx = (uint16_t)(dx & si);
     uint16_t sum = (uint16_t)(bx + dx);
     uint8_t carry = (sum < bx) ? 1 : 0; /* adc ah,0 */
     ah = (uint8_t)(ah + carry);
-    mem_w16(mem, BD_ARECORD, sum);
-    mem[BD_ARECORD_HI] = ah;
+    mem_w16_seg(mem, ds_bdos, BD_ARECORD, sum);
+    mem_w8_seg(mem, ds_bdos,BD_ARECORD_HI, ah);
     seek(mem);
 }
 
@@ -259,20 +259,20 @@ void seek(uint8_t *mem) {
  * `DMPOSITION` directly, an ordinary cross-file call, same as
  * `que1.c`'s own into `que2.c`.
  */
-uint8_t dmposition(const uint8_t *mem) {
-    uint8_t cl = mem[BD_BLKSHF];
-    uint8_t al = (uint8_t)(mem[BD_VRECORD] >> cl);
+uint8_t dmposition(const uint8_t *mem, uint16_t ds_bdos) {
+    uint8_t cl = mem_r8_seg(mem, ds_bdos,BD_BLKSHF);
+    uint8_t al = (uint8_t)(mem_r8_seg(mem, ds_bdos,BD_VRECORD) >> cl);
     uint8_t ch = al;
-    cl = (uint8_t)(7 - mem[BD_BLKSHF]);
-    al = mem[BD_EXTVAL];
+    cl = (uint8_t)(7 - mem_r8_seg(mem, ds_bdos,BD_BLKSHF));
+    al = mem_r8_seg(mem, ds_bdos,BD_EXTVAL);
     al = (uint8_t)(al << cl);
     al = (uint8_t)(al + ch);
     return al;
 }
 
 /* GET_DMA -- bx = .fcb(dskmap) */
-static uint16_t get_dma(const uint8_t *mem) {
-    return (uint16_t)(mem_r16(mem, BD_INFO) + fcb_dskmap);
+static uint16_t get_dma(const uint8_t *mem, uint16_t ds_bdos) {
+    return (uint16_t)(mem_r16_seg(mem, ds_bdos, BD_INFO) + fcb_dskmap);
 }
 
 /*
@@ -281,9 +281,9 @@ static uint16_t get_dma(const uint8_t *mem) {
  * directly, an ordinary cross-file call, same as `que1.c`'s own into
  * `que2.c`.
  */
-uint16_t getdm(const uint8_t *mem, uint8_t cl) {
-    uint16_t bx = (uint16_t)(get_dma(mem) + cl);
-    if (mem[BD_SINGLE] == 0) {
+uint16_t getdm(const uint8_t *mem, uint16_t ds_bdos, uint8_t cl) {
+    uint16_t bx = (uint16_t)(get_dma(mem, ds_bdos) + cl);
+    if (mem_r8_seg(mem, ds_bdos,BD_SINGLE) == 0) {
         uint16_t bx2 = (uint16_t)(bx + cl);
         return mem_r16(mem, bx2);
     }
@@ -293,32 +293,32 @@ uint16_t getdm(const uint8_t *mem, uint8_t cl) {
 /* index -- compute disk block number from the current fcb. Named
  * bdos_index here, not index: clang warns the plain name collides
  * with the C library's own (deprecated) strings.h index() */
-void bdos_index(uint8_t *mem) {
-    uint8_t al = dmposition(mem);
-    uint16_t bx = getdm(mem, al);
-    mem_w16(mem, BD_ARECORD, bx);
+void bdos_index(uint8_t *mem, uint16_t ds_bdos) {
+    uint8_t al = dmposition(mem, ds_bdos);
+    uint16_t bx = getdm(mem, ds_bdos, al);
+    mem_w16_seg(mem, ds_bdos, BD_ARECORD, bx);
 }
 
 /* alloct -- called after index to see if the block is allocated */
-uint16_t alloct(const uint8_t *mem) {
-    return mem_r16(mem, BD_ARECORD);
+uint16_t alloct(const uint8_t *mem, uint16_t ds_bdos) {
+    return mem_r16_seg(mem, ds_bdos, BD_ARECORD);
 }
 
 /* atran -- compute the actual record address, assuming index was called */
-void atran(uint8_t *mem) {
-    uint8_t cl = mem[BD_BLKSHF];
-    uint16_t bx = mem_r16(mem, BD_ARECORD);
+void atran(uint8_t *mem, uint16_t ds_bdos) {
+    uint8_t cl = mem_r8_seg(mem, ds_bdos,BD_BLKSHF);
+    uint16_t bx = mem_r16_seg(mem, ds_bdos, BD_ARECORD);
     uint8_t al = (uint8_t)(bx >> 8); /* mov al,bh */
     bx = (uint16_t)(bx << cl); /* shl bx,cl */
     uint16_t ax = (uint16_t)((uint16_t)al << cl); /* shl ax,cl (ah was 0) */
     uint8_t ah = (uint8_t)(ax >> 8);
-    mem_w16(mem, BD_ABLOCK, bx);
-    al = mem[BD_VRECORD];
-    al = (uint8_t)(al & mem[BD_BLKMSK]);
+    mem_w16_seg(mem, ds_bdos, BD_ABLOCK, bx);
+    al = mem_r8_seg(mem, ds_bdos,BD_VRECORD);
+    al = (uint8_t)(al & mem_r8_seg(mem, ds_bdos,BD_BLKMSK));
     uint8_t bl = (uint8_t)((bx & 0xFF) | al); /* or bl,al */
     bx = (uint16_t)((bx & 0xFF00) | bl);
-    mem_w16(mem, BD_ARECORD, bx);
-    mem[BD_ARECORD_HI] = ah;
+    mem_w16_seg(mem, ds_bdos, BD_ARECORD, bx);
+    mem_w8_seg(mem, ds_bdos,BD_ARECORD_HI, ah);
 }
 
 /*
@@ -326,8 +326,8 @@ void atran(uint8_t *mem) {
  * returned left-shifted in al; zeroes the interface attribute bits
  * in the fcb
  */
-uint8_t get_atts(uint8_t *mem) {
-    uint16_t bx = (uint16_t)(mem_r16(mem, BD_INFO) + 5);
+uint8_t get_atts(uint8_t *mem, uint16_t ds_bdos) {
+    uint16_t bx = (uint16_t)(mem_r16_seg(mem, ds_bdos, BD_INFO) + 5);
     uint8_t dh = 0;
     for (int i = 0; i < 4; i++) {
         uint8_t al = mem[bx];
@@ -346,54 +346,54 @@ uint8_t get_atts(uint8_t *mem) {
  * Not static: src-c/kernel/file2.c's own CLOSE_FCB/CLOSE1 cluster
  * calls it too (an ordinary cross-file call, same convention as
  * que1.c's own cross-file calls into que2.c). */
-uint16_t getexta(const uint8_t *mem) {
-    return (uint16_t)(mem_r16(mem, BD_INFO) + fcb_extnum);
+uint16_t getexta(const uint8_t *mem, uint16_t ds_bdos) {
+    return (uint16_t)(mem_r16_seg(mem, ds_bdos, BD_INFO) + fcb_extnum);
 }
 
 /* GET_S1 -- get the current S1 field to al */
-uint8_t get_s1(const uint8_t *mem) {
-    uint16_t bx = (uint16_t)(getexta(mem) + 1);
+uint8_t get_s1(const uint8_t *mem, uint16_t ds_bdos) {
+    uint16_t bx = (uint16_t)(getexta(mem, ds_bdos) + 1);
     return mem[bx];
 }
 
 /* GET_RRA -- get the current ran-rec field address to bx */
-uint16_t get_rra(const uint8_t *mem) {
-    return (uint16_t)(mem_r16(mem, BD_INFO) + fcb_ranrec);
+uint16_t get_rra(const uint8_t *mem, uint16_t ds_bdos) {
+    return (uint16_t)(mem_r16_seg(mem, ds_bdos, BD_INFO) + fcb_ranrec);
 }
 
 /* GET_RCNTA -- get the reccnt field address to bx */
-uint16_t get_rcnta(const uint8_t *mem) {
-    return (uint16_t)(mem_r16(mem, BD_INFO) + fcb_reccnt);
+uint16_t get_rcnta(const uint8_t *mem, uint16_t ds_bdos) {
+    return (uint16_t)(mem_r16_seg(mem, ds_bdos, BD_INFO) + fcb_reccnt);
 }
 
 /* gtfcba -- compute reccnt and nxtrec addresses for get/setfcb */
-static void gtfcba(const uint8_t *mem, uint16_t *reccnt_addr, uint16_t *nxtrec_addr) {
-    uint16_t info = mem_r16(mem, BD_INFO);
+static void gtfcba(const uint8_t *mem, uint16_t ds_bdos, uint16_t *reccnt_addr, uint16_t *nxtrec_addr) {
+    uint16_t info = mem_r16_seg(mem, ds_bdos, BD_INFO);
     *reccnt_addr = (uint16_t)(info + fcb_reccnt);
     *nxtrec_addr = (uint16_t)(info + fcb_nxtrec);
 }
 
 /* getfcb -- set BDOS scratch variables from the currently addressed fcb */
-void getfcb(uint8_t *mem) {
+void getfcb(uint8_t *mem, uint16_t ds_bdos) {
     uint16_t reccnt_addr, nxtrec_addr;
-    gtfcba(mem, &reccnt_addr, &nxtrec_addr);
-    mem[BD_VRECORD] = mem[nxtrec_addr];
-    mem[BD_RCOUNT] = mem[reccnt_addr];
-    uint16_t bx = getexta(mem);
-    mem[BD_EXTVAL] = (uint8_t)(mem[BD_EXTMSK] & mem[bx]);
+    gtfcba(mem, ds_bdos, &reccnt_addr, &nxtrec_addr);
+    mem_w8_seg(mem, ds_bdos,BD_VRECORD, mem[nxtrec_addr]);
+    mem_w8_seg(mem, ds_bdos,BD_RCOUNT, mem[reccnt_addr]);
+    uint16_t bx = getexta(mem, ds_bdos);
+    mem_w8_seg(mem, ds_bdos,BD_EXTVAL, (uint8_t)(mem_r8_seg(mem, ds_bdos,BD_EXTMSK) & mem[bx]));
 }
 
 /* setfcb -- place BDOS scratch values back into the current fcb */
-void setfcb(uint8_t *mem) {
+void setfcb(uint8_t *mem, uint16_t ds_bdos) {
     uint16_t reccnt_addr, nxtrec_addr;
-    gtfcba(mem, &reccnt_addr, &nxtrec_addr);
-    uint8_t al = mem[BD_SEQIO];
+    gtfcba(mem, ds_bdos, &reccnt_addr, &nxtrec_addr);
+    uint8_t al = mem_r8_seg(mem, ds_bdos,BD_SEQIO);
     if (al == 2) {
         al = 0;
     }
-    al = (uint8_t)(al + mem[BD_VRECORD]);
+    al = (uint8_t)(al + mem_r8_seg(mem, ds_bdos,BD_VRECORD));
     mem[nxtrec_addr] = al;
-    mem[reccnt_addr] = mem[BD_RCOUNT];
+    mem[reccnt_addr] = mem_r8_seg(mem, ds_bdos,BD_RCOUNT);
 }
 
 /* cmpec0 -- checksum cl bytes starting at bx */
@@ -406,8 +406,8 @@ static uint8_t cmpec0(const uint8_t *mem, uint16_t bx, uint16_t cx) {
 }
 
 /* cmpecs -- compute checksum for the current directory buffer */
-uint8_t cmpecs(const uint8_t *mem) {
-    return cmpec0(mem, mem_r16(mem, BD_BUFFA), 128 /* recsiz */);
+uint8_t cmpecs(const uint8_t *mem, uint16_t ds_bdos) {
+    return cmpec0(mem,mem_seg_addr(ds_bdos, mem_r16_seg(mem, ds_bdos, BD_BUFFA)), 128 /* recsiz */);
 }
 
 /*
@@ -417,14 +417,14 @@ uint8_t cmpecs(const uint8_t *mem) {
  * disk map, plus a bias byte
  *	output:	returns the checksum (0 = valid)
  */
-uint8_t chksum_fcb(const uint8_t *mem) {
-    uint8_t al = cmpec0(mem, BD_PD_CNT, 4);
+uint8_t chksum_fcb(const uint8_t *mem, uint16_t ds_bdos) {
+    uint8_t al = cmpec0(mem,mem_seg_addr(ds_bdos, BD_PD_CNT), 4);
     al = (uint8_t)(al + 0xBB);
-    al = (uint8_t)(al + cmpec0(mem, mem_r16(mem, BD_INFO), 12));
+    al = (uint8_t)(al + cmpec0(mem,mem_seg_addr(ds_bdos, mem_r16_seg(mem, ds_bdos, BD_INFO)), 12));
     /* "inc bx" after that 12-byte CMPEC0 call lands on INFO+12 (where
      * the loop's own bx ended up, not back at INFO), i.e. INFO+fcb_
      * extnum+1 -- the same address GET_S1 computes */
-    uint16_t bx = (uint16_t)(getexta(mem) + 1);
+    uint16_t bx = (uint16_t)(getexta(mem, ds_bdos) + 1);
     al = (uint8_t)(al + mem[bx]); /* S1 */
     bx = (uint16_t)(bx + 3); /* INFO+16 == INFO+fcb_dskmap */
     al = (uint8_t)(al + cmpec0(mem, bx, 16)); /* disk map */
@@ -432,42 +432,42 @@ uint8_t chksum_fcb(const uint8_t *mem) {
 }
 
 /* SET_CHKSUM_FCB -- compute the fcb checksum; if invalid, fix S1 to match */
-void set_chksum_fcb(uint8_t *mem) {
-    uint8_t al = chksum_fcb(mem);
+void set_chksum_fcb(uint8_t *mem, uint16_t ds_bdos) {
+    uint8_t al = chksum_fcb(mem, ds_bdos);
     if (al == 0) {
         return; /* RET45 */
     }
     uint8_t ah = al;
-    al = get_s1(mem);
+    al = get_s1(mem, ds_bdos);
     ah = (uint8_t)(ah - al);
     ah = (uint8_t)(-(int8_t)ah);
-    uint16_t bx = (uint16_t)(getexta(mem) + 1);
+    uint16_t bx = (uint16_t)(getexta(mem, ds_bdos) + 1);
     mem[bx] = ah;
 }
 
 /* RESET_CHECKSUM_FCB -- invalidate S1 if the fcb checksum is valid */
-void reset_checksum_fcb(uint8_t *mem) {
-    mem[BD_COMP_FCB_CKS] = 0;
-    if (chksum_fcb(mem) != 0) {
+void reset_checksum_fcb(uint8_t *mem, uint16_t ds_bdos) {
+    mem_w8_seg(mem, ds_bdos,BD_COMP_FCB_CKS, 0);
+    if (chksum_fcb(mem, ds_bdos) != 0) {
         return; /* RET45 */
     }
-    uint16_t bx = (uint16_t)(getexta(mem) + 1);
+    uint16_t bx = (uint16_t)(getexta(mem, ds_bdos) + 1);
     mem[bx] += 1;
 }
 
 /*
  * CHEK_FCB -- as CHKSUM_FCB, but first zeroes fcb(0) if high_ext==0x60
  */
-uint8_t chek_fcb(uint8_t *mem) {
-    if (mem[BD_HIGH_EXT] == 0x60) {
-        mem[mem_r16(mem, BD_INFO)] = 0;
+uint8_t chek_fcb(uint8_t *mem, uint16_t ds_bdos) {
+    if (mem_r8_seg(mem, ds_bdos,BD_HIGH_EXT) == 0x60) {
+        mem_w8_seg(mem, ds_bdos,mem_r16_seg(mem, ds_bdos, BD_INFO), 0);
     }
-    return chksum_fcb(mem);
+    return chksum_fcb(mem, ds_bdos);
 }
 
-extern void close1(uint8_t *mem);
-extern void pack_sdcnt(uint8_t *mem);
-extern uint8_t search_olist(uint8_t *mem, uint8_t ch);
+extern void close1(uint8_t *mem, uint16_t ds_bdos);
+extern void pack_sdcnt(uint8_t *mem, uint16_t ds_bdos);
+extern uint8_t search_olist(uint8_t *mem, uint16_t ds_bdos, uint8_t ch);
 
 /*
  * check_fcb1 -- CHECK_FCB1: verify the currently addressed fcb's own
@@ -506,32 +506,32 @@ extern uint8_t search_olist(uint8_t *mem, uint8_t ch);
  * either way: a 0 there means "stop now," matching what both those
  * callers already do unconditionally on failure.
  */
-uint8_t check_fcb1(uint8_t *mem) {
-    uint8_t al = chek_fcb(mem);
+uint8_t check_fcb1(uint8_t *mem, uint16_t ds_bdos) {
+    uint8_t al = chek_fcb(mem, ds_bdos);
     if (al == 0) {
         return 1; /* ret45 -- valid */
     }
     if ((al & 0x0F) != 0) {
         goto check_fcb3;
     }
-    if (mem[BD_PD_CNT] == 0) {
+    if (mem_r8_seg(mem, ds_bdos,BD_PD_CNT) == 0) {
         goto check_fcb3;
     }
-    mem[(uint16_t)(BD_SDCNT + 1)] = 0xFF;
-    mem[BD_DONT_CLOSE] = 0xFF;
-    close1(mem);
-    mem[BD_LRET] = (uint8_t)(mem[BD_LRET] + 1);
-    if (mem[BD_LRET] == 0) {
+    mem_w8_seg(mem, ds_bdos,(uint16_t)(BD_SDCNT + 1), 0xFF);
+    mem_w8_seg(mem, ds_bdos,BD_DONT_CLOSE, 0xFF);
+    close1(mem, ds_bdos);
+    mem_w8_seg(mem, ds_bdos,BD_LRET, (uint8_t)(mem_r8_seg(mem, ds_bdos,BD_LRET) + 1));
+    if (mem_r8_seg(mem, ds_bdos,BD_LRET) == 0) {
         goto check_fcb3; /* partial close failed */
     }
-    mem[BD_LRET] = 0;
-    pack_sdcnt(mem);
-    if (search_olist(mem, 5)) {
+    mem_w8_seg(mem, ds_bdos,BD_LRET, 0);
+    pack_sdcnt(mem, ds_bdos);
+    if (search_olist(mem, ds_bdos, 5)) {
         return 1; /* found -- checksum ok */
     }
 check_fcb3:
-    if (!mem[BD_CHECK_FCB_RET]) {
-        mem[BD_LRET] = 10;
+    if (!mem_r8_seg(mem, ds_bdos,BD_CHECK_FCB_RET)) {
+        mem_w8_seg(mem, ds_bdos,BD_LRET, 10);
     }
     return 0;
 }
@@ -540,9 +540,9 @@ check_fcb3:
  * check_fcb -- CHECK_FCB: see check_fcb1's own header comment --
  * `func20`/`func21` (`file4.c`) are its own two real callers.
  */
-uint8_t check_fcb(uint8_t *mem) {
-    mem[BD_CHECK_FCB_RET] = 0;
-    return check_fcb1(mem);
+uint8_t check_fcb(uint8_t *mem, uint16_t ds_bdos) {
+    mem_w8_seg(mem, ds_bdos,BD_CHECK_FCB_RET, 0);
+    return check_fcb1(mem, ds_bdos);
 }
 
 /*
@@ -562,14 +562,14 @@ uint16_t set_cdisk1(uint8_t al, uint16_t cx) {
 }
 
 /* setcdisk -- set a "1" bit in BD_SELDSK's own position of cx */
-uint16_t setcdisk(const uint8_t *mem, uint16_t cx) {
-    return set_cdisk1(mem[BD_SELDSK], cx);
+uint16_t setcdisk(const uint8_t *mem, uint16_t ds_bdos, uint16_t cx) {
+    return set_cdisk1(mem_r8_seg(mem, ds_bdos,BD_SELDSK), cx);
 }
 
 /* nowrite -- return non-zero if the current disk is in the r/o vector */
-uint8_t nowrite(const uint8_t *mem) {
-    uint16_t dx = mem_r16(mem, BD_RODSK);
-    uint8_t cl = mem[BD_SELDSK];
+uint8_t nowrite(const uint8_t *mem, uint16_t ds_bdos) {
+    uint16_t dx = mem_r16_seg(mem, ds_bdos, BD_RODSK);
+    uint8_t cl = mem_r8_seg(mem, ds_bdos,BD_SELDSK);
     dx = (uint16_t)(dx >> cl);
     return (uint8_t)(dx & 1);
 }
@@ -593,31 +593,31 @@ uint16_t test_vector1(uint16_t dx, uint8_t cl) {
  * `src-c/kernel/file2.c`'s own `initialize`/`src-c/kernel/file3.c`'s
  * own `curselect` call with other vectors (BD_DLOG/BD_TLOG/BD_RLOG).
  */
-uint16_t test_vector(const uint8_t *mem, uint16_t dx) {
-    return test_vector1(dx, mem[BD_SELDSK]);
+uint16_t test_vector(const uint8_t *mem, uint16_t ds_bdos, uint16_t dx) {
+    return test_vector1(dx, mem_r8_seg(mem, ds_bdos,BD_SELDSK));
 }
 
 /* remove_drive -- REMOVE_DRIVE: clear BD_CURDSK's own bit in bx */
-uint16_t remove_drive(const uint8_t *mem, uint16_t bx) {
-    uint8_t cl = mem[BD_CURDSK];
+uint16_t remove_drive(const uint8_t *mem, uint16_t ds_bdos, uint16_t bx) {
+    uint8_t cl = mem_r8_seg(mem, ds_bdos,BD_CURDSK);
     uint16_t dx = (uint16_t)(1u << cl);
     return (uint16_t)(bx & (uint16_t)~dx);
 }
 
 /* setro -- set the current disk to read-only */
-void setro(uint8_t *mem) {
-    uint16_t bx = setcdisk(mem, mem_r16(mem, BD_RODSK));
-    mem_w16(mem, BD_RODSK, bx);
-    uint16_t dx = (uint16_t)(mem_r16(mem, BD_DIRMAX) + 1);
-    bx = mem_r16(mem, BD_CDRMAXA);
+void setro(uint8_t *mem, uint16_t ds_bdos) {
+    uint16_t bx = setcdisk(mem, ds_bdos, mem_r16_seg(mem, ds_bdos, BD_RODSK));
+    mem_w16_seg(mem, ds_bdos, BD_RODSK, bx);
+    uint16_t dx = (uint16_t)(mem_r16_seg(mem, ds_bdos, BD_DIRMAX) + 1);
+    bx = mem_r16_seg(mem, ds_bdos, BD_CDRMAXA);
     mem_w16(mem, bx, dx);
 }
 
-extern void flush_files(uint8_t *mem);
-extern void flush_file0(uint8_t *mem);
-uint8_t compcdr(const uint8_t *mem);
-void checkwrite(uint8_t *mem);
-void setenddir(uint8_t *mem);
+extern void flush_files(uint8_t *mem, uint16_t ds_bdos);
+extern void flush_file0(uint8_t *mem, uint16_t ds_bdos);
+uint8_t compcdr(const uint8_t *mem, uint16_t ds_bdos);
+void checkwrite(uint8_t *mem, uint16_t ds_bdos);
+void setenddir(uint8_t *mem, uint16_t ds_bdos);
 
 /*
  * checksum/newchecksum -- compute (or, if cl==true, initialize) the
@@ -628,14 +628,14 @@ void setenddir(uint8_t *mem);
  *	input:	cl = true (0xFF) to initialize, or (MPM-specific) 0xFE
  *		for the "directory checksum" variant (TEST_DIR_CS)
  */
-void checksum(uint8_t *mem, uint8_t cl) {
-    uint16_t dx = mem_r16(mem, BD_ARECORD);
-    uint16_t bx = (uint16_t)(mem_r16(mem, BD_CHKSIZ) & 0x7FFF); /* and bh,7fh */
+void checksum(uint8_t *mem, uint16_t ds_bdos, uint8_t cl) {
+    uint16_t dx = mem_r16_seg(mem, ds_bdos, BD_ARECORD);
+    uint16_t bx = (uint16_t)(mem_r16_seg(mem, ds_bdos, BD_CHKSIZ) & 0x7FFF); /* and bh,7fh */
     if (dx >= bx) {
         return; /* ret6 -- past the checksum vector's own size */
     }
-    uint8_t al = cmpecs(mem);
-    bx = (uint16_t)(mem_r16(mem, BD_ARECORD) + mem_r16(mem, BD_CHECKA));
+    uint8_t al = cmpecs(mem, ds_bdos);
+    bx = (uint16_t)(mem_r16_seg(mem, ds_bdos, BD_ARECORD) + mem_r16_seg(mem, ds_bdos, BD_CHECKA));
     cl = (uint8_t)(cl + 1);
     if (cl == 0) {
         mem[bx] = al; /* initcs */
@@ -645,67 +645,67 @@ void checksum(uint8_t *mem, uint8_t cl) {
     if (cl == 0) {
         /* TEST_DIR_CS */
         if (al != mem[bx]) {
-            flush_files(mem);
+            flush_files(mem, ds_bdos);
         }
         return;
     }
     if (al == mem[bx]) {
         return; /* ret7 */
     }
-    if (!compcdr(mem)) {
+    if (!compcdr(mem, ds_bdos)) {
         return; /* ret7 */
     }
-    if (nowrite(mem)) {
+    if (nowrite(mem, ds_bdos)) {
         return; /* ret7 */
     }
-    flush_file0(mem);
-    setro(mem);
+    flush_file0(mem, ds_bdos);
+    setro(mem, ds_bdos);
 }
 
-void newchecksum(uint8_t *mem) {
-    checksum(mem, 0xFF); /* true */
+void newchecksum(uint8_t *mem, uint16_t ds_bdos) {
+    checksum(mem, ds_bdos, 0xFF); /* true */
 }
 
 /* rddirbuf, declared ahead for rddir0's own use below */
-void rddirbuf(uint8_t *mem);
-void seekdir(uint8_t *mem);
+void rddirbuf(uint8_t *mem, uint16_t ds_bdos);
+void seekdir(uint8_t *mem, uint16_t ds_bdos);
 
 /*
  * rddir0 -- seek and read the next directory record if the current
  * entry starts one (dcnt's own low byte lands on a record boundary),
  * then checksum it
  */
-void rddir0(uint8_t *mem, uint8_t cl) {
-    uint8_t al = (uint8_t)((mem[BD_DCNT] & dskmsk) << fcbshf);
-    mem[BD_DPTR] = al;
+void rddir0(uint8_t *mem, uint16_t ds_bdos, uint8_t cl) {
+    uint8_t al = (uint8_t)((mem_r8_seg(mem, ds_bdos,BD_DCNT) & dskmsk) << fcbshf);
+    mem_w8_seg(mem, ds_bdos,BD_DPTR, al);
     if (al != 0) {
         return; /* ret71 -- not a new record */
     }
-    seekdir(mem);
-    rddirbuf(mem);
-    checksum(mem, cl);
+    seekdir(mem, ds_bdos);
+    rddirbuf(mem, ds_bdos);
+    checksum(mem, ds_bdos, cl);
 }
 
 /*
  * rddir -- read the next directory entry (cl = true if initializing)
  */
-void rddir(uint8_t *mem, uint8_t cl) {
-    uint16_t dirmax = mem_r16(mem, BD_DIRMAX);
-    uint16_t dcnt = (uint16_t)(mem_r16(mem, BD_DCNT) + 1);
-    mem_w16(mem, BD_DCNT, dcnt);
+void rddir(uint8_t *mem, uint16_t ds_bdos, uint8_t cl) {
+    uint16_t dirmax = mem_r16_seg(mem, ds_bdos, BD_DIRMAX);
+    uint16_t dcnt = (uint16_t)(mem_r16_seg(mem, ds_bdos, BD_DCNT) + 1);
+    mem_w16_seg(mem, ds_bdos, BD_DCNT, dcnt);
     if (dirmax < dcnt) {
-        setenddir(mem);
+        setenddir(mem, ds_bdos);
         return;
     }
-    rddir0(mem, cl);
+    rddir0(mem, ds_bdos, cl);
 }
 
 /* wrdir -- write the current directory entry, setting its checksum */
-void wrdir(uint8_t *mem) {
-    checkwrite(mem);
-    newchecksum(mem);
+void wrdir(uint8_t *mem, uint16_t ds_bdos) {
+    checkwrite(mem, ds_bdos);
+    newchecksum(mem, ds_bdos);
     /* call setdir -- boundary stub, no-op, see header comment */
-    wrbuff(mem);
+    wrbuff(mem, ds_bdos);
     /* jmp setdata -- boundary stub, no-op */
 }
 
@@ -722,73 +722,73 @@ uint8_t ro_test(const uint8_t *mem, uint16_t bx) {
 }
 
 /* getdptra -- compute the address of a directory element at BD_DPTR */
-uint16_t getdptra(const uint8_t *mem) {
-    return (uint16_t)(mem_r16(mem, BD_BUFFA) + mem[BD_DPTR]);
+uint16_t getdptra(const uint8_t *mem, uint16_t ds_bdos) {
+    return (uint16_t)(mem_r16_seg(mem, ds_bdos, BD_BUFFA) + mem_r8_seg(mem, ds_bdos,BD_DPTR));
 }
 
 /* ckrodir/ckrofile -- check a directory element/fcb for r/o status */
-void ckrofile(uint8_t *mem, uint16_t bx) {
+void ckrofile(uint8_t *mem, uint16_t ds_bdos, uint16_t bx) {
     if (!ro_test(mem, bx)) {
         return; /* ret5 */
     }
-    roferror(mem);
+    roferror(mem, ds_bdos);
 }
 
-void ckrodir(uint8_t *mem) {
-    ckrofile(mem, getdptra(mem));
+void ckrodir(uint8_t *mem, uint16_t ds_bdos) {
+    ckrofile(mem, ds_bdos, getdptra(mem, ds_bdos));
 }
 
 /* checkwrite -- check for a write-protected disk */
-void checkwrite(uint8_t *mem) {
-    if (nowrite(mem) == 0) {
+void checkwrite(uint8_t *mem, uint16_t ds_bdos) {
+    if (nowrite(mem, ds_bdos) == 0) {
         return; /* ret5 */
     }
-    roderror(mem);
+    roderror(mem, ds_bdos);
 }
 
 /* getmodnum -- bx = .fcb(modnum); returns fcb(modnum) */
-uint8_t getmodnum(const uint8_t *mem, uint16_t *bx_out) {
-    uint16_t bx = (uint16_t)(mem_r16(mem, BD_INFO) + fcb_modnum);
+uint8_t getmodnum(const uint8_t *mem, uint16_t ds_bdos, uint16_t *bx_out) {
+    uint16_t bx = (uint16_t)(mem_r16_seg(mem, ds_bdos, BD_INFO) + fcb_modnum);
     *bx_out = bx;
     return mem[bx];
 }
 
 /* clrmodnum -- clear the module number field for user open/make */
-void clrmodnum(uint8_t *mem) {
+void clrmodnum(uint8_t *mem, uint16_t ds_bdos) {
     uint16_t bx;
-    (void)getmodnum(mem, &bx);
+    (void)getmodnum(mem, ds_bdos, &bx);
     mem[bx] = 0;
 }
 
 /* CLR_EXT -- clear the high bits of the extent field */
-void clr_ext(uint8_t *mem) {
-    uint16_t bx = getexta(mem);
+void clr_ext(uint8_t *mem, uint16_t ds_bdos) {
+    uint16_t bx = getexta(mem, ds_bdos);
     mem[bx] = (uint8_t)(mem[bx] & 0x1F);
 }
 
 /* setfwf -- set the file-write-flag bit in fcb(modnum) */
-uint8_t setfwf(uint8_t *mem) {
+uint8_t setfwf(uint8_t *mem, uint16_t ds_bdos) {
     uint16_t bx;
-    uint8_t al = getmodnum(mem, &bx);
+    uint8_t al = getmodnum(mem, ds_bdos, &bx);
     al = (uint8_t)(al | fwfmsk);
     mem[bx] = al;
     return al;
 }
 
 /* compcdr -- return non-zero (carry) if cdrmax > dcnt */
-uint8_t compcdr(const uint8_t *mem) {
-    uint16_t dx = mem_r16(mem, BD_DCNT);
-    uint16_t bx = mem_r16(mem, BD_CDRMAXA);
+uint8_t compcdr(const uint8_t *mem, uint16_t ds_bdos) {
+    uint16_t dx = mem_r16_seg(mem, ds_bdos, BD_DCNT);
+    uint16_t bx = mem_r16_seg(mem, ds_bdos, BD_CDRMAXA);
     return (dx < mem_r16(mem, bx)) ? 1 : 0;
 }
 
 /* setcdr -- if not (cdrmax > dcnt), set cdrmax = dcnt+1 */
-void setcdr(uint8_t *mem) {
-    if (compcdr(mem)) {
+void setcdr(uint8_t *mem, uint16_t ds_bdos) {
+    if (compcdr(mem, ds_bdos)) {
         return;
     }
-    uint16_t bx = mem_r16(mem, BD_CDRMAXA);
-    uint16_t dx = (uint16_t)(mem_r16(mem, BD_DCNT) + 1);
+    uint16_t bx = mem_r16_seg(mem, ds_bdos, BD_CDRMAXA);
+    uint16_t dx = (uint16_t)(mem_r16_seg(mem, ds_bdos, BD_DCNT) + 1);
     mem_w16(mem, bx, dx);
 }
 
@@ -799,36 +799,36 @@ void setcdr(uint8_t *mem) {
  * comment */
 
 /* rddirbuf -- read a directory entry into the directory buffer */
-void rddirbuf(uint8_t *mem) {
+void rddirbuf(uint8_t *mem, uint16_t ds_bdos) {
     /* setdir!rdbuff -- both boundary-stub-only under the convention
      * (setdir's own setdmbf/setdma calls and rdbuff's own readf call
      * have no observable effect), see header comment */
-    rdbuff(mem);
+    rdbuff(mem, ds_bdos);
 }
 
 /* setdata/setdir/setdma -- all 3 are pure boundary-stub setup (XIOS
  * setdmbf/setdmf calls), no observable effect under the convention */
 
 /* dirtouser -- copy the directory entry to the user buffer */
-void dirtouser(uint8_t *mem) {
-    uint16_t dx = mem_r16(mem, BD_BUFFA);
-    uint16_t bx = mem_r16(mem, BD_DMAAD);
-    (void)mem_r16(mem, BD_PARAMETERSEGMENT); /* es switch -- moot, flat model */
+void dirtouser(uint8_t *mem, uint16_t ds_bdos) {
+    uint16_t dx = mem_r16_seg(mem, ds_bdos, BD_BUFFA);
+    uint16_t bx = mem_r16_seg(mem, ds_bdos, BD_DMAAD);
+    (void)mem_r16_seg(mem, ds_bdos, BD_PARAMETERSEGMENT); /* es switch -- moot, flat model */
     move(mem, dx, bx, 128 /* recsiz */);
 }
 
 /* MAKE_FCB_INV -- flag an fcb as invalid */
-void make_fcb_inv(uint8_t *mem) {
+void make_fcb_inv(uint8_t *mem, uint16_t ds_bdos) {
     uint16_t bx;
-    (void)setfwf(mem); /* also recomputes bx below via getmodnum's own math */
-    (void)getmodnum(mem, &bx);
+    (void)setfwf(mem, ds_bdos); /* also recomputes bx below via getmodnum's own math */
+    (void)getmodnum(mem, ds_bdos, &bx);
     bx = (uint16_t)(bx + 2);
     mem_w16(mem, bx, 0xFFFF);
 }
 
 /* CHK_INV_FCB -- returns non-zero if the fcb's dskmap word isn't 0xFFFF */
-uint16_t chk_inv_fcb(const uint8_t *mem) {
-    uint16_t bx = get_dma(mem);
+uint16_t chk_inv_fcb(const uint8_t *mem, uint16_t ds_bdos) {
+    uint16_t bx = get_dma(mem, ds_bdos);
     return (uint16_t)(mem_r16(mem, bx) ^ 0xFFFF);
 }
 
@@ -837,22 +837,22 @@ uint16_t chk_inv_fcb(const uint8_t *mem) {
  *	output:	returns 0 (ret8) if the fcb is valid; sets lret=9 and
  *		returns 9 if invalid
  */
-uint8_t tst_inv_fcb(uint8_t *mem) {
-    if (chk_inv_fcb(mem) != 0) {
+uint8_t tst_inv_fcb(uint8_t *mem, uint16_t ds_bdos) {
+    if (chk_inv_fcb(mem, ds_bdos) != 0) {
         return 0; /* ret8 */
     }
-    mem[BD_LRET] = 9; /* mov al,9!jmp staret */
+    mem_w8_seg(mem, ds_bdos,BD_LRET, 9); /* mov al,9!jmp staret */
     return 9;
 }
 
 /* endofdir/TEST_FFFF -- zero flag set if at end of directory */
-uint8_t endofdir(const uint8_t *mem) {
-    return (mem_r16(mem, BD_DCNT) == 0xFFFF) ? 1 : 0;
+uint8_t endofdir(const uint8_t *mem, uint16_t ds_bdos) {
+    return (mem_r16_seg(mem, ds_bdos, BD_DCNT) == 0xFFFF) ? 1 : 0;
 }
 
 /* setenddir -- set dcnt to the end of the directory */
-void setenddir(uint8_t *mem) {
-    mem_w16(mem, BD_DCNT, 0xFFFF); /* enddir */
+void setenddir(uint8_t *mem, uint16_t ds_bdos) {
+    mem_w16_seg(mem, ds_bdos, BD_DCNT, 0xFFFF); /* enddir */
 }
 
 /*
@@ -861,12 +861,12 @@ void setenddir(uint8_t *mem) {
  *	output:	returns {al, dh} (al = rotated byte, dh = shift count);
  *		*bx_out = the byte's own address
  */
-uint8_t getallocbit(const uint8_t *mem, uint16_t cx, uint16_t *bx_out, uint8_t *dh_out) {
+uint8_t getallocbit(const uint8_t *mem, uint16_t ds_bdos, uint16_t cx, uint16_t *bx_out, uint8_t *dh_out) {
     uint8_t cl = (uint8_t)((cx & 0x07) + 1);
     uint8_t ch = cl;
     (void)ch;
     uint16_t dx = (uint16_t)(cx >> 3);
-    uint16_t bx = (uint16_t)(mem_r16(mem, BD_ALLOCA) + dx);
+    uint16_t bx = (uint16_t)(mem_r16_seg(mem, ds_bdos, BD_ALLOCA) + dx);
     uint8_t al = mem[bx];
     al = (uint8_t)(((al << cl) | (al >> (8 - cl))) & 0xFF); /* rol al,cl */
     *bx_out = bx;
@@ -875,10 +875,10 @@ uint8_t getallocbit(const uint8_t *mem, uint16_t cx, uint16_t *bx_out, uint8_t *
 }
 
 /* setallocbit -- set or reset the allocation bit at position cx to dl */
-void setallocbit(uint8_t *mem, uint16_t cx, uint8_t dl) {
+void setallocbit(uint8_t *mem, uint16_t ds_bdos, uint16_t cx, uint8_t dl) {
     uint16_t bx;
     uint8_t dh;
-    uint8_t al = getallocbit(mem, cx, &bx, &dh);
+    uint8_t al = getallocbit(mem, ds_bdos, cx, &bx, &dh);
     al = (uint8_t)(al & 0xFE);
     al = (uint8_t)(al | (dl & 1));
     /* rotr: ror al,dh and store */

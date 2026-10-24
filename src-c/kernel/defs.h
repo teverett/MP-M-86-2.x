@@ -268,6 +268,10 @@ typedef struct {
 #define SYSDAT_RTM_PDISP  0x003C /* word[2]: far ptr to DSPTCH.RTM's own farpdisp */
 #define SYSDAT_IDLEPD     0x09F0 /* byte[pdlen]: IDLE.SUP's own PD */
 #define SYSDAT_TICKPD     0x0A20 /* byte[pdlen]: TICK.SUP's own PD */
+#define SYSDAT_INITUDA    0x06C0 /* byte[ulen]: INIT.SUP's own init process's
+    UDA (probed directly, same file as SYSDAT_SUPMOD/etc above) -- doubles as
+    COMMAND.SUP's own chain-mode scratch UDA (`cli_ld1`'s own `offset inituda`
+    relocation, `command.c`'s own `cli_gopen`) */
 #define SD_INDISP     0xAC00 /* byte: currently in dispatch? */
 #define SD_INTFLAG    0xAC01 /* byte: if 0, interrupts not enabled */
 #define SD_ES_SAV     0xAC02 /* word */
@@ -660,6 +664,16 @@ static inline uint8_t mem_r8_seg(const uint8_t *mem, uint16_t seg, uint16_t offs
 
 static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8_t val) {
     mem[(uint16_t)((uint16_t)(seg * 16) + offset)] = val;
+}
+
+/* The bare segment:offset -> physical-address computation, with no
+ * read/write of its own -- for passing a genuinely segment-relative
+ * address into a generic, already-flat helper (src-c/kernel/file1.c's
+ * own `move`/`compare`, file1.c's own `cmpec0`, etc.) that takes a
+ * plain uint16_t address and has no segment parameter of its own,
+ * rather than threading a new parameter through it too. */
+static inline uint16_t mem_seg_addr(uint16_t seg, uint16_t offset) {
+    return (uint16_t)((uint16_t)(seg * 16) + offset);
 }
 
 /* src/kernel/MAU.MEM's own SAT (suballocation table) header offsets,

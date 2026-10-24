@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/command.c against src/kernel/
-COMMAND.SUP's shifttail, fileopen, user_retf, and clicmd_entry (the
-non-chain path -- see command.c's own header comment for why
-chain_entry/chain mode is excluded).
+COMMAND.SUP's shifttail, fileopen, user_retf, chain_entry, and
+clicmd_entry (both the ordinary and chain-mode paths -- see
+command.c's own header comment for the three real differences between
+them). `cli_gopen`'s own chain-mode `cli_ld1` UDA hand-off block is
+NOT differentially tested here, for the same reason `cli_gopen`'s own
+non-chain continuation past `prfilnam` isn't either (see command.c's
+own header comment): reaching it requires a real, matching directory
+entry `fileopen` can't be made to produce in any test in this project.
 
 clicmd_entry's own reference run is against command_wrapper.A86, which
 bundles QUE1.RTM (openq_entry/readq_entry/writeq_entry/cwriteq_entry),
@@ -51,6 +56,8 @@ SD_QLR = 0xA020
 SD_PUL = 0xA038
 SD_DAYFILE, SD_SRCHDISK = 0xA068, 0xA069
 SD_CLI_ERR = 0xA058
+UDA_DMA_OFST, UDA_DMA_SEG = 0xA060, 0xA062
+SD_CLI_CHAIN, SD_CLI_TERM = 0xA055, 0xA056
 
 CLI_FCB, CLI_CUSPQPB, CLI_CMDTAIL = 0xB300, 0xB320, 0xB360
 CLI_PCB = 0xB350
@@ -94,7 +101,7 @@ def assemble_reference():
     asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
     code = asm.segment_bytes('cseg')
     entries = {name: asm.symtab[name].value for name in
-               ('shifttail', 'fileopen', 'user_retf', 'clicmd_entry')}
+               ('shifttail', 'fileopen', 'user_retf', 'clicmd_entry', 'chain_entry')}
     chunk = code[entries['user_retf']:entries['user_retf'] + 40]
     int_offset = chunk.index(b'\xcd')
     entries['user_retf_int'] = entries['user_retf'] + int_offset
@@ -184,6 +191,8 @@ def main():
         lib.user_retf.argtypes = [c_u8p]
         lib.clicmd_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16]
         lib.clicmd_entry.restype = BxCx
+        lib.chain_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16]
+        lib.chain_entry.restype = BxCx
         # sysdat/user_retf_offset/cs only matter on cli_gopen's own real
         # f_load path (load.c's load), never reached by either case
         # below (RSP dispatch succeeds before cli_fload; the no-RSP-match
@@ -295,6 +304,67 @@ def main():
               mem_r16(ref_img, SD_CLI_ERR), mem_r16(port_img, SD_CLI_ERR))
         check("clicmd_entry: no RSP match -> PD released back onto pul",
               mem_r16(ref_img, SD_PUL), mem_r16(port_img, SD_PUL))
+
+        # -- chain_entry: dx==0 chain mode, cli_copy's own DMA-buffer
+        # source branch (see command.c's own header comment, point 1)
+        # -- no RSP match, falls through to cli_fload the same way the
+        # non-chain case above does (real fileopen call fails for real,
+        # no matching directory entry) --
+        mem = base_memory()
+        DMABUF = 0x9900
+        mem[DMABUF:DMABUF + 4] = b'NOPE'
+        mem[DMABUF + 4] = 0
+        mem_w16(mem, UDA_DMA_OFST, DMABUF)
+        mem_w16(mem, UDA_DMA_SEG, 0)
+        mem_w16(mem, SD_PUL, FREE_PD)
+        mem_w16(mem, FREE_PD + P_LINK, 0)
+        ref_regs, ref_img = run_reference(code, entries['chain_entry'], mem, {})
+        buf = to_ctypes(mem)
+        got = lib.chain_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(0), ctypes.c_uint16(0))
+        port_img = bytes(buf)
+        check("chain_entry: no RSP match -> bx/cx",
+              (ref_regs['bx'], ref_regs['cx']), (got.bx, got.cx))
+        check("chain_entry: no RSP match -> cli_err == e_bad_open",
+              mem_r16(ref_img, SD_CLI_ERR), mem_r16(port_img, SD_CLI_ERR))
+        check("chain_entry: no RSP match -> PD released back onto pul",
+              mem_r16(ref_img, SD_PUL), mem_r16(port_img, SD_PUL))
+        check("chain_entry: no RSP match -> DMA-copy landed in cli_cmdtail",
+              bytes(ref_img[CLI_FCB + FCB_NAME:CLI_FCB + FCB_NAME + 8]),
+              bytes(port_img[CLI_FCB + FCB_NAME:CLI_FCB + FCB_NAME + 8]))
+
+        # -- chain_entry: dx==0 chain mode, a command matching a
+        # registered RSP queue (same queue setup as the non-chain RSP
+        # case above) -- cli_qful sets cli_term, and clicmd_exit's own
+        # chain+term tail (point 3 in command.c's own header comment)
+        # skips clirls (mxwrite) entirely: MXQD's own Q_MSGCNT, unlike
+        # the non-chain case, never changes. bx/cx are a documented
+        # fixed artifact on this path (see header comment) and not
+        # checked here -- only the real, meaningful side effect
+        # (p_flag's own mask) is.
+        mem = base_memory()
+        mem_w16(mem, MXQD + Q_LINK, QD1)
+        mem_w16(mem, QD1 + Q_LINK, 0)
+        mem_w16(mem, QD1 + Q_FLAGS, QF_RSP)
+        put_name(mem, QD1 + Q_NAME, 'FOOBAR')
+        mem_w16(mem, QD1 + Q_MSGLEN, 0)
+        mem_w16(mem, QD1 + Q_NMSGS, 1)
+        mem_w16(mem, QD1 + Q_MSGCNT, 0)
+        mem[DMABUF:DMABUF + 6] = b'FOOBAR'
+        mem[DMABUF + 6] = 0
+        mem_w16(mem, UDA_DMA_OFST, DMABUF)
+        mem_w16(mem, UDA_DMA_SEG, 0)
+        PF_KEEP, PF_SYS, PF_CTLC, PF_TEMPKEEP = 0x0002, 0x0001, 0x0080, 0x0200
+        mem_w16(mem, PD + P_FLAG, PF_KEEP | PF_SYS | PF_CTLC | PF_TEMPKEEP)
+        ref_regs, ref_img = run_reference(code, entries['chain_entry'], mem, {})
+        buf = to_ctypes(mem)
+        lib.chain_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(0), ctypes.c_uint16(0))
+        port_img = bytes(buf)
+        check("chain_entry: RSP dispatch -> cli_term set",
+              ref_img[SD_CLI_TERM], port_img[SD_CLI_TERM])
+        check("chain_entry: RSP dispatch, chain+term tail -> p_flag masked",
+              mem_r16(ref_img, PD + P_FLAG), mem_r16(port_img, PD + P_FLAG))
+        check("chain_entry: RSP dispatch, chain+term tail -> clirls skipped (mxwrite never ran)",
+              mem_r16(ref_img, QD1 + Q_MSGCNT), mem_r16(port_img, QD1 + Q_MSGCNT))
 
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")

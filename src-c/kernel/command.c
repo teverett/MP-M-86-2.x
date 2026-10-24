@@ -1,23 +1,73 @@
 /*
- * command.c -- C port of src/kernel/COMMAND.SUP's `clicmd_entry`
- * (the whole non-chain path -- a real, typed CLI command, not a
- * chain-loaded one) plus every routine it calls: `shifttail`,
- * `fileopen`, `user_retf`, the console-print helpers (`crlf`/
- * `prchar`/`prtime`/`prnum`/`prdisk`/`prcusp`/`prcsm`/`prtyp`/
+ * command.c -- C port of src/kernel/COMMAND.SUP's `chain_entry`/
+ * `clicmd_entry` (both paths -- a real, typed CLI command *and* a
+ * chain-loaded one, `dx==0`) plus every routine it calls:
+ * `shifttail`, `fileopen`, `user_retf`, the console-print helpers
+ * (`crlf`/`prchar`/`prtime`/`prnum`/`prdisk`/`prcusp`/`prcsm`/`prtyp`/
  * `prnam`/`prn1`/`cprnt`/`pruser`/`prfilnam`), `cli_checkque`,
  * `cli_fload`, `cli_pfn` (this port's own name for the real `pfn`),
  * `mxwrite`/`mxread`, and `conasn`.
  *
- * `chain_entry` itself (always `dx==0` into `clicmd_entry`, i.e.
- * always `cli_chain==true`) is NOT ported: its own chain-mode UDA
- * copy (`cli_fload`'s own `cli_ld1` block) dynamically switches
- * `DS`/`ES` to the newly loaded process's own UDA segment and reads/
- * writes fixed `UDA.FMT` offsets relative to it -- the same real
- * segment-relative-addressing gap already solved for `PROC.RTM`/
- * `ML.MEM`/`MAU.MEM`/`SHARE.MEM`, just not applied here, since
- * `clicmd_entry`'s own ordinary path (a typed command, `cli_chain`
- * always false) is the far more common case and needs none of it.
+ * `chain_entry` is a thin wrapper (`sub dx,dx` then fall into
+ * `clicmd_entry`). Chain mode's own three real differences from the
+ * ordinary path, all gated on `SD_CLI_CHAIN` (set once, in
+ * `clicmd_entry`, from `dx==0`, same as the real asm's own
+ * `cmp dx,0`):
  *
+ *   1. `cli_copy`'s own command-tail copy source: the ordinary path
+ *      copies from the caller's own `CLICB.DEF`-shaped buffer
+ *      (`wrkseg:dx`); chain mode instead copies 128 bytes from the
+ *      *calling process's own* DMA buffer (`cli_dma_seg:cli_dma_ofst`,
+ *      both just saved a few lines earlier in this same function) --
+ *      genuinely segment-relative on the source side (`mem_r8_seg`),
+ *      same as every other dynamic-segment read in this tree.
+ *
+ *   2. `cli_gopen`'s own `cli_ld1` block: chain mode hands the
+ *      *current* process's own live UDA memory off to the newly
+ *      allocated child PD in place (`cli_pd`'s own `p_uda` := the
+ *      running process's own `p_uda`, read via `rlr`, standing in for
+ *      the real asm's own ambient `ES`) rather than letting the
+ *      ordinary `f_load`/`load_entry` path allocate fresh UDA memory
+ *      -- but the *running* process is still executing out of that
+ *      same memory, so it first copies its own live UDA content onto
+ *      a shared scratch block (`SYSDAT_INITUDA`, the exact same block
+ *      `INIT.SUP`'s own `init` reserves for its own init process at
+ *      cold boot, `defs.h`'s own header comment has the detail) and
+ *      relocates its own `p_uda` there, continuing to run from the
+ *      scratch block while its original memory now belongs entirely
+ *      to the new child. Both the UDA copy and the relocation are
+ *      real segment-relative addressing (`mem_r8_seg`/`mem_w8_seg`/
+ *      `mem_r16_seg` against a genuine runtime segment, not a fixed
+ *      `SD_*` flat address) -- the same gap this file's own header
+ *      comment used to say chain mode was blocked on, now resolved
+ *      the same way `PROC.RTM`/`ML.MEM`/`MAU.MEM`/`SHARE.MEM` already
+ *      were. The real asm's own accompanying `mov ss,ax` (the running
+ *      process's own stack also relocates onto the scratch block) has
+ *      no C equivalent, same as every other real stack switch in this
+ *      port (see `init.c`'s own header comment); the real asm's own
+ *      `pushf!cli!...!popf` around the `p_uda` reassignment has no
+ *      consumer here either (this port's own host is single-threaded).
+ *      `load()` is then called with `load_chain=1` and `bx=cli_pd`
+ *      (not `bx=0`) -- `load.c`'s own `cload_entry` already documents
+ *      this exact `bx=PD` convention, just inlined here directly
+ *      rather than going through that thin wrapper, same as the
+ *      ordinary path already inlines `load_entry`'s own `bx=0`.
+ *
+ *   3. `clicmd_exit`'s own tail: if chain mode set `SD_CLI_TERM`
+ *      (meaning the process should terminate on exit -- either
+ *      because `cli_gopen` reached the real `load()` call, or because
+ *      `cli_checkque` succeeded first), the real asm's own `jmp
+ *      mpmif(f_terminate)` is a true tail jump, never returning to
+ *      `clicmd_exit`'s own caller in the real system at all (the
+ *      process is torn down). `f_terminate` is a boundary-stub no-op
+ *      everywhere else in this project (nothing downstream ever reads
+ *      its result), so under that same convention this port just
+ *      clears the documented `p_flag` bits and returns a fixed
+ *      `(bx,cx)=(0,0)` -- an "undefined artifact, fixed choice" (same
+ *      category as `init.c`'s own `io_maxconsole`/`io_maxlist`), since
+ *      no real caller ever actually observes this return value.
+ *
+
  * Many of `clicmd_entry`'s own `mpmif(...)` calls are now real
  * internal calls into already-ported routines, the same technique
  * `sysent.c`'s own `creat_proc_entry`/`que1.c`'s own `readq`/`writeq`
@@ -116,7 +166,7 @@ extern cmd_bxcx conassign_entry(uint8_t *mem, uint16_t dx);
 extern void conout_entry(uint8_t *mem, uint8_t dl);
 extern void conprint_entry(uint8_t *mem, uint16_t dx, uint8_t bh, uint8_t bl);
 extern cmd_bxcx parse_entry(uint8_t *mem, uint16_t dx);
-extern void func15(uint8_t *mem);
+extern void func15(uint8_t *mem, uint16_t ds_bdos);
 extern cmd_bxcx load(uint8_t *mem, uint16_t dx, uint16_t bx, uint16_t sysdat,
                       uint16_t user_retf_offset, uint16_t cs, int load_chain);
 
@@ -158,7 +208,7 @@ typedef struct {
 fileopen_result fileopen(uint8_t *mem) {
     mem[(uint16_t)(CLI_FCB + fcb_name + 5)] |= 0x80; /* f6`= open read-only */
     mem_w16(mem, BD_INFO, CLI_FCB);
-    func15(mem);
+    func15(mem, 0); /* 0 -- same flat convention as this file's own BD_INFO/BD_ARET access */
     uint16_t aret = mem_r16(mem, BD_ARET);
     fileopen_result r = {(uint8_t)(aret & 0xFF), (uint8_t)(aret >> 8)};
     return r;
@@ -353,6 +403,15 @@ static cmd_bxcx cli_rmpd(uint8_t *mem, uint16_t cli_pd);
 static cmd_bxcx cli_gopen(uint8_t *mem, uint16_t cli_pd, uint16_t sysdat,
                            uint16_t user_retf_offset, uint16_t cs);
 
+/* cli_qful -- successful RSP-queue access (or a full MXCli queue on
+ * the way there): in chain mode this process terminates on exit */
+static cmd_bxcx cli_qful(uint8_t *mem) {
+    if (mem[SD_CLI_CHAIN]) {
+        mem[SD_CLI_TERM] = 0xFF; /* true -- SYSTEM.DEF: true equ 0ffffh */
+    }
+    return clicmd_exit(mem);
+}
+
 /*
  * cli_fload -- try to load cli_fcb (given type forced to 'CMD') for
  * execution. `fileopen` is a real call now (see this file's own
@@ -447,14 +506,19 @@ static cmd_bxcx cli_fload(uint8_t *mem, uint16_t sysdat, uint16_t user_retf_offs
 
 /*
  * cli_gopen -- the real successful-open path: a pf_ctlc abort check,
- * then (if cli_dfil) logging the filename via prfilnam, then loading
- * the program (`load.c`'s `load`, now a real call -- `cli_chain` is
- * always false here, so this is always the `f_load`/`load_entry`
- * path, never `f_cload`; `load_entry`'s own real asm ignores its own
- * caller's `bx` and always forces `bx=0`, i.e. "don't init a PD",
- * which is why `cli_pd` itself is never passed into `load` at all --
- * `cli_pd`'s own process gets created separately, below, by
- * `f_createproc`). On success, `cli_gload`'s own Base Page setup
+ * then (if cli_dfil) logging the filename via prfilnam, then (in
+ * chain mode) the `cli_ld1` UDA hand-off (see this file's own header
+ * comment), then loading the program (`load.c`'s own `load`, a real
+ * call). Non-chain is always the `f_load`/`load_entry` path --
+ * `load_entry`'s own real asm ignores its own caller's `bx` and
+ * always forces `bx=0`, i.e. "don't init a PD", which is why `cli_pd`
+ * itself isn't passed into `load` on that path -- `cli_pd`'s own
+ * process gets created separately, below, by `f_createproc`. Chain
+ * mode is always `f_cload`/`cload_entry`'s own `bx=PD` convention
+ * instead (`load.c`'s own `cload_entry` documents it; inlined here
+ * directly rather than going through that wrapper, same as the
+ * non-chain path already inlines `load_entry`'s own `bx=0`). On
+ * success, `cli_gload`'s own Base Page setup
  * (copy+uppercase the command tail into the new program's own DMA
  * buffer, build its own default FCB, and parse up to two filename
  * arguments from the tail into it) needs real segment-relative
@@ -481,12 +545,30 @@ static cmd_bxcx cli_gopen(uint8_t *mem, uint16_t cli_pd, uint16_t sysdat,
         cmd_bxcx result = {0xFFFF, e_abort};
         return result;
     }
+    /* cli_ld1 -- chain mode hands the current process's own live UDA
+     * off to cli_pd, relocating the current process onto a shared
+     * scratch UDA block first (see this file's own header comment) */
+    if (mem[SD_CLI_CHAIN]) {
+        uint16_t old_uda = mem_r16(mem, (uint16_t)(rlr + p_uda)); /* es */
+        mem_w16(mem, (uint16_t)(cli_pd + p_uda), old_uda);
+        uint16_t scratch_seg = (uint16_t)((SYSDAT_INITUDA >> 4) + sysdat);
+        for (uint16_t i = 0; i < ulen; i++) {
+            mem_w8_seg(mem, scratch_seg, i, mem_r8_seg(mem, old_uda, i));
+        }
+        mem_w16(mem, (uint16_t)(rlr + p_uda), scratch_seg);
+    }
+
     if (mem[SD_CLI_DFIL]) {
         prfilnam(mem);
     }
 
-    /* noprfil/cli_ld -- always f_load (cli_chain is always false) */
-    cmd_bxcx ld = load(mem, CLI_FCB, 0, sysdat, user_retf_offset, cs, 0);
+    /* noprfil/cli_ld -- f_cload (bx=cli_pd) in chain mode, f_load
+     * (bx=0) otherwise */
+    int chain = mem[SD_CLI_CHAIN] != 0;
+    if (chain) {
+        mem[SD_CLI_TERM] = 0xFF; /* true */
+    }
+    cmd_bxcx ld = load(mem, CLI_FCB, chain ? cli_pd : 0, sysdat, user_retf_offset, cs, chain);
 
     /* cli_cl */
     mem[UDA_ERROR_MODE] = 0;
@@ -566,8 +648,10 @@ static cmd_bxcx cli_gopen(uint8_t *mem, uint16_t cli_pd, uint16_t sysdat,
         }
     }
 
-    /* 10. Create the process -- f_setprior is skipped (cli_chain is
-     * always false); f_createproc stays a no-op, see header comment */
+    /* 10. Create the process -- f_setprior (chain mode only) is
+     * omitted as a no-op, same as f_createproc right below, since
+     * nothing downstream ever reads either one's result (see header
+     * comment); f_createproc itself stays a no-op too */
 
     /* 11. Assign Console to new process */
     if (mem[SD_CLI_DFIL]) {
@@ -595,11 +679,14 @@ static cmd_bxcx cli_rmpd(uint8_t *mem, uint16_t cli_pd) {
  * MXCli queue to release it (mxwrite, a real call to writeq_entry --
  * same convention as mxread in clicmd_entry below), merge cli_pflag's
  * own pf_tempkeep/pf_keep bits back into the live p_flag, and report
- * cli_err. `cli_chain` is always false in this port's own scope (see
- * this file's own header comment), so the chain-only `f_terminate`
- * tail-jump branch right after the dsk/user/err_mode/dma restores is
- * omitted entirely, and `pf_ctlc`'s own `f_terminate` call stays a
- * boundary stub -- same "dispatch-adjacent" exclusion `f_createproc`/
+ * cli_err. If chain mode set `SD_CLI_TERM`, the real asm's own `jmp
+ * mpmif(f_terminate)` right after the dsk/user/err_mode/dma restores
+ * is a true tail jump that never returns to this function's own
+ * caller in the real system at all -- modeled as a fixed `(bx,cx)=
+ * (0,0)` return instead (see this file's own header comment for why).
+ * Otherwise, `pf_ctlc`'s own separate `f_terminate` call (an ordinary
+ * call/return in the real asm, not a tail jump) stays a boundary
+ * stub -- same "dispatch-adjacent" exclusion `f_createproc`/
  * `f_setprior` get elsewhere in this file, since nothing here ever
  * reads its result either.
  */
@@ -610,6 +697,13 @@ static cmd_bxcx clicmd_exit(uint8_t *mem) {
     mem[UDA_ERROR_MODE] = mem[SD_CLI_ERR_MODE];
     mem_w16(mem, UDA_DMA_OFST, mem_r16(mem, SD_CLI_DMA_OFST));
     mem_w16(mem, UDA_DMA_SEG, mem_r16(mem, SD_CLI_DMA_SEG));
+
+    if (mem[SD_CLI_CHAIN] && mem[SD_CLI_TERM]) {
+        uint16_t mask = (uint16_t)~(uint16_t)(pf_keep | pf_sys | pf_tempkeep | pf_ctlc);
+        mem_w16(mem, (uint16_t)(rlr + p_flag), (uint16_t)(mem_r16(mem, (uint16_t)(rlr + p_flag)) & mask));
+        cmd_bxcx result = {0, 0}; /* undefined artifact, fixed choice -- see header comment */
+        return result;
+    }
 
     /* clirls */
     writeq_entry(mem, MXCLIQPB); /* mxwrite */
@@ -652,7 +746,11 @@ cmd_bxcx clicmd_entry(uint8_t *mem, uint16_t dx, uint16_t sysdat,
     pflag = (uint16_t)((pflag & (uint16_t)~(uint16_t)pf_keep) | pf_tempkeep);
     mem_w16(mem, (uint16_t)(rlr + p_flag), pflag);
 
-    mem[SD_CLI_CHAIN] = 0;
+    int chain = (dx == 0);
+    mem[SD_CLI_CHAIN] = chain ? 0xFF : 0; /* true/false -- SYSTEM.DEF */
+    if (chain) {
+        mem[SD_CLI_TERM] = 0;
+    }
 
     /* cli_cli */
     mem[SD_CLI_DFIL] = 0;
@@ -673,13 +771,20 @@ cmd_bxcx clicmd_entry(uint8_t *mem, uint16_t dx, uint16_t sysdat,
     mem_w16(mem, SD_CLI_DMA_SEG, mem_r16(mem, UDA_DMA_SEG));
     mem_w16(mem, SD_CLI_ERR, 0);
 
-    /* cli_copy -- cli_chain is always false here, so always the
-     * non-chain copy (clicb_net/clicb_cmd..clicblen out of the
-     * caller's own CLICB-shaped buffer at wrkseg:dx), never the
-     * chain-mode UDA copy this port excludes (see header comment) */
-    mem[SD_CLI_NET] = mem_r8_seg(mem, wrkseg, (uint16_t)(dx + cmdcb_net));
-    for (uint16_t i = 0; i < cmdcblen - cmdcb_cmd; i++) {
-        mem[CLI_CMDTAIL + i] = mem_r8_seg(mem, wrkseg, (uint16_t)(dx + cmdcb_cmd + i));
+    /* cli_copy -- chain mode copies 128 bytes from the calling
+     * process's own DMA buffer instead of the caller's own CLICB-
+     * shaped buffer, and never touches cli_net (see header comment) */
+    if (chain) {
+        uint16_t dma_seg = mem_r16(mem, SD_CLI_DMA_SEG);
+        uint16_t dma_ofst = mem_r16(mem, SD_CLI_DMA_OFST);
+        for (uint16_t i = 0; i < 128; i++) {
+            mem[CLI_CMDTAIL + i] = mem_r8_seg(mem, dma_seg, (uint16_t)(dma_ofst + i));
+        }
+    } else {
+        mem[SD_CLI_NET] = mem_r8_seg(mem, wrkseg, (uint16_t)(dx + cmdcb_net));
+        for (uint16_t i = 0; i < cmdcblen - cmdcb_cmd; i++) {
+            mem[CLI_CMDTAIL + i] = mem_r8_seg(mem, wrkseg, (uint16_t)(dx + cmdcb_cmd + i));
+        }
     }
 
     /* cli_parse */
@@ -695,14 +800,20 @@ cmd_bxcx clicmd_entry(uint8_t *mem, uint16_t dx, uint16_t sysdat,
         uint16_t qerr = cli_checkque(mem);
         if (qerr == 0) {
             /* cli_qful -- successful RSP access */
-            return clicmd_exit(mem);
+            return cli_qful(mem);
         }
         if (qerr == e_q_full) {
             mem_w16(mem, SD_CLI_ERR, qerr);
-            return clicmd_exit(mem);
+            return cli_qful(mem);
         }
         /* any other cli_checkque error falls to cli_fload, same as
          * the real asm's own cli_ffload check */
     }
     return cli_fload(mem, sysdat, user_retf_offset, cs);
+}
+
+/* chain_entry -- `sub dx,dx` then fall into clicmd_entry (dx==0 is
+ * clicmd_entry's own chain-mode signal) */
+cmd_bxcx chain_entry(uint8_t *mem, uint16_t sysdat, uint16_t user_retf_offset, uint16_t cs) {
+    return clicmd_entry(mem, 0, sysdat, user_retf_offset, cs);
 }

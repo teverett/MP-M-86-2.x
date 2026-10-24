@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/file2.c against a self-contained
 subset of src/kernel/FILE2.BDO: GET_NALBS, getblock (+ internal
-lefttst/righttst/rblok/rblok0). See file2.c's own header comment for
-why the rest of the file is deferred.
+lefttst/righttst/rblok/rblok0), and now SWAP (`swap_sdcnt`), the first
+routine in this file's own DATA.BDO cseg/dseg collision cluster to get
+a real differential test, now that file1.c/file2.c/file3.c/file4.c's
+own BD_* fields are genuinely segment-relative (see defs.h's own
+`mem_seg_addr` and this file's own DS_BDOS/run_reference_segmented
+header comment). `close`/`close1`/`search`/`searchn`/`open`/`open1`/
+`opencopy`/`copy_dir0`-`2` are now unblocked in principle the same
+way, but don't have their own new tests yet -- same "resolved in
+principle, not yet written" precedent as several other clusters
+elsewhere in this project (see docs/src-c.md).
 """
 import ctypes
 import os
@@ -26,6 +34,7 @@ INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 STACK_TOP = 0xFFF0
 
 BD_MAXALL, BD_ALLOCA, BD_CURDSK = 0x0C4D, 0x0C46, 0x0C36
+BD_SDCNT, BD_SDCNT0, BD_SDBLK, BD_SDBLK0 = 0x0C7D, 0x0C81, 0x0C7F, 0x0C83
 
 # mpmif and its 9 XIOS-call helpers, plus XCRLF/XPRINT -- all real
 # BDOSIF.BDO labels this combined bundle needs to assemble, even
@@ -39,7 +48,7 @@ def assemble_reference():
     asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
     code = asm.segment_bytes('cseg')
     dseg = asm.segment_bytes('dseg')
-    names = ('get_nalbs', 'getblock')
+    names = ('get_nalbs', 'getblock', 'swap')
     entries = {name: asm.symtab[name].value for name in names}
     return code, dseg, entries
 
@@ -97,6 +106,38 @@ def run_reference(code, dseg, entry, mem, regs, stop_addrs=()):
 
 ALLOC_AT = 0x4400
 
+# -- swap_sdcnt: real segmented addressing, proving the DATA.BDO
+# cseg/dseg collision fix for real (see file2.c's own header comment
+# and defs.h's own mem_seg_addr -- this is the first new differential
+# test this project has for any routine in the collision cluster).
+# `swap` itself (the real asm's own label) lands at 0xd1d, inside the
+# combined wrapper's own dseg-sized [0, 0x1000) window that
+# run_reference's own non-segmented convention can't use without
+# corrupting this routine's own code -- so this one test alone needs
+# `segmented=True` with a genuine, non-degenerate DS (DS_BDOS, chosen
+# so its own physical base, DS_BDOS*16, clears this wrapper's entire
+# ~0x2659-byte cseg) instead. `swap_sdcnt` touches only BD_SDCNT/
+# BD_SDCNT0/BD_SDBLK/BD_SDBLK0 -- no SD_*/UDA_*/CLI_* field at all --
+# so this doesn't need to reconcile with those fields' own harness-
+# chosen flat scratch addresses used elsewhere in this project.
+DS_BDOS = 0x0300
+
+
+def phys(seg, offset):
+    return (seg * 16 + offset) & 0xFFFF
+
+
+def run_reference_segmented(code, entry, mem, ds_bdos, stop_addrs=()):
+    image = bytearray(0x10000)
+    image[0:len(code)] = code
+    for addr, val in enumerate(mem):
+        if val != 0:
+            image[addr] = val
+    sim = I86Sim(image, {'ds': ds_bdos, 'sp': STACK_TOP}, entry,
+                 stop_addrs=set(stop_addrs), call_stub_addrs=STUBS, segmented=True)
+    sim.run()
+    return sim.regs, image
+
 
 def main():
     code, dseg, entries = assemble_reference()
@@ -106,9 +147,10 @@ def main():
         c_u8p = ctypes.POINTER(ctypes.c_uint8)
 
         lib.get_nalbs.restype = ctypes.c_uint16
-        lib.get_nalbs.argtypes = [c_u8p]
+        lib.get_nalbs.argtypes = [c_u8p, ctypes.c_uint16]
         lib.getblock.restype = ctypes.c_uint16
-        lib.getblock.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.getblock.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16]
+        lib.swap_sdcnt.argtypes = [c_u8p, ctypes.c_uint16]
 
         failures = []
 
@@ -126,7 +168,7 @@ def main():
         mem_w16(mem, BD_MAXALL, 100)
         ref_regs, _ = run_reference(code, dseg, entries['get_nalbs'], mem, {})
         buf = to_ctypes(mem)
-        got = lib.get_nalbs(ctypes.cast(buf, c_u8p))
+        got = lib.get_nalbs(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("get_nalbs", ref_regs['bx'], got)
 
         def setup(maxall, alloc_bytes):
@@ -140,7 +182,7 @@ def main():
         mem = setup(63, bytes([0x00] * 8))
         ref_regs, ref_img = run_reference(code, dseg, entries['getblock'], mem, {'cx': 10})
         buf = to_ctypes(mem)
-        got = lib.getblock(ctypes.cast(buf, c_u8p), ctypes.c_uint16(10))
+        got = lib.getblock(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(10))
         ref = (ref_regs['bx'], bytes(ref_img[ALLOC_AT:ALLOC_AT + 8]))
         port = (got, bytes(bytes(buf)[ALLOC_AT:ALLOC_AT + 8]))
         check("getblock: starting bit free", ref, port)
@@ -155,7 +197,7 @@ def main():
         mem = setup(63, bytes([0x00, 0x50] + [0] * 6))
         ref_regs, ref_img = run_reference(code, dseg, entries['getblock'], mem, {'cx': 10})
         buf = to_ctypes(mem)
-        got = lib.getblock(ctypes.cast(buf, c_u8p), ctypes.c_uint16(10))
+        got = lib.getblock(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(10))
         ref = (ref_regs['bx'], bytes(ref_img[ALLOC_AT:ALLOC_AT + 8]))
         port = (got, bytes(bytes(buf)[ALLOC_AT:ALLOC_AT + 8]))
         check("getblock: nearest free bit is 2 to the left (loops)", ref, port)
@@ -165,7 +207,7 @@ def main():
         mem = setup(63, bytes([0b00000001] + [0] * 7))
         ref_regs, ref_img = run_reference(code, dseg, entries['getblock'], mem, {'cx': 0})
         buf = to_ctypes(mem)
-        got = lib.getblock(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
+        got = lib.getblock(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(0))
         ref = (ref_regs['bx'], bytes(ref_img[ALLOC_AT:ALLOC_AT + 8]))
         port = (got, bytes(bytes(buf)[ALLOC_AT:ALLOC_AT + 8]))
         check("getblock: cx == 0, nearest free bit is to the right", ref, port)
@@ -174,10 +216,29 @@ def main():
         mem = setup(7, bytes([0xFF]))
         ref_regs, ref_img = run_reference(code, dseg, entries['getblock'], mem, {'cx': 3})
         buf = to_ctypes(mem)
-        got = lib.getblock(ctypes.cast(buf, c_u8p), ctypes.c_uint16(3))
+        got = lib.getblock(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(3))
         ref = (ref_regs['bx'], bytes(ref_img[ALLOC_AT:ALLOC_AT + 1]))
         port = (got, bytes(bytes(buf)[ALLOC_AT:ALLOC_AT + 1]))
         check("getblock: fully allocated, not found", ref, port)
+
+        # -- swap_sdcnt: real segmented addressing, proving the DATA.BDO
+        # collision fix for real (see this file's own DS_BDOS/
+        # run_reference_segmented header comment) --
+        mem = base_memory()
+        p_sdcnt, p_sdcnt0 = phys(DS_BDOS, BD_SDCNT), phys(DS_BDOS, BD_SDCNT0)
+        p_sdblk, p_sdblk0 = phys(DS_BDOS, BD_SDBLK), phys(DS_BDOS, BD_SDBLK0)
+        mem_w16(mem, p_sdcnt, 0x1234)
+        mem_w16(mem, p_sdcnt0, 0x5678)
+        mem_w16(mem, p_sdblk, 0x9ABC)
+        mem_w16(mem, p_sdblk0, 0xDEF0)
+        ref_regs, ref_img = run_reference_segmented(code, entries['swap'], mem, DS_BDOS)
+        buf = to_ctypes(mem)
+        lib.swap_sdcnt(ctypes.cast(buf, c_u8p), ctypes.c_uint16(DS_BDOS))
+        port_img = bytes(buf)
+        check("swap_sdcnt: sdcnt<->sdcnt0", (mem_r16(ref_img, p_sdcnt), mem_r16(ref_img, p_sdcnt0)),
+              (mem_r16(port_img, p_sdcnt), mem_r16(port_img, p_sdcnt0)))
+        check("swap_sdcnt: sdblk<->sdblk0", (mem_r16(ref_img, p_sdblk), mem_r16(ref_img, p_sdblk0)),
+              (mem_r16(port_img, p_sdblk), mem_r16(port_img, p_sdblk0)))
 
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")

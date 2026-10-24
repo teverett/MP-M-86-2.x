@@ -166,71 +166,71 @@ def main():
         lib = ctypes.CDLL(lib_path)
         c_u8p = ctypes.POINTER(ctypes.c_uint8)
 
-        lib.pererror.argtypes = [c_u8p]
-        lib.selectdisk.argtypes = [c_u8p]
-        lib.home.argtypes = [c_u8p]
-        lib.rdbuff.argtypes = [c_u8p]
-        lib.wrbuff.argtypes = [c_u8p]
-        lib.seekdir.argtypes = [c_u8p]
+        lib.pererror.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.selectdisk.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.home.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.rdbuff.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.wrbuff.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.seekdir.argtypes = [c_u8p, ctypes.c_uint16]
         lib.seek.argtypes = [c_u8p]
         lib.get_atts.restype = ctypes.c_uint8
-        lib.get_atts.argtypes = [c_u8p]
+        lib.get_atts.argtypes = [c_u8p, ctypes.c_uint16]
         lib.get_s1.restype = ctypes.c_uint8
-        lib.get_s1.argtypes = [c_u8p]
+        lib.get_s1.argtypes = [c_u8p, ctypes.c_uint16]
         lib.get_rra.restype = ctypes.c_uint16
-        lib.get_rra.argtypes = [c_u8p]
+        lib.get_rra.argtypes = [c_u8p, ctypes.c_uint16]
         lib.get_rcnta.restype = ctypes.c_uint16
-        lib.get_rcnta.argtypes = [c_u8p]
-        lib.bdos_index.argtypes = [c_u8p]
+        lib.get_rcnta.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.bdos_index.argtypes = [c_u8p, ctypes.c_uint16]
         lib.alloct.restype = ctypes.c_uint16
-        lib.alloct.argtypes = [c_u8p]
-        lib.atran.argtypes = [c_u8p]
-        lib.getfcb.argtypes = [c_u8p]
-        lib.setfcb.argtypes = [c_u8p]
+        lib.alloct.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.atran.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.getfcb.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.setfcb.argtypes = [c_u8p, ctypes.c_uint16]
         lib.cmpecs.restype = ctypes.c_uint8
-        lib.cmpecs.argtypes = [c_u8p]
+        lib.cmpecs.argtypes = [c_u8p, ctypes.c_uint16]
         lib.chksum_fcb.restype = ctypes.c_uint8
-        lib.chksum_fcb.argtypes = [c_u8p]
-        lib.set_chksum_fcb.argtypes = [c_u8p]
-        lib.reset_checksum_fcb.argtypes = [c_u8p]
+        lib.chksum_fcb.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.set_chksum_fcb.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.reset_checksum_fcb.argtypes = [c_u8p, ctypes.c_uint16]
         lib.chek_fcb.restype = ctypes.c_uint8
-        lib.chek_fcb.argtypes = [c_u8p]
+        lib.chek_fcb.argtypes = [c_u8p, ctypes.c_uint16]
         lib.setcdisk.restype = ctypes.c_uint16
-        lib.setcdisk.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.setcdisk.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16]
         lib.nowrite.restype = ctypes.c_uint8
-        lib.nowrite.argtypes = [c_u8p]
-        lib.setro.argtypes = [c_u8p]
-        lib.ckrodir.argtypes = [c_u8p]
-        lib.checkwrite.argtypes = [c_u8p]
+        lib.nowrite.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.setro.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.ckrodir.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.checkwrite.argtypes = [c_u8p, ctypes.c_uint16]
         lib.getdptra.restype = ctypes.c_uint16
-        lib.getdptra.argtypes = [c_u8p]
+        lib.getdptra.argtypes = [c_u8p, ctypes.c_uint16]
         lib.getmodnum.restype = ctypes.c_uint8
-        lib.getmodnum.argtypes = [c_u8p, ctypes.POINTER(ctypes.c_uint16)]
-        lib.clrmodnum.argtypes = [c_u8p]
-        lib.clr_ext.argtypes = [c_u8p]
+        lib.getmodnum.argtypes = [c_u8p, ctypes.c_uint16, ctypes.POINTER(ctypes.c_uint16)]
+        lib.clrmodnum.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.clr_ext.argtypes = [c_u8p, ctypes.c_uint16]
         lib.setfwf.restype = ctypes.c_uint8
-        lib.setfwf.argtypes = [c_u8p]
+        lib.setfwf.argtypes = [c_u8p, ctypes.c_uint16]
         lib.compcdr.restype = ctypes.c_uint8
-        lib.compcdr.argtypes = [c_u8p]
-        lib.setcdr.argtypes = [c_u8p]
-        lib.rddirbuf.argtypes = [c_u8p]
-        lib.dirtouser.argtypes = [c_u8p]
-        lib.make_fcb_inv.argtypes = [c_u8p]
+        lib.compcdr.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.setcdr.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.rddirbuf.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.dirtouser.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.make_fcb_inv.argtypes = [c_u8p, ctypes.c_uint16]
         lib.chk_inv_fcb.restype = ctypes.c_uint16
-        lib.chk_inv_fcb.argtypes = [c_u8p]
+        lib.chk_inv_fcb.argtypes = [c_u8p, ctypes.c_uint16]
         lib.tst_inv_fcb.restype = ctypes.c_uint8
-        lib.tst_inv_fcb.argtypes = [c_u8p]
+        lib.tst_inv_fcb.argtypes = [c_u8p, ctypes.c_uint16]
         lib.endofdir.restype = ctypes.c_uint8
-        lib.endofdir.argtypes = [c_u8p]
-        lib.setenddir.argtypes = [c_u8p]
+        lib.endofdir.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.setenddir.argtypes = [c_u8p, ctypes.c_uint16]
         lib.getallocbit.restype = ctypes.c_uint8
-        lib.getallocbit.argtypes = [c_u8p, ctypes.c_uint16, ctypes.POINTER(ctypes.c_uint16), ctypes.POINTER(ctypes.c_uint8)]
-        lib.setallocbit.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint8]
-        lib.checksum.argtypes = [c_u8p, ctypes.c_uint8]
-        lib.newchecksum.argtypes = [c_u8p]
-        lib.rddir.argtypes = [c_u8p, ctypes.c_uint8]
-        lib.rddir0.argtypes = [c_u8p, ctypes.c_uint8]
-        lib.wrdir.argtypes = [c_u8p]
+        lib.getallocbit.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.POINTER(ctypes.c_uint16), ctypes.POINTER(ctypes.c_uint8)]
+        lib.setallocbit.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint8]
+        lib.checksum.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint8]
+        lib.newchecksum.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.rddir.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint8]
+        lib.rddir0.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint8]
+        lib.wrdir.argtypes = [c_u8p, ctypes.c_uint16]
 
         failures = []
 
@@ -249,7 +249,7 @@ def main():
         mem[BD_RETURN_FFFF] = 0
         ref_regs, ref_img = run_reference(code, dseg, entries['pererror'], mem, {}, stop_addrs={entries['goback']})
         buf = to_ctypes(mem)
-        lib.pererror(ctypes.cast(buf, c_u8p))
+        lib.pererror(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = (mem_r16(ref_img, BD_ARET), mem_r16(ref_img, PD + P_FLAG))
         port = (mem_r16(bytes(buf), BD_ARET), mem_r16(bytes(buf), PD + P_FLAG))
         check("pererror: sets aret and pf_ctlc", ref, port)
@@ -259,7 +259,7 @@ def main():
         mem[BD_ERROR_MODE] = 0xFF
         ref_regs, ref_img = run_reference(code, dseg, entries['selerror'], mem, {}, stop_addrs={entries['goback']})
         buf = to_ctypes(mem)
-        lib.selerror(ctypes.cast(buf, c_u8p))
+        lib.selerror(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = (mem_r16(ref_img, BD_ARET), mem_r16(ref_img, PD + P_FLAG))
         port = (mem_r16(bytes(buf), BD_ARET), mem_r16(bytes(buf), PD + P_FLAG))
         check("selerror: error_mode 0xFF, no pf_ctlc", ref, port)
@@ -270,7 +270,7 @@ def main():
         mem[BD_RETURN_FFFF] = 1
         ref_regs, ref_img = run_reference(code, dseg, entries['roderror'], mem, {}, stop_addrs={entries['goback']})
         buf = to_ctypes(mem)
-        lib.roderror(ctypes.cast(buf, c_u8p))
+        lib.roderror(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = (mem_r16(ref_img, BD_ARET), ref_img[BD_RETURN_FFFF])
         port = (mem_r16(bytes(buf), BD_ARET), bytes(buf)[BD_RETURN_FFFF])
         check("roderror: return_ffff forces aret=0xFFFF", ref, port)
@@ -282,7 +282,7 @@ def main():
         mem[BD_SELDSK] = 3
         ref_regs, ref_img = run_reference(code, dseg, entries['selectdisk'], mem, {})
         buf = to_ctypes(mem)
-        lib.selectdisk(ctypes.cast(buf, c_u8p))
+        lib.selectdisk(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("selectdisk: boundary stub fails, curdsk stays 0xFF", ref_img[BD_CURDSK], bytes(buf)[BD_CURDSK])
 
         # -- home: resets dblk --
@@ -290,7 +290,7 @@ def main():
         mem_w16(mem, BD_DBLK, 0x1234)
         ref_regs, ref_img = run_reference(code, dseg, entries['home'], mem, {})
         buf = to_ctypes(mem)
-        lib.home(ctypes.cast(buf, c_u8p))
+        lib.home(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("home: resets dblk", mem_r16(ref_img, BD_DBLK), mem_r16(bytes(buf), BD_DBLK))
 
         # -- seekdir: dblk == 0 -- falls through into seek's own real
@@ -303,7 +303,7 @@ def main():
         mem_w16(mem, BD_SECTPT, 26)
         ref_regs, ref_img = run_reference(code, dseg, entries['seekdir'], mem, {}, stop_addrs=STUBS)
         buf = to_ctypes(mem)
-        lib.seekdir(ctypes.cast(buf, c_u8p))
+        lib.seekdir(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = (mem_r16(ref_img, BD_ARECORD), ref_img[BD_ARECORD_HI])
         port = (mem_r16(bytes(buf), BD_ARECORD), bytes(buf)[BD_ARECORD_HI])
         check("seekdir: dblk == 0", ref, port)
@@ -317,7 +317,7 @@ def main():
         mem_w16(mem, BD_SECTPT, 26)
         ref_regs, ref_img = run_reference(code, dseg, entries['seekdir'], mem, {}, stop_addrs=STUBS)
         buf = to_ctypes(mem)
-        lib.seekdir(ctypes.cast(buf, c_u8p))
+        lib.seekdir(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = (mem_r16(ref_img, BD_ARECORD), ref_img[BD_ARECORD_HI])
         port = (mem_r16(bytes(buf), BD_ARECORD), bytes(buf)[BD_ARECORD_HI])
         check("seekdir: dblk != 0", ref, port)
@@ -337,15 +337,15 @@ def main():
         mem[BD_EXTVAL] = 1
         ref_regs, ref_img = run_reference(code, dseg, entries['index'], mem, {})
         buf = to_ctypes(mem)
-        lib.bdos_index(ctypes.cast(buf, c_u8p))
+        lib.bdos_index(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("index: sets arecord from the disk map", mem_r16(ref_img, BD_ARECORD), mem_r16(bytes(buf), BD_ARECORD))
 
         ref_regs2, _ = run_reference(code, dseg, entries['alloct'], mem, {})
-        got_alloct = lib.alloct(ctypes.cast(buf, c_u8p))
+        got_alloct = lib.alloct(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("alloct: non-zero arecord", ref_regs2['bx'], got_alloct)
 
         ref_regs3, ref_img3 = run_reference(code, dseg, entries['atran'], mem, {})
-        lib.atran(ctypes.cast(buf, c_u8p))
+        lib.atran(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = (mem_r16(ref_img3, BD_ARECORD), ref_img3[BD_ARECORD_HI], mem_r16(ref_img3, BD_ABLOCK))
         port = (mem_r16(bytes(buf), BD_ARECORD), bytes(buf)[BD_ARECORD_HI], mem_r16(bytes(buf), BD_ABLOCK))
         check("atran: computes the actual record address", ref, port)
@@ -359,7 +359,7 @@ def main():
         mem[0x4000 + 8] = 0x04
         ref_regs, ref_img = run_reference(code, dseg, entries['get_atts'], mem, {})
         buf = to_ctypes(mem)
-        got = lib.get_atts(ctypes.cast(buf, c_u8p))
+        got = lib.get_atts(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = (ref_regs['ax'] & 0xFF, bytes(ref_img[0x4005:0x4009]))
         port = (got, bytes(bytes(buf)[0x4005:0x4009]))
         check("get_atts: masks high bits, serializes them", ref, port)
@@ -370,15 +370,15 @@ def main():
         mem[0x4000 + FCB_EXTNUM + 1] = 0x42
         ref_regs, _ = run_reference(code, dseg, entries['get_s1'], mem, {})
         buf = to_ctypes(mem)
-        got = lib.get_s1(ctypes.cast(buf, c_u8p))
+        got = lib.get_s1(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("get_s1", ref_regs['ax'] & 0xFF, got)
 
         ref_regs, _ = run_reference(code, dseg, entries['get_rra'], mem, {})
-        got = lib.get_rra(ctypes.cast(buf, c_u8p))
+        got = lib.get_rra(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("get_rra", ref_regs['bx'], got)
 
         ref_regs, _ = run_reference(code, dseg, entries['get_rcnta'], mem, {})
-        got = lib.get_rcnta(ctypes.cast(buf, c_u8p))
+        got = lib.get_rcnta(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("get_rcnta", ref_regs['bx'], got)
 
         # -- getfcb / setfcb --
@@ -390,7 +390,7 @@ def main():
         mem[BD_EXTMSK] = 0x1F
         ref_regs, ref_img = run_reference(code, dseg, entries['getfcb'], mem, {})
         buf = to_ctypes(mem)
-        lib.getfcb(ctypes.cast(buf, c_u8p))
+        lib.getfcb(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = (ref_img[BD_VRECORD], ref_img[BD_RCOUNT], ref_img[BD_EXTVAL])
         port = (bytes(buf)[BD_VRECORD], bytes(buf)[BD_RCOUNT], bytes(buf)[BD_EXTVAL])
         check("getfcb", ref, port)
@@ -400,7 +400,7 @@ def main():
         mem[BD_RCOUNT] = 9
         ref_regs, ref_img = run_reference(code, dseg, entries['setfcb'], mem, {})
         buf = to_ctypes(mem)
-        lib.setfcb(ctypes.cast(buf, c_u8p))
+        lib.setfcb(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = (ref_img[0x4000 + FCB_NXTREC], ref_img[0x4000 + FCB_RECCNT])
         port = (bytes(buf)[0x4000 + FCB_NXTREC], bytes(buf)[0x4000 + FCB_RECCNT])
         check("setfcb: seqio == 2 resets the nxtrec bias", ref, port)
@@ -412,7 +412,7 @@ def main():
             mem[0x4100 + i] = (i * 3) & 0xFF
         ref_regs, _ = run_reference(code, dseg, entries['cmpecs'], mem, {})
         buf = to_ctypes(mem)
-        got = lib.cmpecs(ctypes.cast(buf, c_u8p))
+        got = lib.cmpecs(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("cmpecs", ref_regs['ax'] & 0xFF, got)
 
         mem = base_memory()
@@ -425,12 +425,12 @@ def main():
         mem[BD_CURDSK] = 4
         ref_regs, _ = run_reference(code, dseg, entries['chksum_fcb'], mem, {})
         buf = to_ctypes(mem)
-        got = lib.chksum_fcb(ctypes.cast(buf, c_u8p))
+        got = lib.chksum_fcb(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("chksum_fcb", ref_regs['ax'] & 0xFF, got)
 
         ref_regs, ref_img = run_reference(code, dseg, entries['set_chksum_fcb'], mem, {})
         buf = to_ctypes(mem)
-        lib.set_chksum_fcb(ctypes.cast(buf, c_u8p))
+        lib.set_chksum_fcb(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = ref_img[0x4000 + FCB_EXTNUM + 1]
         port = bytes(buf)[0x4000 + FCB_EXTNUM + 1]
         check("set_chksum_fcb: fixes up S1 when invalid", ref, port)
@@ -445,7 +445,7 @@ def main():
         mem2[BD_CURDSK] = 4
         ref_regs, ref_img = run_reference(code, dseg, entries['reset_checksum_fcb'], mem2, {})
         buf = to_ctypes(mem2)
-        lib.reset_checksum_fcb(ctypes.cast(buf, c_u8p))
+        lib.reset_checksum_fcb(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = (ref_img[BD_COMP_FCB_CKS], ref_img[0x4000 + FCB_EXTNUM + 1])
         port = (bytes(buf)[BD_COMP_FCB_CKS], bytes(buf)[0x4000 + FCB_EXTNUM + 1])
         check("reset_checksum_fcb", ref, port)
@@ -459,7 +459,7 @@ def main():
         mem3[BD_CURDSK] = 0
         ref_regs, ref_img = run_reference(code, dseg, entries['chek_fcb'], mem3, {})
         buf = to_ctypes(mem3)
-        got = lib.chek_fcb(ctypes.cast(buf, c_u8p))
+        got = lib.chek_fcb(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = (ref_regs['ax'] & 0xFF, ref_img[0x4000])
         port = (got, bytes(buf)[0x4000])
         check("chek_fcb: zeroes fcb(0) when high_ext == 0x60", ref, port)
@@ -469,7 +469,7 @@ def main():
         mem[BD_SELDSK] = 3
         ref_regs, _ = run_reference(code, dseg, entries['setcdisk'], mem, {'cx': 0x00F0})
         buf = to_ctypes(mem)
-        got = lib.setcdisk(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0x00F0))
+        got = lib.setcdisk(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(0x00F0))
         check("setcdisk", ref_regs['bx'], got)
 
         mem = base_memory()
@@ -477,7 +477,7 @@ def main():
         mem_w16(mem, BD_RODSK, 0x0004)
         ref_regs, _ = run_reference(code, dseg, entries['nowrite'], mem, {})
         buf = to_ctypes(mem)
-        got = lib.nowrite(ctypes.cast(buf, c_u8p))
+        got = lib.nowrite(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("nowrite", ref_regs['dx'], got)  # nowrite returns via dx, not ax
 
         mem = base_memory()
@@ -488,7 +488,7 @@ def main():
         mem_w16(mem, BD_CDRMAXA, CDRMAX_AT)
         ref_regs, ref_img = run_reference(code, dseg, entries['setro'], mem, {})
         buf = to_ctypes(mem)
-        lib.setro(ctypes.cast(buf, c_u8p))
+        lib.setro(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = (mem_r16(ref_img, BD_RODSK), mem_r16(ref_img, CDRMAX_AT))
         port = (mem_r16(bytes(buf), BD_RODSK), mem_r16(bytes(buf), CDRMAX_AT))
         check("setro", ref, port)
@@ -503,7 +503,7 @@ def main():
         mem[0x4300 + FCB_TYPE] = 0x00  # not read-only
         ref_regs, ref_img = run_reference(code, dseg, entries['ckrodir'], mem, {}, stop_addrs={entries['goback']})
         buf = to_ctypes(mem)
-        lib.ckrodir(ctypes.cast(buf, c_u8p))
+        lib.ckrodir(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("ckrodir: not read-only", ref_img[PD + P_FLAG], bytes(buf)[PD + P_FLAG])
 
         mem = base_memory()
@@ -511,7 +511,7 @@ def main():
         mem[BD_SELDSK] = 0
         ref_regs, ref_img = run_reference(code, dseg, entries['checkwrite'], mem, {}, stop_addrs={entries['goback']})
         buf = to_ctypes(mem)
-        lib.checkwrite(ctypes.cast(buf, c_u8p))
+        lib.checkwrite(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("checkwrite: disk is writable", ref_img[PD + P_FLAG], bytes(buf)[PD + P_FLAG])
 
         # -- getmodnum / clrmodnum / clr_ext / setfwf --
@@ -522,23 +522,23 @@ def main():
         ref_regs, _ = run_reference(code, dseg, entries['getmodnum'], mem, {})
         buf = to_ctypes(mem)
         bx = ctypes.c_uint16()
-        got = lib.getmodnum(ctypes.cast(buf, c_u8p), ctypes.byref(bx))
+        got = lib.getmodnum(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.byref(bx))
         check("getmodnum", (ref_regs['ax'] & 0xFF, ref_regs['bx']), (got, bx.value))
 
         ref_regs, ref_img = run_reference(code, dseg, entries['clrmodnum'], mem, {})
         buf = to_ctypes(mem)
-        lib.clrmodnum(ctypes.cast(buf, c_u8p))
+        lib.clrmodnum(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("clrmodnum", ref_img[0x4000 + FCB_MODNUM], bytes(buf)[0x4000 + FCB_MODNUM])
 
         ref_regs, ref_img = run_reference(code, dseg, entries['clr_ext'], mem, {})
         buf = to_ctypes(mem)
-        lib.clr_ext(ctypes.cast(buf, c_u8p))
+        lib.clr_ext(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("clr_ext", ref_img[0x4000 + FCB_EXTNUM], bytes(buf)[0x4000 + FCB_EXTNUM])
 
         mem[0x4000 + FCB_MODNUM] = 0x05
         ref_regs, ref_img = run_reference(code, dseg, entries['setfwf'], mem, {})
         buf = to_ctypes(mem)
-        got = lib.setfwf(ctypes.cast(buf, c_u8p))
+        got = lib.setfwf(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("setfwf", (ref_regs['ax'] & 0xFF, ref_img[0x4000 + FCB_MODNUM]), (got, bytes(buf)[0x4000 + FCB_MODNUM]))
 
         # -- compcdr / setcdr --
@@ -549,20 +549,20 @@ def main():
         mem_w16(mem, CDRMAX_AT, 10)
         ref_regs, _ = run_reference(code, dseg, entries['compcdr'], mem, {})
         buf = to_ctypes(mem)
-        got = lib.compcdr(ctypes.cast(buf, c_u8p))
+        got = lib.compcdr(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("compcdr: cdrmax > dcnt", ref_regs['cf'] if 'cf' in ref_regs else (1 if 5 < 10 else 0), got)
 
         mem_w16(mem, CDRMAX_AT, 3)  # cdrmax <= dcnt now
         ref_regs, ref_img = run_reference(code, dseg, entries['setcdr'], mem, {})
         buf = to_ctypes(mem)
-        lib.setcdr(ctypes.cast(buf, c_u8p))
+        lib.setcdr(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("setcdr: bumps cdrmax when needed", mem_r16(ref_img, CDRMAX_AT), mem_r16(bytes(buf), CDRMAX_AT))
 
         # -- rddirbuf / dirtouser --
         mem = base_memory()
         ref_regs, _ = run_reference(code, dseg, entries['rddirbuf'], mem, {}, stop_addrs=STUBS)
         buf = to_ctypes(mem)
-        lib.rddirbuf(ctypes.cast(buf, c_u8p))  # pure boundary-stub setup, no observable effect
+        lib.rddirbuf(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))  # pure boundary-stub setup, no observable effect
         check("rddirbuf: no observable effect", bytes(mem), bytes(buf))
 
         mem = base_memory()
@@ -573,7 +573,7 @@ def main():
             mem[0x4100 + i] = i & 0xFF
         ref_regs, ref_img = run_reference(code, dseg, entries['dirtouser'], mem, {})
         buf = to_ctypes(mem)
-        lib.dirtouser(ctypes.cast(buf, c_u8p))
+        lib.dirtouser(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = bytes(ref_img[0x4300:0x4300 + 128])
         port = bytes(bytes(buf)[0x4300:0x4300 + 128])
         check("dirtouser: copies the directory entry to the user buffer", ref, port)
@@ -584,7 +584,7 @@ def main():
         mem[0x4000 + FCB_MODNUM] = 0x00
         ref_regs, ref_img = run_reference(code, dseg, entries['make_fcb_inv'], mem, {})
         buf = to_ctypes(mem)
-        lib.make_fcb_inv(ctypes.cast(buf, c_u8p))
+        lib.make_fcb_inv(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = (ref_img[0x4000 + FCB_MODNUM], mem_r16(ref_img, 0x4000 + FCB_DSKMAP))
         port = (bytes(buf)[0x4000 + FCB_MODNUM], mem_r16(bytes(buf), 0x4000 + FCB_DSKMAP))
         check("make_fcb_inv: sets fwf and invalidates dskmap", ref, port)
@@ -598,7 +598,7 @@ def main():
 
         ref_regs, ref_img = run_reference(code, dseg, entries['tst_inv_fcb'], mem, {})
         buf = to_ctypes(mem)
-        got = lib.tst_inv_fcb(ctypes.cast(buf, c_u8p))
+        got = lib.tst_inv_fcb(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         ref = (ref_regs['ax'] & 0xFF, ref_img[BD_LRET])
         port = (got, bytes(buf)[BD_LRET])
         check("tst_inv_fcb: invalid -> lret=9", ref, port)
@@ -608,13 +608,13 @@ def main():
         mem_w16(mem, BD_DCNT, 0xFFFF)
         ref_regs, _ = run_reference(code, dseg, entries['endofdir'], mem, {})
         buf = to_ctypes(mem)
-        got = lib.endofdir(ctypes.cast(buf, c_u8p))
+        got = lib.endofdir(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("endofdir: at end", ref_regs['ax'] & 0xFF if False else (1 if 0xFFFF == 0xFFFF else 0), got)
 
         mem_w16(mem, BD_DCNT, 3)
         ref_regs, ref_img = run_reference(code, dseg, entries['setenddir'], mem, {})
         buf = to_ctypes(mem)
-        lib.setenddir(ctypes.cast(buf, c_u8p))
+        lib.setenddir(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("setenddir", mem_r16(ref_img, BD_DCNT), mem_r16(bytes(buf), BD_DCNT))
 
         # -- getallocbit / setallocbit --
@@ -626,12 +626,12 @@ def main():
         buf = to_ctypes(mem)
         bx = ctypes.c_uint16()
         dh = ctypes.c_uint8()
-        got = lib.getallocbit(ctypes.cast(buf, c_u8p), ctypes.c_uint16(9), ctypes.byref(bx), ctypes.byref(dh))
+        got = lib.getallocbit(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(9), ctypes.byref(bx), ctypes.byref(dh))
         check("getallocbit", (ref_regs['ax'] & 0xFF, ref_regs['bx'], ref_regs['dx'] >> 8), (got, bx.value, dh.value))
 
         ref_regs, ref_img = run_reference(code, dseg, entries['setallocbit'], mem, {'cx': 9, 'dx': 1})
         buf = to_ctypes(mem)
-        lib.setallocbit(ctypes.cast(buf, c_u8p), ctypes.c_uint16(9), ctypes.c_uint8(1))
+        lib.setallocbit(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(9), ctypes.c_uint8(1))
         check("setallocbit", ref_img[ALLOC_AT + 1], bytes(buf)[ALLOC_AT + 1])
 
         # -- checksum: past the checksum vector's own size -> no-op --
@@ -643,7 +643,7 @@ def main():
         mem[phys(0) + CHECKA_AT + 100] = 0xAA  # would be touched if not short-circuited
         ref_regs, ref_img = run_reference(code, dseg, entries['checksum'], mem, {'cl': 0}, stop_addrs=STUBS)
         buf = to_ctypes(mem)
-        lib.checksum(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0))
+        lib.checksum(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint8(0))
         check("checksum: past checksum vector size -> no-op",
               ref_img[phys(0) + CHECKA_AT + 100], bytes(buf)[phys(0) + CHECKA_AT + 100])
 
@@ -657,7 +657,7 @@ def main():
             mem[0x4600 + i] = (i * 3) & 0xFF
         ref_regs, ref_img = run_reference(code, dseg, entries['newchecksum'], mem, {}, stop_addrs=STUBS)
         buf = to_ctypes(mem)
-        lib.newchecksum(ctypes.cast(buf, c_u8p))
+        lib.newchecksum(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("newchecksum: initializes the checksum byte",
               ref_img[CHECKA_AT + 5], bytes(buf)[CHECKA_AT + 5])
 
@@ -692,7 +692,7 @@ def main():
         ref_regs, ref_img = run_reference(code, dseg, entries['checksum'], mem, {'cl': 0},
                                            stop_addrs=STUBS, segmented=True)
         buf = to_ctypes(mem)
-        lib.checksum(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0))
+        lib.checksum(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint8(0))
         port_img = bytes(buf)
 
         def checksum_snapshot(img):
@@ -708,7 +708,7 @@ def main():
         mem_w16(mem, BD_DCNT, 5)  # dcnt+1 (6) > dirmax (5)
         ref_regs, ref_img = run_reference(code, dseg, entries['rddir'], mem, {'cl': 0}, stop_addrs=STUBS)
         buf = to_ctypes(mem)
-        lib.rddir(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0))
+        lib.rddir(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint8(0))
         check("rddir: past end of directory -> setenddir", mem_r16(ref_img, BD_DCNT),
               mem_r16(bytes(buf), BD_DCNT))
 
@@ -717,7 +717,7 @@ def main():
         mem[BD_DCNT] = 1  # (1 & dskmsk) << fcbshf != 0
         ref_regs, ref_img = run_reference(code, dseg, entries['rddir0'], mem, {'cl': 0}, stop_addrs=STUBS)
         buf = to_ctypes(mem)
-        lib.rddir0(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0))
+        lib.rddir0(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint8(0))
         check("rddir0: not a record boundary -> no-op", ref_img[BD_DPTR], bytes(buf)[BD_DPTR])
 
         # -- wrdir: checkwrite + newchecksum + wrbuff chain --
@@ -732,7 +732,7 @@ def main():
         mem_w16(mem, BD_RODSK, 0)
         ref_regs, ref_img = run_reference(code, dseg, entries['wrdir'], mem, {}, stop_addrs=STUBS)
         buf = to_ctypes(mem)
-        lib.wrdir(ctypes.cast(buf, c_u8p))
+        lib.wrdir(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
         check("wrdir: checksum initialized via newchecksum",
               ref_img[CHECKA_AT + 5], bytes(buf)[CHECKA_AT + 5])
 

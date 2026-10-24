@@ -1,0 +1,75 @@
+; Standalone wrapper for src/kernel/SUPIF.SUP's `func1`. See
+; src-c/kernel/supif.c's own header comment for exactly what's ported
+; (`func1` only) and why (`user_entry`/`func`/`entry`/`mpmif`/`xiosif`
+; have no C equivalent or no observable effect, same conventions
+; already established elsewhere in this port).
+;
+; `func1` is the only routine this test executes, so everything else
+; below just needs to assemble, not behave correctly:
+;   - `sysdat`/`supervisor` are normally SUPIF.SUP's sibling INIT.SUP's
+;     own cseg cells (see src/kernel/INIT.SUP's own declaration) --
+;     declared here instead, same as idle_wrapper.A86's own `sysdat`.
+;   - `rlr`/`p_uda`/the UDA fields (`u_insys`/`u_wrkseg`/`u_retseg`/
+;     `u_stack_ss`/`u_stack_sp`/`u_func`)/`intflag`/`ulen`/`netmod` are
+;     all real SYSDAT.FMT/UDA.FMT/RSP.DEF fields only `user_entry`/
+;     `func`/`mpmif` touch -- none of them matter to `func1` itself,
+;     so they're dummy DSEG labels, not placed at any harness-chosen
+;     scratch address (nothing in src-c/kernel/defs.h needs to agree
+;     with them).
+;   - `module_map`/`sysent` DO matter to `func1` -- real SYSDAT.FMT
+;     fields at their own real small offsets (0x46/0xA0), placed
+;     `org`-relative to a `sysdatseg` label so a segmented reference
+;     run (DS = that segment, see tests/src-c/test_supif.py) reads the
+;     exact same bytes src-c/kernel/defs.h's own SD_MODULE_MAP/
+;     SD_SYSENT (also the real offsets) do through `ds`.
+	include system.def
+	include modfunc.def
+	include enttab.def
+	dseg
+sysdatseg	equ	$
+	org	(offset sysdatseg) + 046h
+module_map	db	0
+	org	(offset sysdatseg) + 0A0h
+sysent		rb	256*3
+	org	(offset sysdatseg) + 0400h
+rlr		dw	0
+p_uda		dw	0
+u_insys		db	0
+u_wrkseg	dw	0
+u_retseg	dw	0
+u_stack_ss	dw	0
+u_stack_sp	dw	0
+u_func		db	0
+intflag		db	0
+ulen		equ	0100h
+netmod		dw	0,0
+xiosmod		dw	0,0
+module_table	rw	6*4	; 6 modules * 2 far pointers (MODTAB.DEF: modlen=8)
+	cseg
+sysdat		dw	0	; normally INIT.SUP's own cseg cell
+supervisor	dw	entry	; normally INIT.SUP's own cseg cell
+
+; supfunc's own 14 targets -- all already ported elsewhere in
+; src-c/kernel/ (see supif.c's own header comment for exactly where);
+; declared here as bare markers, same convention as cioif_wrapper.A86's
+; own CONSOLE.CIO/CHARIO.CIO function-table stand-ins, since `func1`
+; itself (the only routine this test executes) never jumps into them.
+not_implemented:	ret
+bad_entry:		ret
+version_entry:		ret
+callbios_entry:		ret
+load_entry:		ret
+clicmd_entry:		ret
+rpl_entry:		ret
+parse_entry:		ret
+sysdat_entry:		ret
+tod_entry:		ret
+load:			ret
+mpmversion_entry:	ret
+chain_entry:		ret
+serial_entry:		ret
+cload_entry:		ret
+e_not_implemented	equ	1
+
+	include supif.sup
+	end

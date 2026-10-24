@@ -1050,6 +1050,24 @@ static inline uint16_t mem_seg_addr(uint16_t seg, uint16_t offset) {
  * reasoning as questr_addr/userstr_addr above. */
 #define XIOS_DPBASE  0xAC20
 
+/* src/kernel/SYSDAT.FMT's own `module_map` and `sysent` (a 256*3-byte
+ * table: one 3-byte entry per user function number) -- their real,
+ * small SYSDAT.FMT-relative offsets, used DS-relative (same `_seg`
+ * convention `src-c/kernel/file1.c`'s own BD_* fields use for
+ * BDOS.A86's fields, with `tools/i86sim.py`'s `segmented=True` mode
+ * on the reference side -- unlike XIOS_ or every other SD_ constant
+ * above, these are real offsets, not harness-chosen flat scratch
+ * addresses, because `src-c/kernel/supif.c`'s own `func1` has a
+ * genuine "DS = sysdat segment" precondition, not a moot DS switch). */
+#define SD_MODULE_MAP 0x46
+#define SD_SYSENT     0xA0
+
+/* src/kernel/ENTTAB.DEF -- one `sysent` entry's own field layout */
+#define ENT_MOD  0 /* byte */
+#define ENT_FUNC 1 /* byte */
+#define ENT_FLAG 2 /* byte */
+#define entlen   3
+
 /* src/kernel/CLICB.DEF -- the UDA_WRKSEG-relative command buffer
  * clicmd_entry's own `cli_copy` reads from (via mem_r8_seg). Named
  * cmdcb_* (not clicb_*) because tmp.c already uses `clicb_cmd` as a
@@ -1058,5 +1076,36 @@ static inline uint16_t mem_seg_addr(uint16_t seg, uint16_t offset) {
 #define cmdcb_net  0 /* byte */
 #define cmdcb_cmd  1 /* byte */
 #define cmdcblen   130 /* byte: cmdcb_cmd + 129 */
+
+/* src/kernel/XIOS86Q.A86 -- not DRI source (a from-scratch QEMU
+ * driver this project wrote), but the file actually combined into
+ * the real bootable MPM.bin, unlike the real XIOS.A86. It has no
+ * `INCLUDE`s beyond the standard system.def/modfunc.def/xioscb.def/
+ * pd.def/sysdat.fmt chain and assembles to one fixed layout, so
+ * these are real, probed addresses (`python3 tools/asm86.py
+ * src/kernel/XIOS86Q.A86 -I src/kernel --symbols`), same reasoning
+ * as src-c/loader/defs.h's own LDB86Q_ block -- not harness-chosen
+ * scratch addresses. */
+#define XQ_TICK_COUNT    0x1000 /* byte */
+#define XQ_CLOCKON       0x1001 /* byte */
+#define XQ_STOPPOLL      0x1002 /* word */
+#define XQ_DISK          0x1004 /* byte: selected physical drive (0 only) */
+#define XQ_TRK           0x1005 /* byte */
+#define XQ_SECT          0x1006 /* byte */
+#define XQ_DMA_ADR       0x1007 /* word */
+#define XQ_DMA_SEG       0x1009 /* word */
+#define XQ_CUR_CYL       0x100B /* byte */
+#define XQ_CUR_HEAD      0x100C /* byte */
+#define XQ_CUR_PSEC      0x100D /* byte */
+#define XQ_CUR_BUFOFF    0x100E /* word */
+#define XQ_DTRNTBL       0x1011 /* byte[4] */
+#define XQ_SPECIFY_PARMS 0x1021 /* byte[4] */
+#define XQ_RECAL_PARMS   0x1025 /* byte[3] */
+#define XQ_SEEK_PARMS    0x1028 /* byte[4] */
+#define XQ_READ_PARMS    0x102C /* byte[10] */
+#define XQ_WRITE_PARMS   0x1036 /* byte[10] */
+#define XQ_SECBUF        0x1040 /* byte[fd_secsize=512] */
+#define XQ_DPH0          0x1240 /* word: SELDSK's own DPH address */
+#define XQ_SIGNON        0x134A /* byte[...]: init's own signon message */
 
 #endif

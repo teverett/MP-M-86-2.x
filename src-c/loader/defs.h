@@ -160,6 +160,27 @@
 #define LDB86Q_DPE0        0x1680 /* word: SELDSK's own DPH address (content unconsumed, not modeled -- see init.c-style precedent) -- probed via `--symbols`; shifts whenever tools/asm86.py's own encoding choices change (last: `_encode_alu`'s own accumulator-immediate short form, see that function's own header comment) */
 #define LDB86Q_SEGTABLE    0x1677 /* word: GETSEGT's own segment-table address (static cseg data, content unconsumed by anything ported so far) -- probed via `--symbols`; shifts whenever tools/asm86.py's own encoding choices change (last: `_encode_alu`'s own accumulator-immediate short form, see that function's own header comment) */
 
+/* src/loader/LDBIOS.A86 -- the real iSBC 86/12 + iSBC 204 driver
+ * LDBIOS86Q.A86 above replaces for the QEMU target. Same "no
+ * INCLUDEs, always assembles standalone, so these are real probed
+ * addresses" reasoning as the LDB86Q_* block above -- probed via
+ * `python3 tools/asm86.py src/loader/LDBIOS.A86 --symbols` (this file
+ * has no shifting-encoding history yet, so these are expected to be
+ * stable, but re-probe if `tools/asm86.py` changes again). */
+#define LDB_TRK       0x1541 /* byte: current track */
+#define LDB_SECT      0x1542 /* byte: current sector */
+#define LDB_DMA_ADR   0x153A /* word: dma offset */
+#define LDB_DMA_SEG   0x153C /* word: dma segment */
+#define LDB_SEL_MASK  0x153E /* byte: drive select mask (0x40 or 0x80) */
+#define LDB_DPBASE    0x154D /* word: Base of Disk Parameter Blocks (dpe0/dpe1, 16 bytes/drive) */
+#define LDB_SEGTABLE  0x1548 /* word: GETSEGT's own segment-table address */
+
+/* src/loader/ROM.A86 -- the real SBC86/12 + iSBC 204 boot ROM
+ * src/loader/ROM86Q.A86 above replaces for the QEMU target. Same
+ * "no INCLUDEs, always assembles standalone, real probed address"
+ * reasoning as the LDB86Q_ and LDB_ blocks above. */
+#define ROM_SECTOR1 0x032A /* word: offset of the T0S1 header-sector DMA target -- only its own address matters here (the real transfer it kicks off isn't modeled, see rom.c's own header comment), not any content at that address */
+
 static inline uint16_t mem_r16(const uint8_t *mem, uint16_t addr) {
     return (uint16_t)(mem[addr] | (mem[(uint16_t)(addr + 1)] << 8));
 }

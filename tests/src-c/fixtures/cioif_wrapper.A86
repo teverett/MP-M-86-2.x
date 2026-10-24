@@ -1,0 +1,58 @@
+; Standalone wrapper for src/kernel/CIOIF.CIO's `init`. `entry` (the
+; module's own inter-module CIO dispatch, `call cs:functab[si]!retf`)
+; is not ported -- same reasoning as INIT.SUP's own `entry`, see
+; init.c's own header comment: every real C-side caller that needs
+; one of `entry`'s own functab targets already traces straight to the
+; already-ported routine itself (same "boundary call resolves to an
+; already-ported routine" pattern as `fileopen`/`cli_gopen`), so
+; nothing needs to call *through* `entry` to reach them.
+;
+; `init` itself has no `call`/`callf`/`jmp` of any kind -- a straight
+; 7-instruction body ending in `retf` -- so this needs none of
+; `tools/i86sim.py`'s far-call machinery `init_wrapper.A86` needs; a
+; plain `stop_addrs` right before the `retf` is enough.
+;
+; `supmod` is declared here as a real DSEG label at the same flat
+; address src-c/kernel/defs.h's own `SD_SUPMOD_OFF`/`SD_SUPMOD_SEG`
+; use (0A88Dh, matching `init_wrapper.A86`'s own placement of the
+; same real SYSDAT.FMT field) -- not the whole real module table,
+; which this test has no other use for.
+;
+; `entry`'s own functab lists two dozen CONSOLE.CIO/CHARIO.CIO
+; function names -- declared here as bare markers (never executed,
+; `entry` itself isn't either), same convention as `init_wrapper.A86`'s
+; own `notick`/`idle`/`user_entry` stand-ins, purely so this file
+; assembles as the real, complete module it actually is.
+	include system.def
+	include modfunc.def
+	dseg
+	org	0A88Dh
+supmod		rw	2
+	org	0A8A0h
+xiosmod		rw	2
+	cseg
+conin_entry:		ret
+conout_entry:		ret
+rconin_entry:		ret
+rconout_entry:		ret
+listout_entry:		ret
+dirio_entry:		ret
+conwrite_entry:		ret
+conread_entry:		ret
+constat_entry:		ret
+conattach_entry:	ret
+condetach_entry:	ret
+setdefcon_entry:	ret
+conassign_entry:	ret
+getdefcon_entry:	ret
+conprint_entry:		ret
+lstattach_entry:	ret
+lstdetach_entry:	ret
+setdeflst_entry:	ret
+clstattch_entry:	ret
+cconattch_entry:	ret
+getdeflst_entry:	ret
+mimic_entry:		ret
+unmimic_entry:		ret
+	include cioif.cio
+	end

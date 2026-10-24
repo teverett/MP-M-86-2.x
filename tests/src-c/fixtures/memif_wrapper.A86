@@ -1,0 +1,53 @@
+; Standalone wrapper for src/kernel/MEMIF.MEM's `init`. `entry` (the
+; module's own inter-module MEM dispatch, `call cs:functab[si]`) is
+; not ported -- same reasoning as CIOIF.CIO's own `entry`, see
+; cioif.c's own header comment: every real C-side caller that needs
+; one of `entry`'s own functab targets already calls the already-
+; ported routine directly (`getmemory`/`load.c`'s own `malloc_entry`
+; calls, etc.), so nothing needs to call *through* `entry` to reach
+; them.
+;
+; `init` itself has no `call`/`callf`/`jmp` of any kind -- a straight
+; 7-instruction body ending in `retf` -- so a plain `stop_addrs` right
+; before it is enough, same as cioif_wrapper.A86's own.
+;
+; `supmod` is declared here as a real DSEG label at the same flat
+; address src-c/kernel/defs.h's own `SD_SUPMOD_OFF`/`SD_SUPMOD_SEG`
+; use (0A88Dh), same convention as cioif_wrapper.A86's own.
+;
+; `entry`'s own functab lists a dozen already-real CPMMEM.MEM/
+; MEMORY.MEM/SHARE.MEM/MAU.MEM/ML.MEM function names -- declared here
+; as bare markers (never executed, `entry` itself isn't either), same
+; convention as cioif_wrapper.A86's own, purely so this file
+; assembles as the real, complete module it actually is.
+	include system.def
+	include modfunc.def
+	include pd.def
+	dseg
+	org	0A000h
+rlr		dw	0
+	org	0A88Dh
+supmod		rw	2
+	org	0A8A0h
+xiosmod		rw	2
+	org	0A8B0h
+mxmemowner	dw	0
+mxmemcount	db	0
+mxmemqpb	rb	16
+	cseg
+mpmif:			ret
+maxmem_entry:		ret
+absmax_entry:		ret
+cpmalloc_entry:		ret
+cpmabsa_entry:		ret
+cpmfree_entry:		ret
+freeall_entry:		ret
+malloc_entry:		ret
+mfree_entry:		ret
+share_entry:		ret
+maualloc_entry:		ret
+maufree_entry:		ret
+mlalloc_entry:		ret
+mlfree_entry:		ret
+	include memif.mem
+	end

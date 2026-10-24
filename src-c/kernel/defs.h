@@ -206,6 +206,7 @@ typedef struct {
 #define SD_RSPSEG         0xA80B /* word: segment of first RSP (linked list head) */
 #define SD_INITPD         0xA80D /* byte[pdlen=0x30]: INIT.SUP's own init process's PD */
 #define SD_INITUDA        0xA84D /* byte[ulen=0x100]: INIT.SUP's own init process's UDA */
+#define SD_SUPMOD_OFF     0xA88D /* word: SYSDAT module_table[SUP]'s own entry-pointer offset half (supmod+0) */
 #define SD_SUPMOD_SEG     0xA88F /* word: SYSDAT module_table[SUP]'s own entry-pointer segment half (supmod+2) */
 /* src/kernel/INIT.SUP's own `sysdat`/`supervisor` cseg cells (not a
  * harness-chosen scratch address like the fields above -- these are
@@ -220,6 +221,53 @@ typedef struct {
  * init_wrapper.A86, not assumed. */
 #define INIT_SYSDAT          0x0006 /* word: INIT.SUP's own saved sysdat segment (cs:sysdat) */
 #define INIT_SUPERVISOR_SEG  0x000A /* word: INIT.SUP's own `supervisor` far-ptr segment half */
+
+/* src/kernel/CIOIF.CIO/MEMIF.MEM own the exact same cseg header shape
+ * as INIT.SUP (`jmp init ! jmp entry ! sysdat dw 0 ! supervisor equ
+ * (offset $) ! rw 2`), so `sysdat`=6/`supervisor`=8 land at the same
+ * offsets -- confirmed directly against both real files, not just
+ * assumed from the shared shape. Unlike INIT.SUP's own `init` (whose
+ * own `supervisor` offset half is a fixed compile-time constant, its
+ * own `entry` label -- see init.c's own header comment), these two
+ * modules' own `init` copies *both* halves of `supervisor` from
+ * SYSDAT's own module_table[SUP] entry (SD_SUPMOD_OFF/SD_SUPMOD_SEG),
+ * since their own `supervisor` has to point at a genuinely different
+ * module's own `entry` label, not a fixed offset within itself. */
+#define CIOIF_SYSDAT          0x0006 /* word: CIOIF.CIO's own saved sysdat segment (cs:sysdat) */
+#define CIOIF_SUPERVISOR_OFF  0x0008 /* word: CIOIF.CIO's own `supervisor` far-ptr offset half */
+#define CIOIF_SUPERVISOR_SEG  0x000A /* word: CIOIF.CIO's own `supervisor` far-ptr segment half */
+#define MEMIF_SYSDAT          0x0006 /* word: MEMIF.MEM's own saved sysdat segment (cs:sysdat) */
+#define MEMIF_SUPERVISOR_OFF  0x0008 /* word: MEMIF.MEM's own `supervisor` far-ptr offset half */
+#define MEMIF_SUPERVISOR_SEG  0x000A /* word: MEMIF.MEM's own `supervisor` far-ptr segment half */
+#define RTMIF_SYSDAT          0x0006 /* word: RTMIF.RTM's own saved sysdat segment (cs:sysdat) */
+#define RTMIF_SUPERVISOR_OFF  0x0008 /* word: RTMIF.RTM's own `supervisor` far-ptr offset half */
+#define RTMIF_SUPERVISOR_SEG  0x000A /* word: RTMIF.RTM's own `supervisor` far-ptr segment half */
+#define BDOSIF_SYSDAT          0x0006 /* word: BDOSIF.BDO's own saved sysdat segment (cs:sysdat) */
+#define BDOSIF_SUPERVISOR_OFF  0x0008 /* word: BDOSIF.BDO's own `supervisor` far-ptr offset half */
+#define BDOSIF_SUPERVISOR_SEG  0x000A /* word: BDOSIF.BDO's own `supervisor` far-ptr segment half */
+
+/* src/kernel/SYSDAT.FMT's own `dispatcher`/`rtm_pdisp` (4-byte far
+ * pointers, set by RTMIF.RTM's own `init` to DSPTCH.RTM's own
+ * `fdisp`/`farpdisp`) and `idlepd`/`tickpd` (real PDs, `pdlen` bytes
+ * each) -- *real* SYSDAT.FMT byte offsets this time (probed
+ * directly), unlike `SD_SUPMOD_OFF`/`SD_SUPMOD_SEG` above: those work
+ * as flat addresses only because every caller that reads them
+ * (`cioif.c`/`memif.c`/`init.c`) is tested non-segmented, where the
+ * segment register is ignored anyway. `rtmif.c`'s own `init` is the
+ * first of this group that genuinely needs `segmented=True` (for its
+ * own real `proc_creat` call), and under that mode a plain
+ * `mov ax,dispatcher`-shaped reference really is `DS`-relative --
+ * `DS` is a real, non-zero `sysdat` segment in the real system
+ * (confirmed: `dispatcher`'s own raw offset, 0x38, sits *inside*
+ * `RTMIF.RTM`'s own `init` body if `sysdat` is ever treated as flat
+ * 0, so it cannot be flattened the way `SD_SUPMOD_OFF` is) --
+ * `rtmif.c` reads/writes these via `mem_*_seg(mem, ds_sysdat, ...)`
+ * instead of a flat `SD_*` constant. */
+#define SYSDAT_SUPMOD     0x0000 /* word[2]: SYSDAT.FMT's own module_table[SUP] entry far ptr */
+#define SYSDAT_DISPATCHER 0x0038 /* word[2]: far ptr to DSPTCH.RTM's own fdisp */
+#define SYSDAT_RTM_PDISP  0x003C /* word[2]: far ptr to DSPTCH.RTM's own farpdisp */
+#define SYSDAT_IDLEPD     0x09F0 /* byte[pdlen]: IDLE.SUP's own PD */
+#define SYSDAT_TICKPD     0x0A20 /* byte[pdlen]: TICK.SUP's own PD */
 #define SD_INDISP     0xAC00 /* byte: currently in dispatch? */
 #define SD_INTFLAG    0xAC01 /* byte: if 0, interrupts not enabled */
 #define SD_ES_SAV     0xAC02 /* word */
@@ -767,6 +815,14 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
     see memory.c's own header comment */
 #define SD_CPMMEM_MFB     0xA0B4 /* word[2]: free_memory's own on-stack MFPB.DEF block --
     see cpmmem.c's own header comment */
+#define SD_MXDISKQD       0xA0C0 /* qdlen=30 bytes: src/kernel/DATA.BDO's own
+    mxdiskqd -- a flat scratch address, same convention as SD_SUPMOD_OFF above
+    (BDOSIF.BDO's own init is tested non-segmented, see bdosif.c's own header
+    comment), not mxdiskqd's real raw offset within the combined SYSDAT.FMT+
+    DATA.BDO dseg (probed: 0xf92) */
+#define SD_MXDISKQPB      0xA0E0 /* qpblen=16 bytes: src/kernel/DATA.BDO's own
+    mxdiskqpb, same flat-scratch convention as SD_MXDISKQD above (probed real
+    raw offset: 0xfae) */
 #define SD_TMP_CLICB_CMD  0xA100 /* byte[129]: the command text itself */
 #define SD_TMP_CLICB      (SD_TMP_CLICB_CMD - 1) /* byte: clicb_net, immediately
                                                      before SD_TMP_CLICB_CMD's own

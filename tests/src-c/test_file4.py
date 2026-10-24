@@ -44,7 +44,14 @@ PD_ADDR = 0x4000  # harness-chosen scratch PD address, well clear of cseg/dseg
 # BDOSIF.BDO labels this combined bundle needs to assemble, even
 # though nothing file4.c ports actually reaches them (see
 # file1_wrapper.A86's own header comment).
-STUBS = {0x48b, 0x4b8, 0x4bd, 0x4c2, 0x4c7, 0x4cc, 0x4d1, 0x4d6, 0x4db, 0x4e0, 0x409, 0x416}
+# All 3 bytes lower than their own earlier values -- tools/asm86/
+# isa.py's own `_encode_alu` now emits the real 8086's dedicated,
+# shorter AL/AX,imm accumulator form instead of always the longer
+# group1 r/m,imm form (see that function's own header comment),
+# shrinking some `AND/OR/.../CMP AL,imm8`-shaped instruction earlier
+# in this same combined BDOSIF.BDO+FILE1-4.BDO bundle by a net 3
+# bytes -- every label after it shifts down by the same amount.
+STUBS = {0x488, 0x4b5, 0x4ba, 0x4bf, 0x4c4, 0x4c9, 0x4ce, 0x4d3, 0x4d8, 0x4dd, 0x406, 0x413}
 
 
 def assemble_reference():

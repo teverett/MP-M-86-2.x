@@ -37,18 +37,26 @@ PF_CTLC = 0x0080
 # via `python3 tools/asm86.py tests/src-c/fixtures/file1_wrapper.A86
 # -I src/kernel --symbols`.
 STUBS = {
-    0x48b,  # mpmif
-    0x4b8,  # homef
-    0x4bd,  # seldskf
-    0x4c2,  # settrkf
-    0x4c7,  # setsecf
-    0x4cc,  # setdmf
-    0x4d1,  # setdmbf
-    0x4d6,  # readf
-    0x4db,  # writef
-    0x4e0,  # sectran
+    0x488,  # mpmif
+    0x4b5,  # homef
+    0x4ba,  # seldskf
+    0x4bf,  # settrkf
+    0x4c4,  # setsecf
+    0x4c9,  # setdmf
+    0x4ce,  # setdmbf
+    0x4d3,  # readf
+    0x4d8,  # writef
+    0x4dd,  # sectran
 }
-XCRLF_ADDR, XPRINT_ADDR = 0x409, 0x416
+# All 3 bytes lower than their own earlier values -- tools/asm86/
+# isa.py's own `_encode_alu` now emits the real 8086's dedicated,
+# shorter AL/AX,imm accumulator form instead of always the longer
+# group1 r/m,imm form (see that function's own header comment),
+# shrinking some `AND/OR/.../CMP AL,imm8`-shaped instruction earlier
+# in this same combined BDOSIF.BDO+FILE1-4.BDO bundle by a net 3
+# bytes -- every label after it shifts down by the same amount. Found
+# via the same `--symbols` recipe above, re-run after the fix.
+XCRLF_ADDR, XPRINT_ADDR = 0x406, 0x413
 
 BD_RESEL, BD_ARET, BD_LRET, BD_COMP_FCB_CKS = 0x0C0E, 0x0C0F, 0x0C0F, 0x0C11
 BD_SELDSK, BD_INFO, BD_DMAAD, BD_DMABASE, BD_FX = 0x0C16, 0x0C17, 0x0C1B, 0x0C1D, 0x0C1F

@@ -56,7 +56,17 @@ USER_RETF_OFFSET = 0x0002  # user_retf's own resolved address in the wrapper
 CS_VAL = 0x0000            # the wrapper's own cseg loads at absolute 0
 
 PD_ADDR = 0x5000
-FCB_ADDR = 0x0030          # offset within WRKSEG's own segment
+FCB_ADDR = 0x2000          # offset within WRKSEG's own segment -- clear
+                           # of this wrapper's own cseg (phys(WRKSEG)+
+                           # FCB_ADDR must not land inside it: a plain
+                           # `mem[x]=0` can't actually zero a byte the
+                           # image-building step treats as "background"
+                           # whenever it's nonzero in the real assembled
+                           # code there -- tools/asm86/isa.py's own
+                           # encoding-size fix moved what that cseg byte
+                           # happens to be, turning what was a lucky
+                           # coincidence (it happened to already be 0)
+                           # into a real collision at the old 0x0030
 WRKSEG = 0x0040
 
 CODE_SEG, DATA_SEG, LSTK_SEG = 0x0200, 0x0300, 0x0400

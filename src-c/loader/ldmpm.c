@@ -110,7 +110,9 @@
  * as this file's own header comment already uses for the DDT break
  * check -- what matters here is only that both sides of the
  * differential test agree on the SAME dx value for these calls. */
-#define FCB_ADDR  0x038E
+#define FCB_ADDR  0x0386 /* re-probed after tools/asm86/isa.py's own
+    `_encode_alu` accumulator-immediate fix shifted it 8 bytes down --
+    see that function's own header comment */
 #define SEC1_ADDR 0x0080
 
 typedef uint8_t (*io_in8_fn)(uint16_t port);

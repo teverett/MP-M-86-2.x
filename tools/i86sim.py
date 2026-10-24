@@ -392,6 +392,18 @@ class I86Sim:
             self._push16(self._flags_word())
         elif op == 0x9D:  # POPF
             self._set_flags_word(self._pop16())
+        elif op == 0x9E:  # SAHF -- flags (low byte) <- AH. First needed by
+            # src/kernel/FILE2.BDO's own SEARCHN (`LAHF`...`SAHF`, saving
+            # `compext`'s own ZF result across two intervening MOVs that
+            # don't touch it), tests/src-c/test_file2.py. Reuses
+            # `_flags_word`'s own existing ZF/CF-only packing -- the same
+            # minimal-flag convention every other flags-word consumer in
+            # this module (PUSHF/POPF) already uses, sufficient here
+            # since this specific caller only actually cares about ZF.
+            ah = (self.regs['ax'] >> 8) & 0xFF
+            self._set_flags_word(ah)
+        elif op == 0x9F:  # LAHF -- AH <- flags (low byte), same packing as SAHF above
+            self.regs['ax'] = (self.regs['ax'] & 0x00FF) | ((self._flags_word() & 0xFF) << 8)
         elif op == 0xF8:  # CLC
             self.cf = 0
         elif op == 0xF9:  # STC -- src-c/loader/rom86q.c's own read_sector
@@ -652,6 +664,22 @@ class I86Sim:
             _, reg, rm = self._modrm()
             imm = self._fetch16() if width == 16 else self._fetch8()
             self._group1(reg, rm, imm, width)
+        elif op in (0x04, 0x05, 0x0C, 0x0D, 0x14, 0x15, 0x1C, 0x1D,
+                    0x24, 0x25, 0x2C, 0x2D, 0x34, 0x35, 0x3C, 0x3D):
+            # ADD/OR/ADC/SBB/AND/SUB/XOR/CMP AL/AX,imm -- the dedicated,
+            # shorter accumulator-immediate form (idx*8+4/+5) tools/
+            # asm86.py's own `_encode_alu` now emits for an AL/AX
+            # destination instead of always the longer group1 r/m,imm
+            # form (0x80/0x81 + modrm) -- see that function's own
+            # header comment for why (a real DRI source's own `$+N`
+            # literal byte-offset jump, calibrated against the *real*
+            # assembler's own shorter encoding, silently landing
+            # mid-instruction otherwise). First needed by `search`'s
+            # own SEARCHN cluster, tests/src-c/test_file2.py.
+            width = 8 if op % 2 == 0 else 16
+            reg = op >> 3
+            imm = self._fetch8() if width == 8 else self._fetch16()
+            self._group1(reg, ('reg', 0), imm, width)
         elif op in (0xD0, 0xD1, 0xD2, 0xD3):  # group2 shift/rotate (only SHL/4 and SHR/5 implemented)
             width = 8 if op in (0xD0, 0xD2) else 16
             by_cl = op in (0xD2, 0xD3)

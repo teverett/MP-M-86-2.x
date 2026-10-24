@@ -3747,3 +3747,65 @@ committing to the ~21k total lines across `src/kernel`+`src/loader`+
   own new tests written yet (a real follow-up, not a technical
   blocker). Full existing suite stays green; `make clean && make
   build` stays green (45 files, unchanged -- no new files this pass).
+
+- **Writing `search`'s own new differential test (the follow-up to
+  `swap_sdcnt` above) surfaced a real `tools/asm86.py` encoding bug,
+  fixing which broke 7 *other* already-passing tests' own hardcoded
+  probed addresses -- 6 are fixed, 1 (`test_lbdosf2.py`) is not yet.**
+  `search`'s own real asm (`SEARCHN`) has `CMP CH,MODNUM ! JNZ $+4 !
+  AND AL,3Fh` -- a deliberate DRI byte-reuse trick: when the jump is
+  taken, `$+4` is meant to land exactly past the 3-byte `AND AL,3Fh`
+  (`80 /4 ib`), but `tools/asm86/isa.py`'s own `_encode_alu` always
+  emitted that longer encoding, even for an AL/AX destination, where
+  the real 8086 (and the real DRI assembler) has a dedicated, shorter
+  accumulator-immediate form (`idx*8+4`/`+5`, e.g. `AND AL,imm8` =
+  `24 ib`, 2 bytes) -- so `$+4` landed one byte short, inside the
+  AND's own immediate operand, corrupting decode from there on
+  (caught as "unimplemented opcode" crashes, then wrong results once
+  that was worked around). Fixed in `_encode_alu` itself (now emits
+  the short form for an AL/AX destination), plus two new
+  `tools/i86sim.py` opcodes this exposed a real need for: the
+  accumulator-immediate forms of all 8 ALU ops (`0x04`-`0x3D`, not
+  just the group1 r/m,imm forms already supported) and `LAHF`/`SAHF`
+  (`0x9F`/`0x9E`, saving/restoring `compext`'s own ZF result across
+  two intervening MOVs -- reuses `_flags_word`'s own existing
+  ZF/CF-only packing, the same minimal-flag convention PUSHF/POPF
+  already use).
+
+  This is a real, universal assembler fix -- every `AND/OR/ADC/SBB/
+  SUB/XOR/CMP AL,imm8`-or-wider instruction in every real source file
+  this project assembles now encodes 1-3 bytes shorter wherever it
+  occurs, shifting every label after it. That broke 7 other already-
+  passing tests' own hardcoded, `--symbols`-probed addresses (not a
+  regression in the C port itself -- every one of these constants was
+  already a "real raw offset, re-probe if the assembler ever changes"
+  value, just never expected the assembler to change). Fixed:
+  `test_file1.py`/`test_file2.py`/`test_file3.py`/`test_file4.py`
+  (shared `mpmif`/`homef`/`seldskf`/.../`xprint` `STUBS` set, off by a
+  uniform 3 bytes); `test_ldbios86q.py` (`LDB86Q_DISK` through
+  `LDB86Q_WRITE_PARMS`, non-uniform shifts -- re-probed individually,
+  not guessed); `test_ldmpm.py` (`ldmpm.c`'s own `FCB_ADDR`); and
+  `test_load.py`, which turned out to be a second, independent class
+  of fallout: its own `FCB_ADDR`/`WRKSEG` scratch pair happened to
+  resolve to a physical address *inside* this wrapper's own cseg --
+  writing a plain `0` there to mean "no explicit disk letter" never
+  actually overrode the real assembled byte living there (same "only
+  nonzero bytes override cseg" convention `test_file2.py`'s own
+  `get_nalbs`/`getblock` already relies on elsewhere), so the test
+  was already reading whatever real cseg byte happened to be there --
+  working by sheer coincidence (it was already 0) until the fix
+  changed what that byte is. Moved `FCB_ADDR` to a flat scratch
+  address comfortably clear of this wrapper's entire cseg instead of
+  re-probing (the right fix for a scratch address that was never
+  supposed to depend on real code layout to begin with).
+
+  **`test_lbdosf2.py` remains broken** -- its own `initialize` test
+  case's reference run falls off the end of the real assembled code
+  after a jump-table dispatch (`LEA BX,[6] ! JMP [BX+0]`) computes a
+  wrong target, run thousands of steps through zero-filled memory,
+  and eventually hits a genuinely unimplemented opcode nowhere near
+  any real code. Very likely the same general class as the others (a
+  jump-table entry's own real position moved), but not root-caused in
+  this pass -- see that test's own updated header comment. Full
+  existing suite otherwise stays green; `make clean && make build`
+  otherwise stays green (45 files, unchanged).

@@ -386,6 +386,23 @@ def _encode_alu(name, ops, ctx):
     idx = ALU[name]
     if src.kind == 'imm':
         size = _need_size(name, _opsize(dst, src), ctx)
+        # The real 8086 has a dedicated, shorter accumulator-immediate
+        # form for ADD/OR/ADC/SBB/AND/SUB/XOR/CMP AL/AX,imm (idx*8+4 for
+        # AL, idx*8+5 for AX -- e.g. AND AL,imm8 = 0x24, 2 bytes, vs the
+        # generic group1 r/m8,imm8 form (0x80 /4 ib) this function used
+        # to always emit, 3 bytes). A real DRI source's own `$+N`-style
+        # literal byte-offset ("JNZ $+4 ! AND AL,3Fh", src/kernel/
+        # FILE2.BDO's SEARCHN) is calibrated against the *real*
+        # assembler's own choice -- the short form here -- so always
+        # emitting the longer encoding silently breaks that jump's own
+        # target (landing one byte short, inside the AND's own
+        # immediate instead of past it). First caught porting FILE2.BDO's
+        # own SEARCHN (`search_olist`/`searchn_list` cluster) to a real
+        # differential test, tests/src-c/test_file2.py.
+        if dst.kind == 'reg' and dst.reg == 0 and dst.size == size:
+            opcode = idx * 8 + 4 + (0 if size == 1 else 1)
+            imm = u8(src.mem['value']) if size == 1 else u16(src.mem['value'])
+            return bytes([opcode]) + imm
         opcode = 0x80 if size == 1 else 0x81
         imm = u8(src.mem['value']) if size == 1 else u16(src.mem['value'])
         return bytes([opcode]) + encode_rm(dst, idx, ctx) + imm

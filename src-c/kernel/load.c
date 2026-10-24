@@ -1,10 +1,8 @@
 /*
- * load.c -- C port of src/kernel/LOAD.SUP's `load:`/`load_entry`
- * (the whole intermodule load path except `cload_entry`'s own
- * chain-load mode, see below), plus the real disk I/O and memory
- * allocation it depends on: `diskread`, `load_group`, `get_ch_info`,
- * and the tail portion (`lb_more` through `load_exit`) ported as
- * `load_finish`.
+ * load.c -- C port of src/kernel/LOAD.SUP's `load:`/`load_entry`/
+ * `cload_entry`, plus the real disk I/O and memory allocation it
+ * depends on: `diskread`, `load_group`, `get_ch_info`, and the tail
+ * portion (`lb_more` through `load_exit`) ported as `load_finish`.
  *
  * `diskread`'s real `mpmif(f_freadseq)` call (a sequential BDOS file
  * read) is modeled by `freadseq` below against a deliberately
@@ -39,16 +37,23 @@
  * own `start`/`min`/`max`/`pd`/`attrib` fields share the real MPB's
  * layout byte-for-byte).
  *
- * `cload_entry`'s own chain-load mode (`bx==1` into `load:`) is NOT
- * ported: its own real memory-transfer cleanup (`ld_fnext`/
- * `ld_freeit`) depends on `CPMMEM.MEM`'s own `cpmfree_entry`
- * succeeding for a real MAU release, which that file's own port
- * still can't do faithfully (see `cpmmem.c`'s own header comment on
- * why its own `free_seg` retry is real-but-unexercisable) -- a
- * separate, deeper blocker than either disk I/O or allocation. `load`
- * below is `load_entry`'s own path (`bx=0`) plus an intermodule
- * caller supplying a real, uninitialized PD to init (`bx`=that PD's
- * own address) -- never `bx=1`.
+ * `cload_entry`'s own chain-load mode is now ported too, as a thin
+ * wrapper calling `load` with an explicit `load_chain` flag instead
+ * of the real asm's own magic `bx==1` sentinel (see `cload_entry`'s
+ * own header comment below for why). Its own memory-transfer cleanup
+ * (`ld_fnext`/`ld_freeit`, inside `load`'s own `if (load_chain)`
+ * block) depends on `cpmmem.c`'s own `cpmfree_entry` and `memory.c`'s
+ * own `mfree_entry` both succeeding for a real MAU release -- both
+ * are real now (see those files' own header comments for the pass
+ * that made them so). `ld_freeit`'s own `mpmif(f_freemem)` resolves,
+ * via `MEMIF.MEM`'s own `functab`, to `cpmmem.c`'s `cpmfree_entry`
+ * itself (func#4 within the MEM module, same table `f_malloc`/
+ * `f_memfree`'s own func#6/#7 live in) -- called here directly, in
+ * free-all mode (`mcb_ext = 0xFF`), bypassing the dispatch table the
+ * same way every other direct internal call in this project does.
+ * `load` below now takes an explicit `int load_chain` parameter
+ * instead of smuggling it through `bx` the way the real asm's shared
+ * `load:` entry point does.
  *
  * This tail portion has no `mpmif` dependency of its own: it just
  * builds a Base Page and initializes a new PD's own UDA/LDSTK from an
@@ -200,6 +205,7 @@ uint16_t load_group(uint8_t *mem, uint16_t si, uint16_t sysdat) {
 
 extern load_bxcx malloc_entry(uint8_t *mem, uint16_t dx);
 extern load_bxcx mfree_entry(uint8_t *mem, uint16_t dx);
+extern load_bxcx cpmfree_entry(uint8_t *mem, uint16_t dx);
 load_bxcx load_finish(uint8_t *mem, uint16_t sysdat, uint16_t user_retf_offset, uint16_t cs);
 
 /*
@@ -282,7 +288,8 @@ static uint16_t get_ch_info(uint8_t *mem, uint16_t *n, uint16_t *bx_fail, uint16
     return 0;
 }
 
-load_bxcx load(uint8_t *mem, uint16_t dx, uint16_t bx, uint16_t sysdat, uint16_t user_retf_offset, uint16_t cs) {
+load_bxcx load(uint8_t *mem, uint16_t dx, uint16_t bx, uint16_t sysdat, uint16_t user_retf_offset,
+               uint16_t cs, int load_chain) {
     uint16_t load_pd = bx;
     uint16_t load_fcb = dx;
     mem_w16(mem, SD_LOAD_PD, load_pd);
@@ -305,15 +312,51 @@ load_bxcx load(uint8_t *mem, uint16_t dx, uint16_t bx, uint16_t sysdat, uint16_t
 
     uint16_t n = 0;
     if (load_pd != 0) {
-        /* form_uda -- ldtab[0] is the UDA+LDSTK group; load_chain's
-         * own cleanup (ld_fnext/ld_freeit) is NOT reached here since
-         * this port never sets load_chain -- see header comment */
+        /* form_uda -- ldtab[0] is the UDA+LDSTK group */
         uint16_t si0 = SD_LOAD_LDTAB;
         mem_w16(mem, (uint16_t)(si0 + ldtab_min), (lstklen + ulen) / 16);
         mem_w16(mem, (uint16_t)(si0 + ldtab_max), (lstklen + ulen) / 16);
         mem_w16(mem, (uint16_t)(si0 + ldtab_pd), load_pd);
         mem_w16(mem, (uint16_t)(si0 + ldtab_attrib), mf_load);
         n = 1;
+
+        if (load_chain) {
+            /* ld_fnext/ld_freeit -- free every segment the calling
+             * process (SD_RLR) currently owns except the one matching
+             * the new PD's own p_uda (its freshly-formed UDA+LDSTK
+             * group, allocated later in this same call) */
+            uint16_t uda_seg = mem_r16(mem, (uint16_t)(load_pd + p_uda));
+            uint16_t rlr = mem_r16(mem, SD_RLR);
+            uint16_t walk = mem_r16(mem, (uint16_t)(rlr + p_mem));
+            while (walk != 0) {
+                if (mem_r16(mem, (uint16_t)(walk + ms_start)) != uda_seg) {
+                    uint16_t flags = mem_r16(mem, (uint16_t)(walk + ms_flags));
+                    mem_w16(mem, (uint16_t)(walk + ms_flags), (uint16_t)(flags & (uint16_t)~mf_load));
+                }
+                walk = mem_r16(mem, (uint16_t)(walk + ms_link));
+            }
+
+            /* ld_freeit -- free everything but Load memory, via the
+             * already-ported cpmfree_entry (free-all mode); its own
+             * output is discarded, same as the real asm's own "pop
+             * cx!pop cx!pop cx" (the real asm never checks it either) */
+            mem[(uint16_t)(SD_LOAD_MCB + mcb_ext)] = 0xFF;
+            cpmfree_entry(mem, SD_LOAD_MCB);
+
+            /* free load memory except uda,ldstack -- the real asm's
+             * own direct mpmif(f_memfree) call into mfree_entry,
+             * freeing the tail of the UDA segment beyond what the
+             * UDA+LDSTK group itself actually needs; also fire-and-
+             * forget, same reasoning */
+            mem_w16(mem, (uint16_t)(SD_LOAD_MFPB + mfpb_start), (uint16_t)(uda_seg + (lstklen + ulen) / 16));
+            mem_w16(mem, (uint16_t)(SD_LOAD_MFPB + mfpb_pd), 0);
+            mfree_entry(mem, SD_LOAD_MFPB);
+
+            /* transfer memory to new pd -- reparent the calling
+             * process's own (now-trimmed) p_mem list onto load_pd */
+            mem_w16(mem, (uint16_t)(load_pd + p_mem), mem_r16(mem, (uint16_t)(rlr + p_mem)));
+            mem_w16(mem, (uint16_t)(rlr + p_mem), 0);
+        }
     }
 
     uint16_t bx_fail, cx_fail;
@@ -396,6 +439,28 @@ load_bxcx load(uint8_t *mem, uint16_t dx, uint16_t bx, uint16_t sysdat, uint16_t
     }
 
     return load_finish(mem, sysdat, user_retf_offset, cs);
+}
+
+/*
+ * cload_entry -- entry point to load for a chain command.
+ *	input:	dx = addr of open FCB in u_wrkseg; bx = addr of an unused
+ *		PD to initialize (already carrying a real p_uda, same as
+ *		load's own "intermodule caller" convention)
+ *	output:	same as load/load_entry
+ *
+ * The real asm's own `cload_entry: push bx ! mov bx,1 ! jmps load` is
+ * just an artifact of smuggling two values (the chain-mode sentinel
+ * and the real PD address) through the single `bx` register `load:`
+ * shares with `load_entry`'s own `bx=0`/an intermodule caller's own
+ * `bx=PD` cases -- ported here as a separate, explicit `load_chain`
+ * flag instead of a magic `bx==1` sentinel plus a second stack pop,
+ * which this port has no need to reproduce (see every other routine
+ * in this tree that passes `sysdat`/`cs` directly rather than via a
+ * `cs:`-resident label for the same reason).
+ */
+load_bxcx cload_entry(uint8_t *mem, uint16_t dx, uint16_t bx, uint16_t sysdat,
+                       uint16_t user_retf_offset, uint16_t cs) {
+    return load(mem, dx, bx, sysdat, user_retf_offset, cs, 1);
 }
 
 load_bxcx load_finish(uint8_t *mem, uint16_t sysdat, uint16_t user_retf_offset, uint16_t cs) {

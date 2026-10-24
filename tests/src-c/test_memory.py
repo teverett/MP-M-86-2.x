@@ -3,11 +3,16 @@
 MEMORY.MEM's malloc_entry and mfree_entry (+ internal mall_try_mau,
 mfree_it, both static in the C port and exercised only indirectly).
 
-malloc_entry's own mall_try_mau/mall_ml now make real mpmif(f_maualloc)/
-mpmif(f_mlalloc) calls into the real MAU.MEM/ML.MEM (bundled into this
+malloc_entry's own mall_try_mau/mall_ml and mfree_entry's own mfree_it
+now all make real mpmif(f_maualloc)/mpmif(f_mlalloc)/mpmif(f_maufree)/
+mpmif(f_mlfree) calls into the real MAU.MEM/ML.MEM (bundled into this
 test's own wrapper, with mpmif itself a small real dispatcher -- see
-the wrapper's own header comment) -- see memory.c's own header comment
-for why mfree_entry's own mpmif(f_maufree) isn't upgraded yet.
+the wrapper's own header comment and memory.c's own header comment).
+Needs tools/i86sim.py's opt-in `segmented=True` mode (see test_mau.py's
+own docstring) now that mfree_it's own real call into maufree_entry
+reaches MAU.MEM's own dynamically-computed MAU segment -- confirmed
+safe to enable for every case here, not just the new ones (plain
+unprefixed accesses behave identically either way).
 """
 import ctypes
 import os
@@ -35,10 +40,28 @@ UDA_WRKSEG = 0xA012
 MPB_START, MPB_MIN, MPB_MAX, MPB_PDADR, MPB_FLAGS = 0, 2, 4, 6, 8
 MFPB_START, MFPB_PD = 0, 2
 MS_LINK, MS_START, MS_LENGTH, MS_FLAGS, MS_MAU = 0, 2, 4, 6, 8
+M_LINK = 0
 P_THREAD = 2
 P_MEM = 0x16
 E_NO_UMD, E_ACTIVE_PD, E_NO_MEMORY = 0x12, 0x22, 0x03
 F_MAUALLOC, F_MAUFREE, F_MLALLOC = 0x309, 0x30A, 0x30B
+
+SAT_START, SAT_LENGTH, SAT_NALL, SATLEN = 0, 2, 4, 5
+MAU_SEG = 0x0100
+MAU_REC = 0x4600
+
+
+def phys(seg):
+    return (seg * 16) & 0xFFFF
+
+
+def put_sat(mem, seg, entry_no, start, length, nall, ents=4):
+    base = phys(seg)
+    mem[base] = ents
+    off = base + entry_no * SATLEN
+    mem_w16(mem, off + SAT_START, start)
+    mem_w16(mem, off + SAT_LENGTH, length)
+    mem[off + SAT_NALL] = nall
 
 SYSDAT = 0x2000
 
@@ -85,7 +108,7 @@ def run_reference(code, entry, mem, regs, sysdat_word=SYSDAT):
     # mpmif is a real dispatcher now (see the wrapper's own comment),
     # not a flat call_stub_addrs target -- f_maualloc/f_mlalloc tail
     # into the real MAU.MEM/ML.MEM, everything else just ret's.
-    sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry)
+    sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry, segmented=True)
     sim.run()
     return sim.regs, image
 
@@ -218,9 +241,13 @@ def main():
         check("mfree_entry: no MD covers the target paragraph", (ref_regs['bx'], ref_regs['cx']), port)
 
         # -- mfree_entry: exact-start match -> tail-calls mfree_it, whose own
-        # maufree boundary stub always "fails" (cx=f_maufree, nonzero) and so
-        # takes the decrease-length path; mfree_entry returns mfree_it's
-        # result directly without checking cx (same as the real jmps) --
+        # real maufree_entry call genuinely fails here (ms_mau names a
+        # bogus, nonexistent MAU record -- maufree_entry's own "ents"
+        # read off that garbage segment comes back 0, failing the very
+        # first entry-count check) -- mfree_entry returns mfree_it's
+        # result directly without checking cx (same as the real jmps);
+        # the MD's own length is correctly left untouched on this
+        # failure path --
         mem = base_memory()
         RLR = mem_r16(mem, SD_RLR)
         MD = 0x4500
@@ -236,11 +263,14 @@ def main():
         port, port_img = call_mfree(mem, MFPB)
         ref = ((ref_regs['bx'], ref_regs['cx']), mem_r16(ref_img, MD + MS_LENGTH))
         got = (port, mem_r16(port_img, MD + MS_LENGTH))
-        check("mfree_entry: exact-start match, maufree stub decreases length", ref, got)
+        check("mfree_entry: exact-start match, bogus MAU -> maufree_entry genuinely fails", ref, got)
 
         # -- mfree_entry: target falls strictly inside one MD's range (not
-        # exact start) -- also lands in mfree_it via a real call, decreasing
-        # length by (target - start) --
+        # exact start) -- real maufree_entry call genuinely succeeds (a
+        # real SAT split, via mau_split), so mfree_it's own decrease-
+        # length path runs for real: ms_length[si] shrinks by
+        # (target - start), independently of whatever mau_split did to
+        # the MAU's own internal SAT bookkeeping --
         mem = base_memory()
         RLR = mem_r16(mem, SD_RLR)
         MD = 0x4500
@@ -248,15 +278,71 @@ def main():
         mem_w16(mem, MD + MS_START, 0x30)
         mem_w16(mem, MD + MS_LENGTH, 0x20)
         mem_w16(mem, MD + MS_LINK, 0)
-        mem_w16(mem, MD + MS_MAU, 0x9999)
+        mem_w16(mem, MD + MS_MAU, MAU_REC)
+        mem_w16(mem, MAU_REC + MS_START, MAU_SEG)
+        mem_w16(mem, MAU_REC + MS_LENGTH, 0x1000)
+        put_sat(mem, MAU_SEG, 1, 0x30, 0x20, 1)  # allocated, covers [0x30, 0x50)
+        put_sat(mem, MAU_SEG, 2, 0x50, 0x10, 1)  # sentinel/boundary entry
         MFPB = 0x5100
         mem_w16(mem, MFPB + MFPB_PD, 0)
-        mem_w16(mem, MFPB + MFPB_START, 0x38)  # inside [0x30, 0x50)
+        mem_w16(mem, MFPB + MFPB_START, 0x38)  # inside [0x30, 0x50), not exact start
         ref_regs, ref_img = run_reference(code, entries['mfree_entry'], mem, {'dx': MFPB})
         port, port_img = call_mfree(mem, MFPB)
         ref = ((ref_regs['bx'], ref_regs['cx']), mem_r16(ref_img, MD + MS_LENGTH))
         got = (port, mem_r16(port_img, MD + MS_LENGTH))
-        check("mfree_entry: target inside a larger MD, length decreased", ref, got)
+        check("mfree_entry: target inside a larger MD, real maufree_entry split, length decreased", ref, got)
+
+        # -- mfree_entry: exact-start match, real maufree_entry call --
+        # MAU still has another allocated SAT entry, so mau_collapse's
+        # own scan finds it and reports "not empty" (mfree_exit) --
+        mem = base_memory()
+        RLR = mem_r16(mem, SD_RLR)
+        MD = 0x4500
+        mem_w16(mem, RLR + P_MEM + MS_LINK, MD)
+        mem_w16(mem, MD + MS_START, 0x300)
+        mem_w16(mem, MD + MS_LENGTH, 0x10)
+        mem_w16(mem, MD + MS_LINK, 0)
+        mem_w16(mem, MD + MS_MAU, MAU_REC)
+        mem_w16(mem, MAU_REC + MS_START, MAU_SEG)
+        mem_w16(mem, MAU_REC + MS_LENGTH, 0x1000)
+        put_sat(mem, MAU_SEG, 1, 0x300, 0x10, 1)  # the target, currently allocated
+        put_sat(mem, MAU_SEG, 2, 0x310, 0x10, 1)  # a neighbor that stays allocated
+        MFPB = 0x5100
+        mem_w16(mem, MFPB + MFPB_PD, 0)
+        mem_w16(mem, MFPB + MFPB_START, 0x300)
+        ref_regs, ref_img = run_reference(code, entries['mfree_entry'], mem, {'dx': MFPB})
+        port, port_img = call_mfree(mem, MFPB)
+        ref = ((ref_regs['bx'], ref_regs['cx']), ref_img[phys(MAU_SEG) + 1 * SATLEN + SAT_NALL])
+        got = (port, port_img[phys(MAU_SEG) + 1 * SATLEN + SAT_NALL])
+        check("mfree_entry: real maufree_entry call, MAU still in use", ref, got)
+
+        # -- mfree_entry: exact-start match, real maufree_entry call --
+        # the freed SAT is the MAU's only real entry, so mau_collapse
+        # reports "empty" -- the MAU is then unlinked from the active
+        # MAU list (SD_MAL) and handed back to the Memory Free List
+        # (SD_MFL) via a real mlfree_entry call --
+        mem = base_memory()
+        RLR = mem_r16(mem, SD_RLR)
+        MD = 0x4500
+        mem_w16(mem, RLR + P_MEM + MS_LINK, MD)
+        mem_w16(mem, MD + MS_START, 0x300)
+        mem_w16(mem, MD + MS_LENGTH, 0x10)
+        mem_w16(mem, MD + MS_LINK, 0)
+        mem_w16(mem, MD + MS_MAU, MAU_REC)
+        mem_w16(mem, MAU_REC + MS_START, MAU_SEG)
+        mem_w16(mem, MAU_REC + MS_LENGTH, 0x1000)
+        put_sat(mem, MAU_SEG, 1, 0x300, 0x10, 1, ents=2)  # the MAU's only real entry
+        mem_w16(mem, SD_MAL + M_LINK, MAU_REC)
+        mem_w16(mem, MAU_REC + M_LINK, 0)
+        mem_w16(mem, SD_MFL + M_LINK, 0)
+        MFPB = 0x5100
+        mem_w16(mem, MFPB + MFPB_PD, 0)
+        mem_w16(mem, MFPB + MFPB_START, 0x300)
+        ref_regs, ref_img = run_reference(code, entries['mfree_entry'], mem, {'dx': MFPB})
+        port, port_img = call_mfree(mem, MFPB)
+        ref = ((ref_regs['bx'], ref_regs['cx']), mem_r16(ref_img, SD_MAL), mem_r16(ref_img, SD_MFL))
+        got = (port, mem_r16(port_img, SD_MAL), mem_r16(port_img, SD_MFL))
+        check("mfree_entry: real maufree_entry call, MAU now empty, released to MFL", ref, got)
 
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")

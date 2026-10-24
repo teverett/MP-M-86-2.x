@@ -25,11 +25,23 @@
  * reading back the same unmodified push) -- not a bug, just how the
  * real asm itself behaves.
  *
- * free_memory's own mpmif(f_memfree) call remains a boundary stub: it
- * would need mfree_entry (memory.c), whose own mpmif(f_maufree) call
- * is itself still deferred there (see memory.c's own header comment on
- * why that one's tail-jump-out-of-two-call-frames shape needs more
- * care) -- free_memory can't be upgraded until that lands first.
+ * free_memory's own mpmif(f_memfree) call IS now a real call into
+ * memory.c's mfree_entry too (now that memory.c's own mfree_it has its
+ * real mpmif(f_maufree)/mpmif(f_mlfree) calls -- see that file's own
+ * header comment). The real asm's own on-stack "push cx(0)!push dx"
+ * is, same as getmemory's own MPB, a genuine MFPB.DEF block (start/
+ * pdadr) built at a stack address with DS=SS -- under this port's
+ * flat model, just a fixed scratch block (SD_CPMMEM_MFB, defs.h).
+ * free_memory's own real tail ("pop dx!pop dx!pop ds!ret") never
+ * restores BX or CX after the call, so free_memory's own real output
+ * genuinely IS mfree_entry's own {bx, cx} passed straight through --
+ * this is a correction, not just an upgrade: cpmfree_entry's own
+ * mcb_ext != 0xFF path is a real tail-*jump* into free_memory in the
+ * real asm (`jne free_memory`), so its own final output is free_memory's
+ * real bx too, not a fixed 0 -- the previous boundary-stub-era
+ * assumption that BX there was "undefined, so fixed at 0" was only
+ * ever true because free_memory itself never set BX meaningfully; now
+ * that it does, cpmfree_entry passes it through unchanged instead.
  */
 #include <stdint.h>
 
@@ -40,6 +52,7 @@ typedef struct {
 } mem_bxcx;
 
 extern mem_bxcx malloc_entry(uint8_t *mem, uint16_t dx);
+extern mem_bxcx mfree_entry(uint8_t *mem, uint16_t dx);
 
 /*
  * getmemory
@@ -65,16 +78,13 @@ static mem_axdxcx getmemory(uint8_t *mem, uint16_t ax, uint16_t bx, uint16_t dx)
 /*
  * free_memory
  *	input:	dx = start
- *	output:	cx = error code (always f_memfree, nonzero); the real
- *		routine never actually writes bx itself -- see
- *		cpmfree_entry's own header comment on its tail-jump here
+ *	output:	returns mfree_entry's own {bx, cx} straight through -- see
+ *		header comment
  */
-static uint16_t free_memory(uint8_t *mem, uint16_t dx) {
-    (void)mem;
-    (void)dx;
-    /* push the on-stack MFB parameter block ! mov cx,f_memfree ! call
-     * mpmif -- boundary stub, no-op */
-    return f_memfree;
+static mem_bxcx free_memory(uint8_t *mem, uint16_t dx) {
+    mem_w16(mem, (uint16_t)(SD_CPMMEM_MFB + mfpb_start), dx);
+    mem_w16(mem, (uint16_t)(SD_CPMMEM_MFB + mfpb_pd), 0);
+    return mfree_entry(mem, SD_CPMMEM_MFB);
 }
 
 /*
@@ -164,21 +174,16 @@ mem_bxcx cpmabsa_entry(uint8_t *mem, uint16_t dx) {
  * cpmfree_entry -- Free Mem (CP/M-86 call 57)
  *	input:	dx = offset of MCB in u_wrkseg; mcb_ext = 0xFF to free all
  *		but Load memory, else mcb_base names the one segment to free
- *	output:	bx = 0 if successful, 0xFFFF on failure; cx = error code --
- *		on the mcb_ext != 0xFF tail-jump into free_memory, the real
- *		routine never writes bx on that path either, so its actual
- *		value there is just whatever the caller's own bx happened to
- *		be; this port fixes that at 0 instead of reproducing an
- *		undefined value
+ *	output:	returns free_memory's own {bx, cx} straight through on the
+ *		mcb_ext != 0xFF path (a real tail-jump in the real asm) --
+ *		see header comment
  */
 mem_bxcx cpmfree_entry(uint8_t *mem, uint16_t dx) {
     uint16_t si = dx;
     uint8_t ext = mem[(uint16_t)(si + mcb_ext)];
     uint16_t target = mem_r16(mem, (uint16_t)(si + mcb_base));
     if (ext != 0xFF) {
-        uint16_t cx = free_memory(mem, target);
-        mem_bxcx r = {0, cx};
-        return r;
+        return free_memory(mem, target);
     }
 
     /* cpmf_root: walk the calling process's own p_mem list, freeing
@@ -203,16 +208,16 @@ mem_bxcx cpmfree_entry(uint8_t *mem, uint16_t dx) {
         /* free_seg: on a real free (cx==0) go back to cpmf_root, since
          * the list just changed under us. On failure (cx != 0) the real
          * asm's "jmps cpmf_next" leaves bx untouched -- NOT advanced to
-         * walk -- which under the boundary-stub convention (free_memory
-         * always "fails") spins forever once the list holds a non-Load
-         * segment: the same class of issue as QUE1.RTM's cioattach
-         * "must actually wait" path, translated faithfully but not
-         * exercised by the differential test for that reason, see
-         * docs/src-c.md */
+         * walk -- which would spin forever if free_memory genuinely,
+         * repeatedly failed to free a segment the list itself claims is
+         * there: same class of issue as QUE1.RTM's cioattach "must
+         * actually wait" path. Translated faithfully; not expected to
+         * be hit in practice since every segment on this PD's own
+         * p_mem list should always be freeable, see docs/src-c.md */
         uint16_t target2 = mem_r16(mem, (uint16_t)(walk + ms_start));
-        uint16_t qcx = free_memory(mem, target2);
-        if (qcx == 0) {
-            bx = root; /* cpmf_root, unreachable under the convention */
+        mem_bxcx fr = free_memory(mem, target2);
+        if (fr.cx == 0) {
+            bx = root; /* cpmf_root -- the list changed, restart the walk */
         }
     }
 }

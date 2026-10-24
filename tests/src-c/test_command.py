@@ -39,7 +39,9 @@ from i86sim import I86Sim  # noqa: E402
 
 WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'command_wrapper.A86')
 COMMAND_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f) for f in
-             ('command.c', 'que1.c', 'que2.c', 'console.c', 'chario.c', 'parse.c')]
+             ('command.c', 'que1.c', 'que2.c', 'console.c', 'chario.c', 'parse.c',
+              'file1.c', 'file2.c', 'file3.c', 'file4.c',
+              'load.c', 'memory.c', 'util_mem.c', 'mau.c', 'ml.c', 'cpmmem.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 
 STACK_TOP = 0xFFF0
@@ -180,8 +182,12 @@ def main():
         lib.fileopen.argtypes = [c_u8p]
         lib.fileopen.restype = FileopenResult
         lib.user_retf.argtypes = [c_u8p]
-        lib.clicmd_entry.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.clicmd_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16]
         lib.clicmd_entry.restype = BxCx
+        # sysdat/user_retf_offset/cs only matter on cli_gopen's own real
+        # f_load path (load.c's load), never reached by either case
+        # below (RSP dispatch succeeds before cli_fload; the no-RSP-match
+        # case fails at fileopen before reaching cli_gopen) -- 0 is inert.
 
         failures = []
 
@@ -210,16 +216,27 @@ def main():
         port = bytes(buf)[CLI_CMDTAIL:CLI_CMDTAIL + 6]
         check("shifttail: tail shifted to buffer start", ref, port)
 
-        # -- fileopen: sets the read-only bit on cli_fcb's own name[5],
-        # and the result is fixed at BL=0xFF/BH=0 (see command.c's own
-        # header comment) --
+        # -- fileopen: sets the read-only bit on cli_fcb's own name[5].
+        # fileopen is a real call into file4.c's func15 now (see
+        # command.c's own header comment) -- the wrapper's own
+        # reference run still uses f_fopen's old fixed-stub result
+        # (BL=0xFF/BH=0), since bundling the real BDOS.A86 module here
+        # would just hit the same, already-documented FILE2.BDO
+        # cseg/dseg collision test_file4.py's own func15 ports around
+        # (see file2.c's own header comment) -- but with no matching
+        # directory entry anywhere in this empty fixture, func15's own
+        # real logic genuinely, deterministically fails the same way
+        # (confirmed directly: bl=0xff/bh=0), so the two sides still
+        # agree, just for a real reason on the port side now instead
+        # of a coincidence --
         mem = base_memory()
         mem[CLI_FCB + FCB_NAME + 5] = 0x41  # some pre-existing bits
+        mem[CLI_FCB + FCB_NAME:CLI_FCB + FCB_NAME + 8] = b'FOOBAR  '
         ref_regs, ref_img = run_reference(code, entries['fileopen'], mem, {})
         buf = to_ctypes(mem)
         got = lib.fileopen(ctypes.cast(buf, c_u8p))
         check("fileopen: sets the read-only bit", ref_img[CLI_FCB + FCB_NAME + 5], bytes(buf)[CLI_FCB + FCB_NAME + 5])
-        check("fileopen: fixed BL/BH", (0xFF, 0), (got.bl, got.bh))
+        check("fileopen: real func15 call, no matching dir entry -> BL/BH", (0xFF, 0), (got.bl, got.bh))
 
         # -- user_retf: clears pf_keep/pf_tempkeep/pf_ctlc/pf_sys, leaves
         # every other bit (including pf_raw/pf_ctld here) untouched --
@@ -246,7 +263,8 @@ def main():
         put_command(mem, 'FOOBAR')
         ref_regs, ref_img = run_reference(code, entries['clicmd_entry'], mem, {'dx': CMDBUF})
         buf = to_ctypes(mem)
-        got = lib.clicmd_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(CMDBUF))
+        got = lib.clicmd_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(CMDBUF),
+                                ctypes.c_uint16(0), ctypes.c_uint16(0), ctypes.c_uint16(0))
         port_img = bytes(buf)
         check("clicmd_entry: RSP dispatch -> bx/cx",
               (ref_regs['bx'], ref_regs['cx']), (got.bx, got.cx))
@@ -259,15 +277,17 @@ def main():
               mem_r16(ref_img, QD1 + Q_MSGCNT), mem_r16(port_img, QD1 + Q_MSGCNT))
 
         # -- clicmd_entry: a typed command matching no RSP queue falls
-        # through to cli_fload, whose own file-open always fails (see
-        # command.c's own header comment) -- e_bad_open --
+        # through to cli_fload, whose own real fileopen call fails for
+        # real (no matching directory entry in this empty fixture,
+        # same as the dedicated fileopen case above) -- e_bad_open --
         mem = base_memory()
         put_command(mem, 'NOPE')
         mem_w16(mem, SD_PUL, FREE_PD)
         mem_w16(mem, FREE_PD + P_LINK, 0)
         ref_regs, ref_img = run_reference(code, entries['clicmd_entry'], mem, {'dx': CMDBUF})
         buf = to_ctypes(mem)
-        got = lib.clicmd_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(CMDBUF))
+        got = lib.clicmd_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(CMDBUF),
+                                ctypes.c_uint16(0), ctypes.c_uint16(0), ctypes.c_uint16(0))
         port_img = bytes(buf)
         check("clicmd_entry: no RSP match -> bx/cx",
               (ref_regs['bx'], ref_regs['cx']), (got.bx, got.cx))

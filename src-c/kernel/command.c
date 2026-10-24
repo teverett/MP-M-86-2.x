@@ -37,28 +37,67 @@
  * `cli_cuspqpb`'s own `qpb_buffptr`/`qpb_nmsgs` are never written
  * anywhere in the real `COMMAND.SUP` source itself -- they're real
  * SYSDAT fields the real system's own boot-time init sets once and
- * COMMAND.SUP only ever *reads* (`cli_fload`'s own "2nd argument"
- * parse temporarily overwrites `pcb_flnmptr` and restores it, the
- * one exception). This port's own `cli_pfn`/`cli_checkque` set them
- * explicitly on every call instead of modeling that one-time init.
+ * COMMAND.SUP only ever *reads* them, relying on `pcb_flnmptr` still
+ * holding `CLI_CMDTAIL` (set by `clicmd_entry`'s own earlier
+ * `cli_pfn` call) by the time `cli_gopen`'s own "2nd argument" parse
+ * runs -- `shifttail` has already rewritten `CLI_CMDTAIL`'s own
+ * *content* down to just the command's own arguments by then, so
+ * re-parsing from the same pointer parses the first argument, not
+ * the command name again. This port's own `cli_pfn`/`cli_checkque`
+ * set both fields explicitly on every call instead of modeling that
+ * one-time init, which is equivalent as long as nothing else ever
+ * writes `pcb_fcbptr` to something other than `CLI_FCB` -- true
+ * throughout this file.
  *
- * `fileopen`'s own `mpmif(f_fopen)` (real file open, via `FILE1.BDO`/
- * `FILE2.BDO`'s own still-unported `srch`-dependent bulk -- see
- * docs/src-c.md) stays a boundary stub, but unlike a plain no-op,
- * `BL`/`BH` are genuinely undefined under that convention here (no
- * function-code sentinel the way `mpmif`'s own calls usually leave
- * one in `CX`) -- fixed at a well-defined constant instead, same
- * precedent as `CONSOLE.CIO`'s/`CPMMEM.MEM`'s own undefined-register
- * fixes: `BL=0xFF` (a hard open failure), `BH=0` (not an "extended"
- * error). `cli_fload`'s own real success path (the file actually
- * opens, loads, and a process gets created) is translated faithfully
- * below but never reachable under that fix -- same class as
- * `CONSOLE.CIO`'s own `ca_sleep`/`CPMMEM.MEM`'s own `free_seg` retry.
- * `f_load`/`f_cload`/`f_createproc`/`f_setprior`/`f_terminate` are
- * therefore left as plain boundary stubs too (never reached either,
- * so upgrading them here would add nothing testable) -- `f_load`'s
- * own real target (`load.c`'s `load`) and `f_createproc`'s (`sysent.c`'s
- * `creat_proc_entry`) are both already ported elsewhere regardless.
+ * `fileopen`'s own `mpmif(f_fopen)` and `cli_gopen`'s own
+ * `mpmif(f_load)` are both real calls now: traced through
+ * `MODFUNC.DEF`/`BDOSIF.BDO`'s own `functab` (`f_fopen` = function
+ * 15 = `bdos` module func#2 = `FILE4.BDO`'s own `func15`) and
+ * `SUPIF.SUP`'s own `supfunc` (`f_load` = function 59 = `sup` module
+ * func#4 = `LOAD.SUP`'s own `load_entry`) to routines already ported
+ * elsewhere -- the same "boundary call turns out to resolve to an
+ * already-ported routine once actually traced" pattern as `TMP.A86`/
+ * `SUBMIT.A86`'s own `parsefilename`/`mpm_clicmd` and `LOAD.SUP`'s own
+ * `ld_freeit` (see docs/src-c.md's own changelog entries for all).
+ * `fileopen` replicates `BDOSIF.BDO`'s own shared dispatch convention
+ * by hand around the direct call (`BD_INFO = DX` before, `BX =
+ * BD_ARET` after -- see `fileopen`'s own header comment); `load_entry`
+ * itself always forces `bx=0` regardless of its own caller's `bx`
+ * (`sub bx,bx ! jmp load`), so `cli_gopen` calls `load.c`'s `load`
+ * directly with `bx=0` rather than reproducing that -- `cli_pd` is
+ * never passed into `load` at all on this path (see `cli_gopen`'s own
+ * header comment for why).
+ *
+ * This makes `cli_fload`'s own real success path (a file that
+ * genuinely opens, loads, and gets its own Base Page set up) reachable
+ * for the first time. `f_createproc` (`sysent.c`'s `creat_proc_entry`,
+ * whose own real tail is a dispatcher switch, not an ordinary
+ * call/return -- see `dsptch.c`'s own header comment) and `f_setprior`
+ * stay plain boundary stubs, same as `f_terminate` already was (in
+ * `clicmd_exit`'s own `pf_ctlc` branch) -- all three are
+ * "dispatch-adjacent," their own results never read by anything this
+ * file does afterward, so this doesn't truncate the translation at
+ * all (see `cli_gopen`'s own header comment for the detail).
+ *
+ * `cli_gopen`'s own real continuation (everything past `prfilnam`) has
+ * no differential test of its own, for the same underlying reason
+ * `func15` itself has none: reaching it requires `fileopen` to
+ * genuinely succeed, which requires a real, matching directory entry
+ * -- `FILE1-4.BDO`'s own directory/search machinery, which no test in
+ * this project (including `func15`'s own) currently fakes convincingly
+ * enough to drive from the outside, on top of which bundling
+ * `LOAD.SUP`'s own real asm into `tests/src-c/fixtures/
+ * command_wrapper.A86` would also need to switch that wrapper's own
+ * reference run from non-segmented to `segmented=True` (`load_finish`'s
+ * own UDA writes are genuinely segment-relative), re-verifying every
+ * existing case there for safety first -- same shape of investment as
+ * `test_memory.py`'s own `segmented=True` migration, just not spent
+ * here. This translation was derived carefully by hand against the
+ * real asm (field offsets, the default-FCB "duplicate the first 16
+ * bytes into the next 16" trick, `pcb_flnmptr`'s own reuse across the
+ * two argument parses) and reviewed for compile-time and logical
+ * soundness, but treat it with the same caution as any large,
+ * untested translation.
  */
 #include <stdint.h>
 
@@ -77,6 +116,9 @@ extern cmd_bxcx conassign_entry(uint8_t *mem, uint16_t dx);
 extern void conout_entry(uint8_t *mem, uint8_t dl);
 extern void conprint_entry(uint8_t *mem, uint16_t dx, uint8_t bh, uint8_t bl);
 extern cmd_bxcx parse_entry(uint8_t *mem, uint16_t dx);
+extern void func15(uint8_t *mem);
+extern cmd_bxcx load(uint8_t *mem, uint16_t dx, uint16_t bx, uint16_t sysdat,
+                      uint16_t user_retf_offset, uint16_t cs, int load_chain);
 
 void shifttail(uint8_t *mem, uint16_t ax);
 
@@ -104,14 +146,21 @@ typedef struct {
 } fileopen_result;
 
 /*
- * fileopen -- open cli_fcb (forcing read-only), via the unported
- * mpmif trampoline (f_fopen) -- see this file's own header comment
- * for why BL/BH are fixed at a well-defined constant instead of a
- * plain no-op (0xFF/0 -- a hard, non-extended open failure)
+ * fileopen -- open cli_fcb (forcing read-only), a real call now into
+ * `file4.c`'s already-ported `func15` (BDOS function 15, OPEN) --
+ * see this file's own header comment for how `mpmif(f_fopen)` was
+ * traced to it. `BDOSIF.BDO`'s own shared dispatch sets `BD_INFO =
+ * DX` before calling a functab target, and its own shared `RETMON`
+ * tail reads the result back as `BX = BD_ARET` afterward -- both
+ * replicated here by hand around the direct call, same convention as
+ * `LBDOSENT.A86`'s own `oldbdos`/`goback` (src-c/loader/lbdosent.c).
  */
 fileopen_result fileopen(uint8_t *mem) {
     mem[(uint16_t)(CLI_FCB + fcb_name + 5)] |= 0x80; /* f6`= open read-only */
-    fileopen_result r = {0xFF, 0};
+    mem_w16(mem, BD_INFO, CLI_FCB);
+    func15(mem);
+    uint16_t aret = mem_r16(mem, BD_ARET);
+    fileopen_result r = {(uint8_t)(aret & 0xFF), (uint8_t)(aret >> 8)};
     return r;
 }
 
@@ -239,8 +288,8 @@ static void prfilnam(uint8_t *mem) {
     }
 }
 
-static void conasn(uint8_t *mem) {
-    conassign_entry(mem, CLI_ACB);
+static cmd_bxcx conasn(uint8_t *mem) {
+    return conassign_entry(mem, CLI_ACB);
 }
 
 /*
@@ -301,18 +350,17 @@ static uint16_t cli_checkque(uint8_t *mem) {
 
 static cmd_bxcx clicmd_exit(uint8_t *mem);
 static cmd_bxcx cli_rmpd(uint8_t *mem, uint16_t cli_pd);
-static cmd_bxcx cli_gopen(uint8_t *mem, uint16_t cli_pd);
+static cmd_bxcx cli_gopen(uint8_t *mem, uint16_t cli_pd, uint16_t sysdat,
+                           uint16_t user_retf_offset, uint16_t cs);
 
 /*
  * cli_fload -- try to load cli_fcb (given type forced to 'CMD') for
- * execution. The real open-the-file step (fileopen) is fixed at a
- * deterministic failure (see this file's own header comment), so
- * this always ends in e_bad_open -- the branches below are
- * translated faithfully (matching exactly which retry the real asm
- * takes for a given cli_dsk/srchdisk/cli_fcb combination) but every
- * one of them lands on the same outcome under that fix.
+ * execution. `fileopen` is a real call now (see this file's own
+ * header comment), so every branch below -- which retry runs for a
+ * given cli_dsk/srchdisk/cli_fcb combination, and whether the file is
+ * ultimately found -- is genuinely reachable both ways.
  */
-static cmd_bxcx cli_fload(uint8_t *mem) {
+static cmd_bxcx cli_fload(uint8_t *mem, uint16_t sysdat, uint16_t user_retf_offset, uint16_t cs) {
     uint16_t pul = mem_r16(mem, SD_PUL);
     if (pul == 0) {
         mem_w16(mem, SD_CLI_ERR, e_no_pd);
@@ -350,7 +398,7 @@ static cmd_bxcx cli_fload(uint8_t *mem) {
 
     fileopen_result o = fileopen(mem);
     if (o.bl != 0xFF) {
-        return cli_gopen(mem, cli_pd); /* unreachable under the fixed fileopen result */
+        return cli_gopen(mem, cli_pd, sysdat, user_retf_offset, cs);
     }
 
     int go_bopen;
@@ -366,7 +414,7 @@ static cmd_bxcx cli_fload(uint8_t *mem) {
         fileopen_result o2 = fileopen(mem);
         if (o2.bl != 0xFF) {
             if (mem[CLI_FCB + fcb_type + 1] & 0x80) {
-                return cli_gopen(mem, cli_pd); /* unreachable */
+                return cli_gopen(mem, cli_pd, sysdat, user_retf_offset, cs);
             }
             fileclose(mem);
             uint16_t rlr2 = mem_r16(mem, SD_RLR);
@@ -375,7 +423,7 @@ static cmd_bxcx cli_fload(uint8_t *mem) {
                 fileopen_result o3 = fileopen(mem);
                 if (o3.bl != 0xFF) {
                     if (mem[CLI_FCB + fcb_type + 1] & 0x80) {
-                        return cli_gopen(mem, cli_pd); /* unreachable */
+                        return cli_gopen(mem, cli_pd, sysdat, user_retf_offset, cs);
                     }
                     fileclose(mem);
                 }
@@ -400,14 +448,34 @@ static cmd_bxcx cli_fload(uint8_t *mem) {
 /*
  * cli_gopen -- the real successful-open path: a pf_ctlc abort check,
  * then (if cli_dfil) logging the filename via prfilnam, then loading
- * the program (f_load/f_cload) and creating its process. Unreachable
- * under fileopen's own fixed, always-failing result (see this file's
- * own header comment), and not translated past prfilnam -- the rest
- * depends on f_load's own result, which is a plain boundary stub for
- * the same reason f_createproc/f_setprior/f_terminate are (see header
- * comment), so there is nothing further here that's actually testable.
+ * the program (`load.c`'s `load`, now a real call -- `cli_chain` is
+ * always false here, so this is always the `f_load`/`load_entry`
+ * path, never `f_cload`; `load_entry`'s own real asm ignores its own
+ * caller's `bx` and always forces `bx=0`, i.e. "don't init a PD",
+ * which is why `cli_pd` itself is never passed into `load` at all --
+ * `cli_pd`'s own process gets created separately, below, by
+ * `f_createproc`). On success, `cli_gload`'s own Base Page setup
+ * (copy+uppercase the command tail into the new program's own DMA
+ * buffer, build its own default FCB, and parse up to two filename
+ * arguments from the tail into it) needs real segment-relative
+ * addressing (`cli_bpage`, the Base Page segment `load` just
+ * returned) -- the same already-established `mem_*_seg` pattern
+ * `PROC.RTM`/`ML.MEM`/`MAU.MEM`/`SHARE.MEM`/`load.c` itself all use.
+ *
+ * `f_createproc`'s own real target, `sysent.c`'s `creat_proc_entry`,
+ * ends in `jmp pdisp` -- a real dispatcher switch, not an ordinary
+ * call/return (see `dsptch.c`'s own header comment on why this
+ * port's single-threaded host has no equivalent for that). Luckily
+ * nothing downstream ever reads its own BX/CX (the real asm's own
+ * "mov cli_err,cx" right before `cli_exit` reads CX from `conasn`,
+ * called *after* `f_createproc`, not from it) -- so it stays a true
+ * no-op boundary stub here, same convention as `f_setprior`/
+ * `f_terminate`, without truncating the translation at all: every
+ * real instruction after it (console assignment via `conasn`, the
+ * final `cli_err`/`cli_exit`) is still faithfully ported below.
  */
-static cmd_bxcx cli_gopen(uint8_t *mem, uint16_t cli_pd) {
+static cmd_bxcx cli_gopen(uint8_t *mem, uint16_t cli_pd, uint16_t sysdat,
+                           uint16_t user_retf_offset, uint16_t cs) {
     uint16_t rlr = mem_r16(mem, SD_RLR);
     if (mem_r16(mem, (uint16_t)(rlr + p_flag)) & pf_ctlc) {
         cmd_bxcx result = {0xFFFF, e_abort};
@@ -416,7 +484,101 @@ static cmd_bxcx cli_gopen(uint8_t *mem, uint16_t cli_pd) {
     if (mem[SD_CLI_DFIL]) {
         prfilnam(mem);
     }
-    return cli_rmpd(mem, cli_pd);
+
+    /* noprfil/cli_ld -- always f_load (cli_chain is always false) */
+    cmd_bxcx ld = load(mem, CLI_FCB, 0, sysdat, user_retf_offset, cs, 0);
+
+    /* cli_cl */
+    mem[UDA_ERROR_MODE] = 0;
+    fileclose(mem);
+    if (ld.cx != 0) {
+        if (ld.cx != e_abort) {
+            mem_w16(mem, SD_CLI_ERR, ld.cx); /* cli_lnab */
+        }
+        return cli_rmpd(mem, cli_pd);
+    }
+
+    /* cli_gload */
+    uint16_t cli_bpage = ld.bx;
+    mem_w16(mem, SD_CLI_BPAGE, cli_bpage);
+
+    /* copy cmdtail to the user's own DMA buffer */
+    for (uint16_t i = 0; i < 127; i++) {
+        mem_w8_seg(mem, cli_bpage, (uint16_t)(bpg_dma + 1 + i), mem[(uint16_t)(CLI_CMDTAIL + i)]);
+    }
+
+    /* count cmd length, uppercase it */
+    uint16_t di = bpg_dma + 1;
+    uint8_t cl = 0;
+    for (;;) {
+        uint8_t ch = mem_r8_seg(mem, cli_bpage, di);
+        if (ch == 0) break;
+        if (ch >= 'a' && ch <= 'z') {
+            mem_w8_seg(mem, cli_bpage, di, (uint8_t)(ch & 0x5F));
+        }
+        di++;
+        cl++;
+    }
+    mem_w8_seg(mem, cli_bpage, bpg_dma, cl);
+
+    /* init default fcb -- the first 16 bytes (disk=0, name/type=' '
+     * x11, 2 zero words) duplicated verbatim into the next 16, same
+     * as the real asm's own "rep stosb/stosw" + "rep movsw" pair */
+    mem_w8_seg(mem, cli_bpage, bpg_lddsk, mem[SD_CLI_LDDSK]);
+    mem_w8_seg(mem, cli_bpage, (uint16_t)(bpg_fcb0 + 0), 0);
+    for (int i = 0; i < 11; i++) {
+        mem_w8_seg(mem, cli_bpage, (uint16_t)(bpg_fcb0 + 1 + i), ' ');
+    }
+    for (int i = 0; i < 4; i++) {
+        mem_w8_seg(mem, cli_bpage, (uint16_t)(bpg_fcb0 + 12 + i), 0);
+    }
+    for (int i = 0; i < 16; i++) {
+        mem_w8_seg(mem, cli_bpage, (uint16_t)(bpg_fcb0 + 16 + i),
+                   mem_r8_seg(mem, cli_bpage, (uint16_t)(bpg_fcb0 + i)));
+    }
+
+    /* if cmdtail, parse up to two filename arguments out of it --
+     * cli_pcb's own pcb_flnmptr is still CLI_CMDTAIL from clicmd_entry's
+     * own earlier cli_pfn call; shifttail already rewrote CLI_CMDTAIL's
+     * own content down to just the args, so re-parsing from the same
+     * pointer now parses the first argument, not the command name */
+    if (mem[CLI_CMDTAIL] != 0) {
+        cmd_bxcx pr = cli_pfn(mem, CLI_CMDTAIL);
+        if (pr.bx != 0xFFFF) {
+            /* copy fcb to user fcb front */
+            mem_w16_seg(mem, cli_bpage, bpg_pw1ptr, mem_r16(mem, (uint16_t)(CLI_FCB + fcb_pptr)));
+            mem_w8_seg(mem, cli_bpage, bpg_pw1len, mem[CLI_FCB + fcb_plen]);
+            for (int i = 0; i < 16; i++) {
+                mem_w8_seg(mem, cli_bpage, (uint16_t)(bpg_fcb0 + i), mem[(uint16_t)(CLI_FCB + i)]);
+            }
+
+            /* if more cmdtail, parse a second argument */
+            if (pr.bx != 0) {
+                cmd_bxcx pr2 = cli_pfn(mem, (uint16_t)(pr.bx + 1));
+                if (pr2.bx != 0xFFFF) {
+                    mem_w16_seg(mem, cli_bpage, bpg_pw2ptr, mem_r16(mem, (uint16_t)(CLI_FCB + fcb_pptr)));
+                    mem_w8_seg(mem, cli_bpage, bpg_pw2len, mem[CLI_FCB + fcb_plen]);
+                    for (int i = 0; i < 16; i++) {
+                        mem_w8_seg(mem, cli_bpage, (uint16_t)(bpg_fcb1 + i), mem[(uint16_t)(CLI_FCB + i)]);
+                    }
+                }
+            }
+        }
+    }
+
+    /* 10. Create the process -- f_setprior is skipped (cli_chain is
+     * always false); f_createproc stays a no-op, see header comment */
+
+    /* 11. Assign Console to new process */
+    if (mem[SD_CLI_DFIL]) {
+        crlf(mem);
+    }
+    mem[CLI_ACB + acb_cns] = mem[SD_CLI_CNS];
+    mem_w16(mem, (uint16_t)(CLI_ACB + acb_pd), cli_pd);
+    mem[CLI_ACB + acb_match] = 1;
+    cmd_bxcx ca = conasn(mem);
+    mem_w16(mem, SD_CLI_ERR, ca.cx);
+    return clicmd_exit(mem);
 }
 
 /* cli_rmpd -- release cli_pd back onto pul's own free list, then exit */
@@ -478,7 +640,8 @@ static cmd_bxcx clicmd_exit(uint8_t *mem) {
  * caller's own `UDA_WRKSEG`), either as an RSP-queue dispatch
  * (`cli_checkque`) or a CMD-file load (`cli_fload`).
  */
-cmd_bxcx clicmd_entry(uint8_t *mem, uint16_t dx) {
+cmd_bxcx clicmd_entry(uint8_t *mem, uint16_t dx, uint16_t sysdat,
+                       uint16_t user_retf_offset, uint16_t cs) {
     uint16_t wrkseg = mem_r16(mem, UDA_WRKSEG);
 
     readq_entry(mem, MXCLIQPB); /* mxread */
@@ -541,5 +704,5 @@ cmd_bxcx clicmd_entry(uint8_t *mem, uint16_t dx) {
         /* any other cli_checkque error falls to cli_fload, same as
          * the real asm's own cli_ffload check */
     }
-    return cli_fload(mem);
+    return cli_fload(mem, sysdat, user_retf_offset, cs);
 }

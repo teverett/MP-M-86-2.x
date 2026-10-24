@@ -26,7 +26,7 @@ from i86sim import I86Sim  # noqa: E402
 
 WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'load_wrapper.A86')
 LOAD_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f) for f in
-          ('load.c', 'memory.c', 'util_mem.c', 'mau.c', 'ml.c')]
+          ('load.c', 'memory.c', 'util_mem.c', 'mau.c', 'ml.c', 'cpmmem.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 KERNEL_DIR = os.path.join(REPO_ROOT, 'src', 'kernel')
 
@@ -61,6 +61,20 @@ WRKSEG = 0x0040
 
 CODE_SEG, DATA_SEG, LSTK_SEG = 0x0200, 0x0300, 0x0400
 
+MS_LINK, MS_START, MS_LENGTH, MS_FLAGS, MS_MAU = 0, 2, 4, 6, 8
+MF_LOAD = 0x01
+MCB_EXT = 4
+SAT_START, SAT_LENGTH, SAT_NALL, SATLEN = 0, 2, 4, 5
+
+
+def put_sat(mem, seg, entry_no, start, length, nall, ents=4):
+    base = phys(seg)
+    mem[base] = ents
+    off = base + entry_no * SATLEN
+    mem_w16(mem, off + SAT_START, start)
+    mem_w16(mem, off + SAT_LENGTH, length)
+    mem[off + SAT_NALL] = nall
+
 
 def phys(seg):
     return (seg * 16) & 0xFFFF
@@ -89,7 +103,8 @@ def assemble_reference():
     asm.assemble(WRAPPER, [KERNEL_DIR])
     code = asm.segment_bytes('cseg')
     names = ('lb_more', 'user_retf', 'diskread', 'load_group', 'load', 'load_entry',
-             'malloc_entry', 'mfree_entry', 'maualloc_entry', 'mlalloc_entry')
+             'cload_entry', 'malloc_entry', 'mfree_entry', 'maualloc_entry', 'mlalloc_entry',
+             'maufree_entry', 'mlfree_entry', 'cpmfree_entry')
     entries = {name: asm.symtab[name].value for name in names}
     return code, entries
 
@@ -115,12 +130,14 @@ def base_memory(nldtabents):
 MPMIF_STUB = 0x9000
 F_SETDMA, F_SETDMAB, F_FREADSEQ = 0x1A, 0x33, 0x14
 F_MALLOC, F_MEMFREE, F_MAUALLOC, F_MLALLOC = 0x80, 0x82, 0x309, 0x30B
+F_MAUFREE, F_MLFREE = 0x30A, 0x30C
+F_FREEMEM = 0x39  # cload_entry's own ld_freeit call -- resolves to cpmfree_entry
 F_QREAD, F_QWRITE = 0x89, 0x8B  # load's own mxloadqpb calls -- result unused, true no-ops
 FCB_NXTREC = 0x20
 SD_LOAD_DISK_RECS, SD_LOAD_DISK = 0xA9E9, 0xB000
 
 
-def run_reference(code, entry, mem, regs, call_hooks=None):
+def run_reference(code, entry, mem, regs, call_hooks=None, jmp_hooks=None):
     image = bytearray(0x10000)
     image[0:len(code)] = code
     for addr, val in enumerate(mem):
@@ -129,7 +146,7 @@ def run_reference(code, entry, mem, regs, call_hooks=None):
     image[0] = SYSDAT & 0xFF  # `sysdat dw 0` sits at cseg offset 0
     image[1] = (SYSDAT >> 8) & 0xFF
     sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry, segmented=True,
-                 call_stub_addrs={MPMIF_STUB}, call_hooks=call_hooks)
+                 call_stub_addrs={MPMIF_STUB}, call_hooks=call_hooks, jmp_hooks=jmp_hooks)
     sim.run()
     return sim.regs, image
 
@@ -186,6 +203,24 @@ def make_freadseq_hook(real_targets=None):
         else:
             raise AssertionError(f"unexpected mpmif function code {cx:#x}")
 
+    return hook
+
+
+def make_jmp_redirect_hook(real_targets):
+    """jmp_hooks counterpart to make_freadseq_hook's own `real_targets`
+    redirect: for a real tail-*jump* into mpmif (mfree_it's own closing
+    "mov cx,f_mlfree ! jmp mpmif", not a CALL), no return address gets
+    pushed -- the callee's own eventual "ret" must pop whatever's
+    already on the stack from mfree_it's own original caller, exactly
+    like a real tail call. i86sim.py's own jmp_hooks convention leaves
+    `sim.ip` unchanged after the hook runs unless the hook itself sets
+    it, so this just redirects ip with no stack effect at all."""
+    def hook(sim):
+        cx = sim.regs['cx']
+        if cx in real_targets:
+            sim.ip = real_targets[cx]
+        else:
+            raise AssertionError(f"unexpected mpmif function code {cx:#x} (jmp)")
     return hook
 
 
@@ -444,7 +479,10 @@ def main():
         # a freshly-created MAU off the MFL), load_group, load_finish.
         lib.load.restype = BxCx
         lib.load.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16,
-                              ctypes.c_uint16, ctypes.c_uint16]
+                              ctypes.c_uint16, ctypes.c_uint16, ctypes.c_int]
+        lib.cload_entry.restype = BxCx
+        lib.cload_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16,
+                                     ctypes.c_uint16, ctypes.c_uint16]
 
         P_MEM = 0x16
         LOAD_WRKSEG, LOAD_FCB = 0x4000, 0x2000  # phys(LOAD_WRKSEG) == 0, matching
@@ -489,7 +527,8 @@ def main():
             })})
         buf = to_ctypes(mem)
         got = lib.load(ctypes.cast(buf, c_u8p), ctypes.c_uint16(LOAD_FCB), ctypes.c_uint16(0),
-                        ctypes.c_uint16(SYSDAT), ctypes.c_uint16(user_retf), ctypes.c_uint16(CS_VAL))
+                        ctypes.c_uint16(SYSDAT), ctypes.c_uint16(user_retf), ctypes.c_uint16(CS_VAL),
+                        ctypes.c_int(0))
         port_img = bytes(buf)
 
         def load_snapshot(img, basep_seg):
@@ -506,6 +545,115 @@ def main():
         ref = ((ref_regs['bx'], ref_regs['cx']), load_snapshot(ref_img, ref_regs['bx']))
         port = ((got.bx, got.cx), load_snapshot(port_img, got.bx))
         check("load: one relative Code group, full success end-to-end", ref, port)
+
+        # -- cload_entry: chain-load cleanup, real success end to end --
+        # the calling process (CALLER_PD) owns two segments: KEEP_MD,
+        # matching the new PD's own (pre-existing) p_uda -- must survive
+        # untouched -- and FREE_MD, mistakenly Load-flagged, which
+        # ld_fnext must un-flag before cpmfree_entry's own free-all walk
+        # genuinely frees it (and, since it's its MAU's only real SAT
+        # entry, releases that MAU to the MFL too -- same mechanics as
+        # test_cpmmem.py's own "free-all...released to MFL" case).
+        # Afterward the (now-trimmed) p_mem list is reparented onto the
+        # new PD, and the rest of `load` runs exactly as the plain
+        # success case above (one relative Code group).
+        CALLER_PD, CHILD_PD = 0x8000, 0x8100
+        UDA_SEG_KEEP = 0x0050
+        KEEP_MD, FREE_MD = 0x4200, 0x4250
+        MAU_SEG2, MAU_REC2 = 0x0100, 0x4600
+        MD_FREE2, MFL_MD2 = 0x4300, 0x4400
+        DUMMY_SEG, DUMMY_MAU = 0x0150, 0x4700
+
+        mem2 = bytearray(0x10000)
+        mem_w16(mem2, UDA_WRKSEG, LOAD_WRKSEG)
+        mem2[phys(LOAD_WRKSEG) + LOAD_FCB + FCB_NXTREC] = 0
+        mem_w16(mem2, SD_RLR, CALLER_PD)
+        mem_w16(mem2, CHILD_PD + P_UDA, UDA_SEG_KEEP)
+
+        mem_w16(mem2, CALLER_PD + P_MEM, KEEP_MD)
+        mem_w16(mem2, KEEP_MD + MS_LINK, FREE_MD)
+        mem_w16(mem2, KEEP_MD + MS_START, UDA_SEG_KEEP)
+        mem_w16(mem2, KEEP_MD + MS_FLAGS, MF_LOAD)
+        # KEEP_MD's own ms_mau must point somewhere real -- after
+        # reparenting onto CHILD_PD, malloc_entry's own mall_pdver tries
+        # every existing MD's own MAU first; left at 0 it reads `m_start`
+        # off real cseg bytes in the reference run (nonzero, since that's
+        # genuine code) but off zeroed buffer in the port, diverging --
+        # a MAU with no free space at all fails this step identically and
+        # deterministically on both sides, falling through to mall_ml
+        mem_w16(mem2, KEEP_MD + MS_MAU, DUMMY_MAU)
+        mem_w16(mem2, DUMMY_MAU + MS_START, DUMMY_SEG)
+        mem_w16(mem2, DUMMY_MAU + MS_LENGTH, 2)
+        mem_w16(mem2, DUMMY_MAU + MS_LINK, 0)
+        put_sat(mem2, DUMMY_SEG, 1, 0x10, 5, 1)
+        put_sat(mem2, DUMMY_SEG, 2, 0x15, 10, 1)
+
+        mem_w16(mem2, FREE_MD + MS_LINK, 0)
+        mem_w16(mem2, FREE_MD + MS_START, 0x300)
+        mem_w16(mem2, FREE_MD + MS_LENGTH, 0x10)
+        mem_w16(mem2, FREE_MD + MS_FLAGS, MF_LOAD)  # mistakenly flagged -- ld_fnext must clear it
+        mem_w16(mem2, FREE_MD + MS_MAU, MAU_REC2)
+        mem_w16(mem2, MAU_REC2 + MS_START, MAU_SEG2)
+        mem_w16(mem2, MAU_REC2 + MS_LENGTH, 0x1000)
+        mem_w16(mem2, MAU_REC2 + MS_LINK, 0)
+        # a second, untouched allocated entry keeps this MAU "still in use"
+        # after FREE_MD's own entry is freed -- it never goes anywhere near
+        # SD_MFL, so the later ldtab[0]-only allocation (22 paragraphs, off
+        # MFL_MD2/CODE_SEG_WANT) can't collide with it; MAU-release itself
+        # is already covered end to end by test_memory.py/test_cpmmem.py.
+        # A third (boundary) entry is required too -- mau_collapse's own
+        # real asm returns its "assume empty" default the moment it finds
+        # a zero sat_start *before* ever examining entry 2's own nall, so
+        # without a real entry 3 behind it entry 2 is never actually
+        # checked at all.
+        put_sat(mem2, MAU_SEG2, 1, 0x300, 0x10, 1)
+        put_sat(mem2, MAU_SEG2, 2, 0x310, 0x10, 1)
+        put_sat(mem2, MAU_SEG2, 3, 0x320, 0x10, 1)
+        mem_w16(mem2, SD_MAL, MAU_REC2)
+        mem_w16(mem2, SD_MFL, MFL_MD2)
+
+        mem_w16(mem2, SD_MDUL, MD_FREE2)
+        mem_w16(mem2, MD_FREE2 + MS_LINK, 0)
+        mem_w16(mem2, MFL_MD2 + MS_LINK, 0)
+        mem_w16(mem2, MFL_MD2 + MS_START, CODE_SEG_WANT)
+        mem_w16(mem2, MFL_MD2 + MS_LENGTH, 100)  # comfortably enough for ldtab[0] alone (UDA+LDSTK, 22)
+
+        # no Code/Data group at all -- get_ch_info finds nothing, so only
+        # ldtab[0] (UDA+LDSTK) needs allocating; load_finish then hits its
+        # own already-covered "no code/data group -> e_no_cseg" exit (see
+        # the plain load_finish case for that), keeping this case focused
+        # on the chain cleanup itself rather than load_group/disk content
+        header2 = build_ch_header([])
+        put_disk_records(mem2, [header2])
+
+        chain_real_targets = {
+            F_MALLOC: entries['malloc_entry'], F_MEMFREE: entries['mfree_entry'],
+            F_MAUALLOC: entries['maualloc_entry'], F_MLALLOC: entries['mlalloc_entry'],
+            F_MAUFREE: entries['maufree_entry'], F_MLFREE: entries['mlfree_entry'],
+            F_FREEMEM: entries['cpmfree_entry'],
+        }
+        ref_regs2, ref_img2 = run_reference(
+            code, entries['cload_entry'], mem2, {'dx': LOAD_FCB, 'bx': CHILD_PD},
+            call_hooks={MPMIF_STUB: make_freadseq_hook(chain_real_targets)},
+            jmp_hooks={MPMIF_STUB: make_jmp_redirect_hook(chain_real_targets)})
+        buf2 = to_ctypes(mem2)
+        got2 = lib.cload_entry(ctypes.cast(buf2, c_u8p), ctypes.c_uint16(LOAD_FCB), ctypes.c_uint16(CHILD_PD),
+                                ctypes.c_uint16(SYSDAT), ctypes.c_uint16(user_retf), ctypes.c_uint16(CS_VAL))
+        port_img2 = bytes(buf2)
+
+        # CALLER_PD's own p_mem list is the one piece of state purely under
+        # the chain cleanup's own control (trimmed by the free-all walk,
+        # then handed wholesale to CHILD_PD) -- checked directly. What
+        # happens *after* the cleanup (which MAU malloc_entry's own
+        # existing-MAU-first search ends up satisfying ldtab[0]'s combined
+        # allocation from) is mau.c's/ml.c's own already-independently-
+        # verified "try an existing MAU before making a new one" logic,
+        # not something this test needs to pin down a specific outcome
+        # for -- both sides agreeing on the overall (bx, cx) and on
+        # CALLER_PD ending up with nothing left is the meaningful check.
+        ref2 = ((ref_regs2['bx'], ref_regs2['cx']), mem_r16(ref_img2, CALLER_PD + P_MEM))
+        port2 = ((got2.bx, got2.cx), mem_r16(port_img2, CALLER_PD + P_MEM))
+        check("cload_entry: real chain-load cleanup (free-all, reparent to new PD)", ref2, port2)
 
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")

@@ -19,16 +19,38 @@
  * `load:` from being able to use this port for its own `mpmif(f_malloc)`
  * dependency (see `load.c`'s own header comment).
  *
- * `mfree_entry`/`mfree_it`'s own `mpmif(f_maufree)` is NOT upgraded
- * yet -- unlike the allocate side, the real asm's own "free an empty
- * MAU back to the Memory Free List" path tail-jumps clear out of
- * `mfree_it` *and* `mfree_entry` via `mpmif(f_mlfree)` (bypassing
- * both routines' own normal `ret`), which needs its own careful
- * translation, not a drop-in call -- left for a separate pass. It's
- * still a boundary stub, so `cx` is still set to the function code
- * immediately before the call and only checked afterward, meaning
- * `mfree_it`'s own "actually free the segment" path stays
- * unreachable here, exactly as in the real reference assembly run.
+ * `mfree_entry`/`mfree_it`'s own `mpmif(f_maufree)` IS upgraded now
+ * too, into a real call into `mau.c`'s `maufree_entry` -- the same
+ * "it looked like a register-passing convention but is really a
+ * genuine MAF.DEF block in memory" resolution `cpmmem.c`'s own
+ * `getmemory` fix found for `malloc_entry`'s MPB: the real asm's own
+ * "push ms_mau[si]/ms_start[si]/dx ! mov dx,sp ! push ss!pop ds"
+ * just builds a MAF at a stack address with DS=SS, which under this
+ * port's flat model is simply a fixed scratch block (`SD_MFREE_MAF`,
+ * `defs.h`), built before the call and read back after (`BX`'s own
+ * "0 = MAU still in use, 0xFFFF = MAU now empty" meaning). `mau.c`'s
+ * `maufree_entry` itself reads the MAF through `UDA_WRKSEG`, so this
+ * sets that to 0 first (the same "ambient-flat" trick `tmp.c`/
+ * `submit.c`'s own `parsefilename` calls already use) -- `mem_r16_seg`
+ * with segment 0 degenerates to an ordinary flat read, so the MAF's
+ * own address doubles as its own flat offset.
+ *
+ * The real asm's own "free an empty MAU back to the Memory Free List"
+ * path really does tail-jump clear out of `mfree_it` *and*
+ * `mfree_entry` via `mpmif(f_mlfree)` (bypassing both routines' own
+ * normal `ret`) -- but since `ml.c`'s own `mlfree_entry` always
+ * leaves `bx=0,cx=0` (per that file's own header comment) and
+ * `mfree_exit`'s own plain "MAU still in use" tail is *also* always
+ * `bx=0,cx=0`, both of `mfree_it`'s own reachable "freed the whole
+ * segment" outcomes collapse to the same fixed `{0, 0}` result --
+ * translated directly as a return of that fixed pair after the real
+ * call, rather than as an actual tail-jump (this port has no such
+ * construct). The one *unreachable* edge (the freed MAU not found on
+ * the active MAU list, `SD_MAL` -- should never happen, since every
+ * in-use MAU is invariantly on that list) is translated faithfully
+ * too: the real asm's own stale `BX` there is the freed MD's own
+ * address (`si`), not a deliberate value -- same "undefined artifact,
+ * fixed choice" treatment used throughout this project.
  *
  * `getmd`/`freemd` (src/kernel/UTIL.MEM, util_mem.c) are called as
  * ordinary internal calls below, not boundary stubs. They're declared
@@ -53,6 +75,8 @@ typedef struct {
 
 extern mem_bxcx maualloc_entry(uint8_t *mem, uint16_t bx, uint16_t dx);
 extern mem_bxcx mlalloc_entry(uint8_t *mem, uint16_t dx, uint16_t bx);
+extern mem_bxcx maufree_entry(uint8_t *mem, uint16_t dx);
+extern void mlfree_entry(uint8_t *mem, uint16_t dx, uint16_t bx);
 
 /*
  * mall_try_mau -- try to allocate the MPB's own request out of a
@@ -161,27 +185,59 @@ mem_bxcx malloc_entry(uint8_t *mem, uint16_t dx) {
 /*
  * mfree_it
  *	input:	bx = root, si = MD ([bx]), dx = segment to free
- *	output:	returns {bx, cx}: bx is always the input bx unchanged
- *		(see header comment); cx = error code
+ *	output:	returns {bx, cx} -- see header comment for why both of the
+ *		"freed the whole segment" sub-cases collapse to {0, 0}
  */
 static mem_bxcx mfree_it(uint8_t *mem, uint16_t bx, uint16_t si, uint16_t dx) {
-    /* push MAF structure ! mov cx,f_maufree ! call mpmif -- boundary
-     * stub, no-op; cx is left holding f_maufree's own value, so this
-     * always "fails" (cx != 0) under the convention: the real routine
-     * pops bx/si/dx back to their call-time values before testing cx, so
-     * on this always-taken path it returns bx unchanged and never runs
-     * the decrease-length/mfree_off work below -- see header comment */
-    uint16_t qcx = f_maufree;
-    if (qcx == 0) {
-        if (dx == mem_r16(mem, (uint16_t)(si + ms_start))) {
-            /* mfree_off -- unreachable under the convention, see above */
-        } else {
-            /* decrease length */
-            mem_w16(mem, (uint16_t)(si + ms_length), (uint16_t)(dx - mem_r16(mem, (uint16_t)(si + ms_start))));
-        }
+    uint16_t mau = mem_r16(mem, (uint16_t)(si + ms_mau));
+    mem_w16(mem, UDA_WRKSEG, 0); /* ambient-flat, see header comment */
+    mem_w16(mem, (uint16_t)(SD_MFREE_MAF + maf_mau), mau);
+    mem_w16(mem, (uint16_t)(SD_MFREE_MAF + maf_sat), mem_r16(mem, (uint16_t)(si + ms_start)));
+    mem_w16(mem, (uint16_t)(SD_MFREE_MAF + maf_start), dx);
+    mem_bxcx got = maufree_entry(mem, SD_MFREE_MAF);
+    uint16_t mau_empty = got.bx; /* 0 = MAU still in use, 0xFFFF = now empty -- only meaningful when cx==0 */
+    uint16_t qcx = got.cx;
+    if (qcx != 0) {
+        mem_bxcx r = {bx, qcx};
+        return r;
     }
-    mem_bxcx r = {bx, qcx};
-    return r;
+    if (dx != mem_r16(mem, (uint16_t)(si + ms_start))) {
+        /* decrease length */
+        mem_w16(mem, (uint16_t)(si + ms_length), (uint16_t)(dx - mem_r16(mem, (uint16_t)(si + ms_start))));
+        mem_bxcx r = {bx, 0};
+        return r;
+    }
+
+    /* mfree_off -- take the MD off its own p_mem list and free it */
+    mem_w16(mem, (uint16_t)(bx + ms_link), mem_r16(mem, (uint16_t)(si + ms_link)));
+    freemd(mem, si);
+    if (mau_empty == 0) {
+        mem_bxcx r = {0, 0}; /* mfree_exit -- MAU still in use */
+        return r;
+    }
+
+    /* free the MAU itself -- it's now completely empty: find it on the
+     * active MAU list (SD_MAL) and hand it back to the Memory Free List */
+    uint16_t walk = (uint16_t)(SD_MAL - m_link);
+    for (;;) {
+        uint16_t prev = walk;
+        walk = mem_r16(mem, (uint16_t)(walk + m_link));
+        if (walk == 0) {
+            /* mfree_r -- not found on MAL; should never happen in
+             * practice (every in-use MAU is invariantly on this list) --
+             * see header comment on this edge's own stale BX */
+            mem_bxcx r = {si, 0};
+            return r;
+        }
+        if (walk != mau) {
+            continue;
+        }
+        mem_w16(mem, (uint16_t)(prev + m_link), mem_r16(mem, (uint16_t)(mau + m_link)));
+        mem_w16(mem, (uint16_t)(mau + m_link), 0);
+        mlfree_entry(mem, mau, SD_MFL);
+        mem_bxcx r = {0, 0}; /* mlfree_entry's own tail-jump output, always 0,0 */
+        return r;
+    }
 }
 
 /*

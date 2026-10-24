@@ -763,6 +763,10 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
 #define SD_TMP_PCB        0xA094 /* word[2]: parsefilename's own local PCB.DEF block */
 #define SD_CPMMEM_MPB     0xA0A0 /* word[5]: getmemory's own on-stack MPB.DEF block --
     see cpmmem.c's own header comment on why this is memory, not registers */
+#define SD_MFREE_MAF      0xA0AC /* word[3]: mfree_it's own on-stack MAF.DEF block --
+    see memory.c's own header comment */
+#define SD_CPMMEM_MFB     0xA0B4 /* word[2]: free_memory's own on-stack MFPB.DEF block --
+    see cpmmem.c's own header comment */
 #define SD_TMP_CLICB_CMD  0xA100 /* byte[129]: the command text itself */
 #define SD_TMP_CLICB      (SD_TMP_CLICB_CMD - 1) /* byte: clicb_net, immediately
                                                      before SD_TMP_CLICB_CMD's own
@@ -833,6 +837,13 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
 #define bpg_cseg 0x03 /* word */
 #define bpg_8080 0x05 /* byte */
 #define bpg_eseg 0x0F /* word */
+#define bpg_lddsk   0x50 /* byte */
+#define bpg_pw1ptr  0x51 /* word */
+#define bpg_pw1len  0x53 /* byte */
+#define bpg_pw2ptr  0x54 /* word */
+#define bpg_pw2len  0x56 /* byte */
+#define bpg_fcb0    0x5C /* byte[16] */
+#define bpg_fcb1    0x6C /* byte[16] */
 #define bpg_dma  0x80 /* offset constant, not a field read/written here */
 
 /* src/kernel/LSTK.FMT -- Load Stack Format offsets, relative to the
@@ -890,6 +901,8 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
  * this port uses a small fixed scratch area instead, same spirit as
  * every other SD_* constant here. */
 #define SD_LOAD_MFPB        0xA9EB /* mfpb_start/mfpb_pd, 4 bytes */
+#define SD_LOAD_MCB         0xA9EF /* mcb_base/mcb_length/mcb_ext, 5 bytes --
+    cload_entry's own ld_freeit free-all-but-Load scratch block */
 
 /* src/kernel/APB.DEF -- Abort Parameter Block (abort_spec_entry's own
  * input, reached through u_wrkseg same as every other *PB above) */

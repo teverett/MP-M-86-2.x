@@ -78,7 +78,9 @@ from i86sim import I86Sim  # noqa: E402
 
 TMP_A86 = os.path.join(REPO_ROOT, 'src', 'rsp', 'TMP.A86')
 TMP_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f) for f in
-         ('tmp.c', 'command.c', 'que1.c', 'que2.c', 'console.c', 'chario.c', 'parse.c')]
+         ('tmp.c', 'command.c', 'que1.c', 'que2.c', 'console.c', 'chario.c', 'parse.c',
+          'file1.c', 'file2.c', 'file3.c', 'file4.c',
+          'load.c', 'memory.c', 'util_mem.c', 'mau.c', 'ml.c', 'cpmmem.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 
 STACK_TOP = 0xFFF0
@@ -218,7 +220,11 @@ def make_int_hook(lib, c_u8p, ParseBxCx, CmdBxCx):
             sim.regs['bx'] = r.bx
             sim.regs['cx'] = r.cx
         elif cl == MPM_CLICMD:
-            r = lib.clicmd_entry(ptr, ctypes.c_uint16(dx))
+            # sysdat/user_retf_offset/cs only matter on cli_gopen's own
+            # real f_load path (load.c's load) -- never reached here
+            # (no SD_PUL free-PD list set up), so 0 is inert.
+            r = lib.clicmd_entry(ptr, ctypes.c_uint16(dx), ctypes.c_uint16(0),
+                                  ctypes.c_uint16(0), ctypes.c_uint16(0))
             sim.regs['bx'] = r.bx
             sim.regs['cx'] = r.cx
         # else: every other real `mpm` call (print/console/disk-select/
@@ -298,7 +304,7 @@ def main():
         lib.nextcommand_once.argtypes = [c_u8p]
         lib.parse_entry.argtypes = [c_u8p, ctypes.c_uint16]
         lib.parse_entry.restype = ParseBxCx
-        lib.clicmd_entry.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.clicmd_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16]
         lib.clicmd_entry.restype = CmdBxCx
 
         int_hook = make_int_hook(lib, c_u8p, ParseBxCx, CmdBxCx)

@@ -1,16 +1,16 @@
-; Standalone wrapper for src/kernel/LOAD.SUP's `load:`/`load_entry`
-; (cload_entry's own chain-load mode excluded -- see src-c/kernel/
-; load.c's own header comment) plus `diskread`/`load_group`/
-; `load_finish`. Bundles the real MEMORY.MEM/MAU.MEM/ML.MEM/UTIL.MEM
-; too, so `load`'s own real `mpmif(f_malloc)`/`mpmif(f_memfree)` calls
-; (and their own real `mpmif(f_maualloc)`/`mpmif(f_mlalloc)` calls in
-; turn) have real code to redirect into -- `tests/src-c/test_load.py`'s
-; own combined `mpmif` hook does that redirect in Python (manually
-; pushing a return address and jumping into the real routine's own
-; resolved symbol address) rather than writing a real dispatcher here,
-; since `mpmif` also needs to keep Python-simulating `f_setdmab`/
-; `f_setdma`/`f_freadseq` (see load.c's own header comment on
-; `freadseq`) through that exact same shared call site.
+; Standalone wrapper for src/kernel/LOAD.SUP's `load:`/`load_entry`/
+; `cload_entry` plus `diskread`/`load_group`/`load_finish`. Bundles
+; the real MEMORY.MEM/MAU.MEM/ML.MEM/UTIL.MEM/CPMMEM.MEM too, so
+; `load`'s own real `mpmif(f_malloc)`/`mpmif(f_memfree)` calls and
+; `cload_entry`'s own `mpmif(f_freemem)` call (plus their own real
+; `mpmif(f_maualloc)`/`mpmif(f_mlalloc)` calls in turn) have real code
+; to redirect into -- `tests/src-c/test_load.py`'s own combined
+; `mpmif` hook does that redirect in Python (manually pushing a return
+; address and jumping into the real routine's own resolved symbol
+; address) rather than writing a real dispatcher here, since `mpmif`
+; also needs to keep Python-simulating `f_setdmab`/`f_setdma`/
+; `f_freadseq` (see load.c's own header comment on `freadseq`)
+; through that exact same shared call site.
 ;
 ; Needs tools/i86sim.py's `segmented=True` mode (see src-c/kernel/
 ; ml.c's own header comment): the chosen group's own Base Page
@@ -131,4 +131,5 @@ user_retf:	ret		; dummy stand-in: the real label lives in
 	include mau.mem
 	include ml.mem
 	include util.mem
+	include cpmmem.mem
 	end

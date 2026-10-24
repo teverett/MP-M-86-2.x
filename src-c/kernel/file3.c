@@ -419,6 +419,38 @@ void flush_files(uint8_t *mem) {
     flush_file0(mem);
 }
 
+extern void func48(uint8_t *mem); /* src-c/kernel/file4.c */
+
+/*
+ * pr_term -- PR_TERM: close every open file BD_PDADDR's own process
+ * holds open (removing its locks too), then flush every blocking/
+ * deblocking buffer. Same `searchn_list`/`remove_locks`/`delete_item`
+ * loop shape as `flush_file0` above, but walking every olist entry
+ * unconditionally (`ch=0`) and filtering by PD address directly
+ * (`tst_tbl_lmt` against the item's own pdaddr field, offset 6) --
+ * src/kernel/FILE3.BDO's own `call func48` once the loop ends
+ * resolves to src/kernel/FILE4.BDO's own `FUNC48` (confirmed by
+ * grep against `orig/mpm862sr`'s own copy too, after an initial
+ * case-sensitive grep for `func48` -- lowercase -- turned up
+ * nothing: the real label is `FUNC48`, uppercase).
+ */
+void pr_term(uint8_t *mem) {
+    uint16_t pdaddr = mem_r16(mem, BD_PDADDR);
+    mem_w16(mem, BD_CUR_POS, BD_OPEN_ROOT);
+    for (;;) {
+        if (!searchn_list(mem, 0)) {
+            func48(mem);
+            return; /* retl2 */
+        }
+        uint16_t item = mem_r16(mem, BD_CUR_POS);
+        if (!tst_tbl_lmt(mem, item, 6, pdaddr)) {
+            continue;
+        }
+        remove_locks(mem, item);
+        delete_item(mem, item);
+    }
+}
+
 /*
  * select_ -- SELECT: select the disk at BD_SELDSK for subsequent I/O.
  * `selectdisk`'s own real BDOS-disk-header lookup is a fixed, always-
@@ -465,6 +497,19 @@ void tmp_select(uint8_t *mem, uint8_t dl) {
     mem[BD_SELDSK] = dl;
     curselect(mem);
     mem[BD_SELDSK] = saved_seldsk;
+}
+
+/*
+ * xcurselect -- XCURSELECT: select BD_SELDSK via CURSELECT, with
+ * BD_RETURN_FFFF set around the call -- `goerr`'s own real consumer
+ * (src-c/kernel/file1.c), making a select error reported back as
+ * `aret=0xFFFF` instead of this process's own usual error message,
+ * for the two BDOS functions (27, 31) that need that.
+ */
+void xcurselect(uint8_t *mem) {
+    mem[BD_RETURN_FFFF] = 1; /* true */
+    curselect(mem);
+    mem[BD_RETURN_FFFF] = 0; /* false */
 }
 
 /*
@@ -714,6 +759,30 @@ void set_seldsk(uint8_t *mem) {
 }
 
 /*
+ * reselect_tail -- RESELECT1 onward: check the current fcb to see if
+ * reselection is necessary, switching to the fcb's own named drive
+ * via `set_seldsk`/`curselect` if it names one, then folding this
+ * process's own user code into the fcb's drive byte. Shared by
+ * `reselect` (which computes BD_ACTUAL_RC for real first) and
+ * `reselectx` (which jumps straight here, see that function's own
+ * header comment).
+ */
+static void reselect_tail(uint8_t *mem) {
+    mem[BD_RESEL] = 1;
+    uint16_t bx = mem_r16(mem, BD_INFO);
+    uint8_t al = (uint8_t)((mem[bx] & 0x1F) - 1);
+    mem[BD_LINFO] = al;
+    if (al != 0xFF) {
+        mem[BD_OLDDSK] = mem[BD_SELDSK];
+        mem[BD_FCBDSK] = mem[bx];
+        mem[bx] = (uint8_t)(mem[bx] & 0xE0);
+        set_seldsk(mem);
+    }
+    curselect(mem);
+    mem[bx] = (uint8_t)(mem[BD_USRCODE] | mem[bx]);
+}
+
+/*
  * reselect -- reselect: normalize the current fcb's own read-only/
  * high-extent/actual-record-count bits (same fields `CURSELECT`'s own
  * callers rely on `search`/`searchn` to have set up), then, if the
@@ -747,20 +816,24 @@ void reselect(uint8_t *mem) {
         mem[bx] = 0x80;
     }
     mem[BD_ACTUAL_RC] = al;
+    reselect_tail(mem);
+}
 
-    /* check current fcb to see if reselection is necessary */
-    mem[BD_RESEL] = 1;
-    bx = mem_r16(mem, BD_INFO);
-    al = (uint8_t)((mem[bx] & 0x1F) - 1);
-    mem[BD_LINFO] = al;
-    if (al != 0xFF) {
-        mem[BD_OLDDSK] = mem[BD_SELDSK];
-        mem[BD_FCBDSK] = mem[bx];
-        mem[bx] = (uint8_t)(mem[bx] & 0xE0);
-        set_seldsk(mem);
-    }
-    curselect(mem);
-    mem[bx] = (uint8_t)(mem[BD_USRCODE] | mem[bx]);
+/*
+ * reselectx -- RESELECTX: same as `reselect`, but forcing
+ * BD_HIGH_EXT=0 and skipping the XFCB_READ_ONLY/BD_ACTUAL_RC
+ * computation (and the `clr_ext`/`get_rcnta` calls that feed it)
+ * entirely -- the real asm jumps directly into the middle of
+ * `reselect`'s own body (RESELECT1), with BD_ACTUAL_RC left at
+ * whatever AL happened to be at RESELECTX's own call site (an
+ * undefined artifact under this port, fixed at 0, same "undefined
+ * artifact, fixed choice" precedent as `selectdisk`'s own fixed
+ * `bx=0`).
+ */
+void reselectx(uint8_t *mem) {
+    mem[BD_HIGH_EXT] = 0;
+    mem[BD_ACTUAL_RC] = 0;
+    reselect_tail(mem);
 }
 
 /*

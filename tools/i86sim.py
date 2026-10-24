@@ -130,6 +130,18 @@ class I86Sim:
     `call_hooks` and `call_stub_addrs` just runs the hook; listing it in
     `call_stub_addrs` too is unnecessary.
 
+    `jmp_hooks`: like `call_hooks`, but keyed by a near JMP's own
+    target address instead of a CALL's -- for a routine whose own
+    real tail is a JMP (not a CALL) into another module that itself
+    eventually jumps back to right after this JMP (e.g. `src/loader/
+    LDMPM.A86`'s own `jmp mldbios`, which jumps into `src/loader/
+    LDBIOS86Q.A86`'s own `INIT`, whose own real tail `jmp ccp_offset`
+    lands right back after LDMPM's own `jmp mldbios`), the same
+    "boundary has to actually be modeled" reasoning as `call_hooks`,
+    just for the JMP case: the hook runs and execution simply
+    continues with the very next instruction after the JMP, same as
+    a CALL hook continuing after the CALL.
+
     `jmp_stub_addrs`: addresses that, when reached by a near JMP
     (`0xE9`/`0xEB`), are treated as an immediate RET instead -- for a
     routine whose own real tail end is a JMP (not a CALL) into an
@@ -147,12 +159,73 @@ class I86Sim:
     `call` already pushed and keeps running there, same "doesn't
     return, or resumes exactly here" reasoning as `call_stub_addrs`,
     just for the JMP case instead of the CALL case.
+
+    `far_call_stub_addrs`: addresses of a `CALL FAR [mem]` instruction
+    itself (opcode `0xFF /3`, e.g. `callf dword ptr rtmmod[bx]`) that
+    should be treated as an instant no-op -- same "doesn't return, or
+    resumes exactly here" reasoning as `call_stub_addrs`, but keyed by
+    the *instruction's own* address instead of its target, since the
+    target here is a 4-byte far pointer loaded from memory at runtime
+    (e.g. a module table entry), not resolvable at assembly time the
+    way an ordinary CALL's target is. There's no multi-segment model
+    here for a real far call/return to unwind (same reasoning as
+    `int_stub_nums` above), so this never pushes CS:IP or touches the
+    stack -- `_modrm()` has already consumed the whole instruction's
+    own mod/rm/displacement bytes by the time this fires, so doing
+    nothing further is exactly "continue with the very next
+    instruction." First needed by `src/kernel/INIT.SUP`'s own `init:`,
+    which `callf`s into five other modules' own `init:` entry points
+    through `SYSDAT.FMT`'s module table.
+
+    `far_jmp_stub_addrs`: like `far_call_stub_addrs`, but for a
+    `JMP FAR [mem]` instruction (opcode `0xFF /5`) instead of a
+    `CALL FAR [mem]` -- there's no caller to return to for a JMP, so
+    this halts the sim outright (same as `stop_addrs`) rather than
+    continuing with the next instruction. First needed by
+    `src/loader/ROM86Q.A86`'s own final `jmpf dword ptr leap_off`,
+    the boot sector's own real exit into MPMLDR.bin.
+
+    `int_hooks`: like `call_hooks`, but keyed by interrupt number
+    instead of a call target -- for a software interrupt whose real
+    effect genuinely has to be modeled for the test to mean anything
+    (e.g. a BIOS `INT 13h` disk read, or a loader's own synthetic
+    `INT 224` dispatch into another already-ported module's
+    function table), same "boundary has to actually be modeled"
+    reasoning as `call_hooks`. `hook(sim)` runs in place of the
+    no-op `int_stub_nums` convention (an interrupt number listed in
+    both just runs the hook); same as `call_hooks`, there's no real
+    multi-segment IRET here -- the hook returns and execution simply
+    continues with the very next instruction, so a hook that needs
+    to report failure (e.g. `INT 13h`'s own CF-on-error convention)
+    sets `sim.cf` directly rather than anything IRET would normally
+    restore. First needed by `src/loader/ROM86Q.A86`'s own boot-
+    sector `INT 13h` floppy reads.
+
+    `io_in_hook`/`io_out_hook`: optional callables backing the real
+    8086 port-mapped I/O instructions (`IN`/`OUT`, opcodes `0xE4`-
+    `0xE7`/`0xEC`-`0xEF`) -- there's no real device behind these
+    otherwise, so a routine that touches hardware ports needs one of
+    these supplied (the same "boundary has to actually be modeled for
+    the test to mean anything" reasoning as `call_hooks`, not a plain
+    no-op stub). `io_in_hook(sim, port, width)` returns the value read
+    (`width` is 8 or 16); `io_out_hook(sim, port, width, value)` is
+    called for the write, return value ignored. Hitting `IN`/`OUT`
+    with no hook supplied raises loudly, same as any other
+    unimplemented opcode -- there's deliberately no silent default
+    device (e.g. always-0) that could paper over a real driver's own
+    polling loop never seeing the response it's waiting for. First
+    needed by `src/loader/LDBIOS86Q.A86`'s own UART driver (console
+    I/O at port 0x3F8) and NEC765 floppy controller driver (port
+    0x3F0) -- real port-mapped hardware, not a boundary stub this
+    port can skip the way `xiosif`/`mpmif` elsewhere are.
     """
 
     def __init__(self, mem: bytearray, regs: dict, code_addr: int,
                  stop_addrs=frozenset(), call_stub_addrs=frozenset(),
                  int_stub_nums=frozenset(), segmented: bool = False,
-                 call_hooks=None, jmp_stub_addrs=frozenset()):
+                 call_hooks=None, jmp_hooks=None, jmp_stub_addrs=frozenset(),
+                 far_call_stub_addrs=frozenset(), far_jmp_stub_addrs=frozenset(),
+                 io_in_hook=None, io_out_hook=None, int_hooks=None):
         if len(mem) != 0x10000:
             raise I86SimError(f"mem must be exactly 64KB, got {len(mem)} bytes")
         self.mem = mem
@@ -162,8 +235,14 @@ class I86Sim:
         self.stop_addrs = set(stop_addrs)
         self.call_stub_addrs = set(call_stub_addrs)
         self.jmp_stub_addrs = set(jmp_stub_addrs)
+        self.far_call_stub_addrs = set(far_call_stub_addrs)
+        self.far_jmp_stub_addrs = set(far_jmp_stub_addrs)
+        self.io_in_hook = io_in_hook
+        self.io_out_hook = io_out_hook
         self.int_stub_nums = set(int_stub_nums)
         self.call_hooks = dict(call_hooks) if call_hooks else {}
+        self.jmp_hooks = dict(jmp_hooks) if jmp_hooks else {}
+        self.int_hooks = dict(int_hooks) if int_hooks else {}
         self.segmented = segmented
         self.seg_override = None  # set per-instruction by a 26h/2Eh/36h/3Eh prefix
         self._last_ea_offset = 0  # raw (pre-segmentation) offset from the most
@@ -315,6 +394,11 @@ class I86Sim:
             self._set_flags_word(self._pop16())
         elif op == 0xF8:  # CLC
             self.cf = 0
+        elif op == 0xF9:  # STC -- src-c/loader/rom86q.c's own read_sector
+                          # is the first to need it (every earlier CF set
+                          # came from an arithmetic/shift op, not STC
+                          # directly)
+            self.cf = 1
         elif op == 0x27:  # DAA -- decimal-adjust AL after addition. AF
             # (the half-carry flag) isn't tracked anywhere else in this
             # module (see its own docstring), so this only follows the
@@ -348,9 +432,45 @@ class I86Sim:
             # else: stubbed -- treated as an instant no-op return, see class docstring
         elif op == 0xCD:  # INT imm8
             num = self._fetch8()
-            if num not in self.int_stub_nums:
+            if num in self.int_hooks:
+                self.int_hooks[num](self)
+            elif num not in self.int_stub_nums:
                 raise I86SimError(f"INT 0x{num:02X} not stubbed (not in int_stub_nums) at {start_ip:#06x}")
             # else: stubbed -- treated as an instant no-op, see class docstring
+        elif op in (0xE4, 0xE5):  # IN AL/AX, imm8 -- see io_in_hook's own docstring
+            port = self._fetch8()
+            width = 8 if op == 0xE4 else 16
+            if self.io_in_hook is None:
+                raise I86SimError(f"IN (port 0x{port:02X}) with no io_in_hook at {start_ip:#06x}")
+            val = self.io_in_hook(self, port, width) & (0xFF if width == 8 else 0xFFFF)
+            if width == 8:
+                self.regs['ax'] = (self.regs['ax'] & 0xFF00) | val
+            else:
+                self.regs['ax'] = val
+        elif op in (0xEC, 0xED):  # IN AL/AX, DX
+            port = self.regs['dx']
+            width = 8 if op == 0xEC else 16
+            if self.io_in_hook is None:
+                raise I86SimError(f"IN (port 0x{port:02X}) with no io_in_hook at {start_ip:#06x}")
+            val = self.io_in_hook(self, port, width) & (0xFF if width == 8 else 0xFFFF)
+            if width == 8:
+                self.regs['ax'] = (self.regs['ax'] & 0xFF00) | val
+            else:
+                self.regs['ax'] = val
+        elif op in (0xE6, 0xE7):  # OUT imm8, AL/AX
+            port = self._fetch8()
+            width = 8 if op == 0xE6 else 16
+            val = self.regs['ax'] & (0xFF if width == 8 else 0xFFFF)
+            if self.io_out_hook is None:
+                raise I86SimError(f"OUT (port 0x{port:02X}) with no io_out_hook at {start_ip:#06x}")
+            self.io_out_hook(self, port, width, val)
+        elif op in (0xEE, 0xEF):  # OUT DX, AL/AX
+            port = self.regs['dx']
+            width = 8 if op == 0xEE else 16
+            val = self.regs['ax'] & (0xFF if width == 8 else 0xFFFF)
+            if self.io_out_hook is None:
+                raise I86SimError(f"OUT (port 0x{port:02X}) with no io_out_hook at {start_ip:#06x}")
+            self.io_out_hook(self, port, width, val)
         elif 0x50 <= op <= 0x57:  # PUSH r16
             self._push16(self.regs[_R16[op - 0x50]])
         elif 0x58 <= op <= 0x5F:  # POP r16
@@ -423,6 +543,15 @@ class I86Sim:
             if rm[0] != 'mem':
                 raise I86SimError(f"LEA with a register operand at {start_ip:#06x}")
             self.regs[_R16[reg]] = self._last_ea_offset
+        elif 0xB0 <= op <= 0xB7:  # MOV r8, imm8 (short form) --
+                                  # src-c/loader/lbdosent.c's own
+                                  # differential test is the first to
+                                  # need this (every earlier immediate-
+                                  # to-register MOV used 0xC6/0xC7's
+                                  # register-direct ModRM form instead)
+            self._set_r8(op - 0xB0, self._fetch8())
+        elif 0xB8 <= op <= 0xBF:  # MOV r16, imm16 (short form)
+            self.regs[_R16[op - 0xB8]] = self._fetch16()
         elif op == 0xC6:  # MOV r/m8, imm8
             _, _reg, rm = self._modrm()
             self._store(rm, 8, self._fetch8())
@@ -510,6 +639,14 @@ class I86Sim:
         elif op == 0x0B:  # OR r16, r/m16
             _, reg, rm = self._modrm()
             self.regs[_R16[reg]] = self._bitwise('or', self.regs[_R16[reg]], self._load(rm, 16), 16)
+        elif op == 0x08:  # OR r/m8, r8 -- src-c/loader/lbdosent.c's own
+                          # differential test is the first to need this
+                          # direction (every earlier OR used 0x0A/0x0B)
+            _, reg, rm = self._modrm()
+            self._store(rm, 8, self._bitwise('or', self._load(rm, 8), self._get_r8(reg), 8))
+        elif op == 0x09:  # OR r/m16, r16
+            _, reg, rm = self._modrm()
+            self._store(rm, 16, self._bitwise('or', self._load(rm, 16), self.regs[_R16[reg]], 16))
         elif op in (0x81, 0x80):  # group1 word/byte, imm16/imm8 (ADD/OR/AND/SUB/XOR/CMP)
             width = 16 if op == 0x81 else 8
             _, reg, rm = self._modrm()
@@ -575,6 +712,31 @@ class I86Sim:
             elif op == 0xFF and reg == 0b100:  # JMP r/m16 (near indirect)
                 target = self._load(rm, 16)
                 self.ip = (self.regs['cs'] * 16 + target) & 0xFFFF
+            elif op == 0xFF and reg == 0b011:  # CALL FAR [mem] (indirect far
+                                                # call through a 4-byte far
+                                                # pointer in memory) -- see
+                                                # `far_call_stub_addrs`'s own
+                                                # docstring above for why
+                                                # this is keyed by the
+                                                # instruction's own address
+                if start_ip in self.far_call_stub_addrs:
+                    pass  # no-op -- ip is already past the whole instruction
+                else:
+                    raise I86SimError(f"CALL FAR r/m not implemented (no stub) at {start_ip:#06x}")
+            elif op == 0xFF and reg == 0b101:  # JMP FAR [mem] (indirect far
+                                                # jump through a 4-byte far
+                                                # pointer in memory) -- see
+                                                # `far_jmp_stub_addrs`'s own
+                                                # docstring above; unlike
+                                                # `far_call_stub_addrs`,
+                                                # there's no caller to
+                                                # return to, so this halts
+                                                # outright, same as
+                                                # `stop_addrs`
+                if start_ip in self.far_jmp_stub_addrs:
+                    self.halted = True
+                else:
+                    raise I86SimError(f"JMP FAR r/m not implemented (no stub) at {start_ip:#06x}")
             elif reg in (0b000, 0b001):
                 mask = 0xFF if width == 8 else 0xFFFF
                 delta = 1 if reg == 0b000 else -1
@@ -594,6 +756,17 @@ class I86Sim:
                 self._bitwise('and', self._load(rm, 8), self._get_r8(reg), 8)
             else:
                 self._bitwise('and', self._load(rm, 16), self.regs[_R16[reg]], 16)
+        elif op in (0xA8, 0xA9):  # TEST AL,imm8 / TEST AX,imm16 -- src-c/
+                                  # loader/ldbios86q.c's own fdc_wait_seek
+                                  # is the first to need the accumulator-
+                                  # immediate TEST form (every earlier one
+                                  # used the F6/F7 or 0x84/0x85 forms)
+            if op == 0xA8:
+                imm = self._fetch8()
+                self._bitwise('and', self._get_r8(0), imm, 8)  # _R8_PARENT[0] is 'al'
+            else:
+                imm = self._fetch16()
+                self._bitwise('and', self.regs['ax'], imm, 16)
         elif op in (0xF6, 0xF7):  # group F6/F7 byte/word (only /0 TEST, /4 MUL implemented)
             width = 8 if op == 0xF6 else 16
             _, reg, rm = self._modrm()
@@ -694,11 +867,17 @@ class I86Sim:
         elif op == 0xEB:  # JMP rel8 (JMPS)
             disp = self._fetch_simm8()
             target = (self.ip + disp) & 0xFFFF
-            self.ip = self._pop16() if target in self.jmp_stub_addrs else target
+            if target in self.jmp_hooks:
+                self.jmp_hooks[target](self)  # ip stays as-is -- continue past this JMP
+            else:
+                self.ip = self._pop16() if target in self.jmp_stub_addrs else target
         elif op == 0xE9:  # JMP rel16
             disp = self._fetch_simm16()
             target = (self.ip + disp) & 0xFFFF
-            self.ip = self._pop16() if target in self.jmp_stub_addrs else target
+            if target in self.jmp_hooks:
+                self.jmp_hooks[target](self)  # ip stays as-is -- continue past this JMP
+            else:
+                self.ip = self._pop16() if target in self.jmp_stub_addrs else target
         elif op == 0xFA:  # CLI -- no interrupt model here; parsed and ignored
             pass
         elif op == 0xFB:  # STI -- ditto

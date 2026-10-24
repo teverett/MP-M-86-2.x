@@ -57,6 +57,22 @@ typedef struct {
 #define p_flag    0x06 /* word: process state flags (see pf_* below) */
 #define p_name    0x08 /* byte[pnamsiz]: process name */
 #define p_uda     0x10 /* word: segment address of this PD's UDA */
+/* src/kernel/UDA.FMT */
+#define u_wrkseg  0x2E /* word: current segment addr of buf */
+/* src/kernel/RSP.DEF */
+#define rsp_pd    0x10 /* byte: offset of the Process Descriptor within an RSP's own data segment */
+#define rsp_link  0x00 /* word, es-relative: next RSP's own segment address (linked list) */
+/* src/kernel/SYSTEM.DEF */
+#define mpmint    224  /* int vec for mpm ent. */
+/* src/kernel/MODFUNC.DEF */
+#define bdosmod_bit 0x08
+#define ciomod_bit  0x10
+#define xiosmod_bit 0x20
+/* src/kernel/MODTAB.DEF */
+#define mod_init  4 /* dword offset of a module table entry's own "initialize" far pointer */
+/* src/kernel/XIOSCB.DEF */
+#define io_maxconsole 20
+#define io_maxlist    21
 #define p_mem     0x16 /* word: head of this PD's own MD list */
 #define p_scratch 0x2E /* byte: scratch word (low byte) */
 #define p_dsk     0x12 /* byte: current default disk */
@@ -170,6 +186,38 @@ typedef struct {
 #define SD_PUL        0xA038 /* word: Process Descriptor Unused List */
 #define SD_MXMEMOWNER 0xA03A /* word: PD owning the MX memory queue mutex */
 #define SD_MXMEMCOUNT 0xA03C /* byte: mutex nesting count */
+#define SD_NCIODEV    0xA037 /* byte: number of character i/o devices */
+/* src/kernel/INIT.SUP's own scratch fields -- confirmed via
+ * `--symbols` against tests/src-c/fixtures/init_wrapper.A86 (that
+ * wrapper's own DSEG layout, not independently chosen then matched
+ * up by hand -- same reasoning as the BD_* block in file1.c for why
+ * this avoids drift between the constant and the test). `SD_INTFLAG`
+ * above is a different, pre-existing, still-unconsumed scratch slot
+ * for this same SYSDAT.FMT field under a different file's own
+ * wrapper layout -- not reused here for the same reason no two
+ * files' own independently-chosen BD_ or SD_ addresses are expected
+ * to agree unless they come from the very same combined wrapper. */
+#define SD_INIT_VERSION   0xA800 /* word: addr. version str in SUP code segment */
+#define SD_INIT_TICK_TOS  0xA802 /* word: addr of TICK.SUP's own notick entry */
+#define SD_INIT_IDLE_TOS  0xA804 /* word: addr of IDLE.SUP's own idle entry */
+#define SD_INIT_INTFLAG   0xA806 /* byte: if 0, interrupts not enabled */
+#define SD_RSPSEG         0xA80B /* word: segment of first RSP (linked list head) */
+#define SD_INITPD         0xA80D /* byte[pdlen=0x30]: INIT.SUP's own init process's PD */
+#define SD_INITUDA        0xA84D /* byte[ulen=0x100]: INIT.SUP's own init process's UDA */
+#define SD_SUPMOD_SEG     0xA88F /* word: SYSDAT module_table[SUP]'s own entry-pointer segment half (supmod+2) */
+/* src/kernel/INIT.SUP's own `sysdat`/`supervisor` cseg cells (not a
+ * harness-chosen scratch address like the fields above -- these are
+ * the module's own real, already-resolved cseg offsets, same
+ * reasoning as the BD_* block in this file: INIT.SUP itself declares
+ * them at its own cseg's very start, right after its own 2 `jmp`s
+ * (`jmp init ! jmp entry`, 3 bytes each = 6), so `sysdat`=6 and
+ * `supervisor`=8 (a 4-byte far pointer; its own segment half, the one
+ * `init` actually writes, is 8+2=0Ah) are stable regardless of what
+ * real module comes after INIT.SUP in the final SUP.A86 build --
+ * confirmed via `--symbols` against tests/src-c/fixtures/
+ * init_wrapper.A86, not assumed. */
+#define INIT_SYSDAT          0x0006 /* word: INIT.SUP's own saved sysdat segment (cs:sysdat) */
+#define INIT_SUPERVISOR_SEG  0x000A /* word: INIT.SUP's own `supervisor` far-ptr segment half */
 #define SD_INDISP     0xAC00 /* byte: currently in dispatch? */
 #define SD_INTFLAG    0xAC01 /* byte: if 0, interrupts not enabled */
 #define SD_ES_SAV     0xAC02 /* word */
@@ -626,6 +674,9 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
  * does here: this is the already-resolved real address, confirmed
  * against `--symbols` when VEC.FMT is assembled on its own, org 0) */
 #define i_mpm_ip      0x380
+#define i_mpm_cs      0x382 /* word: immediately follows i_mpm_ip -- src/kernel/
+                               INIT.SUP's own `init` writes both as one real
+                               interrupt-vector-table entry (ip then cs) */
 
 /* src/kernel/MODFUNC.DEF -- mpmif function codes src-c/kernel/command.c
  * uses ((user*0x100)+n unless noted) */

@@ -219,6 +219,7 @@ extern uint8_t check_fcb(uint8_t *mem);
 extern void sqread(uint8_t *mem);
 extern void sqwrite(uint8_t *mem);
 extern void reselect(uint8_t *mem);
+extern void reselectx(uint8_t *mem); /* RESELECTX, now ported for real -- see below */
 extern void make(uint8_t *mem);
 extern uint8_t chk_xfcb_password1(uint8_t *mem, uint16_t bx, uint8_t al);
 extern void delet0(uint8_t *mem, uint8_t found);
@@ -747,22 +748,6 @@ void func16(uint8_t *mem) {
     }
     stamp2(mem);
     seekcopy(mem);
-}
-
-/*
- * reselectx -- RESELECTX: a separate entry point into `reselect`
- * (`file3.c`) that skips straight to `RESELECT1`, forcing
- * `BD_HIGH_EXT=0`. `RESELECT1`'s own tail also sets `BD_ACTUAL_RC`
- * from whatever `AL` happens to hold on entry -- here, genuinely
- * incidental register content (`getexta`/`clr_ext`/`clrmodnum` don't
- * set `AL` to anything meaningful along this call's own path, see
- * `csearch`'s own header comment) that nothing downstream in this
- * call chain (`SEARCH`/`SEARCHN`/`dirtouser`) ever reads back -- not
- * modeled, same "undefined artifact" convention as `selectdisk`'s
- * own fixed `bx=0` choice (`file1.c`).
- */
-static void reselectx(uint8_t *mem) {
-    mem[BD_HIGH_EXT] = 0;
 }
 
 /*

@@ -89,7 +89,25 @@ init:
 				;equal MPM_CODE_SEG (1000h) since SUP's own
 				;module_base is 0.
 	mov es,ax
-	mov u_wrkseg,ds
+	mov es:u_wrkseg,ds	;bare "mov u_wrkseg,ds" is wrong -- a bare
+				;destination defaults to DS (still sysdat-ish
+				;here), not ES (inituda's own segment, just
+				;computed above), so it wrote through to
+				;SYSDAT's own offset 2Eh instead of inituda's
+				;own u_wrkseg field at that same bare offset.
+				;SYSDAT's own offset 2Eh is the back half of
+				;the module table's XIOS entry (its own
+				;"initialize" far pointer's segment word) --
+				;confirmed by offset arithmetic against
+				;MODTAB.DEF (xiosmod=28h, mod_init=+4,
+				;segment word at +6 = 2Eh) and UDA.FMT
+				;(u_wrkseg=2Eh exactly): this clobbered XIOS's
+				;own init segment with whatever segment DS
+				;happened to be, right before "callf dword ptr
+				;xiosmod[bx]" a few lines down would have used
+				;it to jump into the real XIOS module -- same
+				;bug class, same file, as the two already-
+				;documented bare-sysdat-write fixes above.
 
 		;initialize modules
 

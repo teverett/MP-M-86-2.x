@@ -31,6 +31,13 @@ BD_BLKSHF, BD_BLKMSK = 0x0C4A, 0x0C4B
 BD_FREE_ROOT = 0x0052
 BD_PDADDR, BD_FLUSHED, BD_PD_CNT = 0x0C3A, 0x0C8D, 0x0C33
 P_UDA, U_PD_CNT = 0x10, 0x1A
+BD_ARET, BD_RETURN_FFFF, BD_ERROR_MODE = 0x0C0F, 0x0C69, 0x0C29
+BD_SELDSK, BD_HIGH_EXT, BD_ACTUAL_RC, BD_USRCODE = 0x0C16, 0x0C34, 0x0C6C, 0x0C15
+BD_INFO, BD_LINFO, BD_XFCB_READ_ONLY = 0x0C17, 0x0C9B, 0x0C35
+RLR = 0x0068  # real resolved address in THIS wrapper's own combined layout
+SD_RLR = 0xA000  # src-c/kernel/defs.h's own separate scratch address for the same field
+P_FLAG = 0x06
+PF_CTLC = 0x0080
 
 
 def phys(seg):
@@ -51,7 +58,8 @@ def assemble_reference():
     dseg = asm.segment_bytes('dseg')
     names = ('pack_sdcnt', 'compare', 'search_olist', 'search_llist', 'searchn_list',
               'delete_item', 'create_item', 'set_olist_item',
-              'flush_files', 'flush_file0', 'remove_locks', 'inc_pdcnt')
+              'flush_files', 'flush_file0', 'remove_locks', 'inc_pdcnt',
+              'pr_term', 'xcurselect', 'reselectx', 'goback', 'xiosif')
     entries = {name: asm.symtab[name].value for name in names}
     return code, dseg, entries
 
@@ -79,7 +87,7 @@ def base_memory():
     return bytearray(0x10000)
 
 
-def run_reference(code, dseg, entry, mem, regs, stop_addrs=(), segmented=False):
+def run_reference(code, dseg, entry, mem, regs, stop_addrs=(), segmented=False, jmp_stub_addrs=()):
     # Same cseg/dseg layering as test_file1.py's own run_reference --
     # see file1_wrapper.A86's own header comment for why this is
     # needed for this combined bundle specifically.
@@ -97,8 +105,13 @@ def run_reference(code, dseg, entry, mem, regs, stop_addrs=(), segmented=False):
     # real test value happens to have a zero byte (same class of gap
     # BD_CURDSK's own explicit override line already works around).
     image[BD_FREE_ROOT:BD_FREE_ROOT + 2] = mem[BD_FREE_ROOT:BD_FREE_ROOT + 2]
+    # rlr's own real address (0x68, see test_file1.py's own identical
+    # comment) needs the same unconditional overwrite, for the same
+    # reason -- the "only nonzero mem bytes win" rule above silently
+    # skips it whenever the PD address's own low byte happens to be 0.
+    image[RLR:RLR + 2] = mem[RLR:RLR + 2]
     sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry, stop_addrs=set(stop_addrs),
-                 call_stub_addrs=STUBS, segmented=segmented)
+                 call_stub_addrs=STUBS, segmented=segmented, jmp_stub_addrs=set(jmp_stub_addrs))
     sim.run()
     return sim.regs, image
 
@@ -138,6 +151,9 @@ def main():
         lib.flush_file0.argtypes = [c_u8p]
         lib.remove_locks.argtypes = [c_u8p, ctypes.c_uint16]
         lib.inc_pdcnt.argtypes = [c_u8p]
+        lib.pr_term.argtypes = [c_u8p]
+        lib.xcurselect.argtypes = [c_u8p]
+        lib.reselectx.argtypes = [c_u8p]
 
         failures = []
 
@@ -434,6 +450,73 @@ def main():
         lib.flush_files(ctypes.cast(buf, c_u8p))
         check("flush_files: already flushed -> no-op", mem_r16(ref_img, BD_OPEN_ROOT),
               mem_r16(bytes(buf), BD_OPEN_ROOT))
+
+        # -- pr_term: two open files, one owned by the target PD
+        # (removed), one not (kept) --
+        mem = base_memory()
+        ITEM1, ITEM2 = 0x4100, 0x4120
+        TARGET_PD, OTHER_PD = 0x5000, 0x6000
+        mem[ITEM1:ITEM1 + 11] = olist_entry(ITEM2, 0, b'\x00\x00\x00', TARGET_PD)
+        mem[ITEM2:ITEM2 + 11] = olist_entry(0, 0, b'\x00\x00\x00', OTHER_PD)
+        mem_w16(mem, BD_OPEN_ROOT, ITEM1)
+        mem_w16(mem, BD_PDADDR, TARGET_PD)
+        mem_w16(mem, BD_FREE_ROOT, 0)
+        ref_regs, ref_img = run_reference(code, dseg, entries['pr_term'], mem, {},
+                                           stop_addrs={entries['goback']}, segmented=True,
+                                           jmp_stub_addrs={entries['xiosif']})
+        buf = to_ctypes(mem)
+        lib.pr_term(ctypes.cast(buf, c_u8p))
+        port_img = bytes(buf)
+        check("pr_term: removes only the target PD's own open file",
+              mem_r16(ref_img, BD_OPEN_ROOT), mem_r16(port_img, BD_OPEN_ROOT))
+
+        # -- xcurselect: SELDSK != CURDSK, selectdisk's own fixed-fail
+        # boundary stub (file1.c) always reaches selerror -- with
+        # RETURN_FFFF set around the call, goerr's own RTN_PHY_ERRS
+        # branch forces aret=0xFFFF and clears the flag again --
+        mem = base_memory()
+        mem[BD_SELDSK] = 1
+        mem[BD_CURDSK] = 2
+        mem[BD_ERROR_MODE] = 0
+        mem_w16(mem, RLR, 0x5000)
+        mem_w16(mem, SD_RLR, 0x5000)  # both the real bundle address (ref) and the
+                                      # C port's own separate scratch one need it
+        mem_w16(mem, 0x5000 + P_FLAG, 0)
+        ref_regs, ref_img = run_reference(code, dseg, entries['xcurselect'], mem, {},
+                                           stop_addrs={entries['goback']})
+        buf = to_ctypes(mem)
+        lib.xcurselect(ctypes.cast(buf, c_u8p))
+        port_img = bytes(buf)
+
+        def xcurselect_snapshot(img):
+            return (mem_r16(img, BD_ARET), img[BD_RETURN_FFFF], mem_r16(img, 0x5000 + P_FLAG))
+
+        check("xcurselect: aret forced to 0xFFFF, flag cleared, pf_ctlc set",
+              xcurselect_snapshot(ref_img), xcurselect_snapshot(port_img))
+
+        # -- reselectx: HIGH_EXT forced to 0, ACTUAL_RC forced to 0,
+        # same CURSELECT-chain tail as reselect -- SELDSK==CURDSK and
+        # not 0xFF, so CURSELECT's own TEST_FF_DISK takes the plain
+        # early return (no selerror involved here) --
+        mem = base_memory()
+        INFO_AT = 0x4200
+        mem[INFO_AT] = 0  # auto-select (not an explicit drive request)
+        mem_w16(mem, BD_INFO, INFO_AT)
+        mem[BD_SELDSK] = 0
+        mem[BD_CURDSK] = 0
+        mem[BD_USRCODE] = 0
+        mem[BD_HIGH_EXT] = 0xAA
+        mem[BD_ACTUAL_RC] = 0xBB
+        ref_regs, ref_img = run_reference(code, dseg, entries['reselectx'], mem, {})
+        buf = to_ctypes(mem)
+        lib.reselectx(ctypes.cast(buf, c_u8p))
+        port_img = bytes(buf)
+
+        def reselectx_snapshot(img):
+            return (img[BD_HIGH_EXT], img[BD_ACTUAL_RC], img[INFO_AT])
+
+        check("reselectx: forces high_ext/actual_rc, runs the shared tail",
+              reselectx_snapshot(ref_img), reselectx_snapshot(port_img))
 
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")

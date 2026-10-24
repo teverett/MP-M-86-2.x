@@ -131,6 +131,29 @@
 #define maxmod 15   /* largest module number */
 #define namlen 15   /* name length */
 
+/* src/loader/LDBIOS86Q.A86's own scratch/data cells and tables, at
+ * their own REAL resolved addresses (not harness-chosen scratch
+ * ones, unlike the LD_* block above): this file is fully self-
+ * contained (no `INCLUDE`s at all, confirmed by grep) and always
+ * assembled standalone, so `python3 tools/asm86.py src/loader/
+ * LDBIOS86Q.A86 --symbols` gives one real, deterministic layout,
+ * same reasoning as src-c/kernel/defs.h's own BD_* block. */
+#define LDB86Q_DISK        0x1452 /* byte: current disk number */
+#define LDB86Q_TRK         0x1453 /* byte: current track */
+#define LDB86Q_SECT        0x1454 /* byte: current sector */
+#define LDB86Q_DMA_ADR     0x1455 /* word: dma offset */
+#define LDB86Q_DMA_SEG     0x1457 /* word: dma segment */
+#define LDB86Q_CUR_CYL     0x1459 /* byte: physical cylinder */
+#define LDB86Q_CUR_HEAD    0x145A /* byte: physical head */
+#define LDB86Q_CUR_PSEC    0x145B /* byte: physical (512-byte) sector, 1-based */
+#define LDB86Q_CUR_BUFOFF  0x145C /* word: offset of this logical record within secbuf */
+#define LDB86Q_SEEK_PARMS  0x1466 /* byte[4]: FDC SEEK command table */
+#define LDB86Q_READ_PARMS  0x146A /* byte[10]: FDC READ DATA command table */
+#define LDB86Q_WRITE_PARMS 0x1474 /* byte[10]: FDC WRITE DATA command table */
+#define LDB86Q_SECBUF      0x147E /* byte[fd_secsize=512]: one physical sector's worth of scratch buffer */
+#define LDB86Q_DPE0        0x1690 /* word: SELDSK's own DPH address (content unconsumed, not modeled -- see init.c-style precedent) */
+#define LDB86Q_SEGTABLE    0x167E /* word: GETSEGT's own segment-table address (static cseg data, content unconsumed by anything ported so far) */
+
 static inline uint16_t mem_r16(const uint8_t *mem, uint16_t addr) {
     return (uint16_t)(mem[addr] | (mem[(uint16_t)(addr + 1)] << 8));
 }
@@ -138,6 +161,19 @@ static inline uint16_t mem_r16(const uint8_t *mem, uint16_t addr) {
 static inline void mem_w16(uint8_t *mem, uint16_t addr, uint16_t val) {
     mem[addr] = (uint8_t)(val & 0xFF);
     mem[(uint16_t)(addr + 1)] = (uint8_t)(val >> 8);
+}
+
+/* A real segment:offset read/write -- src-c/loader/ldbios86q.c's own
+ * READ/WRITE, transferring a 128-byte logical record to/from their
+ * caller's `dma_seg:dma_adr` buffer -- same reasoning/idiom as
+ * src-c/kernel/defs.h's own mem_r16_seg/mem_w16_seg/mem_r8_seg/
+ * mem_w8_seg (that file's own header comment has the detail). */
+static inline uint8_t mem_r8_seg(const uint8_t *mem, uint16_t seg, uint16_t offset) {
+    return mem[(uint16_t)((uint16_t)(seg * 16) + offset)];
+}
+
+static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8_t val) {
+    mem[(uint16_t)((uint16_t)(seg * 16) + offset)] = val;
 }
 
 #endif

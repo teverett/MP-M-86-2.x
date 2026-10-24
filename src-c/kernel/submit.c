@@ -9,21 +9,30 @@
  *
  * Not ported: `submit:`'s own version-check/priority/FCB-open
  * preamble (no observable effect under the boundary-stub convention
- * beyond what `deblank`/`fill_argtable` already cover) and
- * `clicall`'s own real CLI dispatch -- `notdrive`'s own `call
- * parsefilename` (this file's own copy, same shape as `TMP.A86`'s)
- * deterministically returns `cx = mpm_parse` (152, pre-loaded right
- * before the tail `jmp mpm`), which never satisfies `jcxz goodparse`
- * and never matches any of `clierror`'s real error codes either -- so
- * `goodparse` and everything downstream (the built-in `USER`/
- * `PRINTER`/`$INCLUDE` checks, `notbuiltin`'s own real CLI dispatch)
- * are provably unreachable, same class as `TMP.A86`'s own `goodparse`
- * writeup; `topofcmdloop_once` returns `SUBMIT_SUBMITEXIT` once it
- * reaches that wall, same as the real asm's own `jmp submitexit`.
- * Needed `docs/bugs.md` #3's all 3 fixes in `/src` first (same
- * RSP-unpatched-policy question already asked and answered for
- * `CLOCK.A86`/`TMP.A86`) just to get this far enough to assemble as a
- * differential-test reference at all.
+ * beyond what `deblank`/`fill_argtable` already cover), and the
+ * `$INCLUDE` built-in's own real body (see `try_builtin`'s own header
+ * comment for why). Needed `docs/bugs.md` #3's all 3 fixes in `/src`
+ * first (same RSP-unpatched-policy question already asked and
+ * answered for `CLOCK.A86`/`TMP.A86`) just to get this far enough to
+ * assemble as a differential-test reference at all.
+ *
+ * `goodparse`/`try_builtin`/`notbuiltin`'s own real CLI dispatch WERE
+ * believed provably unreachable (`notdrive`'s own `call
+ * parsefilename` assumed to deterministically return `cx = mpm_parse`
+ * under the boundary-stub convention) -- that was a mischaracterization,
+ * corrected the same way `src-c/kernel/tmp.c`'s own identical claim
+ * was: `parsefilename`'s real target is `src-c/kernel/parse.c`'s
+ * already-ported `parse_entry` (`src/kernel/MODFUNC.DEF`'s own
+ * `f_parsefilename equ (user*0100h)+152`), and `notbuiltin`'s own
+ * `mpm_clicmd` is `src-c/kernel/command.c`'s already-ported
+ * `clicmd_entry` -- both genuinely callable for real, same as
+ * `tmp.c`'s own corrected version. Unlike `TMP.A86` (whose every real
+ * path ends in `jmp nextcommand`), `SUBMIT.A86`'s own `clierror` tail
+ * (`showerr`) is `jmp submitexit` for every error code except
+ * `e_nullcmd` -- so `topofcmdloop_once` now returns
+ * `SUBMIT_GETNXTCMD` for `pruser`/`prprinter`'s own tails, a
+ * successful `clicmd_entry` call, and `e_nullcmd`, but
+ * `SUBMIT_SUBMITEXIT` for every other `clicmd_entry` failure.
  *
  * `cmdtail`/`deblankbuf`/`argtable`/`numargs`/`cmd`(+its own
  * `cmdbuf`/`blen` header bytes)/`clicmd`/`dma`/`buf_ptr`/`pdadr`/
@@ -35,6 +44,7 @@
  * its own 0x665-byte cseg once collapsed into the flat memory model.
  */
 #include <stdint.h>
+#include <string.h>
 
 #include "defs.h"
 
@@ -43,6 +53,162 @@
 /* topofcmdloop_once's own 2 real exit destinations */
 #define SUBMIT_GETNXTCMD  0 /* jmp getnxtcmd -- caller should call readbuffer next */
 #define SUBMIT_SUBMITEXIT 1 /* jmp submitexit -- the program terminates */
+
+typedef struct {
+    uint16_t bx, cx;
+} parse_bxcx;
+typedef struct {
+    uint16_t bx, cx;
+} cmd_bxcx;
+extern parse_bxcx parse_entry(uint8_t *mem, uint16_t dx); /* src-c/kernel/parse.c */
+extern cmd_bxcx clicmd_entry(uint8_t *mem, uint16_t dx);  /* src-c/kernel/command.c */
+
+/* a_to_b -- parse a 1- or 2-digit decimal number from dl(1st char)/
+ * dh(2nd char, or ' ' if only one digit was typed). Identical to
+ * src-c/kernel/tmp.c's own copy (same real asm, duplicated into this
+ * file too) -- see that file's own header comment for the derivation.
+ *	output:	returns bl (0-99, or 0xFF on a non-digit) -- bh is never
+ *		consumed by any real caller, same "undefined artifact,
+ *		not modeled" precedent used throughout this port
+ */
+static uint8_t a_to_b(uint8_t dl, uint8_t dh) {
+    uint8_t tens, units;
+    if (dh == ' ') {
+        tens = '0';
+        units = dl;
+    } else {
+        tens = dl;
+        units = dh;
+    }
+    if (units < '0' || units > '9' || tens < '0' || tens > '9') {
+        return 0xFF;
+    }
+    units = (uint8_t)(units - '0');
+    tens = (uint8_t)(tens - '0');
+    return (uint8_t)(tens * 10 + units);
+}
+
+/*
+ * parsefilename -- parse `string` (at `di`) into the FCB at `si`, via
+ * a local PCB.DEF block (SD_SUBMIT_PCB) -- see this file's own
+ * header comment for why this is a real call into `parse_entry` now.
+ */
+static parse_bxcx parsefilename(uint8_t *mem, uint16_t si_fcb, uint16_t di_string) {
+    mem_w16(mem, (uint16_t)(SD_SUBMIT_PCB + pcb_flnmptr), di_string);
+    mem_w16(mem, (uint16_t)(SD_SUBMIT_PCB + pcb_fcbptr), si_fcb);
+    return parse_entry(mem, SD_SUBMIT_PCB);
+}
+
+/*
+ * clierror -- CLI call unsuccessful: analyze and display an error
+ * message, same convention as src-c/kernel/tmp.c's own `clierror`
+ * except for its own final destination: every branch here but
+ * `e_nullcmd` is `jmp submitexit` (`showerr`'s own tail), not `jmp
+ * getnxtcmd` -- see this file's own header comment.
+ *	input:	cx = error code
+ *	output:	returns SUBMIT_GETNXTCMD (e_nullcmd) or SUBMIT_SUBMITEXIT
+ *		(every other error)
+ */
+static int clierror(uint8_t *mem, uint16_t cx) {
+    if (cx == e_nullcmd) {
+        mem[SD_SUBMIT_CMDSENT] = 0;
+        return SUBMIT_GETNXTCMD;
+    }
+    /* memory_ok/pd_ok/fname_ok/load_ok/open_ok/que_ok all just pick a
+     * message (con_write -- boundary stub, no-op) then `jmp
+     * submitexit` via showerr -- nothing to port past that */
+    return SUBMIT_SUBMITEXIT;
+}
+
+/*
+ * notbuiltin -- make the real CLI call: build a CLICB.DEF-shaped
+ * block (SD_SUBMIT_CLICB, reusing SD_SUBMIT_CLICMD's own already-
+ * populated command text directly as its own cmdcb_cmd field, same
+ * adjacency trick as src-c/kernel/tmp.c's own `not_builtin`) and
+ * call `clicmd_entry` (`command.c`) for real.
+ */
+static int notbuiltin(uint8_t *mem) {
+    mem[SD_SUBMIT_CLICB] = 0; /* clicb_net = 0 */
+    mem[SD_SUBMIT_CMDSENT] = 0xFF; /* cmdsent = true (0xFF, not 1) */
+    mem_w16(mem, UDA_WRKSEG, 0); /* ambient-flat, see tmp.c's own header comment */
+    cmd_bxcx r = clicmd_entry(mem, SD_SUBMIT_CLICB);
+    if (r.bx != 0) {
+        return clierror(mem, r.cx);
+    }
+    return SUBMIT_GETNXTCMD; /* falls straight into getnxtcmd */
+}
+
+/*
+ * try_builtin -- check the parsed FCB's own name field against the
+ * built-in commands (USER, PRINTER; `$INCLUDE`'s own real body is
+ * NOT ported -- it needs `sysdatseg`, a real segment value this
+ * file's own un-ported `submit:` one-time setup captures, which
+ * nothing in this reduced scope has access to; the comparison
+ * against it still runs for real below, so a non-`$INCLUDE` command
+ * still correctly falls through to `notbuiltin`, just a real
+ * `$INCLUDE` command itself is not independently testable here).
+ * USER/PRINTER's own `setuser`/`setlist` dispatch is moot regardless
+ * -- same reasoning as `tmp.c`'s own `try_builtin`.
+ *	input:	parseret = notdrive's own parsefilename result (bx)
+ */
+static int try_builtin(uint8_t *mem, uint16_t parseret) {
+    static const uint8_t usercmd[8] = {'U', 'S', 'E', 'R', ' ', ' ', ' ', ' '};
+    static const uint8_t printercmd[8] = {'P', 'R', 'I', 'N', 'T', 'E', 'R', ' '};
+    static const uint8_t includecmd[8] = {'$', 'I', 'N', 'C', 'L', 'U', 'D', 'E'};
+
+    if (memcmp(&mem[SD_SUBMIT_PARSERESULT + 1], usercmd, 8) == 0) {
+        if (parseret != 0) {
+            parse_bxcx pr = parsefilename(mem, SD_SUBMIT_PARSERESULT, (uint16_t)(parseret + 1));
+            if (pr.cx == 0) {
+                (void)a_to_b(mem[SD_SUBMIT_PARSERESULT + 1], mem[SD_SUBMIT_PARSERESULT + 2]);
+                /* mov dl,bl ! call setuser -- never identified, moot */
+            }
+        }
+        /* pruser: print tail (usermsg/getuser/prnum/crlf, all no-op
+         * boundary stubs) -- jmp getnxtcmd */
+        return SUBMIT_GETNXTCMD;
+    }
+
+    if (memcmp(&mem[SD_SUBMIT_PARSERESULT + 1], printercmd, 8) == 0) {
+        if (parseret != 0) {
+            parse_bxcx pr = parsefilename(mem, SD_SUBMIT_PARSERESULT, (uint16_t)(parseret + 1));
+            if (pr.cx == 0) {
+                (void)a_to_b(mem[SD_SUBMIT_PARSERESULT + 1], mem[SD_SUBMIT_PARSERESULT + 2]);
+                /* mov dl,bl ! call setlist -- never identified, moot */
+            }
+        }
+        /* prprinter: print tail, all no-op -- jmp getnxtcmd */
+        return SUBMIT_GETNXTCMD;
+    }
+
+    if (memcmp(&mem[SD_SUBMIT_PARSERESULT + 1], includecmd, 8) == 0) {
+        /* $INCLUDE's own real body is not ported -- see this
+         * function's own header comment */
+        if (parseret != 0) {
+            return SUBMIT_SUBMITEXIT; /* undefined artifact, fixed
+                                        * choice: not a real outcome
+                                        * of this port's own scope */
+        }
+        /* notinclude (no tail): falls through to notbuiltin */
+    }
+
+    return notbuiltin(mem);
+}
+
+/*
+ * goodparse -- notdrive's own parsefilename succeeded: save the
+ * delimiter position, then either check for a built-in command (if
+ * the parsed FCB named no explicit drive) or go straight to the real
+ * CLI dispatch.
+ *	input:	bx = parsefilename's own result
+ */
+static int goodparse(uint8_t *mem, uint16_t bx) {
+    mem_w16(mem, SD_SUBMIT_PARSERET, bx);
+    if (mem[SD_SUBMIT_PARSERESULT] == 0) {
+        return try_builtin(mem, bx);
+    }
+    return notbuiltin(mem);
+}
 
 /*
  * deblank -- collapse every run of spaces/tabs in SD_SUBMIT_CMDTAIL's
@@ -343,18 +509,22 @@ int topofcmdloop_once(uint8_t *mem, uint8_t charin_al, uint8_t defdisk_al, uint8
         return SUBMIT_GETNXTCMD; /* gonextcmd */
     }
 
-    /* notdrive: call parsefilename -- deterministically "fails" (see
-     * header comment), taking the bad-parse tail: `mov cl,126 ! mov
-     * di,offset clicmd ! mov al,' ' ! repne scasb ! mov byte ptr
-     * [di],'$'` -- unlike TMP.A86's own equivalent (which writes its
-     * '$' terminator into a separate savebuf copy), this one scans
-     * clicmd *itself* for its first space and overwrites there, a
-     * real memory effect this port needs to replicate even though
-     * `goodparse` itself stays unreachable. REPNE SCASB always
-     * advances DI once per byte examined, including the one that
-     * matches, so DI ends up one past the found space (or at
-     * clicmd+126 if none of the first 126 bytes is one). */
+    /* notdrive: call parsefilename for real (si=parseresult,
+     * di=clicmd -- note the si/di roles are swapped from this same
+     * call's own use in try_builtin, matching the real asm exactly). */
     {
+        parse_bxcx pr = parsefilename(mem, SD_SUBMIT_PARSERESULT, SD_SUBMIT_CLICMD);
+        if (pr.cx == 0) {
+            return goodparse(mem, pr.bx);
+        }
+        /* bad parse: `mov cl,126 ! mov di,offset clicmd ! mov al,' '
+         * ! repne scasb ! mov byte ptr [di],'$'` -- scans clicmd
+         * itself for its first space and overwrites there (unlike
+         * TMP.A86's own equivalent, which writes into a separate
+         * savebuf copy), then `jmp clierror` for real. REPNE SCASB
+         * always advances DI once per byte examined, including the
+         * one that matches, so DI ends up one past the found space
+         * (or at clicmd+126 if none of the first 126 bytes is one). */
         uint16_t di = SD_SUBMIT_CLICMD;
         uint16_t count = 126;
         while (count > 0 && mem[di] != ' ') {
@@ -365,6 +535,6 @@ int topofcmdloop_once(uint8_t *mem, uint8_t charin_al, uint8_t defdisk_al, uint8
             di++; /* the matching byte itself still advances di */
         }
         mem[di] = '$';
+        return clierror(mem, pr.cx);
     }
-    return SUBMIT_SUBMITEXIT;
 }

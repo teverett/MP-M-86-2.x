@@ -8,15 +8,28 @@
  * cx,f_terminate ! sub dx,dx ! jmp mpmif", a boundary tail-jump from
  * the very first instruction, nothing to port.
  *
- * Every real allocator/deallocator call here goes through the unported
- * `mpmif` trampoline (`f_malloc`/`f_memfree`) and is a boundary stub per
- * docs/src-c.md's convention -- same as MEMORY.MEM's own malloc_entry/
- * mfree_entry (src-c/kernel/memory.c). getmemory/free_memory only ever
- * hand back the boundary-stub's own function code as the error, so
- * every caller's own success path (the real AX/DX getmemory would set
- * on an actual allocation) is unreachable here, exactly as it is in the
- * real reference assembly run the same way -- see mall_try_mau's
- * identical simplification in memory.c for the established precedent.
+ * getmemory's own mpmif(f_malloc) call IS now a real call into
+ * memory.c's already-ported malloc_entry, not a boundary stub --
+ * the real asm's own "push ax/bx/dx/0/0 ! mov dx,sp ! mov ds,ss" trick
+ * isn't a register-passing convention at all: dx/ds:dx just point the
+ * callee at a genuine MPB.DEF block (start/min/max/pdadr/flags) living
+ * on the caller's own stack, which MAU.MEM's mau_split writes
+ * mpb_start back into on success (see src/kernel/MAU.MEM's own "mov
+ * es:mpb_start[si],ax"). getmemory's own trailing "pop ax" after the
+ * call reads that same slot back, not a stale echo of its own input --
+ * so under this port's flat memory model the on-stack block is simply
+ * a fixed scratch MPB at SD_CPMMEM_MPB (defs.h), built before the call
+ * and read back after. mpb_min is never written by anything in the
+ * real chain, so getmemory's own output "dx = length" is genuinely
+ * just an echo of its own min input (matching the real "pop dx"
+ * reading back the same unmodified push) -- not a bug, just how the
+ * real asm itself behaves.
+ *
+ * free_memory's own mpmif(f_memfree) call remains a boundary stub: it
+ * would need mfree_entry (memory.c), whose own mpmif(f_maufree) call
+ * is itself still deferred there (see memory.c's own header comment on
+ * why that one's tail-jump-out-of-two-call-frames shape needs more
+ * care) -- free_memory can't be upgraded until that lands first.
  */
 #include <stdint.h>
 
@@ -26,22 +39,27 @@ typedef struct {
     uint16_t bx, cx;
 } mem_bxcx;
 
+extern mem_bxcx malloc_entry(uint8_t *mem, uint16_t dx);
+
 /*
  * getmemory
- *	input:	ax = start, bx = min, dx = max -- unused here, see header
- *		comment: this always "fails" under the boundary-stub
- *		convention, and no caller ever reads anything but cx
- *	output:	cx = error code (always f_malloc, nonzero)
+ *	input:	ax = start, bx = min, dx = max
+ *	output:	ax = start (as actually allocated), dx = length (== the
+ *		original min input -- see header comment), cx = error code
  */
-static uint16_t getmemory(uint8_t *mem, uint16_t ax, uint16_t bx, uint16_t dx) {
-    (void)mem;
-    (void)ax;
-    (void)bx;
-    (void)dx;
-    /* push the on-stack MCB parameter block ! mov cx,f_malloc ! call
-     * mpmif -- boundary stub, no-op; cx is left holding f_malloc's own
-     * value */
-    return f_malloc;
+typedef struct {
+    uint16_t ax, dx, cx;
+} mem_axdxcx;
+
+static mem_axdxcx getmemory(uint8_t *mem, uint16_t ax, uint16_t bx, uint16_t dx) {
+    mem_w16(mem, (uint16_t)(SD_CPMMEM_MPB + mpb_start), ax);
+    mem_w16(mem, (uint16_t)(SD_CPMMEM_MPB + mpb_min), bx);
+    mem_w16(mem, (uint16_t)(SD_CPMMEM_MPB + mpb_max), dx);
+    mem_w16(mem, (uint16_t)(SD_CPMMEM_MPB + mpb_pdadr), 0);
+    mem_w16(mem, (uint16_t)(SD_CPMMEM_MPB + mpb_flags), 0);
+    mem_bxcx r = malloc_entry(mem, SD_CPMMEM_MPB);
+    mem_axdxcx out = {mem_r16(mem, (uint16_t)(SD_CPMMEM_MPB + mpb_start)), bx, r.cx};
+    return out;
 }
 
 /*
@@ -67,13 +85,15 @@ static uint16_t free_memory(uint8_t *mem, uint16_t dx) {
 mem_bxcx maxmem_entry(uint8_t *mem, uint16_t dx) {
     uint16_t si = dx;
     uint16_t max = mem_r16(mem, (uint16_t)(si + mcb_length));
-    uint16_t cx = getmemory(mem, 0, 0, max);
-    if (cx != 0) {
-        mem_bxcx r = {0xFFFF, cx};
+    mem_axdxcx got = getmemory(mem, 0, 0, max);
+    if (got.cx != 0) {
+        mem_bxcx r = {0xFFFF, got.cx};
         return r;
     }
-    /* mm_gm -- unreachable under the boundary-stub convention, see
-     * header comment */
+    /* mm_gm */
+    mem_w16(mem, (uint16_t)(si + mcb_length), got.dx);
+    mem_w16(mem, (uint16_t)(si + mcb_base), got.ax);
+    mem[(uint16_t)(si + mcb_ext)] = 1;
     mem_bxcx r = {0, 0};
     return r;
 }
@@ -87,12 +107,14 @@ mem_bxcx absmax_entry(uint8_t *mem, uint16_t dx) {
     uint16_t si = dx;
     uint16_t start = mem_r16(mem, (uint16_t)(si + mcb_base));
     uint16_t max = mem_r16(mem, (uint16_t)(si + mcb_length));
-    uint16_t cx = getmemory(mem, start, 0, max);
-    if (cx != 0) {
-        mem_bxcx r = {0xFFFF, cx};
+    mem_axdxcx got = getmemory(mem, start, 0, max);
+    if (got.cx != 0) {
+        mem_bxcx r = {0xFFFF, got.cx};
         return r;
     }
-    /* am_gm -- unreachable, see header comment */
+    /* am_gm */
+    mem_w16(mem, (uint16_t)(si + mcb_length), got.dx);
+    mem_w16(mem, (uint16_t)(si + mcb_base), got.ax);
     mem_bxcx r = {0, 0};
     return r;
 }
@@ -105,12 +127,14 @@ mem_bxcx absmax_entry(uint8_t *mem, uint16_t dx) {
 mem_bxcx cpmalloc_entry(uint8_t *mem, uint16_t dx) {
     uint16_t si = dx;
     uint16_t length = mem_r16(mem, (uint16_t)(si + mcb_length));
-    uint16_t cx = getmemory(mem, 0, length, length);
-    if (cx != 0) {
-        mem_bxcx r = {0xFFFF, cx};
+    mem_axdxcx got = getmemory(mem, 0, length, length);
+    if (got.cx != 0) {
+        mem_bxcx r = {0xFFFF, got.cx};
         return r;
     }
-    /* ca_gm -- unreachable, see header comment */
+    /* ca_gm */
+    mem_w16(mem, (uint16_t)(si + mcb_length), got.dx);
+    mem_w16(mem, (uint16_t)(si + mcb_base), got.ax);
     mem_bxcx r = {0, 0};
     return r;
 }
@@ -124,12 +148,14 @@ mem_bxcx cpmabsa_entry(uint8_t *mem, uint16_t dx) {
     uint16_t si = dx;
     uint16_t start = mem_r16(mem, (uint16_t)(si + mcb_base));
     uint16_t length = mem_r16(mem, (uint16_t)(si + mcb_length));
-    uint16_t cx = getmemory(mem, start, length, length);
-    if (cx != 0) {
-        mem_bxcx r = {0xFFFF, cx};
+    mem_axdxcx got = getmemory(mem, start, length, length);
+    if (got.cx != 0) {
+        mem_bxcx r = {0xFFFF, got.cx};
         return r;
     }
-    /* caa_gm -- unreachable, see header comment */
+    /* caa_gm */
+    mem_w16(mem, (uint16_t)(si + mcb_length), got.dx);
+    mem_w16(mem, (uint16_t)(si + mcb_base), got.ax);
     mem_bxcx r = {0, 0};
     return r;
 }

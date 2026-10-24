@@ -2,8 +2,10 @@
 """Differential test for src-c/kernel/submit.c against a self-contained
 subset of src/rsp/SUBMIT.A86: deblank+fill_argtable (unlabeled code
 right after `submit:`'s own `call openfile`), expand_command
-(`nextchar`/.../`echocommand`), readbuffer, readchar. See submit.c's
-own header comment for why the rest of the file is deferred.
+(`nextchar`/.../`echocommand`), readbuffer, readchar, and (now)
+topofcmdloop_once's own real `goodparse`/`try_builtin`/`notbuiltin`
+dispatch. See submit.c's own header comment for why `$INCLUDE`'s own
+real body and `submit:`'s own one-time setup are still deferred.
 
 SUBMIT.A86 assembles standalone (no wrapper fixture needed -- it has
 no INCLUDEs at all), after fixing all 3 of docs/bugs.md #3's bugs
@@ -19,6 +21,26 @@ uses is relative, so shifting the whole block by a constant preserves
 every internal branch; `deblank`/`fill_argtable`/`expand_command`
 never reference an absolute same-cseg address for anything other than
 boundary-stub print calls).
+
+`topofcmdloop_once`'s own `goodparse`/`try_builtin`/`notbuiltin` were
+previously believed provably unreachable (same claim `tmp.c`'s own
+`goodparse` made, and just as wrong -- see submit.c's own header
+comment for the correction: `parsefilename`/`mpm_clicmd` are real
+calls into `parse.c`'s `parse_entry`/`command.c`'s `clicmd_entry`).
+Exercising them for real needs the exact same two fixes
+test_tmp.py's own run_reference needed: `call_stub_addrs` for every
+print-adjacent routine (`getuser`/`setuser`/`getlist`/`setlist`/
+`prnum`, alongside the already-stubbed `con_write`/`crlf`) to avoid
+`print_ds_string`-class `cs`-relative addressing breaking under the
+`CSEG_BASE` shift, and an unshifted-real-address override for
+`usercmd`/`printercmd`/`includecmd` (cseg-resident DATA `try_builtin`
+compares against by absolute address, same class of problem as
+`usercmd`/`printercmd` in `tmp.c`'s own test). `notbuiltin`'s own
+real `clicmd_entry` call needs `command.c`'s usual supporting fixture
+too (`SD_RLR`/`UDA_WRKSEG`/an MXCli queue with one token) -- see
+test_command.py's own base_memory(), reused here via the same
+`int_hooks`-driven real `ctypes` call test_tmp.py's own
+`make_int_hook` already established (not reproduced in Python).
 """
 import ctypes
 import os
@@ -33,7 +55,8 @@ from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
 SUBMIT_A86 = os.path.join(REPO_ROOT, 'src', 'rsp', 'SUBMIT.A86')
-SUBMIT_C = os.path.join(REPO_ROOT, 'src-c', 'kernel', 'submit.c')
+SUBMIT_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f) for f in
+            ('submit.c', 'command.c', 'que1.c', 'que2.c', 'console.c', 'chario.c', 'parse.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 
 STACK_TOP = 0xFFF0
@@ -64,6 +87,58 @@ PF_CHILDABORT = 0x0800
 PF_CTLC = 0x0080
 PD_ADDR = 0x9000
 
+MPMINT = 224
+MPM_PARSE = 152
+MPM_CLICMD = 150
+
+# command.c's own scratch fixture (tests/src-c/test_command.py's own
+# base_memory(), reused verbatim -- see this file's own header
+# comment)
+SD_RLR = 0xA000
+UDA_WRKSEG = 0xA012
+SD_QLR = 0xA020
+MXCLIQPB = 0xB400
+Q_LINK, Q_FLAGS, Q_MSGLEN, Q_NMSGS, Q_MSGCNT = 0x00, 0x04, 0x0E, 0x10, 0x16
+QF_MX = 0x01
+QPB_QADDR = 0x02
+MXQD = 0x9400  # clear of PD_ADDR (0x9000) above
+
+# Print-adjacent routines genuinely reachable now that goodparse/
+# try_builtin run for real -- stubbed outright, same reasoning as
+# test_tmp.py's own PRINT_STUBS.
+PRINT_STUBS = ('con_write', 'crlf', 'getuser', 'setuser', 'getlist', 'setlist', 'prnum')
+
+
+def add_command_fixture(mem):
+    mem_w16(mem, SD_RLR, PD_ADDR)
+    mem_w16(mem, UDA_WRKSEG, 0)
+    mem_w16(mem, SD_QLR, MXQD)
+    mem_w16(mem, MXQD + Q_LINK, 0)
+    mem_w16(mem, MXQD + Q_FLAGS, QF_MX)
+    mem_w16(mem, MXQD + Q_MSGLEN, 0)
+    mem_w16(mem, MXQD + Q_NMSGS, 1)
+    mem_w16(mem, MXQD + Q_MSGCNT, 1)
+    mem_w16(mem, MXCLIQPB + QPB_QADDR, MXQD)
+
+
+def make_int_hook(lib, c_u8p):
+    def hook(sim):
+        cl = sim.regs['cx'] & 0xFF
+        dx = sim.regs['dx']
+        buf = (ctypes.c_uint8 * 0x10000).from_buffer(sim.mem)
+        ptr = ctypes.cast(buf, c_u8p)
+        if cl == MPM_PARSE:
+            r = lib.parse_entry(ptr, ctypes.c_uint16(dx))
+            sim.regs['bx'] = r.bx
+            sim.regs['cx'] = r.cx
+        elif cl == MPM_CLICMD:
+            r = lib.clicmd_entry(ptr, ctypes.c_uint16(dx))
+            sim.regs['bx'] = r.bx
+            sim.regs['cx'] = r.cx
+        # else: every other real `mpm` call stays a pure no-op, same
+        # as the old blanket int_stub_nums={224} this replaces.
+    return hook
+
 
 def assemble_reference():
     asm = Assembler()
@@ -77,14 +152,31 @@ def assemble_reference():
              'pdadr', 'fcb', 'subfilename', 'cmdsent', 'defdisk',
              'promptutens', 'promptuones', 'promptdisk')
     entries = {name: asm.symtab[name].value for name in names}
-    return code, entries
+    print_stubs = {CSEG_BASE + asm.symtab[name].value for name in PRINT_STUBS}
+    # usercmd/printercmd/includecmd are DSEG-resident DATA (SUBMIT.A86
+    # switches to `dseg` partway through, unlike TMP.A86 -- confirmed
+    # by grep for `^\s*dseg` -- so these three, like every other real
+    # DSEG field this file has, are NOT part of the shifted `cseg`
+    # blob at all) that `try_builtin` compares against by absolute
+    # address -- same "needs its own real content restored post-
+    # shift" treatment as test_tmp.py's own usercmd/printercmd,
+    # just sourced from `dseg` instead of `code` (an earlier version
+    # of this fix read them from `code`/cseg by analogy with
+    # test_tmp.py, which doesn't apply here -- caught because the
+    # bytes that came back weren't the expected text at all).
+    dseg = asm.segment_bytes('dseg')
+    real_names = {}
+    for name in ('usercmd', 'printercmd', 'includecmd'):
+        addr = asm.symtab[name].value
+        real_names[addr] = dseg[addr:addr + 8]
+    return code, entries, print_stubs, real_names
 
 
 def build_c_library():
     lib_path = tempfile.mktemp(suffix='.dylib' if sys.platform == 'darwin' else '.so')
     subprocess.run(
         ['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC',
-         '-I', INCLUDE_DIR, SUBMIT_C, '-o', lib_path],
+         '-I', INCLUDE_DIR, *SUBMIT_C, '-o', lib_path],
         check=True,
     )
     return lib_path
@@ -118,7 +210,7 @@ def to_ctypes(mem):
 
 
 def main():
-    code, e = assemble_reference()
+    code, e, print_stubs, real_names = assemble_reference()
     lib_path = build_c_library()
     try:
         lib = ctypes.CDLL(lib_path)
@@ -132,6 +224,18 @@ def main():
         lib.readchar.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint8, ctypes.c_uint8]
         lib.topofcmdloop_once.restype = ctypes.c_int
         lib.topofcmdloop_once.argtypes = [c_u8p, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8]
+
+        class ParseBxCx(ctypes.Structure):
+            _fields_ = [('bx', ctypes.c_uint16), ('cx', ctypes.c_uint16)]
+
+        class CmdBxCx(ctypes.Structure):
+            _fields_ = [('bx', ctypes.c_uint16), ('cx', ctypes.c_uint16)]
+
+        lib.parse_entry.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.parse_entry.restype = ParseBxCx
+        lib.clicmd_entry.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.clicmd_entry.restype = CmdBxCx
+        int_hook = make_int_hook(lib, c_u8p)
 
         failures = []
 
@@ -326,17 +430,19 @@ def main():
             mem[e['cmd']:e['cmd'] + len(cmdb)] = cmdb
             mem[e['blen']] = len(cmd_text)
             mem_w16(mem, e['numargs'], 0)
+            add_command_fixture(mem)
             image = bytearray(0x10000)
             image[CSEG_BASE:CSEG_BASE + len(code)] = code
             for addr, val in enumerate(mem):
                 if val != 0:
                     image[addr] = val
+            for addr, data in real_names.items():
+                image[addr:addr + len(data)] = data
             sim = I86Sim(image, {'ax': (al << 8) | al, 'sp': STACK_TOP},
                          CSEG_BASE + e['topofcmdloop'],
                          stop_addrs={CSEG_BASE + e['submitexit'], CSEG_BASE + e['getnxtcmd']},
-                         call_stub_addrs={CSEG_BASE + e['mpm'], CSEG_BASE + e['charin'],
-                                          CSEG_BASE + e['con_write'], CSEG_BASE + e['crlf']},
-                         int_stub_nums={224})
+                         call_stub_addrs={CSEG_BASE + e['mpm'], CSEG_BASE + e['charin']} | print_stubs,
+                         int_hooks={MPMINT: int_hook})
             sim.run()
             ref_img = image
             ref_outcome = 1 if sim.ip - CSEG_BASE == e['submitexit'] else 0
@@ -356,6 +462,7 @@ def main():
             port_mem[SD_SUBMIT_CMD:SD_SUBMIT_CMD + len(cmdb)] = cmdb
             port_mem[SD_SUBMIT_BLEN] = len(cmd_text)
             mem_w16(port_mem, SD_SUBMIT_NUMARGS, 0)
+            add_command_fixture(port_mem)
             buf = to_ctypes(port_mem)
             # if the control-C path runs, the real asm's own `and al,5fh`
             # (upper-casing charin's answer) is what actually persists
@@ -388,6 +495,12 @@ def main():
                                True, ord('n'), "")
         run_topofcmdloop_case("control-C pending, answer 'Y' -> sets pf_ctlc, submitexit",
                                True, ord('Y'), "DIR A:")
+        run_topofcmdloop_case("USER builtin, no argument -> getnxtcmd",
+                               False, 4, "USER")
+        run_topofcmdloop_case("USER builtin, with a 1-digit argument -> getnxtcmd",
+                               False, 4, "USER 5")
+        run_topofcmdloop_case("PRINTER builtin, with a 2-digit argument -> getnxtcmd",
+                               False, 4, "PRINTER 12")
 
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")

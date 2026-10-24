@@ -135,8 +135,10 @@ typedef struct {
 #define e_no_pd            0x0C
 #define e_no_cseg          33 /* no CSEG in load file */
 #define e_pd_noterm        35 /* could not terminate process */
+#define e_bad_load         28 /* bad ret. from BDOS load */
 #define e_bad_read         29 /* bad ret. from BDOS read */
 #define e_bad_open         30 /* bad ret. from BDOS open */
+#define e_nullcmd          31 /* null command */
 #define e_abort            40 /* external termination occurred */
 
 /* src/kernel/XIOSCB.DEF */
@@ -756,7 +758,16 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
  * comment above */
 #define SD_TMP_CMDSENT    0xA070 /* byte: true once a CLI command has been sent */
 #define SD_TMP_READ_BLEN  0xA071 /* byte: length of the last console-read command */
+#define SD_TMP_FCB        0xA072 /* byte[32]: parsefilename's own output FCB */
+#define SD_TMP_PARSERET   0xA092 /* word: clicall's own parsefilename result (bx) */
+#define SD_TMP_PCB        0xA094 /* word[2]: parsefilename's own local PCB.DEF block */
+#define SD_CPMMEM_MPB     0xA0A0 /* word[5]: getmemory's own on-stack MPB.DEF block --
+    see cpmmem.c's own header comment on why this is memory, not registers */
 #define SD_TMP_CLICB_CMD  0xA100 /* byte[129]: the command text itself */
+#define SD_TMP_CLICB      (SD_TMP_CLICB_CMD - 1) /* byte: clicb_net, immediately
+                                                     before SD_TMP_CLICB_CMD's own
+                                                     cmdcb_cmd field -- see tmp.c's
+                                                     own header comment */
 #define SD_TMP_SAVEBUF    0xA200 /* byte[128]: clicall's own copy, '$'-terminated */
 
 /* src/rsp/SUBMIT.A86's own DSEG fields src-c/kernel/submit.c touches,
@@ -782,6 +793,12 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
 #define SD_SUBMIT_PROMPTUTENS 0xA8E3 /* byte: prompt's own user-number tens digit (or 13 if none) */
 #define SD_SUBMIT_PROMPTUONES 0xA8E4 /* byte: prompt's own user-number ones digit */
 #define SD_SUBMIT_PROMPTDISK  0xA8E5 /* byte: prompt's own disk-letter character */
+#define SD_SUBMIT_PARSERESULT 0xA8E6 /* byte[36]: notdrive's own parsefilename output FCB */
+#define SD_SUBMIT_PARSERET   0xA90A /* word: notdrive's own parsefilename result (bx) */
+#define SD_SUBMIT_PCB        0xA90C /* word[2]: parsefilename's own local PCB.DEF block */
+#define SD_SUBMIT_CLICB      (SD_SUBMIT_CLICMD - 1) /* byte: clicb_net, immediately
+                                                        before SD_SUBMIT_CLICMD -- see
+                                                        submit.c's own header comment */
 
 /* src/kernel/SYSTEM.DEF */
 #define ulen    0x100 /* size of uda */

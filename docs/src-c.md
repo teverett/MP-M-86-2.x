@@ -107,8 +107,8 @@ immediate load instead of a memory read.
 | `src/kernel/RPL.SUP` | `rpl_entry` | — (the file's one routine is ported, but collapses to its single deterministic `rpl_err` outcome under the boundary-stub convention — `mpmif(f_qopen)`'s own function code, MODFUNC.DEF's `(user*0100h)+135`, is never 0, so `cmp cx,0 ! jne rpl_err` is always taken; the real success path — a hand-built fake far-return stack frame and a `retf` transferring control into a queue-delivered RSP entry point, with no C equivalent at all — is provably unreachable, same reasoning as `CONSOLE.CIO`'s/`CPMMEM.MEM`'s own unreachable branches, see `src-c/kernel/rpl.c`'s own header comment) |
 | `src/rsp/ECHO.A86` | `main`/`loop` (one full pass — see below) | — |
 | `src/rsp/CLOCK.A86` | `clockloop` (one full pass — see below) | — (`clock`'s own one-time setup, `mov ds,sysdat`/`mov bx,tod_offset`, is moot under the flat memory model, same as the DS/ES-switch convention elsewhere — the test starts directly at `clockloop` with `bx` preset instead) |
-| `src/rsp/TMP.A86` | `nextcommand_once` (one full pass — see below) | `tmp:`'s own one-time setup — moot, every operation in it is a boundary-stub call or a register load feeding one; `goodparse` and everything downstream of it (`try_builtin`/`notuser`/`not_builtin`'s own real CLI dispatch) — provably unreachable under the boundary-stub convention, see below |
-| `src/rsp/SUBMIT.A86` | `deblank`+`fill_argtable` (unlabeled code after `submit:`'s own `call openfile`), `expand_command`, `readbuffer`, `readchar`, `topofcmdloop_once` (one full pass — see below) | `submit:`'s own one-time version-check/priority/FCB-open preamble — no observable effect under the boundary-stub convention beyond what `deblank`/`fill_argtable` already cover; `clicall`'s own real CLI dispatch — provably unreachable past `notdrive`'s own `call parsefilename`, same wall `TMP.A86`'s `goodparse` hit, see below |
+| `src/rsp/TMP.A86` | `nextcommand_once` (one full pass through `nextcommand:`/`clicall:`/`goodparse:`/`try_builtin:`/`not_builtin:`/`clierror:` — see below), `a_to_b` | `tmp:`'s own one-time setup — moot, every operation in it is a boundary-stub call or a register load feeding one; `setuser`/`setlist` — never identified, moot regardless (see below) |
+| `src/rsp/SUBMIT.A86` | `deblank`+`fill_argtable` (unlabeled code after `submit:`'s own `call openfile`), `expand_command`, `readbuffer`, `readchar`, `topofcmdloop_once` (one full pass through `topofcmdloop:`/`notdrive:`/`goodparse:`/`try_builtin:`/`notbuiltin:`/`clierror:` — see below), `a_to_b` | `submit:`'s own one-time version-check/priority/FCB-open preamble — no observable effect under the boundary-stub convention beyond what `deblank`/`fill_argtable` already cover; `$INCLUDE`'s own real body — needs `sysdatseg`, a real segment value only `submit:`'s own un-ported one-time setup captures, not available in this reduced scope (the comparison against it still runs for real, so this only matters if a real `$INCLUDE` command is typed); `setuser`/`setlist` — never identified, moot regardless (see below) |
 | `src/kernel/TICK.SUP` | `notick_once`, `tick_once` | — (both of this file's real labels are ported) |
 | `src/kernel/QUE1.RTM` | all 10 routines: `makeq_entry`, `openq_entry`, `deleteq_entry`, `queverify`, `readq_entry`/`creadq_entry`/`readq`, `writeq_entry`/`cwriteq_entry`/`writeq` | — (the whole file is ported; `readq`'s/`writeq`'s own real "wait forever" retry — unconditional call, queue empty/full — is translated faithfully but not exercised by the test, same unexercisable-but-real shape as `cioattach` below/`CPMMEM.MEM`'s `cpmfree_entry`; every other path, including the conditional-and-empty/full immediate-error case, is fully portable and exercised) |
 | `src/kernel/QUE2.RTM` | `rlsmx`, `getqdaddr`, `remqd`, `qspace`, `qrelease` | — (all 5 of this file's routines are ported) |
@@ -128,7 +128,7 @@ immediate load instead of a memory read.
 | `src/kernel/SHARE.MEM` | `share_entry` | — (this file's one routine is ported) |
 | `src/kernel/LOAD.SUP` | `load_finish`, `diskread`, `load_group`, `get_ch_info`, `load`/`load_entry` — see below | `cload_entry`'s own chain-load mode (`bx==1` into `load:`) only — its own real memory-transfer cleanup (`ld_fnext`/`ld_freeit`) depends on `CPMMEM.MEM`'s own `cpmfree_entry` succeeding for a real MAU release, which that file's own port still can't do faithfully (see `cpmmem.c`'s own header comment) |
 | `src/kernel/MEMORY.MEM` | `malloc_entry`, `mfree_entry` (+ internal `mall_try_mau`, `mfree_it`) | — (the whole file is ported; `malloc_entry`'s own `mpmif(f_maualloc)`/`mpmif(f_mlalloc)` are now real internal calls into `mau.c`'s `maualloc_entry`/`ml.c`'s `mlalloc_entry` — both fully ported already — rather than boundary stubs; `mfree_entry`'s own `mpmif(f_maufree)` is a separate, still-deferred upgrade, see `memory.c`'s own header comment for why its own tail-jump-out-of-two-call-frames shape needs more care) |
-| `src/kernel/CPMMEM.MEM` | `maxmem_entry`, `absmax_entry`, `cpmalloc_entry`, `cpmabsa_entry`, `cpmfree_entry` (+ internal `getmemory`, `free_memory`) | `freeall_entry` — one line (`mov cx,f_terminate ! sub dx,dx ! jmp mpmif`), same as `SYSENT.RTM`'s `creat_proc_entry`: nothing to port |
+| `src/kernel/CPMMEM.MEM` | `maxmem_entry`, `absmax_entry`, `cpmalloc_entry`, `cpmabsa_entry`, `cpmfree_entry` (+ internal `getmemory`, now a real call into `memory.c`'s `malloc_entry` — see below) | `freeall_entry` — one line (`mov cx,f_terminate ! sub dx,dx ! jmp mpmif`), same as `SYSENT.RTM`'s `creat_proc_entry`: nothing to port; `free_memory` — still a boundary stub, blocked on `memory.c`'s own still-deferred `mfree_entry` upgrade (see that file's own header comment) |
 | `src/loader/LBDOSIO.A86` | `conbrk`, `conout`, `tabout`, `crlf`, `print`, `func9`, `staret`, `funcret`, `setlret1` | `func1`/`func3`/`func6`/`func7`/`func8`/`func10`/`func11` — each just an `EQU` alias for the bare `return:` label: nothing to port. `func2` is likewise just an alias for `tabout` itself, already ported under its own name |
 | `src/loader/LBDOSNEW.A86` | `func51` (set segment base for disk I/O) | `func50`/`func52`/`func53`/`func54`/`func55`/`func56`/`func57` — each just a separate entry point into the same bare `ret` at the end of this file (`func51`'s own tail falls through all of them), nothing to port |
 | `src/loader/LBDOSDAT.A86` | — | pure data declarations (`DB`/`DW`/`RB`), zero real code — nothing to port, same as `DATA.BDO` |
@@ -2816,3 +2816,205 @@ committing to the ~21k total lines across `src/kernel`+`src/loader`+
   0), not by an outright crash, worth remembering as its own
   category of bug to watch for. Full existing suite stays green;
   `make clean && make build` stays green.
+
+- **`src/rsp/TMP.A86`'s own "provably unreachable" claim was wrong --
+  `goodparse` and everything downstream are now ported for real.**
+  This file's own header comment used to argue `clicall`'s own `call
+  parsefilename` deterministically returns `cx=mpm_parse` (152) under
+  the boundary-stub convention (pre-loaded right before a no-op tail
+  JMP into `mpm`), making `goodparse` unreachable and `parsefilename`
+  itself an unidentified black box. Tracing `mpm_parse` (152) against
+  `src/kernel/MODFUNC.DEF`'s own `f_parsefilename equ (user*0100h)+152`
+  shows it's `src-c/kernel/parse.c`'s own already-ported `parse_entry`
+  (the exact same real target `src-c/kernel/command.c`'s own `cli_pfn`
+  already calls) -- genuinely callable for real, not a dead end.
+  Likewise `not_builtin`'s own `mpm_clicmd` (150) is `command.c`'s
+  already-ported `clicmd_entry`. Both are now wired up for real:
+  `parsefilename` builds a local `PCB.DEF` block and calls
+  `parse_entry`; `not_builtin` builds a local `CLICB.DEF` block
+  (reusing `SD_TMP_CLICB_CMD`'s own already-populated command text
+  directly, via adjacency, rather than copying it) and calls
+  `clicmd_entry`. `goodparse`/`try_builtin`/`clierror` are all ported
+  too; `try_builtin`'s own `setuser`/`setlist` dispatch was never
+  identified, but that turned out not to matter -- their only
+  observable job, under this flat memory model, is a `jmp pruser`/
+  `jmp prprinter` either way, which this port already reaches
+  directly. `a_to_b` is fully self-contained (pure register
+  arithmetic, no `mpm` call at all) and ported alongside them.
+
+  Tested by extending `tests/src-c/test_tmp.py` to drive the real
+  calls from the Python side: ONE `int_hooks` entry on `INT mpmint`
+  inspects `CL` and, for `mpm_parse`/`mpm_clicmd`, makes a genuine
+  `ctypes` call into this same shared library's own `parse_entry`/
+  `clicmd_entry` against `sim.mem` directly (via `ctypes.c_uint8.
+  from_buffer`, a zero-copy view -- writes the C call makes land
+  straight in `sim.mem`), falling through to the old blanket no-op
+  for every other function code. This is the same "wire a real call"
+  precedent `src-c/loader/ldmpm.c`'s own extern call into `init_entry`
+  already established, just driven from the test harness instead of
+  from another C file -- genuinely exercising `command.c`'s own real
+  (and separately, exhaustively tested) `clicmd_entry` logic rather
+  than re-deriving it in Python.
+
+  Making `goodparse` actually reachable surfaced two real bugs in
+  this test's own pre-existing `CSEG_BASE`-shift technique, neither
+  triggered before since nothing used to run that far: (1)
+  `print_ds_string`'s own `mov ax,cs ! mov ds,ax` prologue computes
+  its own addressing basis from the live `cs` register, which a
+  `CSEG_BASE` shift (moving where the *bytes* live in the test's own
+  flat array, not the assembled addresses the code itself computes)
+  can't retroactively fix under this file's own flat/non-segmented
+  addressing -- letting it run for real sent its own `$`-scan hunting
+  through memory that was never populated, spinning for a very long
+  time instead of crashing outright (caught by watching step counts
+  climb into the tens of thousands with no sign of halting, then
+  histogramming which addresses recurred most often to find where).
+  (2) `try_builtin`'s own `mov di,offset usercmd`/`offset printercmd`
+  are absolute references to cseg-resident *data* (not a control-flow
+  target, which survives a shift fine) -- same class of problem,
+  fixed by writing their own real content back to their own
+  unshifted real address in the test's own image, the same treatment
+  `cmdsent`/`read_blen`/`clicb_cmd`/`savebuf` already got. Both fixed
+  by either stubbing the routine outright (the print calls -- true
+  no-ops, no observable effect either way) or restoring the real
+  data (`usercmd`/`printercmd`). 12 cases match (6 new). Full
+  existing suite stays green; `make clean && make build` stays green.
+
+  `src/rsp/SUBMIT.A86`'s own near-identical claim (`clicall`'s real
+  CLI dispatch "provably unreachable past `notdrive`'s own `call
+  parsefilename`") is now suspect for the exact same reason, but not
+  yet re-examined -- a candidate for a future pass.
+
+- **`src/rsp/SUBMIT.A86`'s own identical claim was wrong too --
+  `goodparse`/`try_builtin`/`notbuiltin` ported for real**, the same
+  correction as `TMP.A86`'s own (see that file's own changelog entry
+  just above): `parsefilename`'s real target is `parse.c`'s already-
+  ported `parse_entry`, and `notbuiltin`'s own `mpm_clicmd` is
+  `command.c`'s already-ported `clicmd_entry`. `a_to_b` is ported too
+  (a second, independent copy of the identical real asm `tmp.c`'s
+  own copy already has). `$INCLUDE`'s own real body is the one piece
+  deliberately left out -- it needs `sysdatseg`, a real segment value
+  only `submit:`'s own un-ported one-time setup captures (not
+  available in this reduced scope); the comparison against it still
+  runs for real either way, so a command that *doesn't* name
+  `$INCLUDE` is unaffected, and one that does gets a fixed, "not a
+  real outcome of this port's own scope" result instead of silently
+  mismodeling it.
+
+  Unlike `TMP.A86` (every real path ends in `jmp nextcommand`),
+  `SUBMIT.A86`'s own `clierror` tail (`showerr`) is `jmp submitexit`
+  for every error code except `e_nullcmd` -- `topofcmdloop_once` now
+  reflects that exactly (`SUBMIT_GETNXTCMD` for `pruser`/`prprinter`'s
+  own tails, a successful `clicmd_entry` call, and `e_nullcmd`;
+  `SUBMIT_SUBMITEXIT` for every other `clicmd_entry` failure).
+  `notdrive`'s own bad-parse tail (scanning `clicmd` itself for its
+  first space and overwriting it with `$`, a real memory effect
+  already modeled before this pass) now also calls the real
+  `clierror` with `parsefilename`'s own real error code, instead of
+  unconditionally reporting `SUBMIT_SUBMITEXIT`.
+
+  Reused `tmp.c`'s/test_tmp.py's own fixes verbatim rather than
+  rediscovering them: `call_stub_addrs` for every print-adjacent
+  routine (`con_write`/`crlf`/`getuser`/`setuser`/`getlist`/
+  `setlist`/`prnum`) to avoid the same `cs`-relative-addressing-
+  under-a-`CSEG_BASE`-shift problem, and an unshifted-real-address
+  override for `usercmd`/`printercmd`/`includecmd`'s own actual
+  content. That override needed one more real fix specific to this
+  file, though: `SUBMIT.A86` (unlike `TMP.A86`) switches from `cseg`
+  to `dseg` partway through (confirmed by grep for `^\s*dseg`) --
+  `usercmd`/`printercmd`/`includecmd` are DSEG-resident, not cseg-
+  resident, so their own real content has to come from
+  `asm.segment_bytes('dseg')`, not `code` (cseg). An initial attempt
+  copied them from `code` by analogy with `tmp.c`'s own test and
+  silently read garbage (bytes that happened to be instruction
+  opcodes at that same offset in cseg) -- caught by searching the
+  assembled bytes for the literal string `USER` and finding it
+  nowhere in `cseg` at all, which is what actually prompted checking
+  for a second `dseg` switch in the first place.
+
+  `notbuiltin`'s own real `clicmd_entry` call needed the usual
+  `command.c` supporting fixture (`SD_RLR`/`UDA_WRKSEG`/an MXCli
+  queue with one token), reused verbatim from test_command.py's own
+  `base_memory()`, same as `tmp.c`'s test. All pre-existing
+  `topofcmdloop_once` cases keep passing with no behavior change
+  (none of them happen to name a real RSP queue, so `clicmd_entry`
+  now genuinely runs and genuinely fails the same way the old fake
+  boundary stub used to, for a different, real reason) plus 3 new
+  cases (`USER`/`USER <n>`/`PRINTER <n>`). Full existing suite stays
+  green; `make clean && make build` stays green.
+
+- **`src/kernel/CPMMEM.MEM`'s own `getmemory` was mischaracterized the
+  same way `TMP.A86`/`SUBMIT.A86` were -- its "always fails under the
+  boundary-stub convention" framing was accurate at the time it was
+  written (before `MEMORY.MEM`'s own `malloc_entry` was itself real),
+  but it quietly went stale once `memory.c` landed.** `getmemory`'s own
+  real body (`push cx,cx,dx,bx,ax ! mov dx,sp ! mov ds,ss ! mov
+  cx,f_malloc ! call mpmif`) looked at first like an ordinary register-
+  passing convention this port's own `malloc_entry(mem, dx)` C
+  signature couldn't reproduce (the real routine's own output is
+  documented as "AX = start, DX = length", but `malloc_entry` only
+  returns `bx`/`cx`) -- investigating `MAU.MEM`'s own `mau_split`
+  (`mov es:mpb_start[si],ax`) resolved the mismatch: the "stack push"
+  isn't register passing at all, it's building a genuine `MPB.DEF`
+  block (`mpb_start`/`mpb_min`/`mpb_max`/`mpb_pdadr`/`mpb_flags`) in
+  memory, with `dx`/`ds:ss` just pointing the callee at it -- the same
+  memory `mau_split` writes `mpb_start` back into on success, which
+  `getmemory`'s own trailing `pop ax` then reads back (not a stale
+  echo of its own input). `mpb_min` is never written by anything in
+  the real chain, so `getmemory`'s own documented "DX = length" output
+  is genuinely just an echo of its own `min` input -- confirmed against
+  the real asm, not a port bug.
+
+  Fixed by giving `getmemory` a fixed scratch `MPB.DEF` block
+  (`SD_CPMMEM_MPB`, `defs.h`) instead of a register-passing stub: it
+  writes `start`/`min`/`max` into the block (`pdadr`/`flags` fixed at
+  0, matching the real push sequence), calls `memory.c`'s real
+  `malloc_entry(mem, SD_CPMMEM_MPB)`, and returns `{ax = mpb_start
+  read back, dx = the original min input, cx = malloc_entry's own
+  error code}`. All 4 callers (`maxmem_entry`/`absmax_entry`/
+  `cpmalloc_entry`/`cpmabsa_entry`) now use that real `ax`/`dx` on
+  success to fill in `mcb_base`/`mcb_length` (plus `mcb_ext=1` for
+  `maxmem_entry`'s own `mm_gm`, matching the real asm exactly) instead
+  of falling through an "unreachable" comment. `free_memory`
+  (`cpmfree_entry`'s own tail call) stays a boundary stub -- it would
+  need `memory.c`'s own `mfree_entry`, whose own `mpmif(f_maufree)`
+  call is itself still deferred there (see that file's own header
+  comment on why its tail-jump-out-of-two-call-frames shape needs more
+  care) -- upgrading `free_memory` is blocked until that lands first,
+  not a new gap this pass introduced.
+
+  `tests/src-c/fixtures/cpmmem_wrapper.A86` now bundles `MEMORY.MEM`/
+  `MAU.MEM`/`ML.MEM`/`UTIL.MEM` the same way `memory_mem_wrapper.A86`
+  already does, with `mpmif` upgraded from a flat `call_stub_addrs`
+  target to a real dispatcher for `f_malloc`/`f_maualloc`/`f_mlalloc`
+  (the first of those three is new; the latter two are needed because
+  `malloc_entry`'s *own* real asm body makes its own nested
+  `mpmif(f_maualloc)`/`mpmif(f_mlalloc)` calls, which this wrapper's
+  `mpmif` has to route too, or they silently fall through to a no-op
+  `ret` instead of reaching the real `MAU.MEM`/`ML.MEM` code bundled
+  right there in the same file -- caught by a reference-side `cx`
+  coming back as `f_mlalloc` itself instead of a real error code).
+  `test_cpmmem.py`'s own 4 "always fails" cases are now a real
+  differential instead (no unused MDs -> `e_no_umd`, propagated for
+  real through `malloc_entry` rather than echoing the old hardcoded
+  `f_malloc` sentinel), plus a new `cpmalloc_entry` case exercising the
+  real `mall_ml` path end to end (one unused MD, this PD's own p_mem
+  list empty, MFL root genuinely empty -- fails for a real reason,
+  `e_no_memory`, with the MD freed back, matching `memory.c`'s own
+  established "mlalloc genuinely fails" precedent). A full genuine-
+  *success* case (reaching `mla_makemau`/`mla_initmau`'s own real MAU
+  creation) was deliberately not attempted here -- it needs
+  `tools/i86sim.py`'s `segmented=True` mode (for `ML.MEM`'s own
+  dynamically-computed MAU segment writes) combined with this file's
+  own flat-model `SD_*` scratch addresses, a combination no existing
+  test exercises yet; safer to leave as a clearly-scoped follow-up than
+  to guess at it. Full existing suite stays green; `make clean && make
+  build` stays green.
+
+  This also settles `LOAD.SUP`'s own long-standing note about
+  `cload_entry`'s chain-load cleanup being "blocked on `cpmfree_entry`
+  succeeding for a real MAU release": that blocker is about *freeing*
+  memory (`free_memory`/`mfree_entry`), not allocating it, and remains
+  exactly as blocked as before -- this pass only upgrades the
+  allocate side (`getmemory`/`malloc_entry`). `LOAD.SUP`'s own chain-
+  load mode is still open.

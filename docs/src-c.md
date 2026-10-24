@@ -106,10 +106,10 @@ immediate load instead of a memory read.
 | `src/kernel/CONSOLE.CIO` | all 15 routines (`lstattach_entry`, `clstattch_entry`, `cconattch_entry`, `conattach_entry`, `cioattach`, `lstdetach_entry`, `condetach_entry`, `ciodetach`, `conassign_entry`, `getdefcon_entry`, `getdeflst_entry`, `setdefcon_entry`, `setdeflst_entry`, `mimic_entry`, `unmimic_entry`) + `CHARIO.CIO`'s `getccbadr` (a small dependency, pulled in on its own) | — |
 | `src/kernel/CHARIO.CIO` | all 9 entry points (`conin_entry`, `conout_entry`, `rconin_entry`, `rconout_entry`, `listout_entry`, `constat_entry`, `dirio_entry`, `conwrite_entry`, `conprint_entry`, `conread_entry`) + 20 internal routines (`rawinit`, `coninit`, `getconnum`, `attach`, `echoc`, `conbrk`, `chkctl`, `control_p`, `prcsmsg`, `prname`, `conout`, `compout`, `ctlout`, `tabout`, `pspace`, `pbacksp`, `pcr`, `crlf`, `crlfp`, `conin`) | `stdout` — its own `conoutf`/`listf` calls are both no-ops under the boundary-stub convention regardless of which branch is taken, so it collapses to nothing observable; inlined as a comment in `conout`'s own mimic-forwarding branch instead of a separate function, see that file's own header comment |
 | `src/kernel/COMMAND.SUP` | `shifttail`, `fileopen`, `user_retf`, `clicmd_entry` (+ internal `cli_pfn`, `cli_checkque`, `cli_fload`, `cli_gopen`, `cli_rmpd`, `clicmd_exit`, `prchar`/`crlf`/`prnum`/`prtime`/`prdisk`/`write_cstr`/`prcsm`/`prnam`/`prtyp`/`pruser`/`prcusp`/`prfilnam`/`conasn`) — see below | `chain_entry` itself, always `dx==0` into `clicmd_entry` (i.e. always `cli_chain==true`) — its own chain-mode UDA copy (`cli_fload`'s own `cli_ld1` block) dynamically switches `DS`/`ES` to the newly loaded process's own UDA segment, the same real segment-relative-addressing gap already solved for `PROC.RTM`/`ML.MEM`/`MAU.MEM`/`SHARE.MEM`, just not applied here, since `clicmd_entry`'s own ordinary (non-chain) path is the far more common case and needs none of it; `cli_gopen`'s own real success path past `prfilnam` (loading the program and creating its process) — provably unreachable under `fileopen`'s own fixed, always-failing result (see `command.c`'s own header comment), so not translated past that point |
-| `src/kernel/FILE1.BDO` | `pererror`/`roderror`/`roferror`/`selerror` (+ internal `goerr`), `move`, `selectdisk`, `home`, `PASS_ARECORD`, `rdbuff`, `wrbuff`/`wrbufflg` (+ internal `diocomp`), `seekdir`/`seek`, `dmposition`, `GET_DMA`, `getdm`, `bdos_index`, `alloct`, `atran`, `GET_ATTS`, `GET_S1`, `GET_RRA`, `GET_RCNTA`, `getexta`, `gtfcba`, `getfcb`, `setfcb`, `cmpecs`/`CMPEC0`, `CHKSUM_FCB`, `SET_CHKSUM_FCB`, `RESET_CHECKSUM_FCB`, `CHEK_FCB`, `setcdisk`, `nowrite`, `setro`, `ckrodir`/`ckrofile`/`RO_TEST`, `checkwrite`, `getdptra`, `getmodnum`, `clrmodnum`, `CLR_EXT`, `setfwf`, `compcdr`, `setcdr`, `rddirbuf`, `setdata`/`setdir`/`setdma`, `dirtouser`, `MAKE_FCB_INV`, `CHK_INV_FCB`, `TST_INV_FCB`, `endofdir`, `setenddir`, `getallocbit`, `setallocbit`, `checksum`/`newchecksum`, `rddir`/`rddir0`, `wrdir` (the last 3 were blocked on `FILE3.BDO`'s own `FLUSH_FILE0`/`FLUSH_FILES`, now resolved — see that file's own status-table row; `subdh`, `checksum`'s own size check, folds directly into an `if` there instead of a standalone function) | `CHECK_FCB` (+ `CHEK_FCB`'s own MPM branch calling it) — its own `PACK_SDCNT`/`SEARCH_OLIST` dependency is since ported (`src-c/kernel/file3.c`), but it also calls `CLOSE1` (`FILE2.BDO`), which cascades into `CLOSE_FCB`/`GET_DIR_EXT`/`RESTORE_RC`/`srch`/`getdptra` -- not scoped yet, so still deferred |
-| `src/kernel/FILE2.BDO` | `GET_NALBS`, `getblock` (+ internal `lefttst`/`righttst`/`rblok`/`rblok0`) | `SEARCH`/`SEARCHN`/`DELETE`/`RENAME`/`OPEN`/`MAKE` and the rest of the file (80+ labels) — all route through `srch`, which calls `rddir` (`FILE1.BDO`'s own deferred routine, blocked transitively by `FLUSH_FILE0`'s real segment-relative-addressing gap, `FILE3.BDO`); `GET_DIR_EXT`/`RESTORE_RC` are themselves clean, self-contained FCB arithmetic, but their only real caller `CLOSE_FCB` (part of `CLOSE1`) also calls `srch` — porting them alone wouldn't un-defer anything |
-| `src/kernel/FILE3.BDO` | `PACK_SDCNT`, `COMPARE`, `SEARCH_OLIST`/`SEARCH_LLIST`/`SEARCHN_LIST` (+ internal `search_listo`), `DELETE_ITEM`, `CREATE_ITEM`, `SET_OLIST_ITEM`, `TST_TBL_LMT`, `REMOVE_LOCKS`, `FLUSH_FILES`/`FLUSH_FILE0`, `INC_PDCNT` | `TST_OLIST`/`CHK_OLIST`/`PR_TERM` — `CHK_OLIST` calls the still-unported `openx06`/`compare_pds` and relies on its own caller having pushed a word for it to `pop` partway through (an implicit calling convention, not a boundary stub); `PR_TERM` calls the still-unported `func48`; one further routine (not identified by name) uses `std` (now resolvable, `tools/i86sim.py` tracks the direction flag — not reconned this pass); the rest of the file not reconned this pass |
-| `src/kernel/FILE4.BDO` | `func24`, `func25`, `func29`, `func32`, `FUNC44`, `FUNC45`, `func51`, `func52` | `func13`-`func23`, `func30`, `func33`-`func43`, `FUNC46`, `FUNC48` — all route through `srch`/`rddir`, `CURSELECT`/`initialize`, `CHECK_FCB`, or `FLUSH_FILES`, all transitively blocked by `FLUSH_FILE0`'s real segment-relative-addressing gap (`FILE3.BDO`); `GOBACK` — a 2-instruction tail jump into `BDOSIF.BDO`'s own module-dispatch epilogue (`BDOS_RETURN`), the same jump-table-dispatcher class already deferred elsewhere, not worth porting alone; the rest of the file not reconned this pass |
+| `src/kernel/FILE1.BDO` | `pererror`/`roderror`/`roferror`/`selerror` (+ internal `goerr`), `move`, `selectdisk`, `home`, `PASS_ARECORD`, `rdbuff`, `wrbuff`/`wrbufflg` (+ internal `diocomp`), `seekdir`/`seek`, `dmposition`, `GET_DMA`, `getdm`, `bdos_index`, `alloct`, `atran`, `GET_ATTS`, `GET_S1`, `GET_RRA`, `GET_RCNTA`, `getexta`, `gtfcba`, `getfcb`, `setfcb`, `cmpecs`/`CMPEC0`, `CHKSUM_FCB`, `SET_CHKSUM_FCB`, `RESET_CHECKSUM_FCB`, `CHEK_FCB`, `setcdisk`, `nowrite`, `setro`, `ckrodir`/`ckrofile`/`RO_TEST`, `checkwrite`, `getdptra`, `getmodnum`, `clrmodnum`, `CLR_EXT`, `setfwf`, `compcdr`, `setcdr`, `rddirbuf`, `setdata`/`setdir`/`setdma`, `dirtouser`, `MAKE_FCB_INV`, `CHK_INV_FCB`, `TST_INV_FCB`, `endofdir`, `setenddir`, `getallocbit`, `setallocbit`, `checksum`/`newchecksum`, `rddir`/`rddir0`, `wrdir` (the last 3 were blocked on `FILE3.BDO`'s own `FLUSH_FILE0`/`FLUSH_FILES`, now resolved — see that file's own status-table row; `subdh`, `checksum`'s own size check, folds directly into an `if` there instead of a standalone function), `check_fcb1`/`check_fcb` (`CHECK_FCB1`/`CHECK_FCB` — `CLOSE1` is ported now too, `src-c/kernel/file2.c`; `CHECK_FCB1`'s own `POP BX ;DISCARD RETURN ADDRESS` trick, same category as `PARSE.SUP`'s own `delim`, is translated as a plain boolean return instead — see `check_fcb1`'s own header comment for the full calling-convention writeup; `CHECK_FCB` is NOT dead, contrary to an earlier revision of this comment — `FILE4.BDO`'s own `func20`/`func21` are its own two real callers, both ported now too), non-`static` `dmposition`/`getdm`/`diocomp` (cross-file calls from `file3.c`'s own `diskwrite`/`func48`), and now `set_cdisk1`/`test_vector1` (split out of `setcdisk`/`test_vector` to take an explicit bit-position/shift-amount instead of always reading `BD_SELDSK`, for `file3.c`'s own `diskreset`) | — (every routine in this file is now ported) |
+| `src/kernel/FILE2.BDO` | `GET_NALBS`, `getblock` (+ internal `lefttst`/`righttst`/`rblok`/`rblok0`), `SEARCH`/`SEARCHN` (`search`/`search1`/`searchn`, + internal `searchi`/`searchi1`/`compext`/`swap_sdcnt`), `CLOSE`/`CLOSE1` (`close`/`close1`/`close_fcb`/`seekcopy`, + internal `get_dir_ext`/`restore_rc`/`set_rc`/`merge_word`/`merge_byte`, the last 3 now non-`static` for `FILE3.BDO`'s own `rseek`) — these 3 clusters ported but **not exercised by a differential test**, see `file2.c`'s own header comment: their own real cseg footprint, in the combined FILE1-4.BDO wrapper, runs well past 0xc00, directly overlapping where DATA.BDO's own dseg-relative fields (`BD_INFO`/`BD_SRCHA`/etc, the very fields these routines read/write) resolve to — code and the data it operates on colliding at the same flat address, not fixable by relocating just one side the way every earlier SD_RLR-style gap was; `initialize` (+ internal `scndm`/`test_dir`), `MAKE` (`make`, + internal `set_dcnt_dblk`/`copy_dir0`/`copy_dir2`), `DELETE` (`delet`, + internal `cpydirloc`/`init_xfcb_search`/`init_xfcb_search1`/`chk_wild`/`does_xfcb_exist`/`delete1_entry`/`delete2_entry`), `RENAME` (`rename_`, + internal `check_wild`/`check_wild0`/`copy_user_no`/`copy_dir`), `OPEN`/`OPEN1`/`opencopy` (its real top-level entry point is `FILE4.BDO`'s own `func15`, see that file's own row below), `openreel` (+ internal `sdcnt_eq_xdcnt`, non-`static` for `FILE3.BDO`'s own `fix_olist_item`), `delet0` (non-`static` for `FILE4.BDO`'s own `func22`/MAKE), and now `indicators` (non-`static` for `FILE4.BDO`'s own `func30`) — `initialize`/`make`/`set_dcnt_dblk`/`openreel`/`sdcnt_eq_xdcnt` confirmed clear of the DATA.BDO collision via `--symbols` (0x0a8a-0x0b74, 0x10b8-0x112c, 0x114d-0x11ed, and 0x10ce respectively, all outside dseg's own 0-0x1000 span), but `copy_dir0`/`copy_dir1`/`copy_dir2` (0xe50-0xe6d) and `open`/`OPEN1`/`opencopy` (0xf34-0xf3d) and `SWAP` (0xd1d) land inside it, same as `CLOSE1`'s own cluster, and `delet`/`rename_` weren't checked either way; no differential tests written for any of these yet either way (time, not always a technical blocker). `delet`'s own single-pass branch does `jmps delet0` right after `ckrodir`, relying on `ckrodir`'s own real ZF there being an incidental side effect of `RO_TEST`'s own `ADD BX,ROFILE` (always leaves ZF clear in practice) rather than a real not-found check -- not modeled as a flag, this port just always takes that branch's own fixed destination directly, see `delet`'s own header comment. `delet`'s own `DELETE1` label became its own function, `delete1_entry` (+ `DELETE2`'s own `delete2_entry`), since `rename_`'s own real asm calls straight into the middle of `DELETE`'s body as an ordinary subroutine. `searchi`/`SET_DCNT_DBLK`/`CHECK_WILD`/`SWAP`/`sdcnt_eq_xdcnt`/`COMPEXT`/`GET_DIR_EXT`/`RESTORE_RC`/`SET_RC` all made non-`static` for cross-file calls into them (the last 4 for `FILE3.BDO`'s own `rseek`). `openreel`'s own real `call make` is followed by a `jz openerr` that tests a flag `make`'s own tail (`setfwf`'s `or al,fwfmsk`) can never leave clear -- not modeled, same "unreachable" precedent as `cli_gopen` | 30+ remaining labels, not yet individually scoped |
+| `src/kernel/FILE3.BDO` | `PACK_SDCNT`, `COMPARE`, `SEARCH_OLIST`/`SEARCH_LLIST`/`SEARCHN_LIST` (+ internal `search_listo`), `DELETE_ITEM`, `CREATE_ITEM`, `SET_OLIST_ITEM`, `TST_TBL_LMT`, `REMOVE_LOCKS`, `FLUSH_FILES`/`FLUSH_FILE0`, `INC_PDCNT`, `CURSELECT` (+ internal `select_`), `TST_OLIST`/`CHK_OLIST` (+ internal `chk_olist0`), `COMPARE_PDS`, `CHK_PASSWORD`/`CHK_PWS` (+ internal `get_dir_mode`/`cmp_pw`/`get_xfcb`/`get_xfcb0`/`chk_pw`), and now `OPEN`'s own remaining dependencies: `SET_SELDSK`, `reselect`, `parsave`/`parsave33`/`parsave33r` (the first two really BDOSIF.BDO's own, ported here for lack of a `bdosif.c`), `COPY_DMA_IN`/`COPY_DMA_OUT`, `STAMP1`/`STAMP2` (+ internal `stamp3`), `COUNT_OPENS`, `CREATE_OLIST_ITEM`, `FIX_OLIST_ITEM` (`MAKE`'s own `openreel`, `file2.c`), and now `diskread`/`sqread`, `diskwrite`/`sqwrite` (+ internal `test_disk_fcb`/`test_lock`/`move_arecord`/`reset_fwf`), `chk_xfcb_password1`, `init_xfcb`/`init_xfcb0`, and `set_pw` (`FILE4.BDO`'s own `func19`-`func23`, see that file's own row below), `diskreset` (`func13`/`func14`/`func37`), `rseek`/`rseek1` (the latter now split out for `FILE4.BDO`'s own `func40`), `parsave36`/`parsave36r`, `rdread`, `rdwrite` (`FILE4.BDO`'s own `func33`/`func34`), `getfilesize`/`setrandom` (+ internal `cmperr`, `FILE4.BDO`'s own `func35`/`func36`), `tmp_select` (`FILE4.BDO`'s own `func46`), and now `lock_` (+ internal `incr_rr`/`save_rr`/`reset_rr`, `count_locks`, `check_free`, `get_lockadd`, `lock_err_apply`, `free_lock`, `set_lock`, `FILE4.BDO`'s own `func42`/`func43`) — `CURSELECT` checked clear of the DATA.BDO collision (resolves to 0x15e3+, past dseg's own 0x1000-byte length entirely), and so is this pass's entire new cluster (`func15`'s own row below has the detail), but none of these have a differential test yet. An earlier revision of this comment claimed `CHK_OLIST` "relies on its own caller having pushed a word for it to pop partway through" -- re-reading it closely this pass, that's wrong: the `pop dx`/`push dx` pair around its own `compare_pds` call is just ordinary register-save plumbing (freeing a register across a call, then restoring it before any real `ret`), not an implicit-caller convention; `openx06` (`FILE4.BDO`) and `compare_pds` are both ported now; `chk_pw`'s own `CHK_PW1` tail never returns normally (same as `openx06`), so `chk_pw`/`chk_password`/`chk_pws` all return a plain boolean instead of literally discarding anything, same convention `check_fcb1` established; `get_dir_mode`/`get_xfcb`/`cmp_pw` all made non-`static` for `func15`'s own cross-file calls into them | `PR_TERM` — calls the still-unported `func48`; one further routine (not identified by name) uses `std` (now resolvable, `tools/i86sim.py` tracks the direction flag — not reconned this pass); `TMP_SELECT`/`XCURSELECT`/`RESELECTX` (callers *into* `CURSELECT`/`reselect`, not part of them) — not reconned this pass; the rest of the file not reconned this pass |
+| `src/kernel/FILE4.BDO` | `func24`, `func25`, `func29`, `func32`, `FUNC44`, `FUNC45`, `func51`, `func52`, `SET_ARET`/`openx06`, `func15` (BDOS OPEN) + its own `OPENX`/`OPENX0`-`OPENX09` cascade, `func16` (BDOS CLOSE) + `FUNC48` (flush buffers), `func17`/`func18` (search for first/next occurrence of a file, + internal `csearch`/`reselectx`), and now `func19` (delete), `func20`/`func21` (sequential read/write), `func22` (MAKE), `func23` (RENAME) — `func16` replicates `CHECK_FCB1`'s own push/pop convention by hand too, mapping straight onto `check_fcb1`'s boolean return since its own fallback target (`CLOSE00`) is a trivial `set_aret`-and-return; `func17`/`func18`'s own shared `CSEARCH` always runs `dirtouser` after `search`/`searchn` via a manual stack trick (unconditional, unlike every other such trick in this port); `func20`/`func21` are `CHECK_FCB`'s own two real callers (an earlier revision of this comment wrongly called `CHECK_FCB` dead, see `check_fcb1`'s own header comment, `file1.c`); `func22` reuses `func15`'s own `OPENX1`/`OPENX03`/`OPENX08` cascade directly (refactored into their own functions for this); each of `func19`-`func23` calls into `file2.c`'s own colliding `close`/`close1`/`search`/`searchn`/`delet`/`rename_`/`open` clusters somewhere in its chain, so none of them get a new differential test either, same as `func15`; and now `func13`/`func14` (reset disk system/select disk info) + `func37` (reset drive, + internal `reset_37`) — reuse `FILE3.BDO`'s own new `diskreset` and `file1.c`'s own `TEST_VECTOR1`/`SET_CDISK1`, both split out of `test_vector`/`setcdisk` to take an explicit shift-amount/bit-position instead of always reading `BD_SELDSK`; `func13` calls `RESET_37` directly (`func37`'s own real continuation, same "call into the middle" pattern as `rename_`'s own `CALL DELETE1`); `TEST_VECTOR1`/`SET_CDISK1` land inside the DATA.BDO collision range, so this cluster gets no new differential test either, despite `diskreset`/`func13`/`func14`/`func37` themselves being individually clear of it. `func38`/`func39`/`FUNC41`/`FUNC47`/`FUNC49`/`FUNC50` have no body of their own at all (`EQU FUNCRET`, a dispatch-table alias onto `BDOSIF.BDO`'s own empty `funcret`), nothing to port; and now `func33`/`func34` (random read/write) — thin wrappers (`parsave36r` + `CHECK_FCB`, one of its own real callers too, same as `func20`/`func21`, + a tail call into `FILE3.BDO`'s own `rseek`-based `rdread`/`rdwrite`); clear of the collision themselves, but `parsave36` (lands inside it, same as `parsave`/`parsave33`) doesn't, so no new differential test; and now `func30` (set file indicators) — another thin wrapper (`parsave33`/`copy_dma_in`/`CHECK_WILD`/`RESELECTX`/`CHK_PASSWORD` + a tail call into `FILE2.BDO`'s own `indicators`), clear of the collision itself but `indicators` isn't; and now `func35`/`func36` (file size, set random record) — thin wrappers around `FILE3.BDO`'s own `getfilesize`/`setrandom`; `func35` calls into `file2.c`'s own colliding `search`/`searchn` transitively, but `func36`/`setrandom`/`cmperr` don't touch that cluster at all, a legitimate (if not yet written) differential-test candidate; and now `func40` (write random with zero fill) + `FUNC46` (get disk free space) — `func40` calls `rseek1`/`diskwrite` directly (not `rseek`/`rdwrite`, which would re-zero `BD_SEQIO`); `FUNC46` counts zero bits in the disk's own allocation vector via `FILE2.BDO`'s own `GET_NALBS`, converting block count to record count in a wider type instead of chasing the real asm's own split 16+8-bit shift; both land clear of the collision, but `diskwrite`/`GET_NALBS` don't, so no new differential tests; and now `func42`/`func43` (lock/unlock record) — thin wrappers into `FILE3.BDO`'s own `lock_`; `LOCK_PERR` (the real asm's own `MOV SP,LOCK_SP` stack-unwind entry) turned out to be provably dead code, nothing anywhere calls it, so the whole cluster's own manual-stack trick reduces to the ordinary `POP`/`POP`-discard category already modeled elsewhere, no real stack manipulation needed. **`FILE4.BDO` is now ported in full** — every real BDOS dispatch function has a C counterpart; `func38`/`func39`/`FUNC41`/`FUNC47`/`FUNC49`/`FUNC50` are bare `EQU FUNCRET` dispatch-table aliases with no body of their own (straight onto `BDOSIF.BDO`'s own empty `funcret: ret`), and `GOBACK` is a 2-instruction tail jump into `BDOSIF.BDO`'s own module-dispatch epilogue (`BDOS_RETURN`) — both out of scope by definition, not "remaining work" | — (every routine in this file is now ported) |
 | `src/kernel/DATA.BDO` | — | pure data (BDOS-wide scratch fields + the `XERR_LIST` error-message table) — zero real code, nothing to port |
 | `src/kernel/BDOSIF.BDO` | — | `init`/`entry`/`getdiskmx`/`CALL_BDOS`/the whole SHELL mechanism (`SHELL`/`CBDOS`/`SHELL_ERR`/`SHELL_RTN`/`INCR_RR`/`SAVE_RR`/`RESET_RR`/`TST_WRT`/`MULT_IO`/`COMPARE_RECS`/`BDOS_RETURN`) — this module's own central dispatch, needing far CALL/RET support (`callf cs:dword ptr .supervisor`/`.xiosmod`) that doesn't exist yet, the same deferred class as `MEMIF.MEM`/`CIOIF.CIO`/`RTMIF.RTM`/`SUPIF.SUP`; `XCRLF`/`XPRINT`/`staret`/`funcret`/`setlret1`/`parsave`/`parsave33`/`parsave36`/`parunsave`/`entryzero`/`mpmif`/`xiosif`/the `bootf`-family boundary stubs (`homef`/`seldskf`/.../`flush`) — each either collapses to register setup before a boundary-stub tail call (already accounted for directly inline in `file1.c` where it matters, e.g. `staret`'s own effect) or is transitively blocked by the same `entry:`/SHELL machinery (`parsave`/`parunsave`'s own `SHELL_FLAG` dependency); read in full, nothing left to port |
 | `src/kernel/UTIL.MEM` | `getmd`, `freemd` | — (both of this file's routines are ported) |
@@ -1563,3 +1563,746 @@ committing to the ~21k total lines across `src/kernel`+`src/loader`+
   `test_file1.py`'s own `checksum`/`rddir`/`wrdir` cases, still passes.
   `CHECK_FCB` is the only routine in `FILE1.BDO` still genuinely
   deferred, blocked on `FILE2.BDO`'s own still-unported `CLOSE1`.
+- **`src/kernel/FILE2.BDO`'s `SEARCH`/`SEARCHN` (`search`/`search1`/
+  `searchn`, + internal `searchi`/`searchi1`/`compext`/`swap_sdcnt`).**
+  Deferred in an earlier pass only because `rddir` was -- now that
+  `rddir`'s own real segment-relative-addressing gap is resolved (see
+  the `FILE1.BDO`/`FILE3.BDO` entries above), this ports the whole
+  cluster: the XFCB (extended-FCB) special case, the per-character
+  match loop (`srchloop`/`srchext`/`srchok`/`SEARCHNM`), and the
+  "user 0" fallback pass (`USER_ZERO_PASS`/`swap_sdcnt`).
+
+  Along the way, `tools/i86sim.py` gained `jmp_stub_addrs`: addresses
+  that, when reached by a near JMP, are treated as an immediate RET
+  instead of actually jumping there -- for a routine whose own real
+  tail end is a JMP (not a CALL) into an unported boundary that real
+  hardware eventually returns through normally (`seek`'s own final
+  `jmps setsecf`, reached via `seekdir`'s `call seekdir` from
+  `rddir0` -- `searchn`'s own very first directory-record read always
+  takes this exact path, the first routine to need it; `call_stub_addrs`
+  alone only catches the CALL case).
+
+  Despite that fix, this cluster ended up **not exercised by a
+  differential test** -- the first on this project to be translated
+  faithfully but left untested. `searchn`'s own real cseg footprint,
+  in the combined FILE1-4.BDO wrapper (`tests/src-c/fixtures/
+  file1_wrapper.A86`/`file2_wrapper.A86`), runs well past where
+  DATA.BDO's own dseg-relative fields start (0xc00) -- confirmed via
+  `--symbols`, `SRCHN1` (one of `searchn`'s own internal branch
+  targets) resolves to 0xc11, a few bytes before `BD_INFO`'s own real
+  address (0x0c17). On real hardware this is harmless (cseg and dseg
+  are different physical segments), but `tools/i86sim.py` flattens
+  both into one 64KB array at these same raw offsets -- confirmed
+  directly: writing a test FCB pointer into `BD_INFO` overwrites
+  `searchn`'s own real instruction bytes at that exact flat address,
+  and the reference run starts executing its own operand data as
+  code. Unlike every earlier SD_RLR-style gap, relocating just the
+  *data* side doesn't work here, since the *code* (`searchn`'s own
+  body) is the other half of the same collision. See `file2.c`'s own
+  header comment for the full writeup and why a quick fix (a smaller,
+  rescoped wrapper) isn't straightforward either. `get_nalbs`/
+  `getblock`'s own 5 pre-existing differential-test cases still pass,
+  unchanged.
+- **`src/kernel/FILE2.BDO`'s `CLOSE`/`CLOSE1` (`close`/`close1`/
+  `close_fcb`/`seekcopy`, + internal `get_dir_ext`/`restore_rc`/
+  `set_rc`/`merge_word`/`merge_byte`).** This was `FILE1.BDO`'s own
+  long-standing blocker for `CHECK_FCB` -- deferred only because it
+  called `srch`, ported in the entry just above. Ports the disk-map
+  merge `CLOSE_FCB` does against the matching directory entry
+  (single-byte and double-byte map variants both), the backward
+  disk-map scan in `GET_DIR_EXT` (whose own real asm comment, "BX =
+  .FCB(VRECORD)", is wrong -- confirmed against `file1.c`'s own
+  `gtfcba`/`getfcb` that its real output is `.fcb(nxtrec)`, which is
+  what this actually starts from), and the record-count reconciliation
+  at the end of a successful merge (an MPM-specific "another process
+  may have extended this file, keep the higher reccnt" step). `close`
+  itself (the real F_CLOSE BDOS function, a 2-check wrapper around
+  `close1`) is ported too, nothing left deferred in its way. Same
+  outcome as `search`/`search1`/`searchn` just above: translated
+  faithfully, `make build` and the full existing suite stay green, but
+  **not exercised by a differential test**, for the identical reason
+  (this cluster's own real cseg footprint lands even deeper into
+  DATA.BDO's own dseg-field range: `close`=0xfa8 through `CLOSE2`'s
+  own merge-loop labels at 0x1023-0x10b7).
+
+  `CHECK_FCB` itself stays deferred, but for its own reason now, not
+  `CLOSE1`'s: on its "invalid checksum, try a partial close" path it
+  does `POP BX ;DISCARD RETURN ADDRESS`, a deliberate manual stack-pop
+  (same category of trick as `PARSE.SUP`'s own `delim`, see
+  `parse.c`'s header comment) that returns one call frame higher than
+  its own direct caller -- a separate piece of work, left for its own
+  pass.
+- **`src/kernel/FILE1.BDO`'s `CHECK_FCB1`/`CHECK_FCB` -- the
+  complication flagged in the entry just above, resolved in the same
+  session.** Reading the real asm turned up exactly what the `POP BX`
+  was for: both of `FILE4.BDO`'s own real call sites (its `OPEN`/
+  `CLOSE` MPM branches, not yet ported) manually `PUSH` the address
+  they want control to land at instead of their own normal return
+  address, right before `CALL CHECK_FCB1`, and `POP` it back off
+  immediately after -- a callee-discards-its-own-return-address error
+  jump, same mechanism as `PARSE.SUP`'s own `delim`. Translated the
+  same way that file's own header comment describes: `check_fcb1`
+  just returns a plain `0`/`1`, and any future port of `FILE4.BDO`'s
+  own two call sites will need to replicate the push/pop by hand (an
+  ordinary early-return in C instead) -- documented in `check_fcb1`'s
+  own header comment in full, since this is now the 2nd routine in
+  this tree needing that writeup (after `delim`'s own). `CHECK_FCB`
+  itself (the version that resets `BD_CHECK_FCB_RET=false` before
+  falling into `CHECK_FCB1`) is provably dead -- neither real call
+  site reaches it, both set `BD_CHECK_FCB_RET=true` and call
+  `CHECK_FCB1` directly -- but it's translated anyway, since doing so
+  cost one line. This closes out `FILE1.BDO`: every routine in that
+  file is now ported. `check_fcb1`'s own cross-file call into
+  `close1` (`src-c/kernel/file2.c`) is a new dependency file1.c
+  didn't have before, so `tests/src-c/test_file1.py`'s/
+  `test_file3.py`'s own `build_c_library` calls needed `file2.c`
+  added to their own link lists. Full existing suite stays green; no
+  new differential-test cases (same reasoning as `CLOSE1`'s own entry
+  above -- `CHECK_FCB1`'s own real address in this combined bundle
+  lands in the same DATA.BDO-colliding range).
+- **`src/kernel/FILE2.BDO`'s `initialize` (+ internal `scndm`/
+  `test_dir`) and `src/kernel/FILE3.BDO`'s `CURSELECT` (+ internal
+  `select_`).** This un-blocks `FILE2.BDO`'s own `DELETE`/`RENAME`/
+  `OPEN`/`MAKE` and most of `FILE4.BDO`'s remaining `func*` entries,
+  which routed through one or both of these (plus `srch`/`CHECK_FCB`,
+  both already ported in earlier entries above).
+
+  `curselect`'s own real tail (`SELECT`'s disk-login/reinit body, and
+  the final `jmp initialize`) is translated faithfully but never
+  reached: `selectdisk`'s own real BDOS-disk-header lookup is a
+  fixed, always-failing boundary stub (`file1.c`'s own header
+  comment), so `select_` always ends at `selerror` -- same "stop
+  translating right past the last real boundary" choice `command.c`'s
+  own `cli_gopen` makes for an analogous case. `scndm`'s own real asm
+  carries a 0/1 bit across loop iterations via push/pop instead of a
+  register (the register it would otherwise use gets reused inside
+  the loop body for the disk-map block number) -- no C-level
+  equivalent needed, a plain local variable does the same job.
+  `test_dir`'s own real asm shares one `ret` between two different
+  callers (its own internal loop-exit jumps, and `initialize`'s own
+  early-return test right after calling it) -- ordinary code reuse
+  around a single shared instruction, not a stack trick, so this
+  returns a plain boolean instead for `initialize` to branch on.
+  `file1.c` gained two new small cross-file helpers, `test_vector`
+  (`TEST_VECTOR`, generalizing `nowrite`'s own inlined version of the
+  same shift) and `remove_drive` (`REMOVE_DRIVE`).
+
+  Unlike this session's own earlier entries (`searchn`, `CLOSE1`),
+  these four routines are confirmed clear of the DATA.BDO flat-
+  address collision -- checked directly via `--symbols` against the
+  same combined bundle: `initialize`'s own real range (0x0a8a-0x0b74)
+  stays safely below where DATA.BDO's own fields start (0xc00), and
+  `curselect`'s (0x15e3+) lands past dseg's own 0x1000-byte length
+  entirely. A differential test is therefore actually feasible here,
+  just not written in this pass. Full existing suite stays green.
+- **`src/kernel/FILE2.BDO`'s `MAKE` (`make`, + internal
+  `set_dcnt_dblk`/`copy_dir0`/`copy_dir2`).** Of `DELETE`/`RENAME`/
+  `OPEN`/`MAKE`, this is the one that turned out to be genuinely
+  self-contained once actually read: it only needs routines already
+  ported (`search`/`searchn`, `setcdr`, `checkwrite`, `setfwf`) plus
+  its own small internal helpers. `DELETE`/`RENAME` both still route
+  through `FILE3.BDO`'s own still-unported `TST_OLIST`/`CHK_OLIST`
+  (blocked on `openx06`/`compare_pds`, see that file's own status-
+  table entry); `OPEN`'s real entry point turned out to be
+  `FILE4.BDO`'s own `OPEN_FILE`, not `FILE2.BDO`'s own `open:` (which
+  it only falls into partway through) -- and `OPEN_FILE`'s own MPM
+  branch is one of `CHECK_FCB1`'s two real callers, so porting it
+  needs that push-a-fallback-address/pop-it-on-success convention
+  replicated by hand in C (documented in `check_fcb1`'s own header
+  comment, `file1.c`, specifically for this).
+
+  `copy_dir0`'s own two register-reuse layers (`COPY_DIR2`'s own
+  push/pop round-trip, re-purposing `dx` to carry `cx` across a
+  `getdptra` call; `COPY_DIR0`/`COPY_DIR1`'s own `inc cl`/`dec cl`
+  loop-count idiom) both collapse to plain C locals and an ordinary
+  `for`/`if` without needing either trick modeled literally -- same
+  spirit as `scndm`'s own stack-carried bit, two entries above.
+  `copy_dir` itself (the bare `DH=0x80` prologue `COPY_DIR0` falls
+  through from) isn't ported -- nothing in `make`'s own call graph
+  reaches it, only `COPY_DIR0` directly. Full existing suite stays
+  green; no new differential-test cases (`copy_dir0`/`copy_dir1`/
+  `copy_dir2`'s own real addresses, 0xe50-0xe6d, land inside the same
+  DATA.BDO-colliding range as `CLOSE1`'s own cluster -- `make`/
+  `set_dcnt_dblk` themselves don't, but calling through to
+  `copy_dir0` either way makes a clean test here just as unreachable
+  as it was there).
+- **`src/kernel/FILE3.BDO`'s `COMPARE_PDS`/`TST_OLIST`/`CHK_OLIST`
+  (+ internal `chk_olist0`) and `src/kernel/FILE4.BDO`'s `SET_ARET`/
+  `openx06`.** `DELETE`/`RENAME`'s own cited blocker. `COMPARE_PDS`
+  turned out to be a 1-line tail call into the already-ported
+  `compare`. `openx06`/`SET_ARET` never return normally (`openx06`
+  sets `BD_ARET`'s own high byte to 5 and `BD_LRET` to the generic
+  0xFF failure sentinel, then either `jmp GOBACK` or falls into
+  `REPORT_ERR`'s own pure-display tail -- see `set_aret`'s own header
+  comment, `file4.c`, for why neither is translated past those 2
+  writes, and for the one way this differs from `file1.c`'s own
+  `goerr`, which shares that same tail but has a real side effect of
+  its own checked *before* reaching it).
+
+  An earlier revision of this doc's own `FILE3.BDO` row claimed
+  `CHK_OLIST` "relies on its own caller having pushed a word for it
+  to pop partway through" -- wrong, caught re-reading it closely this
+  pass: the `pop dx`/`push dx` pair around its own `compare_pds` call
+  is just ordinary register-save plumbing (freeing a register across
+  one call, restored before any real `ret`), not an implicit calling
+  convention at all. `TST_OLIST`/`CHK_OLIST` turned out to be the
+  same routine (`chk_olist0`) with one flag flipped (verify-only vs.
+  also-remove-and-bump-`BD_PD_CNT`).
+
+  Reading `DELETE` itself after clearing this blocker turned up a
+  *new*, separate one: its own very first real step, `CHK_PWS`
+  (password checking), needs `GET_DIR_MODE`/`GET_XFCB`/`GET_XFCB0`/
+  `CMP_PW` -- a whole password-FCB subsystem not reconned at all yet.
+  `DELETE` stays deferred for that reason now, not `TST_OLIST`/
+  `CHK_OLIST`. Full existing suite stays green; no new differential-
+  test cases (same reasoning as this session's earlier entries).
+- **`src/kernel/FILE3.BDO`'s password-FCB cluster: `CHK_PASSWORD`/
+  `CHK_PWS` (+ internal `get_dir_mode`/`cmp_pw`/`get_xfcb`/
+  `get_xfcb0`/`chk_pw`).** `DELETE`'s own real remaining blocker from
+  the entry just above. `cmp_pw`'s own `CMP_PW3` loop walks an xfcb's
+  own password field *backwards* (`STD`) while decrypting each byte
+  against the xfcb's own checksum byte, falling back first to a
+  "null password" special case (all blanks/zeros, matches anything)
+  and then, on a real mismatch, to the system-wide default password
+  -- needed no new `tools/i86sim.py` support, direction-flag tracking
+  was already added for `MAU.MEM`'s own `mau_insert`.
+
+  `chk_pw`'s own `CHK_PW1` tail (`mov al,7 ! jmp set_aret`) never
+  returns normally to its own caller, same shape as `openx06`
+  (previous entry) -- but unlike `openx06`, `chk_pw`'s own real
+  callers (`CHECK_PASSWORD`, and `DELETE`'s own `CHK_PWS`) genuinely
+  need to know whether this happened, so they can stop too instead of
+  continuing as if nothing went wrong. `chk_pw`/`chk_password`/
+  `chk_pws` all return a plain boolean instead of literally
+  discarding a return address -- the same convention `check_fcb1`
+  already established (see that function's own header comment,
+  `file1.c`) -- and this was caught and fixed mid-pass: an earlier
+  draft had them all silently `return` after calling `set_aret`
+  with no way for `DELETE` to tell the difference, which would have
+  silently swallowed every real password error. `set_aret` itself
+  (`file4.c`) is no longer `static`, for this same cross-file call.
+
+- **`src/kernel/FILE2.BDO`'s `DELETE` (`delet`, + internal
+  `cpydirloc`/`init_xfcb_search`/`init_xfcb_search1`/`chk_wild`/
+  `does_xfcb_exist`).** Needed the password cluster above plus
+  `TST_OLIST`/`CHK_OLIST`/`COMPARE_PDS` (an earlier entry this same
+  session) to actually assemble into something complete. The
+  trickiest part translating it was `delet`'s own "one well-defined,
+  non-wild match" fast path: the real asm does `jmps delet0` right
+  after `ckrodir`, and `delet0`'s very next instruction is `JZ
+  DELETE2` -- but `ckrodir`'s own real `ret` leaves ZF as whatever
+  `RO_TEST`'s own `ADD BX,ROFILE` set it to (an address addition,
+  essentially never exactly 0 in practice), not a real "was anything
+  found" result; the *other* path into `delet0` (via `DELETE02`'s own
+  fresh `search` call) *does* carry a meaningful ZF. Rather than
+  model that incidental, almost-always-false flag literally, this
+  port's own fast path just always takes `delet0`'s own "found"
+  branch directly (`goto delete1`), which is what it does in
+  practice anyway. `searchi1` (`file2.c`, already existed from the
+  `SEARCH`/`SEARCHN` pass) is no longer `static`, since
+  `does_xfcb_exist` calls it directly (reusing the existing
+  `BD_SRCHA` pointer rather than resetting it from `BD_INFO`, same as
+  the real asm). Full existing suite stays green; no new differential-
+  test cases (same reasoning as this session's earlier entries --
+  `delet` wasn't individually checked against the DATA.BDO collision,
+  but given how much of this cluster already falls inside it, it's
+  the safer assumption).
+- **`src/kernel/FILE2.BDO`'s `RENAME` (`rename_`, + internal
+  `check_wild`/`check_wild0`/`copy_user_no`/`copy_dir`).** The last of
+  `DELETE`/`RENAME`/`OPEN`/`MAKE` to need its own dedicated pass (and
+  the one requiring the most structural rework). Needed `delet`'s own
+  `DELETE1` label split out into its own real function: the real
+  asm's `rename_` does `CALL DOES_XFCB_EXIST ! JNZ $+5 ! CALL
+  DELETE1`, calling straight into the middle of `DELETE`'s own body
+  as an ordinary subroutine, which eventually returns normally (via
+  what's now `delete2_entry`'s own `cpydirloc`/`staret` tail) to
+  whichever `CALL` reached it. `copy_dir` itself (the bare `DH=0x80`
+  prologue `COPY_DIR0` falls through from, left unexposed in the
+  `MAKE` entry above since nothing needed it yet) turned out to need
+  a second look here too: `rename_`'s own `MOV CL,DSKMAP ! MOV
+  DL,EXTNUM` reuses those 2 constants purely for their *numeric*
+  value (16 and 12), as a plain "copy starting at this fcb offset,
+  this many bytes" pair, not their usual field-offset meaning --
+  copying the fcb's own second-half name/type/extnum (the new name)
+  over the matching directory entry's own first 12 bytes.
+  `CHECK_WILD`/`CHECK_WILD0` (the opposite sense of `delet`'s own
+  wildcard check -- `RENAME` errors out *if* a `?` is found in either
+  filename, `DELETE` wants one for a wildcard delete) are ported too.
+  Full existing suite stays green; no new differential-test cases
+  (same reasoning as this session's earlier entries).
+
+  This closes out `DELETE`/`RENAME`/`MAKE` in `FILE2.BDO`; `OPEN`
+  itself followed in the very next pass (see below).
+- **`src/kernel/FILE4.BDO`'s `func15` (BDOS OPEN), + its own `OPENX`/
+  `OPENX0`-`OPENX09` cascade, and the rest of its own dependency
+  chain: `src-c/kernel/file2.c`'s `open`/`OPEN1`/`opencopy` (+
+  non-`static` `SWAP`/`SEARCHI`/`SET_DCNT_DBLK`/`CHECK_WILD`);
+  `src-c/kernel/file3.c`'s `SET_SELDSK`/`reselect`,
+  `parsave`/`parsave33`/`parsave33r` (the first two really
+  BDOSIF.BDO's own, ported here for lack of a `bdosif.c`),
+  `COPY_DMA_IN`/`COPY_DMA_OUT`, `STAMP1`/`STAMP2` (+ internal
+  `stamp3`), `COUNT_OPENS`, `CREATE_OLIST_ITEM`, and non-`static`
+  `GET_DIR_MODE`/`GET_XFCB`/`CMP_PW`; `src-c/kernel/file1.c`'s
+  non-`static` `RO_TEST`.**
+
+  Scoping this out fully (reading every real dependency transitively
+  before writing any code) turned up a pleasant surprise: almost
+  everything `func15` touches was already ported from earlier
+  passes this session (`search`/`searchn`, `HOME`/`setenddir`,
+  `CHECK_FCB1`, `GET_ATTS`, `RESET_CHECKSUM_FCB`, `CURSELECT`,
+  `CLR_EXT`/`GET_RCNTA`, `search_olist`/`searchn_list`/
+  `compare_pds`/`create_item`/`set_olist_item`, `GET_RRA`, `NOWRITE`,
+  `seekcopy`). Only `reselect`'s own cluster, the `parsave` family,
+  `COUNT_OPENS`, and `CREATE_OLIST_ITEM` were genuinely new.
+
+  `func15`'s own MPM branch replicates `CHECK_FCB1`'s push-fallback/
+  pop-on-success convention by hand: the real asm pushes `OFFSET
+  OPEN_FILE` as `CHECK_FCB1`'s own fallback target, but that target
+  turns out to be identical to the normal-success continuation
+  whenever `BD_HIGH_EXT != 0x60`, so both collapse into a single
+  `goto open_file` in the port. `OPENX` itself is the real "manual
+  stack trick" of this cluster -- its own `POP BX ;DISCARD RETURN
+  ADDRESS` right after a successful `endofdir` check means it only
+  ever returns normally to `func15`'s own call sites on outright
+  open failure; on success it runs the *entire* rest of the real BDOS
+  OPEN call itself (`OPENX0` through `OPENX2`'s own final `ret`/`jmp
+  goback`), so one C function (`openx`) covers the whole cascade --
+  see that function's own header comment, `file4.c`, for the detail
+  (including one genuinely dead branch: the MPM code's own second
+  `OR AL,AL ;JNZ OPENX0` tests the same `AL` the line right before it
+  already proved is 0, so it can never branch -- not modeled, same
+  "translate faithfully but note unreachable" precedent as
+  `cli_gopen`/`curselect`'s own `SELECT` success path).
+
+  `STAMP1`/`STAMP2`'s own `OFFSET TOD` (day/hour/min/sec, a real
+  `src/rsp/CLOCK.A86` struct) got its own new harness-chosen scratch
+  constant, `SD_FILE_TOD` -- deliberately *not* reusing the existing
+  `SD_TOD`/`SD_CLOCK_TOD_BASE` constants `command.c`/`tmp.c`/
+  `clock.c` already use for (plausibly) the same real struct, since
+  neither of those was ever confirmed to be the same physical copy
+  FILE3.BDO/FILE4.BDO read, and this port's own convention is to mint
+  an independent scratch base rather than assume two unconfirmed
+  routines share one.
+
+  `--symbols` against the combined wrapper turned up one more
+  DATA.BDO flat-address collision cluster: `file2.c`'s own `open`/
+  `OPEN1`/`opencopy` (0xF34-0xF3D) and `SWAP` (0xD1D) land inside
+  DATA.BDO's own dseg range (0x000-0x1000), same class of gap as
+  `searchn`/`CLOSE`/`copy_dir0`-`2` earlier this session -- so, same
+  as those, no differential test was written for this pass's own
+  additions, even though `func15`/`openx` and most of their own
+  dependencies are individually clear of it (calling through the
+  colliding `open` makes the whole chain untestable against real
+  hardware regardless). Full existing suite stays green; `make clean
+  && make build` stays green.
+- **`src/kernel/FILE2.BDO`'s `openreel` (+ internal
+  `sdcnt_eq_xdcnt`), and `src/kernel/FILE3.BDO`'s `FIX_OLIST_ITEM`.**
+  `openreel` is `MAKE`'s own extent-rollover helper -- called from the
+  (still-unported) sequential/random read/write BDOS functions
+  whenever a file's own current extent runs out, it either bumps the
+  extent field in place (same directory entry) or closes the current
+  extent and opens/creates the next one. `FIX_OLIST_ITEM` is its own
+  real `FILE3.BDO` dependency: once `openreel` extends a file via
+  `MAKE`, it propagates the file's own new (larger) directory
+  position into every open-file-list entry tracking it.
+
+  `FIX_OLIST_ITEM`'s own real `swap`/`pack_sdcnt`/`swap` sandwiched
+  right before its `searchn_list` call recomputes `BD_PACKED_DCNT`
+  from whatever `BD_SDCNT`/`BD_SDBLK` held *before* the call (restored
+  by the second `swap`) -- but a second, unconditional `pack_sdcnt`
+  call later in the same loop iteration always overwrites that result
+  before anything reads it. Provably dead the same way `CHECK_FCB` is
+  (see that function's own header comment, `file1.c`), so not
+  translated. `openreel`'s own `call make` is followed by a `jz
+  openerr` whose flag `make`'s own real tail (`setfwf`'s `or
+  al,fwfmsk`) can never leave clear -- also not modeled, same
+  "translate faithfully but note unreachable" precedent as
+  `cli_gopen`/`curselect`'s own `SELECT` success path.
+
+  `SDCNT_EQ_XDCNT` (needed by `FIX_OLIST_ITEM`, a cross-file call into
+  `FILE2.BDO`) and `openreel`/`FIX_OLIST_ITEM` themselves all land
+  clear of the DATA.BDO flat-address collision (`--symbols`: 0x10ce,
+  0x114d-0x11ed, 0x1ca2 respectively), unlike `open`/`OPEN1`/
+  `opencopy`/`SWAP` from the previous pass -- but since `openreel`
+  itself calls `open`-adjacent machinery (`close`, `opencopy`, both
+  inside the collision range already), no new differential test was
+  written here either, same reasoning as `func15`'s own entry above.
+  Two new plain constants (`maxmod`) and two new `BD_*` fields
+  (`BD_SAVE_MOD`, `BD_RMF`) added to `defs.h`. Full existing suite
+  stays green; `make clean && make build` stays green.
+- **`src/kernel/FILE4.BDO`'s `func16` (BDOS CLOSE) and `FUNC48`
+  (flush blocking/deblocking buffers).** The other of `CHECK_FCB1`'s
+  two real callers flagged back when `check_fcb1` itself was ported
+  (`file1.c`) -- turned out to be the easy half: `func16`'s own
+  fallback target, `CLOSE00`, is just `mov al,6 ! jmp set_aret` (a
+  checksum-error report), so it maps directly onto `check_fcb1`'s own
+  boolean return (`if (!check_fcb1(mem)) { set_aret(mem, 6); return;
+  }`) with no `goto` needed at all, unlike `func15`'s own fallback
+  (which had to collapse into its normal-success continuation).
+  `FUNC48` is a 2-line wrapper: `FLUSH` (`BDOSIF.BDO`) is a boundary-
+  stub tail jump into the XIOS table, and `DIOCOMP` (`file1.c`,
+  made non-`static` for this) already has a fixed, always-0 result
+  under the convention, so `func48` itself has no observable effect
+  either.
+
+  `func16` ends with the same "last reference closes the olist item,
+  and its own lock-list entries if unlocked" logic `func15`'s own
+  `OPENX05`/`OPENX08` build up -- `delete_item`/`remove_locks` (both
+  `file3.c`, already ported/non-`static`) cover it with no new
+  dependencies. One new `BD_*` field, `BD_FILE_ID` (0x0C88), added to
+  `defs.h`. `func16`/`FUNC48` themselves land clear of the DATA.BDO
+  collision (`--symbols`: 0x2005/0x24d7), but `func16` calls straight
+  into `file2.c`'s own `close`/`close1` cluster, which doesn't -- so,
+  same reasoning as `func15`'s own entry, no new differential test.
+  Full existing suite stays green; `make clean && make build` stays
+  green.
+- **`src/kernel/FILE4.BDO`'s `func17`/`func18` (BDOS search for
+  first/next occurrence of a file), + internal `csearch`/
+  `reselectx`.** Both BDOS functions funnel into one shared tail,
+  `CSEARCH`, which turned out to hide this port's first genuinely
+  *unconditional* manual stack trick: the real asm `push`es `OFFSET
+  dirtouser` then `jmp`s (never `call`s) into `SEARCH`/`SEARCHN`, so
+  that routine's own ordinary `ret` lands at `dirtouser` instead of
+  back in `CSEARCH` -- every single time, regardless of whether
+  anything was found. Every other manual-stack-trick case ported so
+  far (`CHECK_FCB1`, `OPENX`) only redirects on one specific outcome
+  (an error, or success) -- this is the first one that's really just
+  an unconditional tail call wearing the same disguise, so it
+  collapses cleanly into a plain `search`/`searchn` call followed by
+  an unconditional `dirtouser` call, no boolean/`goto` plumbing
+  needed at all.
+
+  `RESELECTX` itself is a second, trivial entry point into `reselect`
+  (`file3.c`) that just forces `BD_HIGH_EXT=0` -- its own further
+  `RESELECT1` tail also sets `BD_ACTUAL_RC` from whatever `AL`
+  happens to hold on entry, but along `CSEARCH`'s own call path
+  (`GETEXTA`/`CLR_EXT`/`CLRMODNUM` don't set `AL` meaningfully) that's
+  genuinely incidental register content nothing downstream
+  (`SEARCH`/`SEARCHN`/`dirtouser`) ever reads back -- not modeled,
+  same "undefined artifact" convention as `selectdisk`'s own fixed
+  `bx=0` choice. Two new `BD_*` fields, `BD_SRCHABASE`/`BD_SRCHAOFST`
+  (`func17`'s own saved caller fcb location, restored by `func18`),
+  added to `defs.h`.
+
+  Everything this pass added lands clear of the DATA.BDO collision,
+  but `csearch` calls straight into `file2.c`'s own colliding
+  `search`/`searchn` cluster, so no new differential test here
+  either, same reasoning as `func15`'s/`func16`'s own entries. Full
+  existing suite stays green; `make clean && make build` stays green.
+- **`src/kernel/FILE4.BDO`'s `func19` (delete), `func20`/`func21`
+  (sequential read/write), `func22` (MAKE), and `func23` (RENAME).**
+  The largest single pass this session: scoping `func20`/`func21`
+  out transitively turned up a big, previously-unscoped chunk of
+  `FILE3.BDO`'s own "part 3" (sequential disk I/O), almost entirely
+  self-contained since nearly everything it calls (`getfcb`/`setfcb`/
+  `bdos_index`/`alloct`/`atran`/`seek`/`rdbuff`/`getblock`/`openreel`)
+  was already ported from earlier passes. New: `diskread`/`sqread`
+  and `diskwrite`/`sqwrite` (`src-c/kernel/file3.c`), + their own
+  shared `test_disk_fcb`/`TEST_DISK_FCB1` helper (refactored into a
+  `test_disk_fcb1_tail` shared by both `test_disk_fcb` itself and
+  `diskwrite`'s own direct `CALL CLOSE ! CALL TEST_DISK_FCB1`, which
+  reuses the same tail after a different close variant), `reset_fwf`,
+  and the lock-list check `test_lock`/`move_arecord` (`diskwrite`'s
+  own unlocked-mode path -- `TEST_LOCK`'s own failure tail,
+  `LOCK_ERR`, does a `POP`/`POP` against a stack shape `diskwrite`
+  deliberately sets up to match, the same manual-stack-trick category
+  as `CHECK_FCB1`, modeled as a plain boolean since this port doesn't
+  track a call stack at all). `dmposition`/`getdm` (`file1.c`) made
+  non-`static` for this.
+
+  `func20`/`func21` turned out to be `CHECK_FCB`'s own two real
+  callers -- an earlier revision of `check_fcb1`'s own header comment
+  (`file1.c`) wrongly called `CHECK_FCB` provably dead, reasoning only
+  about `func15`/`func16`'s own two `CHECK_FCB1` call sites; re-
+  reading `CHECK_FCB`'s own real asm closely showed it's nothing but
+  `MOV CHECK_FCB_RET,FALSE` falling straight into `CHECK_FCB1`, no
+  separate complication at all (a second stale claim this same
+  comment made, also fixed). Both corrected in `file1.c`'s own header
+  comments.
+
+  `func22` (MAKE) needed the most new ground: `chk_xfcb_password1`,
+  `init_xfcb`/`init_xfcb0`, and `set_pw` (all `file3.c`), plus
+  `delet0` (`file2.c`'s own `delet` dispatch, split out non-`static`
+  since `func22` calls it directly after its own `SEARCH`, same
+  "`rename_` calls `delete1_entry` directly" precedent from an earlier
+  pass). More importantly, `func22`'s own tail reuses `func15`'s own
+  `OPENX1`/`OPENX03`/`OPENX08` cascade directly -- `openx` (`file4.c`)
+  was a single monolithic function before this pass; refactored into
+  `openx2`/`openx08`/`openx03`/`openx03_create`/`openx05`/`openx04`/
+  `openx1` so both `openx` and `func22` can enter it at the right
+  point. `func22` also has its own instance of the "`MAKE`'s own tail
+  always leaves `AL` nonzero/`ZF` clear" unreachable-branch pattern
+  `openreel` found first (`file2.c`'s own header comment) -- the
+  "delete the fcb just created, report no room" fallback after a
+  `MAKE` call is dead code here too.
+
+  `func19`/`func23` are both thin wrappers (`copy_dma_in` + a single
+  tail call into `delet`/`rename_`, already ported). All 5 functions
+  land clear of the DATA.BDO collision, but every one of them calls
+  into `file2.c`'s own colliding `search`/`close`/`open`/`delet`/
+  `rename_` clusters somewhere in its chain, so none gets a new
+  differential test, same reasoning as `func15`'s own entry. Several
+  new `BD_*`/plain constants added to `defs.h` (`BD_SRCHABASE`/
+  `BD_SRCHAOFST`, `BD_DMINX`, `lstrec`). Full existing suite stays
+  green; `make clean && make build` stays green.
+
+  This leaves `func13`/`func14` (reset disk system / select disk
+  info, needing `FILE3.BDO`'s own `DISKRESET` -- a sizable per-disk
+  open-list scan not reconned yet), `func30` (set file indicators),
+  `func33`/`func34` (random read/write, needing `FILE3.BDO`'s own
+  `RSEEK`, also not reconned), `func35`-`func37`/`func40`-`func43`
+  (file size, set random record, reset/access/free drive, write-
+  random-with-zero-fill, lock/unlock record), and `FUNC46` (get disk
+  free space) as `FILE4.BDO`'s own remaining unported functions.
+- **`src/kernel/FILE3.BDO`'s `diskreset`, and `src/kernel/FILE4.BDO`'s
+  `func13`/`func14` (reset disk system/select disk info) + `func37`
+  (reset drive, + internal `reset_37`).** `func14` turned out trivial
+  (`SET_SELDSK`/`CURSELECT`, both already ported). `func13`/`func37`
+  share `DISKRESET`: for each bit set in its own input vector
+  (`BD_INFO`), check whether another process has a file open on that
+  disk in a removable/forced-read-only way (`SEARCHN_LIST`/
+  `compare_pds`, both already ported); if every open file on that
+  disk belongs to this same process, it's safe to reset, otherwise
+  report "denied" (`BD_ARET=0xFFFF`, the actual denied-process display
+  a boundary-stub no-op under this port's convention, same as
+  `XCRLF`/`XPRINT` elsewhere).
+
+  `DISKRESET`'s own `TEST_VECTOR1`/`SET_CDISK1` calls (`file1.c`) turned
+  out to need splitting those two functions out of the already-ported
+  `test_vector`/`setcdisk`: both of the real asm's own callers here
+  pass an explicit bit-position/shift-amount (`BD_CURDSK`, the disk
+  actually being checked) rather than letting the function read
+  `BD_SELDSK` itself. `func13` calls `RESET_37` directly -- `func37`'s
+  own real continuation after its own `CALL DISKRESET`, with a
+  different `BD_INFO` already set up -- the same "call into the
+  middle of another function" pattern as `rename_`'s own `CALL
+  DELETE1` from an earlier pass.
+
+  `DISKRESET`/`func13`/`func14`/`func37` themselves land clear of the
+  DATA.BDO collision, but `TEST_VECTOR1`/`SET_CDISK1` don't (0x8c5/
+  0x8da in the combined wrapper), so this cluster gets no new
+  differential test either. `func38`/`func39`/`FUNC41`/`FUNC47`/
+  `FUNC49`/`FUNC50` turned out to have no body of their own at all --
+  `EQU FUNCRET`, a dispatch-table alias straight onto `BDOSIF.BDO`'s
+  own empty `funcret: ret` -- nothing to port, removed from the
+  "remaining" list. Several new `BD_*` constants added to `defs.h`
+  (`BD_NTLOG`, `BD_SET_RO_FLAG`, `BD_CHECK_DISK`, `BD_DENIEDDRV`,
+  `BD_DENIEDCNS`, `BD_DENIEDPRC`). Full existing suite stays green;
+  `make clean && make build` stays green.
+
+  This leaves `func30` (set file indicators), `func33`/`func34`
+  (random read/write, needing `FILE3.BDO`'s own `RSEEK`, not reconned
+  yet), `func35`/`func36` (file size, set random record), `func40`-
+  `func43` (write-random-with-zero-fill, lock/unlock record), and
+  `FUNC46` (get disk free space) as `FILE4.BDO`'s own remaining
+  unported functions.
+- **`src/kernel/FILE3.BDO`'s `rseek`.** The user explicitly asked for
+  this one by name. Decodes the fcb's own packed 3-byte `ranrec`
+  field (bit-twiddling: record# in byte0's low 7 bits, extent# split
+  across byte0's own high bit and byte1's low nibble, module# packed
+  across byte1's high nibble and byte2 via a nibble-swap) into
+  {module#, extent#, record#}, then either confirms the currently-
+  addressed extent already matches (same module and extent, or an
+  adjacent extent within the same directory-fcb group via `COMPEXT`)
+  or closes it and opens/creates the target extent (`RANCLOSE`) --
+  reading a not-yet-written extent is an error, writing one creates
+  it via `MAKE`.
+
+  Needed four `file2.c` helpers non-`static` for cross-file use:
+  `COMPEXT`, `GET_DIR_EXT`, `RESTORE_RC`, `SET_RC` (all from the
+  already-ported `CLOSE`/`CLOSE1` cluster) -- `get_dir_ext_result`
+  moved to `defs.h` for this, same precedent as `get_xfcb_result`.
+  The real asm's own flags entering `rseek`'s own two (not yet
+  ported) callers, `rdread`/`rdwrite`'s own `JNZ RET19` check, are
+  unambiguous on the pure-success and direct-`SEEKERR` tails but
+  genuinely incidental on the `RANCLOSE`/`BADSEEK` paths (nothing
+  between `CALL MAKE_FCB_INV` and the final `RET` touches flags
+  again) -- translated as the clearly intended boolean throughout
+  instead, same class of judgment call as `diskreset`'s own flag
+  handling from the previous pass.
+
+  `rseek` itself lands clear of the DATA.BDO collision, but
+  `COMPEXT`/`GET_DIR_EXT`/`RESTORE_RC`/`SET_RC` (part of the already-
+  colliding `CLOSE` cluster) and `close`/`open`/`make` themselves
+  don't, so no new differential test. Full existing suite stays
+  green; `make clean && make build` stays green.
+- **`src/kernel/FILE4.BDO`'s `func33`/`func34` (random disk
+  read/write), + `FILE3.BDO`'s own `rdread`/`rdwrite`/`parsave36`/
+  `parsave36r`.** Both BDOS functions are thin wrappers now that
+  `rseek` exists: `parsave36r` (parsave a 36-byte xfcb, then
+  `reselect` -- same shape as `parsave33r`) + `CHECK_FCB` (a third and
+  fourth real caller, alongside `func20`/`func21` -- `check_fcb1`'s
+  own header comment, `file1.c`, has the full writeup) + a tail call
+  into `rdread`/`rdwrite`, each just `rseek` followed by
+  `diskread`/`diskwrite` (both already ported) on success.
+
+  `rdread`/`rdwrite`/`func33`/`func34`/`parsave36r` all land clear of
+  the DATA.BDO collision, but `parsave36` doesn't (0x454, same as
+  `parsave`/`parsave33` from an earlier pass), and `rdread`/`rdwrite`
+  transitively touch the already-colliding `close`/`open`/`make`/
+  `search` cluster regardless -- so, same reasoning as `func15`'s own
+  entry, no new differential test. Full existing suite stays green;
+  `make clean && make build` stays green.
+
+  This leaves `func30` (set file indicators), `func35`/`func36` (file
+  size, set random record -- needing `FILE3.BDO`'s own
+  `getfilesize`/`setrandom`/`cmperr`, not reconned yet), `func40`-
+  `func43` (write-random-with-zero-fill, lock/unlock record), and
+  `FUNC46` (get disk free space) as `FILE4.BDO`'s own remaining
+  unported functions.
+- **`src/kernel/FILE4.BDO`'s `func30` (set file indicators), +
+  `FILE2.BDO`'s own `indicators`.** `indicators` turned out to use a
+  simpler, *unmasked* variant of the directory-copy pattern
+  `COPY_DIR0`/`COPY_DIR1` already use: it calls `COPY_DIR2` (already
+  ported, `copy_dir2`) directly and then a plain `MOVE` instead of
+  `COPY_DIR1`'s own per-byte attribute-masking loop -- `MOVE`'s own
+  `MOV CH,0` discards whatever attribute mask `COPY_DIR2` packed into
+  `CH`, so the copy is unconditional. `fcb_extnum` (12) gets reused
+  purely for its *numeric* value here too, as the copy length, not
+  its usual field-offset meaning -- the same "constant reuse for
+  numeric value" trick `rename_`'s own `DSKMAP`/`EXTNUM` use.
+
+  `func30` itself is a thin wrapper around `indicators`; the real
+  asm's own `CALL indicators ! JMP cpydirloc` is redundant, since
+  `indicators` already ends with its own call into `cpydirloc` -- the
+  second one is just a no-op repeat, not translated separately.
+  `func30` lands clear of the DATA.BDO collision, but `indicators`
+  doesn't (0xf0f, inside `COPY_DIR0`-`2`'s own already-colliding
+  range), so no new differential test. Full existing suite stays
+  green; `make clean && make build` stays green.
+- **`src/kernel/FILE4.BDO`'s `func35`/`func36` (return file size,
+  set random record), + `FILE3.BDO`'s own `getfilesize`/`setrandom`
+  (+ internal `cmperr`).** `cmperr` packs a directory entry's or
+  fcb's own record-count/extent#/module# fields into the same 24-bit
+  "mmmm eeee errr rrrr" position `ranrec` itself stores, shared by
+  both callers (`getfilesize` via `fcb_reccnt`'s own offset,
+  `setrandom` via `fcb_nxtrec`'s). `getfilesize` scans every matching
+  directory extent via `SEARCH`/`SEARCHN` (both already ported),
+  computing each one's own position and keeping the largest
+  (`fcb_ranrec` ends up holding the file's own logical size); the
+  real asm's own 24-bit unsigned compare (`SUB AX,[BX]` then `SBB
+  AL,2[BX]`, testing the final carry) translated as a plain C `int`
+  subtraction with an explicit borrow term, simpler than chasing
+  flags by hand. `setrandom` just runs `cmperr` once and writes the
+  result straight into `fcb_ranrec` -- the reverse direction of what
+  `getfilesize` reads.
+
+  `getfilesize`/`setrandom`/`cmperr`/`func35`/`func36` all land clear
+  of the DATA.BDO collision -- but `getfilesize` calls into
+  `file2.c`'s own colliding `search`/`searchn` cluster, so `func35`
+  still gets no new differential test; `setrandom`/`func36`, by
+  contrast, never touch that cluster at all (pure fcb-field
+  arithmetic) and would be a legitimate candidate for one, just not
+  written yet (time, not a technical blocker -- same standing
+  disclaimer as several earlier entries). Full existing suite stays
+  green; `make clean && make build` stays green.
+
+  This leaves `func40`-`func43` (write-random-with-zero-fill, lock/
+  unlock record) and `FUNC46` (get disk free space) as `FILE4.BDO`'s
+  own remaining unported functions.
+- **`src/kernel/FILE4.BDO`'s `func40` (write random with zero fill)
+  and `FUNC46` (get disk free space), + `FILE3.BDO`'s own `rseek1`/
+  `tmp_select`.** `func40` turned out to need `rseek`'s own real body
+  as a *separate* entry point: the real asm's own `RSEEK1` label
+  skips `RSEEK`'s own `MOV SEQIO,0` (since `func40` just set
+  `BD_SEQIO=2` itself, right before calling it), and calls `DISKWITE`
+  directly rather than going through `rdwrite`'s own `rseek`-then-
+  `diskwrite` wrapper. Split the existing `rseek` into `rseek1` (the
+  real work) + a 2-line `rseek` wrapper (`BD_SEQIO=0` then `rseek1`)
+  to match, and made `diskwrite` non-`static` for `func40`'s own
+  direct call.
+
+  `FUNC46` needed one new small helper, `tmp_select` (`TMP_SELECT`,
+  `file3.c`): temporarily select a given disk via `CURSELECT`,
+  restoring `BD_SELDSK` (but not `BD_CURDSK`, `CURSELECT`'s own real
+  side effect) afterward. The free-space count itself is a per-byte
+  popcount over the disk's own allocation vector (`GET_NALBS`,
+  already ported) -- the real asm's own `SHR`/`JNC` loop skips
+  leading zero bits before counting each `1` bit, but a plain bit-by-
+  bit scan computes the identical total (same Hamming weight either
+  way), so that's what's translated. Converting the resulting block
+  count to a record count (`SHL ...,BLKSHF`) is done in a 32-bit
+  intermediate instead of chasing the real asm's own split 16-bit-
+  plus-carry-into-AH computation -- verified by hand against a
+  worked example (0x1234 blocks, shift 4, both approaches give
+  0x12340) rather than assumed.
+
+  `func40`/`FUNC46`/`rseek1`/`tmp_select` all land clear of the
+  DATA.BDO collision, but `diskwrite` (`func40`'s own tail) and
+  `GET_NALBS` (`FUNC46`'s own tail) don't, so no new differential
+  test for either. `FUNC41` turned out to be another `EQU FUNCRET`
+  alias, same as `func38`/`func39`/`FUNC47`/`FUNC49`/`FUNC50` from an
+  earlier pass -- nothing to port. Full existing suite stays green;
+  `make clean && make build` stays green.
+
+  This leaves only `func42`/`func43` (lock/unlock record) as
+  `FILE4.BDO`'s own remaining unported functions -- their own real
+  dependency, `FILE3.BDO`'s `LOCK`/`GET_LOCKADD`/`LOCK_ERR` cluster,
+  does genuine stack-pointer manipulation (`LOCK_PERR`'s own `MOV
+  SP,LOCK_SP`) to unwind out of a per-record loop on a lock conflict
+  -- a fundamentally different class of translation problem than
+  anything else in this file, not reconned in enough detail yet to
+  be confident in a translation; left for its own dedicated pass.
+- **`src/kernel/FILE4.BDO`'s `func42`/`func43` (lock/unlock record),
+  + `FILE3.BDO`'s own `LOCK`/`GET_LOCKADD`/`LOCK_ERR` cluster (`lock_`,
+  + internal `incr_rr`/`save_rr`/`reset_rr`, `count_locks`,
+  `check_free`, `get_lockadd`, `lock_err_apply`, `free_lock`,
+  `set_lock`). This finishes `FILE4.BDO`.**
+
+  The dedicated recon this cluster needed turned up the one finding
+  that made the whole thing tractable: `LOCK_PERR` -- the entry point
+  that actually does `MOV SP,LOCK_SP` to restore the real stack
+  pointer -- has **no caller anywhere in `src/`**, confirmed by a full
+  grep across every `.BDO`/`.SUP`/`.MEM`/`.CIO`/`.RTM` file. It's
+  provably dead code. Every real path that fires `LOCK_ERR` (three of
+  them: `GET_LOCKADD`'s own two internal checks, and `TEST_LOCK`'s own
+  conflict case) goes through the *other*, much more ordinary half --
+  a `POP DX ! POP CX` discard against a stack shape `LOCK`'s own per-
+  record loop deliberately sets up (one pushed countdown word per
+  iteration, balanced by its own `POP`, plus one pushed fallback
+  address -- `OFFSET LOCK9` -- that stays on the stack for the whole
+  loop and gets silently consumed by whichever `RET` reaches it first,
+  success or error). That's the same manual-stack-trick category
+  already modeled throughout this port (`CHECK_FCB1`, `OPENX`,
+  `CSEARCH`'s own unconditional variant) -- translated here by
+  threading the loop's own counter through explicitly as `remaining`,
+  standing in for the real asm's own popped `CH`, instead of modeling
+  a call stack.
+
+  One real wrinkle survived needing a judgment call: `GET_LOCKADD`'s
+  own `RSEEK` call never has its read/write-mode input (`CL`) set by
+  any of its real callers -- genuinely incidental register content,
+  same "undefined artifact" category as `selectdisk`'s own fixed
+  `BX=0` (`file1.c`); resolved the same way, with a fixed, documented
+  choice (read_mode=0) rather than chasing an unknowable value.
+  `SET_LOCK`'s own `MOV [DI],DX` (storing the owning olist item's
+  address at a lock-list item's own `item+8` field, overwriting the
+  zero `SET_OLIST_ITEM` itself just wrote there) relies on the same
+  real `rep movs` DI-after-the-copy side effect already documented for
+  `SET_OLIST_ITEM` itself (`file3.c`'s own header comment) -- not
+  modeled directly, the address is recomputed as `bx+8` instead, same
+  precedent. `TEST_LOCK` itself needed a small retrofit: it used to
+  set `BD_LRET=8` directly on conflict (correct for `diskwrite`'s own
+  single call, which happens to make the real `LOCK_ERR` computation
+  collapse to exactly that), but `lock_`'s own per-record loop needs
+  the full `mult_cnt`-shifted version instead -- so `test_lock` no
+  longer touches `BD_LRET` itself, and each of its two callers applies
+  its own version now.
+
+  `lock_`/`count_locks`/`check_free`/`get_lockadd`/`free_lock`/
+  `set_lock`/`func42`/`func43` all land clear of the DATA.BDO
+  collision, but `incr_rr`/`save_rr`/`reset_rr` (`BDOSIF.BDO`'s own,
+  ported here since nothing else uses them) don't, so no new
+  differential test for this cluster. Several new `BD_*` constants
+  added to `defs.h` (`BD_LOCK_SP`/`BD_LOCK_SHELL` -- both confirmed
+  write-only and thus not modeled at all, `BD_LOCK_UNLOCK`,
+  `BD_LOCK_MAX`, `BD_SHELL_RR`). Full existing suite stays green;
+  `make clean && make build` stays green.
+
+  **`FILE4.BDO` is now ported in full.** Every real BDOS dispatch
+  function (`func13`-`func52`) has a C counterpart, modulo the handful
+  that are bare `EQU FUNCRET` dispatch-table aliases with no body of
+  their own (`func38`/`func39`/`FUNC41`/`FUNC47`/`FUNC49`/`FUNC50`)
+  and `GOBACK` (a 2-instruction tail jump into `BDOSIF.BDO`'s own
+  module-dispatch epilogue) -- both out of scope by definition, not
+  unfinished work.

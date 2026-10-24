@@ -16,6 +16,31 @@
 
 #include <stdint.h>
 
+/*
+ * get_xfcb_result -- src-c/kernel/file3.c's own `get_xfcb`/`get_xfcb0`
+ * output (also used directly by src-c/kernel/file4.c's own `func15`):
+ * al = the xfcb's own password mode (bits 5-7) with bit 0 set, found =
+ * whether an xfcb was located at all (the real ZF), bx = .xfcb(extnum)
+ * (`cmp_pw`'s own expected input).
+ */
+typedef struct {
+    uint8_t al;
+    uint8_t found;
+    uint16_t bx;
+} get_xfcb_result;
+
+/*
+ * get_dir_ext_result -- src-c/kernel/file2.c's own `get_dir_ext`
+ * output (also used directly by src-c/kernel/file3.c's own `rseek`):
+ * bx = .fcb(extnum), al = dir ext, dl = non-zero if no blocks were
+ * found at all.
+ */
+typedef struct {
+    uint16_t bx;
+    uint8_t al;
+    uint8_t dl;
+} get_dir_ext_result;
+
 /* src/kernel/SYSTEM.DEF */
 #define pnamsiz 8  /* size of process/queue/file name fields */
 #define qnamsiz pnamsiz /* src/kernel/SYSTEM.DEF: qnamsiz equ pnamsiz */
@@ -180,10 +205,13 @@
 #define fcb_passwd 0x10 /* byte[8] */
 #define fcb_plen   0x1A /* byte: password length */
 #define fcb_extnum 0x0C /* byte: extent number field */
+#define fcb_ubytes 0x0D /* byte: unfilled bytes field */
 #define fcb_modnum 0x0E /* byte: data module number (high bit = fwf) */
 #define fcb_reccnt 0x0F /* byte: record count field */
 #define fcb_dskmap 0x10 /* byte: disk map field */
 #define fcb_nxtrec 0x20 /* byte: next record field (= fcblen) */
+#define fcblen 0x20 /* size of one FCB (src/kernel/EQU.BDO) */
+#define namlen 15 /* name+type length, for a SEARCH's own CL (src/kernel/EQU.BDO) */
 #define fcb_ranrec 0x21 /* word: random record field */
 #define fwfmsk     0x80 /* bit in fcb_modnum: file write flag */
 /* src/kernel/EQU.BDO: rofile equ 9 -- same offset as fcb_type above;
@@ -350,9 +378,10 @@
 #define BD_DBLK        0x0C27 /* word: directory block */
 #define BD_ERROR_MODE  0x0C29 /* byte */
 #define BD_PD_CNT      0x0C33 /* byte: BDOS process count */
+#define BD_CHECK_FCB_RET 0x0C75 /* byte: see check_fcb1's own header comment in file1.c */
 #define BD_PDADDR      0x0C3A /* word: PD address target for the current call */
 #define BD_HIGH_EXT    0x0C34 /* byte: FCB high extent bits */
-/* 0x0C35 (XFCB_READ_ONLY) unused by name */
+#define BD_XFCB_READ_ONLY 0x0C35 /* byte: xfcb read-only flag, set by reselect */
 #define BD_CURDSK      0x0C36 /* byte: current disk */
 #define BD_CDRMAXA     0x0C3C /* word: pointer to current dir max value */
 #define BD_CHECKA      0x0C44 /* word: current checksum vector addr */
@@ -391,6 +420,9 @@
  * src-c/kernel/file4.c's own ported routines touch, at their own real
  * resulting addresses (same reasoning/method as the BD_* block above) */
 #define BD_DLOG        0x0C03 /* word: disk login vector */
+#define BD_RLOG        0x0C05 /* word: removable-drive login vector */
+#define BD_TLOG        0x0C07 /* word: "just logged in this call" vector */
+#define BD_DIRBLK      0x0C51 /* word: reserved directory block count */
 #define BD_RETURNSEG   0x0CBB /* word: user return segment (func27/31/52) */
 
 /* src/kernel/DATA.BDO -- the subset of BDOS-wide scratch fields
@@ -410,15 +442,82 @@
 #define BD_CUR_POS     0x0C79 /* word: current position in olist/llist */
 #define BD_PRV_POS     0x0C7B /* word: previous position in olist/llist */
 
-/* src/kernel/SYSDAT.FMT -- free_root, the olist/llist free-node list
- * root (src-c/kernel/file3.c's own delete_item/create_item). Unlike
- * every BD_* constant above (FILE1-4.BDO's own scratch area, which
- * resolves to 0xC00+ in the combined module), this is a real
- * SYSDAT.FMT field -- confirmed via `--symbols` against the same
- * wrapper: it resolves to 0x52, not a BD_*-range address. See
- * file3.c's own header comment for why this is safe to use directly
- * (not a new scratch choice) in this combined module's own test. */
+/* src/kernel/DATA.BDO -- the subset of BDOS-wide scratch fields
+ * src-c/kernel/file2.c's own `srch`/`SEARCH`/`SEARCHN` port touches,
+ * at their own real resulting addresses (same reasoning/method as the
+ * BD_* block above, checked against the same `file1_wrapper.A86`
+ * bundle) */
+#define BD_SEARCH_USER0   0x0C12 /* byte */
+#define BD_FIND_XFCB      0x0C14 /* byte */
+#define BD_SRCHA          0x0C19 /* word: search address (start of FCB being searched for) */
+#define BD_SRCHL          0x0C20 /* byte: search length */
+#define BD_FCB_EXISTS     0x0C6B /* byte */
+#define BD_SAVE_XFCB      0x0C6D /* byte */
+#define BD_ACTUAL_RC      0x0C6C /* byte: SET_RC's own output, read by RESTORE_RC */
+#define BD_EFCB           0x0C00 /* byte: an empty (all-0xE5) fcb template, for MAKE's own "search for free space" pass */
+#define BD_DF_PASSWORD    0x0C2B /* byte[8]: the system-wide default password */
+#define BD_XDMAAD         0x0C67 /* word: the xfcb's own dma address (user-supplied password buffer) */
+#define BD_MAKE_XFCB      0x0C13 /* byte: true if MAKE is creating an extended fcb */
+#define BD_SAVE_EXT       0x0C6F /* byte: CLOSE1's own saved fcb(ext) value */
+#define BD_DONT_CLOSE     0x0C85 /* byte: skip CLOSE_FCB's own final rewrite if true */
+#define BD_ATTRIBUTES     0x0C70 /* byte */
+#define BD_SDCNT0         0x0C81 /* word */
+#define BD_SDBLK0         0x0C83 /* word */
+#define BD_DIRLOC         0x0C99 /* byte: directory flag in rename, etc. */
+#define BD_XDCNT          0x0CAA /* word */
+#define BD_XDBLK          0x0CAC /* word */
+#define BD_USER_ZERO_PASS 0x0CAE /* byte */
+#define BD_SAVE_MOD       0x0C6E /* byte: openreel's own saved module# */
+#define BD_RMF            0x0C97 /* byte: openreel's own "read mode" flag */
+#define BD_FILE_ID        0x0C88 /* word: func16's own saved olist item addr */
+#define BD_SRCHABASE      0x0C23 /* word: func17's own saved user parameter segment */
+#define BD_SRCHAOFST      0x0C21 /* word: func17's own saved user fcb offset */
+#define BD_DMINX          0x0C9C /* byte: diskwrite's own saved disk-map index */
+#define BD_LOCK_SP        0x0C72 /* word: LOCK's own saved real SP -- never read anywhere in src/, see lock_'s own header comment */
+#define BD_LOCK_SHELL     0x0C74 /* byte: LOCK's own shell flag -- never read anywhere in src/, see lock_'s own header comment */
+#define BD_LOCK_UNLOCK    0x0C76 /* byte: true=lock, false=unlock (func42/func43's own input) */
+#define BD_SHELL_RR       0x0CB4 /* byte[3]: BDOSIF.BDO's own SAVE_RR/RESET_RR scratch for fcb_ranrec */
+#define BD_NTLOG          0x0C09 /* word: diskreset's own "newly logged in" accumulator */
+#define BD_SET_RO_FLAG    0x0C8B /* byte: diskreset's own forced-read-only flag */
+#define BD_CHECK_DISK     0x0C8C /* byte: diskreset's own per-disk removable/ro flag */
+#define BD_DENIEDDRV      0x0DF0 /* byte: diskreset's own denied-process error message drive letter */
+#define BD_DENIEDCNS      0x0DFB /* byte: diskreset's own denied-process error message console # */
+#define BD_DENIEDPRC      0x0E05 /* byte[8]: diskreset's own denied-process error message process name */
+
+/* src/kernel/DATA.BDO -- the subset of BDOS-wide scratch fields
+ * src-c/kernel/file3.c's own `reselect`/`parsave`/`COUNT_OPENS`/
+ * `CREATE_OLIST_ITEM` and src-c/kernel/file2.c's own `open`/`OPEN1`/
+ * `opencopy` port touches, at their own real resulting addresses
+ * (same reasoning/method as the BD_* blocks above, checked against
+ * the same `file1_wrapper.A86`/`file3_wrapper.A86` bundles) */
+#define BD_FCBDSK      0x0C0C /* byte: OPEN's own saved disk# for the fcb being opened */
+#define BD_PARCOPFL    0x0C0D /* byte: parsave's own "copy succeeded" flag */
+#define BD_USRCODE     0x0C15 /* byte: user code of the process making this call */
+#define BD_MULT_CNT    0x0C2A /* byte: real local copy of u_mult_cnt (see UDA_MULT_CNT) */
+#define BD_OPEN_CNT    0x0C86 /* byte: COUNT_OPENS' own running open-file count */
+#define BD_LOCK_CNT    0x0C87 /* byte: COUNT_OPENS' own running locked-record count */
+#define BD_MAKE_FLAG   0x0C6A /* byte: true if the current open is really a MAKE */
+#define BD_LINFO       0x0C9B /* byte: reselect's own saved disk# (from SET_SELDSK) */
+#define BD_OLDDSK      0x0CA0 /* byte: reselect's own previously-selected disk# */
+#define BD_SHELL_FLAG  0x0CB3 /* byte: parsave's own "command shell" flag */
+#define BD_INFOSAVE    0x0CB7 /* word: parsave's own saved BD_INFO across the copy */
+#define BD_PARLG       0x0CBD /* byte: parsave's own copy length */
+#define BD_COMMON_DMA  0x0C57 /* byte: parsave33's own "use the common dma area" flag */
+#define BD_LOC_PAR_AREA 0x0E0E /* byte: parsave's own local (ds-relative) parameter-area scratch byte */
+
+/* src/kernel/SYSDAT.FMT -- free_root/open_max, system-wide constants
+ * src-c/kernel/file3.c's own olist/llist and COUNT_OPENS code touches
+ * (free_root: delete_item/create_item; open_max: COUNT_OPENS' own
+ * limit check). Unlike every BD_* constant above (FILE1-4.BDO's own
+ * scratch area, which resolves to 0xC00+ in the combined module),
+ * these are real SYSDAT.FMT fields -- confirmed via `--symbols`
+ * against the same wrapper: they resolve to 0x52/0x8C, not BD_*-range
+ * addresses. See file3.c's own header comment for why this is safe to
+ * use directly (not a new scratch choice) in this combined module's
+ * own test. */
 #define BD_FREE_ROOT   0x0052 /* word: olist/llist free-node list root */
+#define BD_OPEN_MAX    0x008C /* byte: max simultaneous open files/locks allowed */
+#define BD_LOCK_MAX    0x008A /* byte: max simultaneous locked records allowed */
 
 /* src-c/kernel/chario.c's own scratch addresses for the literal CS-
  * resident strings src/kernel/CHARIO.CIO embeds inline (ptrmsg,
@@ -569,6 +668,13 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
 #define SD_TOD     0xA049 /* word[1]+byte[3]: tod_day/tod_hr/tod_min/tod_sec */
 #define todlen     5
 
+/* src/kernel/FILE3.BDO/FILE4.BDO's own `OFFSET TOD` (day:word, hour:
+ * byte, min:byte, sec:byte, real offsets 0/2/3/4) -- `STAMP1`'s/
+ * `STAMP2`'s own source. Its own independently-chosen scratch base,
+ * same reasoning as `SD_CLOCK_TOD_BASE`/`SD_TOD` above (not confirmed
+ * to be the same real struct as either). */
+#define SD_FILE_TOD 0xA780 /* word[1]+byte[3]: day/hour/min/sec */
+
 /* src/kernel/SYSDAT.FMT -- src/kernel/COMMAND.SUP's own scratch
  * variables (the subset src-c/kernel/command.c's ported subroutines
  * touch), at fixed harness-chosen scratch addresses */
@@ -633,6 +739,12 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
 /* src/kernel/EQU.BDO -- fixed build-time constants (not scratch) */
 #define fcbshf  5 /* log2(fcblen) */
 #define dskmsk  3 /* dirrec-1 = (recsiz/fcblen)-1 = directory elements per record, minus 1 */
+#define bdos_empty  0xE5 /* empty directory entry marker (EQU.BDO's own `empty` -- renamed
+                             here since a bare `empty` is too generic a macro name to export
+                             into every file that includes defs.h) */
+#define maxext  31 /* largest extent number (EQU.BDO) */
+#define maxmod  0x3F /* largest module number (EQU.BDO) */
+#define lstrec  0x7F /* last record number in an extent (EQU.BDO) */
 
 /* src/kernel/LDTAB.DEF -- one Load Table entry (src-c/kernel/load.c's
  * own load_finish) */

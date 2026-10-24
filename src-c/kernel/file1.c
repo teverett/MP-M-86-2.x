@@ -10,7 +10,8 @@
  * getmodnum, clrmodnum, CLR_EXT, setfwf, compcdr, setcdr,
  * rddirbuf, setdata/setdir/setdma, dirtouser, MAKE_FCB_INV,
  * CHK_INV_FCB, TST_INV_FCB, endofdir, setenddir, getallocbit,
- * setallocbit, checksum/newchecksum, rddir/rddir0, wrdir).
+ * setallocbit, checksum/newchecksum, rddir/rddir0, wrdir,
+ * check_fcb1/check_fcb).
  *
  * FILE1.BDO is not self-contained -- it's one of 4 files (FILE1-4.BDO)
  * meant to be assembled together into one BDOS module, sharing data
@@ -26,12 +27,21 @@
  * `rddir0`) `rddir`, both now ported, but the subtraction itself was
  * never worth a standalone C routine.
  *
- * One thing is still deferred, for an unrelated reason -- it calls
- * into `FILE2.BDO`'s own real (not yet ported) logic, not a boundary
- * stub:
- *   - CHECK_FCB (+ its own CHEK_FCB tail only when it leads there) --
- *     its MPM branch calls CLOSE1, which cascades into FILE2.BDO's
- *     own still-unported CLOSE_FCB/srch.
+ * `CHECK_FCB`/`CHECK_FCB1` are ported now too (see `check_fcb1`'s own
+ * header comment below for the full calling-convention writeup). An
+ * earlier revision of this comment claimed `CHECK_FCB` had its own
+ * further manual-stack complication beyond `CHECK_FCB1`'s own (on
+ * top of the "invalid checksum, partial close might fix it" path's
+ * own `POP BX ;DISCARD RETURN ADDRESS`) -- re-reading it closely once
+ * `FILE4.BDO`'s own `func15`/`func16` needed `CHECK_FCB1` directly
+ * showed that's wrong: `CHECK_FCB` (under MPM) is nothing but `MOV
+ * CHECK_FCB_RET,FALSE` immediately falling through into `CHECK_FCB1`
+ * itself -- no separate complication at all, just the same stack
+ * trick with a different flag value, already covered by
+ * `check_fcb1`'s own boolean-return translation. `FILE4.BDO`'s own
+ * `func20`/`func21` (sequential read/write) are `CHECK_FCB`'s own two
+ * real callers -- both just need "stop immediately on failure,"
+ * which this boolean return already gives for free.
  *
  * `GOBACK` (pererror/roderror/roferror/selerror/goerr's own common
  * tail, via RTN_PHY_ERRS) lives in FILE4.BDO: `mov sp,save_sp ! jmp
@@ -129,8 +139,11 @@ static void pass_arecord(const uint8_t *mem, uint16_t *dx_out, uint8_t *ch_out) 
 /*
  * diocomp -- check readf/writef's own result for disk errors
  *	output:	returns 0 (success) always -- see header comment
+ * Not `static`: `src-c/kernel/file4.c`'s own `func48` (BDOS flush)
+ * also calls `DIOCOMP` directly, an ordinary cross-file call, same
+ * as `que1.c`'s own into `que2.c`.
  */
-static uint8_t diocomp(uint8_t *mem) {
+uint8_t diocomp(uint8_t *mem) {
     (void)mem;
     return 0;
 }
@@ -242,8 +255,11 @@ void seek(uint8_t *mem) {
 /*
  * dmposition -- compute disk map position for vrecord
  *	output:	returns the dm$position value
+ * Not `static`: `src-c/kernel/file3.c`'s own `diskwrite` also calls
+ * `DMPOSITION` directly, an ordinary cross-file call, same as
+ * `que1.c`'s own into `que2.c`.
  */
-static uint8_t dmposition(const uint8_t *mem) {
+uint8_t dmposition(const uint8_t *mem) {
     uint8_t cl = mem[BD_BLKSHF];
     uint8_t al = (uint8_t)(mem[BD_VRECORD] >> cl);
     uint8_t ch = al;
@@ -259,8 +275,13 @@ static uint16_t get_dma(const uint8_t *mem) {
     return (uint16_t)(mem_r16(mem, BD_INFO) + fcb_dskmap);
 }
 
-/* getdm -- return disk map value from position cx */
-static uint16_t getdm(const uint8_t *mem, uint8_t cl) {
+/*
+ * getdm -- return disk map value from position cx. Not `static`:
+ * `src-c/kernel/file3.c`'s own `diskwrite` also calls `GETDM`
+ * directly, an ordinary cross-file call, same as `que1.c`'s own into
+ * `que2.c`.
+ */
+uint16_t getdm(const uint8_t *mem, uint8_t cl) {
     uint16_t bx = (uint16_t)(get_dma(mem) + cl);
     if (mem[BD_SINGLE] == 0) {
         uint16_t bx2 = (uint16_t)(bx + cl);
@@ -321,8 +342,11 @@ uint8_t get_atts(uint8_t *mem) {
     return (uint8_t)(dh << 4);
 }
 
-/* getexta -- get the current extent field address to al (bx out) */
-static uint16_t getexta(const uint8_t *mem) {
+/* getexta -- get the current extent field address to al (bx out).
+ * Not static: src-c/kernel/file2.c's own CLOSE_FCB/CLOSE1 cluster
+ * calls it too (an ordinary cross-file call, same convention as
+ * que1.c's own cross-file calls into que2.c). */
+uint16_t getexta(const uint8_t *mem) {
     return (uint16_t)(mem_r16(mem, BD_INFO) + fcb_extnum);
 }
 
@@ -441,11 +465,105 @@ uint8_t chek_fcb(uint8_t *mem) {
     return chksum_fcb(mem);
 }
 
-/* setcdisk/SET_CDISK1 -- set a "1" bit in BD_SELDSK's position of cx */
-uint16_t setcdisk(const uint8_t *mem, uint16_t cx) {
-    uint8_t al = mem[BD_SELDSK];
+extern void close1(uint8_t *mem);
+extern void pack_sdcnt(uint8_t *mem);
+extern uint8_t search_olist(uint8_t *mem, uint8_t ch);
+
+/*
+ * check_fcb1 -- CHECK_FCB1: verify the currently addressed fcb's own
+ * checksum (chek_fcb), applying the "invalid checksum, but one open
+ * copy might just be stale" MPM recovery (a partial `close1`, then a
+ * locked-file search) before giving up for real.
+ *	output: returns 1 if the checksum is valid (including after a
+ *		successful recovery) -- a plain, ordinary return in the
+ *		real asm too (`RET45`). Returns 0 otherwise; the real
+ *		asm reaches that case by first discarding its own return
+ *		address (`POP BX ;DISCARD RETURN ADDRESS`) so that its
+ *		own eventual `ret` (immediately, if the caller set
+ *		`BD_CHECK_FCB_RET`, or via `staret` after setting
+ *		`BD_LRET=10` otherwise) lands one call frame higher than
+ *		wherever `CHECK_FCB1` was actually called from -- same
+ *		category of manual stack trick as `PARSE.SUP`'s own
+ *		`delim` (see `parse.c`'s own header comment). Both of the
+ *		real callers (`FILE4.BDO`'s own `OPEN`/`CLOSE` MPM
+ *		branches, not yet ported) manually push the address they
+ *		want control to land at instead of their own normal
+ *		return address, right before calling `CHECK_FCB1`, and
+ *		pop it right back off immediately after (discarded, since
+ *		that's only reached on a valid checksum) -- so a 0
+ *		return here just means "do the same thing: skip straight
+ *		to your own designated fallback instead of continuing
+ *		normally", without this function literally touching the
+ *		call stack to get there.
+ *
+ * `CHECK_FCB` itself (`CHECK_FCB1`'s own caller, which first sets
+ * `BD_CHECK_FCB_RET=false` before falling into `CHECK_FCB1`) is
+ * NOT dead -- an earlier revision of this comment claimed it was,
+ * since `func15`/`func16` both set `BD_CHECK_FCB_RET=true` and call
+ * `CHECK_FCB1` directly, but `func20`/`func21` (sequential read/
+ * write, `src-c/kernel/file4.c`) call `CHECK_FCB` itself, with
+ * `BD_CHECK_FCB_RET` left false. Same boolean-return convention
+ * either way: a 0 there means "stop now," matching what both those
+ * callers already do unconditionally on failure.
+ */
+uint8_t check_fcb1(uint8_t *mem) {
+    uint8_t al = chek_fcb(mem);
+    if (al == 0) {
+        return 1; /* ret45 -- valid */
+    }
+    if ((al & 0x0F) != 0) {
+        goto check_fcb3;
+    }
+    if (mem[BD_PD_CNT] == 0) {
+        goto check_fcb3;
+    }
+    mem[(uint16_t)(BD_SDCNT + 1)] = 0xFF;
+    mem[BD_DONT_CLOSE] = 0xFF;
+    close1(mem);
+    mem[BD_LRET] = (uint8_t)(mem[BD_LRET] + 1);
+    if (mem[BD_LRET] == 0) {
+        goto check_fcb3; /* partial close failed */
+    }
+    mem[BD_LRET] = 0;
+    pack_sdcnt(mem);
+    if (search_olist(mem, 5)) {
+        return 1; /* found -- checksum ok */
+    }
+check_fcb3:
+    if (!mem[BD_CHECK_FCB_RET]) {
+        mem[BD_LRET] = 10;
+    }
+    return 0;
+}
+
+/*
+ * check_fcb -- CHECK_FCB: see check_fcb1's own header comment --
+ * `func20`/`func21` (`file4.c`) are its own two real callers.
+ */
+uint8_t check_fcb(uint8_t *mem) {
+    mem[BD_CHECK_FCB_RET] = 0;
+    return check_fcb1(mem);
+}
+
+/*
+ * set_cdisk1 -- SET_CDISK1: set a "1" bit in al's own position of cx.
+ * Not `static`: `src-c/kernel/file3.c`'s own `diskreset` also calls
+ * `SET_CDISK1` directly (with `al=BD_CURDSK`, not `BD_SELDSK`), an
+ * ordinary cross-file call, same as `que1.c`'s own into `que2.c`.
+ */
+/* `SET_CDISK1` lands at 0x8c5 in the combined wrapper bundle -- inside
+ * DATA.BDO's own dseg collision range (0x000-0x1000, same class of
+ * gap as `searchn`'s own header comment, `file2.c`) -- so, same as
+ * that, `diskreset`'s own cluster (`file3.c`/`file4.c`) gets no new
+ * differential test either. */
+uint16_t set_cdisk1(uint8_t al, uint16_t cx) {
     uint16_t bx = (uint16_t)(1u << al);
     return (uint16_t)(bx | cx);
+}
+
+/* setcdisk -- set a "1" bit in BD_SELDSK's own position of cx */
+uint16_t setcdisk(const uint8_t *mem, uint16_t cx) {
+    return set_cdisk1(mem[BD_SELDSK], cx);
 }
 
 /* nowrite -- return non-zero if the current disk is in the r/o vector */
@@ -454,6 +572,36 @@ uint8_t nowrite(const uint8_t *mem) {
     uint8_t cl = mem[BD_SELDSK];
     dx = (uint16_t)(dx >> cl);
     return (uint8_t)(dx & 1);
+}
+
+/*
+ * test_vector1 -- TEST_VECTOR1: shift dx right by cl bits, return
+ * bit 0. Not `static`: `src-c/kernel/file3.c`'s own `diskreset` also
+ * calls `TEST_VECTOR1` directly (with `cl=BD_CURDSK`, already set to
+ * the disk being reset, not `BD_SELDSK`), an ordinary cross-file
+ * call, same as `que1.c`'s own into `que2.c`.
+ */
+uint16_t test_vector1(uint16_t dx, uint8_t cl) {
+    dx = (uint16_t)(dx >> cl);
+    return (uint16_t)(dx & 1);
+}
+
+/*
+ * test_vector -- TEST_VECTOR: shift dx right by BD_SELDSK bits,
+ * return bit 0. `nowrite` above is this same shift, just always
+ * applied to BD_RODSK specifically; this is the general entry
+ * `src-c/kernel/file2.c`'s own `initialize`/`src-c/kernel/file3.c`'s
+ * own `curselect` call with other vectors (BD_DLOG/BD_TLOG/BD_RLOG).
+ */
+uint16_t test_vector(const uint8_t *mem, uint16_t dx) {
+    return test_vector1(dx, mem[BD_SELDSK]);
+}
+
+/* remove_drive -- REMOVE_DRIVE: clear BD_CURDSK's own bit in bx */
+uint16_t remove_drive(const uint8_t *mem, uint16_t bx) {
+    uint8_t cl = mem[BD_CURDSK];
+    uint16_t dx = (uint16_t)(1u << cl);
+    return (uint16_t)(bx & (uint16_t)~dx);
 }
 
 /* setro -- set the current disk to read-only */
@@ -561,8 +709,13 @@ void wrdir(uint8_t *mem) {
     /* jmp setdata -- boundary stub, no-op */
 }
 
-/* RO_TEST -- test a directory element/fcb for r/o status, carry set if r/o */
-static uint8_t ro_test(const uint8_t *mem, uint16_t bx) {
+/*
+ * RO_TEST -- test a directory element/fcb for r/o status, carry set
+ * if r/o. Not `static`: `src-c/kernel/file4.c`'s own `func15` (BDOS
+ * OPEN) also calls `RO_TEST` directly, an ordinary cross-file call,
+ * same as `que1.c`'s own into `que2.c`.
+ */
+uint8_t ro_test(const uint8_t *mem, uint16_t bx) {
     bx = (uint16_t)(bx + fcb_type); /* rofile == fcb_type's own offset */
     uint8_t al = mem[bx];
     return (uint8_t)(al >> 7);

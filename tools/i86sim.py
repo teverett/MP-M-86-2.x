@@ -129,12 +129,30 @@ class I86Sim:
     the plain no-op convention above isn't enough). An address in both
     `call_hooks` and `call_stub_addrs` just runs the hook; listing it in
     `call_stub_addrs` too is unnecessary.
+
+    `jmp_stub_addrs`: addresses that, when reached by a near JMP
+    (`0xE9`/`0xEB`), are treated as an immediate RET instead -- for a
+    routine whose own real tail end is a JMP (not a CALL) into an
+    unported boundary that the real hardware eventually returns
+    through normally, so the *caller who did a plain CALL into this
+    routine* still gets a normal return (e.g. `src/kernel/FILE1.BDO`'s
+    own `seek`, reached via `seekdir`'s own `call seekdir` from
+    `rddir0`: `seek`'s own last I/O dispatch, `jmps setsecf`, is a
+    tail JMP, not a CALL, so `call_stub_addrs` alone can't catch it --
+    first needed by `src-c/kernel/file2.c`'s own `searchn`, whose own
+    very first directory record read, on every call, always lands on
+    this exact path). Unlike `stop_addrs` (which halts right there, for a
+    routine whose own real exit genuinely never returns to ITS OWN
+    caller), this pops the return address the enclosing routine's own
+    `call` already pushed and keeps running there, same "doesn't
+    return, or resumes exactly here" reasoning as `call_stub_addrs`,
+    just for the JMP case instead of the CALL case.
     """
 
     def __init__(self, mem: bytearray, regs: dict, code_addr: int,
                  stop_addrs=frozenset(), call_stub_addrs=frozenset(),
                  int_stub_nums=frozenset(), segmented: bool = False,
-                 call_hooks=None):
+                 call_hooks=None, jmp_stub_addrs=frozenset()):
         if len(mem) != 0x10000:
             raise I86SimError(f"mem must be exactly 64KB, got {len(mem)} bytes")
         self.mem = mem
@@ -143,6 +161,7 @@ class I86Sim:
         self.regs.update(regs)
         self.stop_addrs = set(stop_addrs)
         self.call_stub_addrs = set(call_stub_addrs)
+        self.jmp_stub_addrs = set(jmp_stub_addrs)
         self.int_stub_nums = set(int_stub_nums)
         self.call_hooks = dict(call_hooks) if call_hooks else {}
         self.segmented = segmented
@@ -674,10 +693,12 @@ class I86Sim:
                 self.ip = (self.ip + disp) & 0xFFFF
         elif op == 0xEB:  # JMP rel8 (JMPS)
             disp = self._fetch_simm8()
-            self.ip = (self.ip + disp) & 0xFFFF
+            target = (self.ip + disp) & 0xFFFF
+            self.ip = self._pop16() if target in self.jmp_stub_addrs else target
         elif op == 0xE9:  # JMP rel16
             disp = self._fetch_simm16()
-            self.ip = (self.ip + disp) & 0xFFFF
+            target = (self.ip + disp) & 0xFFFF
+            self.ip = self._pop16() if target in self.jmp_stub_addrs else target
         elif op == 0xFA:  # CLI -- no interrupt model here; parsed and ignored
             pass
         elif op == 0xFB:  # STI -- ditto

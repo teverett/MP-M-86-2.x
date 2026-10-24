@@ -19,7 +19,8 @@ from i86sim import I86Sim  # noqa: E402
 WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'file2_wrapper.A86')
 FILE2_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', 'file2.c'),
            os.path.join(REPO_ROOT, 'src-c', 'kernel', 'file1.c'),
-           os.path.join(REPO_ROOT, 'src-c', 'kernel', 'file3.c')]
+           os.path.join(REPO_ROOT, 'src-c', 'kernel', 'file3.c'),
+           os.path.join(REPO_ROOT, 'src-c', 'kernel', 'file4.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 
 STACK_TOP = 0xFFF0

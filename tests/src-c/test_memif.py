@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/memif.c against src/kernel/
-MEMIF.MEM's `init`. `entry` is not ported -- see memif.c's own
-header comment. Byte-for-byte identical shape to cioif.c's own test
--- see cioif.c's own header comment for the full rationale."""
+MEMIF.MEM's `init`. `entry` (MEMIF.MEM's own inter-module MEM
+dispatch, with its real binary-semaphore acquire/release) is now
+ported too -- see tests/src-c/test_memif_entry.py for its own
+dedicated differential test. `init` itself is byte-for-byte identical
+in shape to cioif.c's own -- see cioif.c's own header comment for the
+full rationale."""
 import ctypes
 import os
 import subprocess
@@ -16,7 +19,12 @@ from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
 WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'memif_wrapper.A86')
-MEMIF_C = os.path.join(REPO_ROOT, 'src-c', 'kernel', 'memif.c')
+# memif.c's own `entry` now calls into cpmmem.c/memory.c/share.c/
+# mau.c/ml.c -- link all six, even though this test only exercises
+# `init` (same build tests/src-c/test_memif_entry.py uses for `entry`
+# itself).
+MEMIF_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f)
+           for f in ('memif.c', 'cpmmem.c', 'memory.c', 'share.c', 'mau.c', 'ml.c', 'util_mem.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 
 STACK_TOP = 0xFFF0
@@ -40,7 +48,7 @@ def build_c_library():
     lib_path = tempfile.mktemp(suffix='.dylib' if sys.platform == 'darwin' else '.so')
     subprocess.run(
         ['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC',
-         '-I', INCLUDE_DIR, MEMIF_C, '-o', lib_path],
+         '-I', INCLUDE_DIR, *MEMIF_C, '-o', lib_path],
         check=True,
     )
     return lib_path

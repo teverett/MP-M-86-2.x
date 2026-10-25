@@ -1,0 +1,52 @@
+; Standalone wrapper for src/kernel/CIOIF.CIO's `entry` (the module's
+; own inter-module CIO dispatch), together with the real CONSOLE.CIO
+; and CHARIO.CIO its own `functab` dispatches into -- same combination
+; src/kernel/CIO.A86 itself assembles for real
+; (`include cioif.cio!include console.cio!include chario.cio`).
+;
+; Same scratch-address conventions as chario_wrapper.A86 (which this
+; one otherwise mirrors) -- `rlr`/`ccb`/`ncns`/`nlstdev`/`ncondev` at
+; the addresses src-c/kernel/defs.h/tests/src-c/test_chario.py and
+; this file's own test_cioif.py (its `entry` test) both use.
+	include system.def
+	include modfunc.def
+	include xioscb.def
+	include pd.def
+	include err.def
+	include qd.def
+	include acb.def
+	include ccb.def
+	include char.def
+	dseg
+	org	0A000h
+rlr		dw	0
+	org	0A012h
+u_wrkseg	dw	0
+	org	0A030h
+ccb		dw	0
+	org	0A032h
+thrdrt		dw	0
+	org	0A034h
+ncns		db	0
+nlstdev		db	0
+ncondev		db	0
+	org	0A88Dh
+supmod		rw	2	; SYSDAT's own module_table[sup] far pointer --
+				; init copies this into CIOIF.CIO's own local
+				; `supervisor` cell (not otherwise touched here)
+	org	0A8A0h
+xiosmod		rw	2	; SYSDAT's own module_table[xios] far pointer --
+				; only `xiosif`'s own `.xiosmod` dot-reference
+				; needs this to exist to assemble
+	cseg
+; Unlike chario_wrapper.A86 (which has no CIOIF.CIO and so stubs
+; mpmif/xiosif as bare EQU addresses), this wrapper DOES include
+; CIOIF.CIO, which declares `mpmif`/`xiosif` as real labels of its
+; own (`callf cs:dword ptr .supervisor!ret` / `callf dword ptr
+; .xiosmod!ret`) -- test_cioif.py treats THOSE real addresses as
+; ordinary near-call boundary stubs instead (same ``call_stub_addrs``
+; convention, just at a real address instead of a made-up one).
+	include cioif.cio
+	include console.cio
+	include chario.cio
+	end

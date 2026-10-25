@@ -53,10 +53,6 @@
 
 #include "defs.h"
 
-typedef struct {
-    uint16_t bx, cx;
-} cio_bxcx;
-
 extern uint16_t getccbadr(const uint8_t *mem, uint8_t dh, uint16_t *bx_out);
 extern cio_bxcx conattach_entry(uint8_t *mem);
 extern cio_bxcx condetach_entry(uint8_t *mem);

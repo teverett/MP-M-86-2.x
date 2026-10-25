@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/cioif.c against src/kernel/
-CIOIF.CIO's `init`. `entry` is not ported -- see cioif.c's own
-header comment."""
+CIOIF.CIO's `init`. `entry` (CIOIF.CIO's own inter-module CIO
+dispatch) is now ported too -- see tests/src-c/test_cioif_entry.py
+for its own dedicated differential test (it needs CONSOLE.CIO/
+CHARIO.CIO linked in for real, unlike this file's own init-only
+wrapper)."""
 import ctypes
 import os
 import subprocess
@@ -15,7 +18,10 @@ from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
 WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'cioif_wrapper.A86')
-CIOIF_C = os.path.join(REPO_ROOT, 'src-c', 'kernel', 'cioif.c')
+# cioif.c's own `entry` now calls into console.c/chario.c -- link all
+# three, even though this test only exercises `init` (same 3-file
+# build tests/src-c/test_cioif_entry.py uses for `entry` itself).
+CIOIF_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f) for f in ('cioif.c', 'console.c', 'chario.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 
 STACK_TOP = 0xFFF0
@@ -43,7 +49,7 @@ def build_c_library():
     lib_path = tempfile.mktemp(suffix='.dylib' if sys.platform == 'darwin' else '.so')
     subprocess.run(
         ['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC',
-         '-I', INCLUDE_DIR, CIOIF_C, '-o', lib_path],
+         '-I', INCLUDE_DIR, *CIOIF_C, '-o', lib_path],
         check=True,
     )
     return lib_path

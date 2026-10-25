@@ -1,8 +1,9 @@
 ; Standalone wrapper for src/kernel/SUPIF.SUP's `func1`. See
 ; src-c/kernel/supif.c's own header comment for exactly what's ported
-; (`func1` only) and why (`user_entry`/`func`/`entry`/`mpmif`/`xiosif`
-; have no C equivalent or no observable effect, same conventions
-; already established elsewhere in this port).
+; (`func1`, now including its real `mod == sup` dispatch-through) and
+; why (`user_entry`/`func`/`entry`/`mpmif`/`xiosif` have no C
+; equivalent or no observable effect, same conventions already
+; established elsewhere in this port).
 ;
 ; `func1` is the only routine this test executes, so everything else
 ; below just needs to assemble, not behave correctly:
@@ -22,6 +23,20 @@
 ;     run (DS = that segment, see tests/src-c/test_supif.py) reads the
 ;     exact same bytes src-c/kernel/defs.h's own SD_MODULE_MAP/
 ;     SD_SYSENT (also the real offsets) do through `ds`.
+;
+; The 15 real `supfunc` targets are declared as marker stubs, not the
+; real routines -- each one is already independently differential-
+; tested elsewhere (test_sysfunc.py/test_load.py/test_command.py/
+; test_rpl.py/test_parse.py), so this test's own job is only to check
+; `func1`'s real dispatch-through logic itself: which slot a given
+; (mod,func) lands on, and that `bx` arrives forced (0 for
+; `load_entry`, 1 for `cload_entry`) or ambient (every other slot,
+; including bare `load`) exactly as src-c/kernel/supif.c's own header
+; comment claims. Each stub leaves `bx` completely untouched (so the
+; caller's own `bx` -- forced or not -- comes straight back out) and
+; sets `cx` to a slot-specific marker (`0x9000 + slot #`) so the test
+; can tell which stub actually ran without needing a separate trace
+; area.
 	include system.def
 	include modfunc.def
 	include enttab.def
@@ -49,26 +64,31 @@ module_table	rw	6*4	; 6 modules * 2 far pointers (MODTAB.DEF: modlen=8)
 sysdat		dw	0	; normally INIT.SUP's own cseg cell
 supervisor	dw	entry	; normally INIT.SUP's own cseg cell
 
-; supfunc's own 14 targets -- all already ported elsewhere in
-; src-c/kernel/ (see supif.c's own header comment for exactly where);
-; declared here as bare markers, same convention as cioif_wrapper.A86's
-; own CONSOLE.CIO/CHARIO.CIO function-table stand-ins, since `func1`
-; itself (the only routine this test executes) never jumps into them.
-not_implemented:	ret
-bad_entry:		ret
-version_entry:		ret
-callbios_entry:		ret
-load_entry:		ret
-clicmd_entry:		ret
-rpl_entry:		ret
-parse_entry:		ret
-sysdat_entry:		ret
-tod_entry:		ret
-load:			ret
-mpmversion_entry:	ret
-chain_entry:		ret
-serial_entry:		ret
-cload_entry:		ret
+not_implemented:	mov cx,09000h ! ret	; 0
+bad_entry:		mov cx,09001h ! ret	; 1
+version_entry:		mov cx,09002h ! ret	; 2
+callbios_entry:		mov cx,09003h ! ret	; 3
+; load_entry/cload_entry are real src/kernel/LOAD.SUP labels (not
+; SUPIF.SUP's own), reproduced verbatim here (just the forcing, not
+; `load:`'s own real body -- see this file's own header comment) since
+; supif.c's own func1 collapses that forcing in directly, same as the
+; real LOAD.SUP does.
+load_entry:		mov bx,0 ! jmps load	; 4
+clicmd_entry:		mov cx,09005h ! ret	; 5
+rpl_entry:		mov cx,09006h ! ret	; 6
+parse_entry:		mov cx,09007h ! ret	; 7
+sysdat_entry:		mov cx,09008h ! ret	; 8
+tod_entry:		mov cx,09009h ! ret	; 9
+load:			mov cx,0900Ah ! ret	; 10 (bx left untouched -- ambient, or whatever load_entry/cload_entry forced)
+mpmversion_entry:	mov cx,0900Bh ! ret	; 11
+chain_entry:		mov cx,0900Ch ! ret	; 12
+serial_entry:		mov cx,0900Dh ! ret	; 13
+; (real cload_entry also `push bx`es the original bx for `load:`'s own
+; body to consume later as a "PD addr on stack" -- out of scope here,
+; load.c's own business, not supif.c's; omitted so this stub's own
+; `ret` isn't left looking at that extra stack word instead of its
+; real return address)
+cload_entry:		mov bx,1 ! jmps load	; 14
 e_not_implemented	equ	1
 
 	include supif.sup

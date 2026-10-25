@@ -1,7 +1,7 @@
 /*
  * file4.c -- C port of a clean, self-contained subset of src/kernel/
  * FILE4.BDO (the BDOS function-dispatch table): func24, func25,
- * func29, func32, FUNC44, FUNC45, func51, func52, SET_ARET/openx06,
+ * func26, func29, func32, FUNC44, FUNC45, func51, func52, SET_ARET/openx06,
  * func15 (BDOS OPEN) + its own OPENX/OPENX0-OPENX09 cascade, func16
  * (BDOS CLOSE) + FUNC48 (flush buffers), func17/func18 (search for
  * first/next occurrence of a file, + internal `csearch`/
@@ -14,7 +14,10 @@
  * now func42/func43 (lock/unlock record).
  *
  * FILE4.BDO is now ported in full: every real function in its own
- * BDOS dispatch table has a C counterpart (`func13`-`func52`), modulo
+ * BDOS dispatch table has a C counterpart (`func13`-`func52`) --
+ * `func26` (found genuinely missing, not merely deferred, while
+ * wiring up `BDOSIF.BDO`'s own `entry`/`CALL_BDOS` dispatch table in
+ * `bdosif.c`) is now ported too -- modulo
  * the handful that are bare `EQU FUNCRET` dispatch-table aliases with
  * no body of their own at all (`func38`/`func39`/`FUNC41`/`FUNC47`/
  * `FUNC49`/`FUNC50`, straight onto `BDOSIF.BDO`'s own empty `funcret:
@@ -309,6 +312,18 @@ void func44_entry(uint8_t *mem, uint8_t dl, uint16_t *bx_out, uint16_t *cx_out) 
  */
 void func45_entry(uint8_t *mem, uint8_t dl, uint16_t *bx_out, uint16_t *cx_out) {
     mem[UDA_ERROR_MODE] = dl;
+    *bx_out = 0;
+    *cx_out = 0;
+}
+
+/* func26 -- set the subsequent dma address (MPM branch; CPM's own
+ * `dmaad`/`setdata` branch is dead in this tree, same convention as
+ * every other `if CPM`/`if MPM` split elsewhere)
+ *	input:	dx = new dma offset
+ *	output:	u_dma_ofst = dx; *bx_out = 0, *cx_out = 0
+ */
+void func26_entry(uint8_t *mem, uint16_t dx, uint16_t *bx_out, uint16_t *cx_out) {
+    mem_w16(mem, UDA_DMA_OFST, dx);
     *bx_out = 0;
     *cx_out = 0;
 }

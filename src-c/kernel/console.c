@@ -26,10 +26,6 @@
 
 #include "defs.h"
 
-typedef struct {
-    uint16_t bx, cx;
-} cio_bxcx;
-
 /*
  * getccbadr -- get CCB for calling proc's default console
  *	input:	dh = console number

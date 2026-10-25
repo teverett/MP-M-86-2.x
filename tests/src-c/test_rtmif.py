@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/rtmif.c against src/kernel/
-RTMIF.RTM's `init`. `entry` is not ported -- see rtmif.c's own
-header comment. `proc_creat` is a boundary stub in the reference
+RTMIF.RTM's `init`. `entry` (RTMIF.RTM's own inter-module RTM
+dispatch) is now ported too -- see tests/src-c/test_rtmif_entry.py
+for its own dedicated differential test. `proc_creat` is a boundary
+stub in the reference
 wrapper (see tests/src-c/fixtures/rtmif_wrapper.A86's own header
 comment for why) -- the C port still makes the real call into
 proc.c's own already-verified `proc_creat`, so only the parts of
@@ -25,7 +27,13 @@ from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
 WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'rtmif_wrapper.A86')
-RTMIF_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f) for f in ('rtmif.c', 'proc.c')]
+# rtmif.c's own `entry` now calls into sysent.c/dsptch.c/flag.c/
+# que1.c/que2.c/findpd.c/abort.c too -- link all nine, even though
+# this test only exercises `init` (same build
+# tests/src-c/test_rtmif_entry.py uses for `entry` itself).
+RTMIF_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f)
+           for f in ('rtmif.c', 'proc.c', 'sysent.c', 'dsptch.c', 'flag.c',
+                     'que1.c', 'que2.c', 'findpd.c', 'abort.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 
 STACK_TOP = 0xFFF0

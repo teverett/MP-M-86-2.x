@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/bdosif.c against src/kernel/
-BDOSIF.BDO's `init`. `entry` is not ported -- see bdosif.c's own
-header comment.
+BDOSIF.BDO's `entry` (its own BDOS function-table dispatch). See
+bdosif.c's own header comment for the full design: only the 10 real
+functions whose own `btab_flag` is 0 (func24/25/26/29/32/44/45/51/52/
+107, BDOS function #s 11/12/13/16/19/31/32/36/37/45) skip `getdiskmx`
+(the real critical-section-switch+SHELL+CALL_BDOS mechanism, not
+ported here) -- every other function # is a documented boundary
+(`reached_getdiskmx`), stubbed the same way `tests/src-c/
+test_file4.py`'s own `STUBS` set already stubs other BDOSIF.BDO/
+FILE1-4.BDO far-call-like boundaries.
 
-`init`'s own three `call mpmif` sites (create/open/write the MX disk
-queue) are real calls into QUE1.RTM's own `makeq_entry`/`openq_entry`/
-`writeq_entry` (already independently verified, tests/src-c/
-test_que.py) -- wired via the fresh near-dispatch `mpmif` convention
-tests/src-c/fixtures/bdosif_wrapper.A86's own header comment explains
-(BDOSIF.BDO's own real `mpmif` is a genuine indirect far call with no
-real-redirect capability in tools/i86sim.py, so it can't be driven for
-real the way RTMIF.RTM's own single near `call proc_creat` could).
+Reuses tests/src-c/fixtures/file4_wrapper.A86 verbatim (the same
+combined BDOSIF.BDO+FILE1-4.BDO+UDA.FMT+SYSDAT.FMT+DATA.BDO bundle
+src/kernel/BDOS.A86 itself assembles) -- `entry`/`functab`/`nomx`/
+`exit`/`getdiskmx` are all real labels already present in it, nothing
+new needed there. Same "no dseg layering, force-copy each field"
+reference-run convention as test_file4.py; see that file's own header
+comment for why (this combined bundle's own dseg collides with cseg
+at these tiny real offsets).
 """
 import ctypes
 import os
@@ -24,38 +31,49 @@ sys.path.insert(0, os.path.join(REPO_ROOT, 'tools'))
 from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
-WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'bdosif_wrapper.A86')
-BDOSIF_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f) for f in ('bdosif.c', 'que1.c', 'que2.c')]
+WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'file4_wrapper.A86')
+BDOSIF_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f)
+            for f in ('bdosif.c', 'file1.c', 'file2.c', 'file3.c', 'file4.c')]
+BDOSIF_C.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'bdosif_init_stubs.c'))
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 
 STACK_TOP = 0xFFF0
 
-SD_SUPMOD_OFF, SD_SUPMOD_SEG = 0xA88D, 0xA88F
-BDOSIF_SYSDAT, BDOSIF_SUPERVISOR_OFF, BDOSIF_SUPERVISOR_SEG = 0x0006, 0x0008, 0x000A
+REAL_RLR, REAL_DLOG, REAL_RODSK, REAL_RETURNSEG = 0x68, 0xC03, 0xC01, 0xCBB
+REAL_U_DMA_OFST, REAL_U_DMA_SEG = 0x2, 0x4
+REAL_U_ERROR_MODE, REAL_U_MULT_CNT, REAL_U_RETSEG = 0x10, 0x11, 0x30
 
-SD_RLR, SD_QLR, SD_QUL, SD_QMAU, SD_ENDSEG = 0xA000, 0xA020, 0xA022, 0xA024, 0xA026
-UDA_WRKSEG = 0xA012
-SD_MXDISKQD, SD_MXDISKQPB = 0xA0C0, 0xA0E0
+SD_RLR = 0xA000
+UDA_DMA_OFST, UDA_DMA_SEG = 0xA060, 0xA062
+UDA_ERROR_MODE, UDA_MULT_CNT, UDA_RETSEG = 0xA064, 0xA065, 0xA014
 
-Q_LINK, Q_FLAGS, Q_NAME, Q_MSGLEN, Q_NMSGS, Q_DQ, Q_NQ, Q_MSGCNT, Q_MSGOUT, Q_BUF = \
-    0, 4, 6, 0x0E, 0x10, 0x12, 0x14, 0x16, 0x18, 0x1A
-QPB_FLGS, QPB_QADDR, QPB_NMSGS, QPB_BUFFPTR, QPB_NAME = 0, 2, 4, 6, 8
-QNAMSIZ = 8
-QF_MX = 0x01
+PD_ADDR = 0x4000
 
-DS_SYSDAT = 0x1234  # arbitrary tag -- init is tested non-segmented, see
-                    # bdosif.c's own header comment
+# Same stub set test_file4.py already needs for this combined bundle
+# to run its own already-ported code paths (mpmif and friends -- see
+# that file's own comment), plus `getdiskmx` itself: the one real
+# boundary *this* test deliberately stops short of (bdosif.c's own
+# `entry` reports reaching it rather than modeling it).
+STUBS = {0x488, 0x4b5, 0x4ba, 0x4bf, 0x4c4, 0x4c9, 0x4ce, 0x4d3, 0x4d8, 0x4dd, 0x406, 0x413}
+
+
+def mem_w16(mem, addr, val):
+    mem[addr] = val & 0xFF
+    mem[addr + 1] = (val >> 8) & 0xFF
+
+
+def mem_r16(mem, addr):
+    return mem[addr] | (mem[addr + 1] << 8)
 
 
 def assemble_reference():
     asm = Assembler()
     asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
     code = asm.segment_bytes('cseg')
-    entry = asm.symtab['init'].value
-    entry_label = asm.symtab['entry'].value
-    retf_addrs = [i for i in range(entry, entry_label) if code[i] == 0xCB]
-    assert len(retf_addrs) == 1, f"expected exactly 1 retf, found {retf_addrs}"
-    return code, entry, retf_addrs[0]
+    entry = asm.symtab['entry'].value
+    exit_addr = asm.symtab['exit'].value
+    getdiskmx = asm.symtab['getdiskmx'].value
+    return code, entry, exit_addr, getdiskmx
 
 
 def build_c_library():
@@ -70,58 +88,71 @@ def build_c_library():
 
 def base_memory():
     mem = bytearray(0x10000)
-    mem_w16(mem, SD_ENDSEG, 0x5000)
-    mem_w16(mem, UDA_WRKSEG, DS_SYSDAT)  # same flat-passthrough convention
-                                          # test_que.py's own base_memory uses
-    mem_w16(mem, SD_SUPMOD_OFF, 0x0718)
-    mem_w16(mem, SD_SUPMOD_SEG, 0x1000)
-
-    # src/kernel/DATA.BDO's own real initial mxdiskqd/mxdiskqpb values
-    mem_w16(mem, SD_MXDISKQD + Q_LINK, 0)
-    mem_w16(mem, SD_MXDISKQD + Q_FLAGS, QF_MX)
-    mem[SD_MXDISKQD + Q_NAME:SD_MXDISKQD + Q_NAME + QNAMSIZ] = b'MXdisk  '
-    mem_w16(mem, SD_MXDISKQD + Q_MSGLEN, 0)
-    mem_w16(mem, SD_MXDISKQD + Q_NMSGS, 1)
-    mem_w16(mem, SD_MXDISKQD + Q_DQ, 0)
-    mem_w16(mem, SD_MXDISKQD + Q_NQ, 0)
-    mem_w16(mem, SD_MXDISKQD + Q_MSGCNT, 0)
-    mem_w16(mem, SD_MXDISKQD + Q_MSGOUT, 0)
-    mem_w16(mem, SD_MXDISKQD + Q_BUF, 0)
-
-    mem[SD_MXDISKQPB + QPB_FLGS] = 0
-    mem_w16(mem, SD_MXDISKQPB + QPB_QADDR, 0)
-    mem_w16(mem, SD_MXDISKQPB + QPB_NMSGS, 1)
-    mem_w16(mem, SD_MXDISKQPB + QPB_BUFFPTR, 0)
-    mem[SD_MXDISKQPB + QPB_NAME:SD_MXDISKQPB + QPB_NAME + QNAMSIZ] = b'MXdisk  '
+    mem_w16(mem, SD_RLR, PD_ADDR)
     return mem
 
 
-def mem_w16(mem, addr, val):
-    mem[addr] = val & 0xFF
-    mem[addr + 1] = (val >> 8) & 0xFF
-
-
-def mem_r16(mem, addr):
-    return mem[addr] | (mem[addr + 1] << 8)
-
-
-def run_reference(code, entry, stop_addr, mem, regs):
-    image = bytearray(mem)
+def run_reference(code, entry, exit_addr, getdiskmx, mem, cl, dx, bx, ds):
+    image = bytearray(0x10000)
     image[0:len(code)] = code
-    sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry, stop_addrs={stop_addr})
+    for addr, val in enumerate(mem):
+        if val != 0:
+            image[addr] = val
+    image[REAL_RLR:REAL_RLR + 2] = mem[SD_RLR:SD_RLR + 2]
+    image[REAL_U_DMA_OFST:REAL_U_DMA_OFST + 2] = mem[UDA_DMA_OFST:UDA_DMA_OFST + 2]
+    image[REAL_U_DMA_SEG:REAL_U_DMA_SEG + 2] = mem[UDA_DMA_SEG:UDA_DMA_SEG + 2]
+    image[REAL_U_ERROR_MODE] = mem[UDA_ERROR_MODE]
+    image[REAL_U_MULT_CNT] = mem[UDA_MULT_CNT]
+    image[REAL_U_RETSEG:REAL_U_RETSEG + 2] = mem[UDA_RETSEG:UDA_RETSEG + 2]
+    stubs = STUBS | {getdiskmx}
+    sim = I86Sim(image, {'cx': cl, 'dx': dx, 'bx': bx, 'ds': ds, 'sp': STACK_TOP}, entry,
+                 stop_addrs={exit_addr}, call_stub_addrs=stubs)
     sim.run()
     return sim.regs, image
 
 
+class EntryResult(ctypes.Structure):
+    _fields_ = [('bx', ctypes.c_uint16), ('cx', ctypes.c_uint16), ('reached_getdiskmx', ctypes.c_uint8)]
+
+
+def run_port(lib, mem, cl, dx, bx, ds):
+    buf = (ctypes.c_uint8 * 0x10000)(*mem)
+    lib.entry.restype = EntryResult
+    lib.entry.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint8, ctypes.c_uint16,
+                           ctypes.c_uint16, ctypes.c_uint16]
+    return lib.entry(ctypes.cast(buf, ctypes.POINTER(ctypes.c_uint8)), cl, dx, bx, ds)
+
+
+AMBIENT_BX = 0x55AA
+
+# (label, cl, dx, ds, seed_fn) -- seed_fn(mem) plants whatever this
+# function # needs for a non-trivial check.
+DIRECT_CASES = [
+    ("func24 (11): login vector", 11, 0, 0, lambda m: mem_w16(m, REAL_DLOG, 0x1234)),
+    ("func25 (12): current disk", 12, 0, 0, lambda m: m.__setitem__(PD_ADDR + 1, 3)),  # p_dsk = offset 1
+    ("func26 (13): set dma address", 13, 0x5678, 0, lambda m: None),
+    ("func29 (16): r/o vector", 16, 0, 0, lambda m: mem_w16(m, REAL_RODSK, 0x4321)),
+    ("func32 (19): interrogate user code", 19, 0x00FF, 0, lambda m: None),
+    ("func32 (19): set user code", 19, 0x001D, 0, lambda m: None),
+    ("func44 (31): valid multi-sector count", 31, 0x0010, 0, lambda m: None),
+    ("func44 (31): zero is out of range", 31, 0x0000, 0, lambda m: None),
+    ("func45 (32): set bdos error mode", 32, 0x00FF, 0, lambda m: None),
+    ("func51 (36): set dma base", 36, 0x9ABC, 0, lambda m: None),
+    ("func52 (37): get dma", 37, 0, 0x1111, lambda m: None),
+    ("func107 (45): FUNCRET no-op", 45, 0x1234, 0, lambda m: None),
+]
+
+# Every other function # (0-10,14,15,17,18,20-30,33-35,38-44,46) goes
+# through getdiskmx -- a handful of representative samples, not all
+# 37, since they all take the exact same documented-boundary path.
+BOUNDARY_CASES = [0, 7, 14, 20, 28, 38, 46]
+
+
 def main():
-    code, entry, stop_addr = assemble_reference()
+    code, entry, exit_addr, getdiskmx = assemble_reference()
     lib_path = build_c_library()
     try:
         lib = ctypes.CDLL(lib_path)
-        c_u8p = ctypes.POINTER(ctypes.c_uint8)
-
-        lib.init.argtypes = [c_u8p, ctypes.c_uint16]
-
         failures = []
 
         def check(label, ref, port):
@@ -130,42 +161,30 @@ def main():
             if status == "FAIL":
                 failures.append(label)
 
-        def to_ctypes(mem):
-            return (ctypes.c_uint8 * 0x10000)(*mem)
+        for label, cl, dx, ds, seed_fn in DIRECT_CASES:
+            mem = base_memory()
+            seed_fn(mem)
+            bx = AMBIENT_BX
+            ref_regs, _ = run_reference(code, entry, exit_addr, getdiskmx, mem, cl, dx, bx, ds)
+            port = run_port(lib, mem, cl, dx, bx, ds)
+            ref = (ref_regs['bx'] & 0xFFFF, ref_regs['cx'] & 0xFFFF)
+            got = (port.bx, port.cx)
+            check(label, ref, got)
+            check(f"{label}: reached_getdiskmx", False, bool(port.reached_getdiskmx))
 
-        mem = base_memory()
-        ref_regs, ref_img = run_reference(code, entry, stop_addr, mem, {'ds': DS_SYSDAT})
-        buf = to_ctypes(mem)
-        lib.init(ctypes.cast(buf, c_u8p), ctypes.c_uint16(DS_SYSDAT))
-        port = bytes(buf)
-
-        check("init: sysdat", ref_img[BDOSIF_SYSDAT:BDOSIF_SYSDAT + 2], port[BDOSIF_SYSDAT:BDOSIF_SYSDAT + 2])
-        check("init: supervisor offset", ref_img[BDOSIF_SUPERVISOR_OFF:BDOSIF_SUPERVISOR_OFF + 2],
-              port[BDOSIF_SUPERVISOR_OFF:BDOSIF_SUPERVISOR_OFF + 2])
-        check("init: supervisor segment", ref_img[BDOSIF_SUPERVISOR_SEG:BDOSIF_SUPERVISOR_SEG + 2],
-              port[BDOSIF_SUPERVISOR_SEG:BDOSIF_SUPERVISOR_SEG + 2])
-
-        # makeq_entry threaded mxdiskqd onto SD_QLR
-        check("init: qlr -> mxdiskqd", mem_r16(ref_img, SD_QLR), mem_r16(port, SD_QLR))
-        check("init: mxdiskqd's own q_link", mem_r16(ref_img, SD_MXDISKQD + Q_LINK),
-              mem_r16(port, SD_MXDISKQD + Q_LINK))
-
-        # openq_entry filled in mxdiskqpb's own qpb_qaddr
-        check("init: mxdiskqpb's own qpb_qaddr", mem_r16(ref_img, SD_MXDISKQPB + QPB_QADDR),
-              mem_r16(port, SD_MXDISKQPB + QPB_QADDR))
-
-        # writeq_entry incremented mxdiskqd's own q_msgcnt (nmsgs=1, so
-        # this is the "not full" real path, not the unconditional
-        # retry-forever one -- see que1.c's own header comment)
-        check("init: mxdiskqd's own q_msgcnt", mem_r16(ref_img, SD_MXDISKQD + Q_MSGCNT),
-              mem_r16(port, SD_MXDISKQD + Q_MSGCNT))
-        check("init: mxdiskqd's own q_buf (MX queue, no owner)", mem_r16(ref_img, SD_MXDISKQD + Q_BUF),
-              mem_r16(port, SD_MXDISKQD + Q_BUF))
+        for cl in BOUNDARY_CASES:
+            mem = base_memory()
+            bx = AMBIENT_BX
+            ref_regs, _ = run_reference(code, entry, exit_addr, getdiskmx, mem, cl, 0, bx, 0)
+            port = run_port(lib, mem, cl, 0, bx, 0)
+            ref = ref_regs['bx'] & 0xFFFF
+            check(f"func #{cl}: reaches getdiskmx, bx stays ambient", AMBIENT_BX, ref)
+            check(f"func #{cl}: reached_getdiskmx", True, bool(port.reached_getdiskmx))
 
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")
             return 1
-        print("\nall cases match.")
+        print(f"\nall {2 * len(DIRECT_CASES) + 2 * len(BOUNDARY_CASES)} cases match.")
         return 0
     finally:
         os.remove(lib_path)

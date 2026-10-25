@@ -29,6 +29,16 @@ typedef struct {
     uint16_t bx;
 } get_xfcb_result;
 
+/* cio_bxcx -- the BX/CX pair most of CONSOLE.CIO/CHARIO.CIO's own
+ * entries return (CIOIF.CIO's own `entry` dispatch just forwards
+ * whatever's in them). Shared here (not a per-file local typedef)
+ * so src-c/kernel/cioif.c's own `entry` dispatcher -- which calls
+ * into both files -- can declare and return it without a type
+ * mismatch once all three are linked into one real binary. */
+typedef struct {
+    uint16_t bx, cx;
+} cio_bxcx;
+
 /*
  * get_dir_ext_result -- src-c/kernel/file2.c's own `get_dir_ext`
  * output (also used directly by src-c/kernel/file3.c's own `rseek`):
@@ -1030,6 +1040,16 @@ static inline uint16_t mem_seg_addr(uint16_t seg, uint16_t offset) {
 
 #define questr_addr  0xB410 /* byte[10]: " Msg Qued\0" literal, write_cstr'd on demand */
 #define userstr_addr 0xB420 /* byte[9]: "(User 0)\0" literal, write_cstr'd on demand */
+
+/* src/kernel/SYSDAT.FMT's own `mxmemqpb` -- the MX memory queue
+ * MEMIF.MEM's own `entry` acquires/releases `SD_MXMEMOWNER`/
+ * `SD_MXMEMCOUNT` (above) around every dispatch through, via
+ * `f_qread`/`f_qwrite`. A fixed harness-chosen scratch address, same
+ * reasoning as every other SD_* field; its own 16-byte content is
+ * never read by this port (those two calls are boundary stubs, see
+ * src-c/kernel/memif.c's own header comment) -- only its address is
+ * ever used, as `f_qread`/`f_qwrite`'s own `dx` argument. */
+#define SD_MXMEMQPB   0xB500 /* byte[16], content unconsumed */
 
 /* src/kernel/XIOS.A86's own private DSEG fields src-c/kernel/xios.c
  * touches, at fixed harness-chosen scratch addresses (XIOS.A86 is a

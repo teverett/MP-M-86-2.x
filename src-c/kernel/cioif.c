@@ -1,5 +1,10 @@
 /*
- * cioif.c -- C port of src/kernel/CIOIF.CIO's `init` AND now `entry`
+ * cioif.c -- C port of src/kernel/CIOIF.CIO's `init` AND now `entry`,
+ * named here `cioif_init`/`cioif_entry` -- every module's own real
+ * asm label for these two routines is just `init`/`entry`; see
+ * bdosif.c's own header comment for why the C ports need a module
+ * prefix instead.
+ *
  * (the module's own inter-module CIO dispatch, `mov ch,0!shl cx,1!
  * mov si,cx!call cs:functab[si]!retf`) -- CL selects one of the 23
  * functions below, each already ported in console.c/chario.c; this
@@ -56,7 +61,7 @@ typedef struct {
  *		real inputs it needs (most use dl or dx; conprint_entry
  *		alone also needs bh/bl)
  */
-entry_result entry(uint8_t *mem, uint8_t cl, uint16_t dx, uint8_t bh, uint8_t bl) {
+entry_result cioif_entry(uint8_t *mem, uint8_t cl, uint16_t dx, uint8_t bh, uint8_t bl) {
     entry_result r = {0, 0, 0};
     uint8_t dl = (uint8_t)dx;
     switch (cl) {
@@ -122,7 +127,7 @@ entry_result entry(uint8_t *mem, uint8_t cl, uint16_t dx, uint8_t bh, uint8_t bl
  * far pointer into `supervisor`, never its own -- so there's no `cs`
  * parameter here.
  */
-void init(uint8_t *mem, uint16_t ds_sysdat) {
+void cioif_init(uint8_t *mem, uint16_t ds_sysdat) {
     mem_w16(mem, CIOIF_SYSDAT, ds_sysdat);
     mem_w16(mem, CIOIF_SUPERVISOR_OFF, mem_r16(mem, SD_SUPMOD_OFF));
     mem_w16(mem, CIOIF_SUPERVISOR_SEG, mem_r16(mem, SD_SUPMOD_SEG));

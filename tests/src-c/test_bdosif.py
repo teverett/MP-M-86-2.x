@@ -117,10 +117,10 @@ class EntryResult(ctypes.Structure):
 
 def run_port(lib, mem, cl, dx, bx, ds):
     buf = (ctypes.c_uint8 * 0x10000)(*mem)
-    lib.entry.restype = EntryResult
-    lib.entry.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint8, ctypes.c_uint16,
+    lib.bdosif_entry.restype = EntryResult
+    lib.bdosif_entry.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint8, ctypes.c_uint16,
                            ctypes.c_uint16, ctypes.c_uint16]
-    return lib.entry(ctypes.cast(buf, ctypes.POINTER(ctypes.c_uint8)), cl, dx, bx, ds)
+    return lib.bdosif_entry(ctypes.cast(buf, ctypes.POINTER(ctypes.c_uint8)), cl, dx, bx, ds)
 
 
 AMBIENT_BX = 0x55AA

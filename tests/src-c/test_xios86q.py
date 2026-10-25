@@ -163,10 +163,10 @@ def main():
 
         lib.const_entry.restype = ctypes.c_uint8
         lib.const_entry.argtypes = [IN8_FN]
-        lib.conin_entry.restype = ctypes.c_uint8
-        lib.conin_entry.argtypes = [IN8_FN, OUT8_FN]
-        lib.conout_entry.restype = None
-        lib.conout_entry.argtypes = [IN8_FN, OUT8_FN, ctypes.c_uint8]
+        lib.xios_conin_entry.restype = ctypes.c_uint8
+        lib.xios_conin_entry.argtypes = [IN8_FN, OUT8_FN]
+        lib.xios_conout_entry.restype = None
+        lib.xios_conout_entry.argtypes = [IN8_FN, OUT8_FN, ctypes.c_uint8]
         lib.punch_entry.restype = ctypes.c_uint8
         lib.punch_entry.argtypes = []
         lib.reader_entry.restype = ctypes.c_uint8
@@ -233,14 +233,14 @@ def main():
         # -- CONIN --
         ref_regs, _ = run_reference(code, dseg, entries['conin'], {}, Device(uart=Uart86Q(rx_bytes=b'Q')))
         in8, out8 = make_c_hooks(Device(uart=Uart86Q(rx_bytes=b'Q')))
-        check("CONIN", ref_regs['ax'] & 0xFF, lib.conin_entry(in8, out8))
+        check("CONIN", ref_regs['ax'] & 0xFF, lib.xios_conin_entry(in8, out8))
 
         # -- CONOUT --
         d1 = Device()
         run_reference(code, dseg, entries['conout'], {'cx': 0x58}, d1)
         d2 = Device()
         in8, out8 = make_c_hooks(d2)
-        lib.conout_entry(in8, out8, ctypes.c_uint8(0x58))
+        lib.xios_conout_entry(in8, out8, ctypes.c_uint8(0x58))
         check("CONOUT", d1.uart.tx, d2.uart.tx)
 
         # -- PUNCH/READER/LISTST --

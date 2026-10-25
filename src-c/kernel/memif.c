@@ -1,5 +1,10 @@
 /*
- * memif.c -- C port of src/kernel/MEMIF.MEM's `init` AND now `entry`
+ * memif.c -- C port of src/kernel/MEMIF.MEM's `init` AND now `entry`,
+ * named here `memif_init`/`memif_entry` -- every module's own real
+ * asm label for these two routines is just `init`/`entry`; see
+ * bdosif.c's own header comment for why the C ports need a module
+ * prefix instead.
+ *
  * (the module's own inter-module MEM dispatch). Unlike `CIOIF.CIO`'s
  * own `entry` (plain dispatch), this one wraps every call in a real
  * binary-semaphore acquire/release (`SD_MXMEMOWNER`/`SD_MXMEMCOUNT`,
@@ -58,7 +63,7 @@ extern entry_result maufree_entry(uint8_t *mem, uint16_t dx);
 extern entry_result mlalloc_entry(uint8_t *mem, uint16_t dx, uint16_t bx);
 extern entry_result mlfree_entry(uint8_t *mem, uint16_t dx, uint16_t bx);
 
-void init(uint8_t *mem, uint16_t ds_sysdat) {
+void memif_init(uint8_t *mem, uint16_t ds_sysdat) {
     mem_w16(mem, MEMIF_SYSDAT, ds_sysdat);
     mem_w16(mem, MEMIF_SUPERVISOR_OFF, mem_r16(mem, SD_SUPMOD_OFF));
     mem_w16(mem, MEMIF_SUPERVISOR_SEG, mem_r16(mem, SD_SUPMOD_SEG));
@@ -70,7 +75,7 @@ void init(uint8_t *mem, uint16_t ds_sysdat) {
  *		dx/bx = whichever of this specific function's own real
  *		inputs it needs
  */
-entry_result entry(uint8_t *mem, uint8_t cl, uint16_t dx, uint16_t bx) {
+entry_result memif_entry(uint8_t *mem, uint8_t cl, uint16_t dx, uint16_t bx) {
     uint16_t rlr = mem_r16(mem, SD_RLR);
     uint16_t saved_pflag = 0;
     int reacquired = 0;

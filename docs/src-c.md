@@ -16,9 +16,12 @@ Each routine is first ported and verified in isolation (see "How a
 routine gets ported" below) before any link/boot step is attempted —
 `src-c/Makefile`'s own `make build`/`make test` only compile-check and
 differentially test each file on its own; there is no linked kernel/
-loader binary yet. Getting there (a real entry point, a linker script
-or equivalent, an actual bootable image) is a separate, not-yet-started
-effort layered on top of this routine-by-routine groundwork.
+loader binary built from this routine-by-routine work yet. A real
+`ld`+linker-script image-builder pipeline now exists and is proven
+end to end (`src-c/boot/`, see its own section below) — but it's a
+parallel proof-of-pipeline using a minimal hand-written stub, not yet
+wired to any of the real ported routines above. Doing that is a
+separate, larger, not-yet-started effort layered on top of both.
 
 Instead this follows the same approach the user's other project,
 [`CP-M-C`](https://github.com/teverett/CP-M-C) (a C port of DRI's CP/M 2.2
@@ -90,6 +93,176 @@ really are "the same location" system-wide. A wrapper always declares
 these as real DSEG labels at that address, never a plain EQU constant,
 since EQU would wrongly assemble a read of the field (`mov bx,rlr`) as an
 immediate load instead of a memory read.
+
+## `src-c/boot/`: a real `ld`-based image-builder pipeline
+
+`src-c/boot/` is a real, working `ld`+linker-script image-builder
+pipeline, built to answer "can we get `/src-c` to a bootable image at
+all" — proven end to end (compiles, links, boots under QEMU, prints
+its own signon over the serial port), but deliberately **not yet
+wired to any of the real ported routines** in `src-c/kernel/`/
+`src-c/loader/` above. It's a parallel proof-of-pipeline, built with
+a minimal hand-written stub (`boot.s`'s own multiboot header + `_start`,
+`kernel_main.c`'s own serial signon), not a replacement for or change
+to `/src`'s own real MP/M-86 boot chain (`ROM.A86` ->
+`LDBIOS.A86`/`LDMPM.A86` -> the kernel, built by `tools/asm86.py` +
+`tools/build_mpmsys.py`/`build_mpmldr.py` — entirely untouched by any
+of this).
+
+Two things made this nontrivial, worth recording:
+
+- **No 8086/80186 C compiler exists anywhere on this machine** (checked
+  `ia16-elf-gcc`, Watcom, SDCC — SDCC's own target list is
+  `mcs51/z80/.../mos6502/f8l`, no 8086 target at all, confirmed via
+  `sdcc --version`). The toolchain actually used,
+  **`i686-elf-gcc`/`i686-elf-ld`/`i686-elf-grub-file`** (already
+  installed via Homebrew, `brew search i686-elf`), targets **32-bit
+  protected mode with a flat memory model** — a genuinely different
+  execution model from MP/M-86's own real 16-bit real-mode,
+  segment:offset-addressed one. This is why `src-c/boot/` stays a
+  separate proof-of-pipeline rather than a drop-in replacement for
+  anything above: every ported routine in `src-c/kernel/` takes a
+  `uint8_t *mem` array + a 16-bit offset (written to run on the
+  *host* CPU against a simulated flat byte array for differential
+  testing, see "How a routine gets ported" above) — wiring any of
+  them into a real 32-bit protected-mode kernel would need those
+  routines' own real-memory-addressing story worked out first, a
+  separate and likely large effort, not attempted here.
+- **A multiboot header needs the ELF `SHF_ALLOC` flag to land inside
+  the file's own first 8KB**, which a bootloader scans for it.
+  `gas` doesn't infer that flag for a section name it doesn't
+  already recognize (`.multiboot` isn't one of its well-known
+  names) — without it (`.section .multiboot` alone), `ld` placed the
+  section at the *end* of the file regardless of this script's own
+  `SECTIONS` ordering, which `i686-elf-grub-file --is-x86-multiboot`
+  caught by failing outright. Fixed with an explicit `.section
+  .multiboot, "a"`.
+
+`tests/src-c/test_boot.py` builds `src-c/boot/` with the real
+toolchain and boots the result under QEMU (`-kernel kernel.elf`,
+multiboot loads directly, no GRUB ISO/`grub-mkrescue` step needed for
+this), checking the serial signon string comes back — the one
+`tests/src-c/test_*.py` file that depends on external tools instead
+of this project's own from-scratch `tools/asm86.py`/`tools/i86sim.py`;
+it skips (not fails) if `i686-elf-gcc`/`i686-elf-ld`/
+`i686-elf-grub-file`/`qemu-system-i386` aren't on `PATH`. `src-c` isn't
+wired into this repo's own CI yet either (`.github/workflows/` only
+builds/tests `/src`), so this doesn't affect CI either way.
+
+`src-c/Makefile`'s own `make build` (the compile-only, no-link
+type-check pass across every `src-c/kernel/`/`src-c/loader/` file)
+now also uses this same real cross toolchain (`CC := i686-elf-gcc`,
+`LD := i686-elf-ld`, both now also actually invoked by the real
+`kernel.elf` link target, see below) instead of the host `cc` --
+`CC`/`LD`/the common `CFLAGS` (`-m32 -march=i686 -mgeneral-regs-only
+-ffreestanding -fno-pie -fno-stack-protector -fcf-protection=none
+-fno-asynchronous-unwind-tables -O2 -Wall -Wextra -Werror` — a real
+kernel-code flag set, not just "freestanding": `-mgeneral-regs-only`
+stops GCC from ever emitting SSE/MMX/x87 instructions, which would
+need FPU/SSE context-switch support nothing here has;
+`-fcf-protection=none` drops control-flow-enforcement prologues this
+freestanding kernel has no OS/CPU support for; `-fno-asynchronous-
+unwind-tables` drops C++-style exception-unwinding metadata this
+code never uses) live in `src-c/build.mk`, `include`d by
+`src-c/Makefile` (`boot/` has no `Makefile` of its own at all --
+folded into this one, see the "`kernel.elf`" section below) so
+`make build`'s type-check pass and the real `kernel.elf` link can't
+quietly drift apart on toolchain choice or codegen; `make build`
+itself adds `-std=c11`/`-I freestanding-include` on top of
+`build.mk`'s own `CFLAGS` --
+`tests/src-c/test_*.py`'s own differential tests still build their
+own `ctypes`-loadable shared libraries with the *host* `cc` directly
+(hardcoded in each test file, not read from this Makefile), since a
+cross-compiled object can't be `dlopen`ed into the host Python
+process that way; the two compiles serve different purposes and
+were already independent of each other. Getting this to actually
+compile needed two small fixes, both worth remembering:
+
+- `-ffreestanding` is required, not optional, even for files that
+  only use `<stdint.h>`: without it, `i686-elf-gcc`'s own bundled
+  `stdint.h` assumes a *hosted* environment and does `#include_next
+  <stdint.h>`, expecting a further, real libc one somewhere down the
+  search path -- which doesn't exist on this bare, libc-less cross
+  toolchain, so it fails outright (`fatal error: stdint.h: No such
+  file or directory`, from inside the compiler's own header). With
+  `-ffreestanding`, the same header instead defines everything
+  itself, per the C standard's own "freestanding implementations
+  must provide stdint.h standalone" requirement.
+- `<string.h>` isn't one of the handful of headers a freestanding
+  implementation is required to ship (unlike `stdint.h`), and this
+  toolchain has no libc at all, so it doesn't exist here, period —
+  a handful of files (`submit.c`/`tmp.c`/`xios86q.c`/`ldbios86q.c`)
+  include it for `memcpy`/`memcmp`. Fixed with a tiny declarations-
+  only shim, `src-c/freestanding-include/string.h` (`-I
+  freestanding-include`, added to `CFLAGS`) -- no definitions exist
+  anywhere yet, so this is still compile-only; a real link step
+  would need actual bodies for both.
+
+### `kernel.elf`: the whole `src-c/kernel/` tree, actually linked
+
+`src-c/Makefile`'s `kernel.elf` target (`linker.ld` now lives in
+`src-c/` itself, not under `boot/`, since it's no longer that
+directory's own private concern) links `src-c/boot/`'s own stub
+together with *every* compiled `src-c/kernel/` object (deliberately
+not `src-c/loader/` -- in the real system the loader and the kernel
+are two separate executables that never coexist in one linked image
+either, so linking them together here would be wrong even by the
+real architecture's own design, not just inconvenient) into one real
+ELF via `i686-elf-ld`. This **succeeds** -- `kernel.elf` links, passes
+`i686-elf-grub-file --is-x86-multiboot`, and still boots/signs on
+under QEMU exactly like `src-c/boot/`'s own standalone stub (nothing
+in `kernel_main.c` calls into any of these routines yet, so this
+isn't evidence any of them *work* together -- just that the tree
+*links* as one unit, see this section's own opening paragraphs above
+for why that's still a different question from "boots a working
+MP/M-86 kernel").
+
+Getting there required two real fixes, not just flag-tuning:
+
+- **`memcpy`/`memcmp` needed real bodies, not just declarations** --
+  `freestanding-include/string.h`'s own shim only declared them
+  (enough for `make build`'s compile-only pass), but linking
+  anything that calls them needs an actual definition somewhere.
+  `freestanding-include/string_shim.c` (byte-at-a-time, no attempt
+  at the usual libc-style optimization -- it exists only to make
+  `kernel.elf` link, not as a differential-tested port of anything).
+- **Several genuinely different real routines in genuinely different
+  real files had been independently ported to the same generic C
+  name**, because their real asm labels happen to match -- harmless
+  for isolated per-file differential testing (the only linking these
+  files had ever done before), but a hard link failure once the
+  whole tree links as one unit. Two distinct cases, both fixed by
+  adding a module prefix to the C name only (the real asm label, and
+  every differential test's own understanding of *that*, is
+  untouched):
+  - `init`/`entry`: `BDOSIF.BDO`/`CIOIF.CIO`/`MEMIF.MEM`/`RTMIF.RTM`'s
+    own inter-module dispatchers, plus `INIT.SUP`'s own separate
+    `init`, all real different routines, all five named exactly
+    `init`/`entry` in their own real asm (purely locally/table-
+    relative there, never needing to be globally unique) -- renamed
+    to `bdosif_init`/`bdosif_entry`, `cioif_init`/`cioif_entry`,
+    `memif_init`/`memif_entry`, `rtmif_init`/`rtmif_entry`, and
+    `sup_init` (`src-c/kernel/init.c`, `INIT.SUP`'s own `entry` isn't
+    ported at all, see that row below, so no second rename needed
+    there).
+  - `conin_entry`/`conout_entry`: `CHARIO.CIO`'s own higher-level
+    console-layer entries (`chario.c`, called by `cioif.c`'s
+    dispatcher and `command.c`) collided with `XIOS86Q.A86`'s own,
+    genuinely different, low-level hardware-driver entries
+    (`xios86q.c`, called only internally within that same file) --
+    renamed the `xios86q.c` side only (`xios_conin_entry`/
+    `xios_conout_entry`), since it was the one with no other file's
+    own call sites to update.
+  - Every affected differential test (`test_bdosif.py`/
+    `test_cioif.py`/`test_cioif_entry.py`/`test_init.py`/
+    `test_memif.py`/`test_memif_entry.py`/`test_rtmif.py`/
+    `test_rtmif_entry.py`/`test_xios86q.py`) had its own `ctypes`
+    `lib.<name>` lookups updated to match -- all still pass.
+
+This was deliberately a rename, not a build-system-only `-D` macro
+patch kept in a separate list: more invasive up front (eight test
+files touched), but the source now says what the symbol actually is,
+with nothing to keep in sync by hand.
 
 ## Status
 

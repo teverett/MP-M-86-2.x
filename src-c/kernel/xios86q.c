@@ -31,8 +31,9 @@
  *     machinery, same "resumes exactly here once rescheduled"
  *     reasoning the boundary-stub convention describes; modeled as
  *     an immediate return once `polldev` reports ready, since
- *     neither `conin_entry` nor `conout_entry` (its only two real
- *     callers) ever inspect `rtm_poll`'s own return value anyway --
+ *     neither `xios_conin_entry` nor `xios_conout_entry` (its only two
+ *     real callers, named with an `xios_` prefix here -- see below
+ *     for why) ever inspect `rtm_poll`'s own return value anyway --
  *     its whole observable job, from their point of view, is just
  *     "block until ready," which this port's synthetic test device
  *     always already is.
@@ -147,17 +148,23 @@ uint8_t const_entry(io_in8_fn io_in8) {
     return polldev_entry(io_in8, c0indev);
 }
 
-/* conin_entry -- Function 1: Console Input. */
-uint8_t conin_entry(io_in8_fn io_in8, io_out8_fn io_out8) {
+/* xios_conin_entry -- Function 1: Console Input. Named with an
+ * `xios_` prefix, not the bare real asm label `conin_entry` -- that
+ * collides with CHARIO.CIO's own, genuinely different, real
+ * `conin_entry` (chario.c) once this whole tree is linked into one
+ * real image; see bdosif.c's own header comment for the same class
+ * of rename, needed for the same reason. */
+uint8_t xios_conin_entry(io_in8_fn io_in8, io_out8_fn io_out8) {
     (void)io_out8;
     rtm_poll(io_in8, c0indev);
     return io_in8(uart_rxtx);
 }
 
-/* conout_entry -- Function 2: Console Output.
+/* xios_conout_entry -- Function 2: Console Output. Named with an
+ * `xios_` prefix for the same reason as `xios_conin_entry` above.
  *	input:	cl = character to send
  */
-void conout_entry(io_in8_fn io_in8, io_out8_fn io_out8, uint8_t cl) {
+void xios_conout_entry(io_in8_fn io_in8, io_out8_fn io_out8, uint8_t cl) {
     rtm_poll(io_in8, c0outdev);
     io_out8(uart_rxtx, cl);
 }
@@ -482,7 +489,7 @@ void stopclk_entry(uint8_t *mem) {
 static void pmsg(uint8_t *mem, io_in8_fn io_in8, io_out8_fn io_out8, const uint8_t *msg) {
     (void)mem;
     for (; *msg != 0; msg++) {
-        conout_entry(io_in8, io_out8, *msg);
+        xios_conout_entry(io_in8, io_out8, *msg);
     }
 }
 

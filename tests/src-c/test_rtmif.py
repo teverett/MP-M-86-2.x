@@ -101,7 +101,7 @@ def main():
         lib = ctypes.CDLL(lib_path)
         c_u8p = ctypes.POINTER(ctypes.c_uint8)
 
-        lib.init.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16]
+        lib.rtmif_init.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16]
 
         failures = []
 
@@ -133,7 +133,7 @@ def main():
 
         ref_regs, ref_img = run_reference(code, entry, stop_addr, mem, {'ds': DS_SYSDAT, 'cs': CS})
         buf = to_ctypes(mem)
-        lib.init(ctypes.cast(buf, c_u8p), ctypes.c_uint16(DS_SYSDAT), ctypes.c_uint16(CS),
+        lib.rtmif_init(ctypes.cast(buf, c_u8p), ctypes.c_uint16(DS_SYSDAT), ctypes.c_uint16(CS),
                  ctypes.c_uint16(fdisp), ctypes.c_uint16(farpdisp))
         port = bytes(buf)
 

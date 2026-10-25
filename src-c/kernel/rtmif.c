@@ -1,5 +1,10 @@
 /*
- * rtmif.c -- C port of src/kernel/RTMIF.RTM's `init` AND now `entry`
+ * rtmif.c -- C port of src/kernel/RTMIF.RTM's `init` AND now `entry`,
+ * named here `rtmif_init`/`rtmif_entry` -- every module's own real
+ * asm label for these two routines is just `init`/`entry`; see
+ * bdosif.c's own header comment for why the C ports need a module
+ * prefix instead.
+ *
  * (the module's own inter-module RTM dispatch, `mov ch,0!shl cx,1!
  * mov si,cx!call cs:function[si]!retf` -- unlike `MEMIF.MEM`'s own
  * `entry`, no mutex wrapper, just a plain 21-way dispatch, same
@@ -148,7 +153,7 @@ extern void sleep_entry(uint8_t *mem, uint16_t dx);
 extern void wakeup_entry(uint8_t *mem, uint16_t dx);
 extern uint16_t findpdname_entry(uint8_t *mem, uint16_t bx, const uint8_t *name, uint16_t *cx_out);
 
-void init(uint8_t *mem, uint16_t ds_sysdat, uint16_t cs,
+void rtmif_init(uint8_t *mem, uint16_t ds_sysdat, uint16_t cs,
           uint16_t fdisp_offset, uint16_t farpdisp_offset) {
     mem_w16(mem, RTMIF_SYSDAT, ds_sysdat);
 
@@ -196,7 +201,7 @@ typedef struct {
  *	output:	*was_already_indisp is only meaningful after case 14
  *		(creat_proc_entry) -- see dsptch.c's own header comment
  */
-entry_result entry(uint8_t *mem, uint8_t cl, uint16_t dx, uint16_t ax, uint16_t bx, uint16_t cx,
+entry_result rtmif_entry(uint8_t *mem, uint8_t cl, uint16_t dx, uint16_t ax, uint16_t bx, uint16_t cx,
                     uint16_t si, uint16_t di, uint16_t bp, uint16_t ds, uint16_t sysdat,
                     uint8_t *was_already_indisp) {
     entry_result r = {ax, bx, cx, dx, si, di, bp};

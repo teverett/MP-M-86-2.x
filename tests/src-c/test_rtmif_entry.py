@@ -148,8 +148,8 @@ def main():
                         ('dx', ctypes.c_uint16), ('si', ctypes.c_uint16), ('di', ctypes.c_uint16),
                         ('bp', ctypes.c_uint16)]
 
-        lib.entry.restype = EntryResult
-        lib.entry.argtypes = [c_u8p, ctypes.c_uint8, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16,
+        lib.rtmif_entry.restype = EntryResult
+        lib.rtmif_entry.argtypes = [c_u8p, ctypes.c_uint8, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16,
                                ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16,
                                ctypes.c_uint16, ctypes.c_uint16, c_u8p]
 
@@ -171,7 +171,7 @@ def main():
                                                 'si': si, 'di': di, 'bp': bp})
             buf = to_ctypes(mem)
             was_indisp = ctypes.c_uint8(0)
-            r = lib.entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(cl), ctypes.c_uint16(dx),
+            r = lib.rtmif_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(cl), ctypes.c_uint16(dx),
                            ctypes.c_uint16(ax), ctypes.c_uint16(bx), ctypes.c_uint16(cx),
                            ctypes.c_uint16(si), ctypes.c_uint16(di), ctypes.c_uint16(bp),
                            ctypes.c_uint16(ds), ctypes.c_uint16(sysdat), ctypes.byref(was_indisp))

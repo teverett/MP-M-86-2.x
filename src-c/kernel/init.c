@@ -1,6 +1,11 @@
 /*
  * init.c -- C port of src/kernel/INIT.SUP's `init` (system
- * initialization). `entry` (the module's own other real label,
+ * initialization), named here `sup_init` -- every module's own real
+ * asm label for this routine is just `init`; see bdosif.c's own
+ * header comment for why the C ports need a module prefix instead
+ * (this one collided with bdosif.c/cioif.c/memif.c/rtmif.c's own
+ * `init` once this whole tree is linked into one real image).
+ * `entry` (the module's own other real label,
  * inter-module BDOS-style dispatch into the Supervisor) is not
  * ported here -- it's genuinely a different routine, not reconned
  * in this pass.
@@ -90,7 +95,7 @@
  *		`notick`/IDLE.SUP's own `idle` entry offsets;
  *		user_entry_offset = SUPIF.SUP's own `user_entry` offset
  */
-void init(uint8_t *mem, uint16_t ds_sysdat, uint16_t cs,
+void sup_init(uint8_t *mem, uint16_t ds_sysdat, uint16_t cs,
           uint16_t notick_offset, uint16_t idle_offset,
           uint16_t user_entry_offset) {
     mem_w16(mem, INIT_SYSDAT, ds_sysdat);

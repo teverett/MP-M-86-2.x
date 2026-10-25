@@ -92,7 +92,7 @@ def main():
         lib = ctypes.CDLL(lib_path)
         c_u8p = ctypes.POINTER(ctypes.c_uint8)
 
-        lib.init.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16,
+        lib.sup_init.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16,
                               ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16]
 
         failures = []
@@ -120,7 +120,7 @@ def main():
             code, entry, xiosif, far_calls, stop_addr, mem,
             {'ds': DS_SYSDAT, 'cs': CS})
         buf = to_ctypes(mem)
-        lib.init(ctypes.cast(buf, c_u8p), ctypes.c_uint16(DS_SYSDAT), ctypes.c_uint16(CS),
+        lib.sup_init(ctypes.cast(buf, c_u8p), ctypes.c_uint16(DS_SYSDAT), ctypes.c_uint16(CS),
                   ctypes.c_uint16(NOTICK_OFS), ctypes.c_uint16(IDLE_OFS), ctypes.c_uint16(USER_ENTRY_OFS))
         port = bytes(buf)
         check("init: sysdat", ref_img[INIT_SYSDAT:INIT_SYSDAT + 2], port[INIT_SYSDAT:INIT_SYSDAT + 2])

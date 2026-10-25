@@ -118,8 +118,8 @@ def main():
         class EntryResult(ctypes.Structure):
             _fields_ = [('ax', ctypes.c_uint16), ('bx', ctypes.c_uint16), ('cx', ctypes.c_uint16)]
 
-        lib.entry.restype = EntryResult
-        lib.entry.argtypes = [c_u8p, ctypes.c_uint8, ctypes.c_uint16, ctypes.c_uint8, ctypes.c_uint8]
+        lib.cioif_entry.restype = EntryResult
+        lib.cioif_entry.argtypes = [c_u8p, ctypes.c_uint8, ctypes.c_uint16, ctypes.c_uint8, ctypes.c_uint8]
 
         failures = []
 
@@ -143,7 +143,7 @@ def main():
             ref_regs, ref_img = run_reference(code, entry, stop_addr, mpmif, xiosif, mem,
                                                {'cx': cl, 'dx': dx, 'bx': (bh << 8) | bl})
             buf = to_ctypes(mem)
-            r = lib.entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(cl), ctypes.c_uint16(dx),
+            r = lib.cioif_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(cl), ctypes.c_uint16(dx),
                            ctypes.c_uint8(bh), ctypes.c_uint8(bl))
             if check_bx_cx:
                 if cl in BL_ONLY:

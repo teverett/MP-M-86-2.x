@@ -79,7 +79,7 @@ def main():
         lib = ctypes.CDLL(lib_path)
         c_u8p = ctypes.POINTER(ctypes.c_uint8)
 
-        lib.init.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.cioif_init.argtypes = [c_u8p, ctypes.c_uint16]
 
         failures = []
 
@@ -102,7 +102,7 @@ def main():
         mem_w16(mem, SD_SUPMOD_SEG, 0x1000)
         ref_regs, ref_img = run_reference(code, entry, stop_addr, mem, {'ds': DS_SYSDAT})
         buf = to_ctypes(mem)
-        lib.init(ctypes.cast(buf, c_u8p), ctypes.c_uint16(DS_SYSDAT))
+        lib.cioif_init(ctypes.cast(buf, c_u8p), ctypes.c_uint16(DS_SYSDAT))
         port = bytes(buf)
         check("init: sysdat", ref_img[CIOIF_SYSDAT:CIOIF_SYSDAT + 2], port[CIOIF_SYSDAT:CIOIF_SYSDAT + 2])
         check("init: supervisor offset", ref_img[CIOIF_SUPERVISOR_OFF:CIOIF_SUPERVISOR_OFF + 2],

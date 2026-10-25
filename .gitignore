@@ -5,4 +5,5 @@ __pycache__/
 src/**/*.bin
 /build/
 /src-c/obj/
+/src-c/kernel.elf
 /&1

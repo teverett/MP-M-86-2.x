@@ -1,5 +1,15 @@
 /*
- * bdosif.c -- C port of src/kernel/BDOSIF.BDO's `init` and `entry`.
+ * bdosif.c -- C port of src/kernel/BDOSIF.BDO's `init` and `entry`,
+ * named here `bdosif_init`/`bdosif_entry` -- every module's own real
+ * asm label for these two routines is just `init`/`entry` (purely
+ * locally/table-relative in the real system, never a globally
+ * unique name), but `CIOIF.CIO`/`MEMIF.MEM`/`RTMIF.RTM`'s own C
+ * ports (cioif.c/memif.c/rtmif.c) use the exact same bare names too
+ * -- genuinely different real routines colliding once this whole
+ * tree is linked into one real image (`src-c/Makefile`'s own
+ * `kernel.elf` target), not a copy-paste mistake. Prose below still
+ * says `init`/`entry` throughout for the real asm routine itself;
+ * only the two C symbols themselves needed the module prefix.
  *
  * `entry`'s own real shape: compute `si` from `cl` (the BDOS function
  * number, 0-46) into `functab`, then branch on that entry's own
@@ -73,7 +83,7 @@ extern bdos_bxcx makeq_entry(uint8_t *mem, uint16_t dx, uint16_t sysdat);
 extern bdos_bxcx openq_entry(uint8_t *mem, uint16_t dx);
 extern bdos_bxcx writeq_entry(uint8_t *mem, uint16_t dx);
 
-void init(uint8_t *mem, uint16_t ds_sysdat) {
+void bdosif_init(uint8_t *mem, uint16_t ds_sysdat) {
     mem_w16(mem, BDOSIF_SYSDAT, ds_sysdat);
     mem_w16(mem, BDOSIF_SUPERVISOR_OFF, mem_r16(mem, SD_SUPMOD_OFF));
     mem_w16(mem, BDOSIF_SUPERVISOR_SEG, mem_r16(mem, SD_SUPMOD_SEG));
@@ -122,7 +132,7 @@ typedef struct {
  * leaves it at exactly that) and each other case overwrites it with
  * its own target's real result, same as every other dispatcher in
  * this tree. */
-entry_result entry(uint8_t *mem, uint8_t cl, uint16_t dx, uint16_t bx, uint16_t ds) {
+entry_result bdosif_entry(uint8_t *mem, uint8_t cl, uint16_t dx, uint16_t bx, uint16_t ds) {
     entry_result r = {bx, cl, 0};
     uint8_t dl = (uint8_t)dx;
     switch (cl) {

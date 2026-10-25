@@ -103,8 +103,8 @@ def main():
         class EntryResult(ctypes.Structure):
             _fields_ = [('bx', ctypes.c_uint16), ('cx', ctypes.c_uint16)]
 
-        lib.entry.restype = EntryResult
-        lib.entry.argtypes = [c_u8p, ctypes.c_uint8, ctypes.c_uint16, ctypes.c_uint16]
+        lib.memif_entry.restype = EntryResult
+        lib.memif_entry.argtypes = [c_u8p, ctypes.c_uint8, ctypes.c_uint16, ctypes.c_uint16]
 
         failures = []
 
@@ -121,7 +121,7 @@ def main():
             ref_regs, ref_img = run_reference(code, dseg, entry, stop_addr, mpmif, mem,
                                                {'cx': cl, 'dx': dx, 'bx': bx})
             buf = to_ctypes(mem)
-            r = lib.entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(cl), ctypes.c_uint16(dx), ctypes.c_uint16(bx))
+            r = lib.memif_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(cl), ctypes.c_uint16(dx), ctypes.c_uint16(bx))
             if check_result:
                 check(f"{label}: bx/cx", (ref_regs['bx'] & 0xFFFF, ref_regs['cx'] & 0xFFFF), (r.bx, r.cx))
             return ref_img, bytes(buf)

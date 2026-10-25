@@ -1,8 +1,8 @@
 # `/src-c`: a C port of the hand-written MP/M-86 assembly
 
 `/src-c` is a routine-by-routine C port of the hand-written ASM86 in
-`src/kernel/`, `src/loader/`, and `src/rsp/`, with the goal of eventually
-building a real, bootable MP/M-86 kernel from it. It is **not** an attempt
+`src/kernel/`, `src/loader/`, and `src/rsp/`, with the eventual goal of
+building a working MP/M-86 kernel from it. It is **not** an attempt
 to produce C that compiles to the same bytes as `tools/asm86/`'s output —
 that was the original goal, but a representative real routine
 (`src/kernel/FINDPD.RTM`) makes clear why it isn't realistic: hand-tuned
@@ -12,16 +12,16 @@ spontaneously emit from idiomatic C. Forcing a byte match would mean either
 wall-to-wall inline asm, or fighting one specific compiler's quirks
 indefinitely.
 
-Each routine is first ported and verified in isolation (see "How a
-routine gets ported" below) before any link/boot step is attempted —
-`src-c/Makefile`'s own `make build`/`make test` only compile-check and
-differentially test each file on its own; there is no linked kernel/
-loader binary built from this routine-by-routine work yet. A real
-`ld`+linker-script image-builder pipeline now exists and is proven
-end to end (`src-c/boot/`, see its own section below) — but it's a
-parallel proof-of-pipeline using a minimal hand-written stub, not yet
-wired to any of the real ported routines above. Doing that is a
-separate, larger, not-yet-started effort layered on top of both.
+Routines are ported individually, with differential testing wherever
+the test harness can exercise them (see "How a routine gets ported"
+below). `src-c/Makefile`'s `make build`/`make test` compile-check the
+ports and run their differential tests. The
+`kernel.elf` target also links the boot stub with every compiled
+`src-c/kernel/` object, but `kernel_main.c` does not call those
+routines: the image boots only far enough to print its signon and is
+not a working MP/M-86 system. The linked image and the differential
+tests are therefore separate kinds of evidence; wiring the ported
+routines into an operational kernel remains future work.
 
 Instead this follows the same approach the user's other project,
 [`CP-M-C`](https://github.com/teverett/CP-M-C) (a C port of DRI's CP/M 2.2
@@ -96,15 +96,12 @@ immediate load instead of a memory read.
 
 ## `src-c/boot/`: a real `ld`-based image-builder pipeline
 
-`src-c/boot/` is a real, working `ld`+linker-script image-builder
-pipeline, built to answer "can we get `/src-c` to a bootable image at
-all" — proven end to end (compiles, links, boots under QEMU, prints
-its own signon over the serial port), but deliberately **not yet
-wired to any of the real ported routines** in `src-c/kernel/`/
-`src-c/loader/` above. It's a parallel proof-of-pipeline, built with
-a minimal hand-written stub (`boot.s`'s own multiboot header + `_start`,
-`kernel_main.c`'s own serial signon), not a replacement for or change
-to `/src`'s own real MP/M-86 boot chain (`ROM.A86` ->
+`src-c/boot/` supplies the hand-written multiboot entry and serial
+signon used by the `kernel.elf` target. The target links that stub
+with every compiled `src-c/kernel/` object and boots under QEMU, but
+the stub does not call any ported routines, and `src-c/loader/` is
+not part of this image. It is not a replacement for or change to
+`/src`'s own real MP/M-86 boot chain (`ROM.A86` ->
 `LDBIOS.A86`/`LDMPM.A86` -> the kernel, built by `tools/asm86.py` +
 `tools/build_mpmsys.py`/`build_mpmldr.py` — entirely untouched by any
 of this).
@@ -322,6 +319,10 @@ with nothing to keep in sync by hand.
 | `src/loader/LBDOSF2.A86` | the whole file: `scndm`, `initialize`, `cpydirloc`, `compext`, `srch`/`srchn`/`srchnext`, `delet`/`delet0`, `getblock`, `copyfcb`/`copydir`/`seekcopy`, `rename`, `indicators`, `open`/`opencopy`, `mergezero`, `close`, `make`, `openreel`/`openmod`/`openr0`-`openr2`/`openerr` | — (every routine in this file is ported) |
 | `src/loader/LBDOSF3.A86` | `sqread`/`diskread`, `slect`/`curselect`/`reselect`, `func13`/`func15`/`func20`/`func26`, `goback`/`retmon`, plus `parsave`/`parsave33`/`parunsave` (borrowed from the otherwise-deferred `LBDOSENT.A86`, needed by `func15`/`func20`/`goback`) | over half the real file is already dead, commented-out code from an earlier rewrite (its own old `rseek`/`rdread`/`rdwrite`/`cmperr`/`getfilesize` family) — never assembled, nothing to port; `func12`/`func16`-`func19`/`func21`-`func25`/`func27`-`func37`/`func40` are each just an `EQU` alias for the bare `return:` label, nothing to port; `func14` aliases `curselect`, `func38`/`func39` alias `funcret` (`src-c/loader/lbdosio.c`), both already ported under their own names; `LBDOSENT.A86`'s own dispatch (`oldbdos`) and `func50`-`func57` (all bare-`return:` aliases) are now ported too, see that file's own row above |
 
+Current validation: `make -C src-c build` compiles all 50 C files, and
+`make -C src-c test` passes. The `test_lbdosf2.py` reference harness
+models BIOS targets reached by both near calls and tail jumps.
+
 Each is backed by a `tests/src-c/test_<file>.py` differential test — see
 each one's own header comment for exactly what it covers.
 
@@ -531,8 +532,9 @@ routine translation — revisit once that machinery exists):
   files total ~4900 lines of BDOS file-system internals and are
   Tier-3-plus-sized on their own.
 
-Everything else in `src/kernel/`, `src/loader/`, `src/rsp/` is **not
-started**.
+The table above is the current per-file status. Files and routines
+listed there include work in `src/kernel/`, `src/loader/`, and
+`src/rsp/`; use each row's deferred column for the remaining scope.
 
 ### Scope notes
 
@@ -549,17 +551,17 @@ started**.
   `XIOS.A86`'s own portable function-set routines (its real hardware I/O
   and interrupt code stay out for a different reason — no C equivalent,
   not a blocked bug — see `xios.c`'s own header comment).
-- The goal is a real, bootable MP/M-86 kernel built from this C port —
-  not just a verified reference for readability/documentation. Each
-  routine is still ported and differentially tested in isolation first,
-  the same way; linking/booting the result is a separate, later effort
-  layered on top, not yet started.
+- The goal remains a working MP/M-86 kernel built from this C port,
+  not just a verified reference. The current `kernel.elf` links and
+  boots the ported kernel objects with the multiboot stub, but does not
+  execute them; the real MP/M-86 boot chain and operational kernel
+  behavior remain unfinished.
 
-### Planned rollout order
+### Original rollout notes (historical)
 
-Smallest real-logic files first, to keep proving the pipeline before
-committing to the ~21k total lines across `src/kernel`+`src/loader`+
-`src/rsp`:
+The notes below preserve the original rollout plan and intermediate
+status snapshots. They are historical; the status table above is
+authoritative for what is ported and deferred now.
 
 - **Tier 1 (<100 lines): done**, except where noted above —
   `SYSENT.RTM`, `SYSFUNC.SUP`, `FLAG.RTM`, `IDLE.SUP` are ported and
@@ -3969,9 +3971,10 @@ committing to the ~21k total lines across `src/kernel`+`src/loader`+
   value, just never expected the assembler to change). Fixed:
   `test_file1.py`/`test_file2.py`/`test_file3.py`/`test_file4.py`
   (shared `mpmif`/`homef`/`seldskf`/.../`xprint` `STUBS` set, off by a
-  uniform 3 bytes); `test_ldbios86q.py` (`LDB86Q_DISK` through
-  `LDB86Q_WRITE_PARMS`, non-uniform shifts -- re-probed individually,
-  not guessed); `test_ldmpm.py` (`ldmpm.c`'s own `FCB_ADDR`); and
+  uniform 3 bytes); `test_ldbios86q.py` (the `LDB86Q_*` static-data
+  addresses, including `DPE0`/`SEGTABLE` and `DISK` through
+  `WRITE_PARMS`, shifted non-uniformly and re-probed individually, not
+  guessed); `test_ldmpm.py` (`ldmpm.c`'s own `FCB_ADDR`); and
   `test_load.py`, which turned out to be a second, independent class
   of fallout: its own `FCB_ADDR`/`WRKSEG` scratch pair happened to
   resolve to a physical address *inside* this wrapper's own cseg --
@@ -3986,13 +3989,14 @@ committing to the ~21k total lines across `src/kernel`+`src/loader`+
   re-probing (the right fix for a scratch address that was never
   supposed to depend on real code layout to begin with).
 
-  **`test_lbdosf2.py` remains broken** -- its own `initialize` test
-  case's reference run falls off the end of the real assembled code
-  after a jump-table dispatch (`LEA BX,[6] ! JMP [BX+0]`) computes a
-  wrong target, run thousands of steps through zero-filled memory,
-  and eventually hits a genuinely unimplemented opcode nowhere near
-  any real code. Very likely the same general class as the others (a
-  jump-table entry's own real position moved), but not root-caused in
-  this pass -- see that test's own updated header comment. Full
-  existing suite otherwise stays green; `make clean && make build`
-  otherwise stays green (45 files, unchanged).
+  **`test_lbdosf2.py`'s reference-run failure is resolved.** The
+  wrapper configured BIOS entry points as `call_stub_addrs` only, but
+  `rddirbuf` reaches `setdmf` through a tail `JMP`. Without a matching
+  jump stub, the simulator executed unrelated bytes at the BIOS
+  function's numeric address in the wrapper, returned a spurious
+  nonzero status, and entered the error handler. Configuring those
+  affected tail-jump targets (`setsecf` and `setdmf`) in
+  `jmp_stub_addrs` models those BIOS returns from the enclosing `CALL`
+  correctly. The focused test and full
+  `make -C src-c test` suite now pass; `make -C src-c build` compiles
+  all 50 C files.

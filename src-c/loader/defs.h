@@ -144,21 +144,21 @@
  * own accumulator-immediate short form, see that function's own
  * header comment) -- not a uniform shift across all of them, since
  * the fix only shrinks specific instructions wherever they occur. */
-#define LDB86Q_DISK        0x144B /* byte: current disk number */
-#define LDB86Q_TRK         0x144C /* byte: current track */
-#define LDB86Q_SECT        0x144D /* byte: current sector */
-#define LDB86Q_DMA_ADR     0x144E /* word: dma offset */
-#define LDB86Q_DMA_SEG     0x1450 /* word: dma segment */
-#define LDB86Q_CUR_CYL     0x1452 /* byte: physical cylinder */
-#define LDB86Q_CUR_HEAD    0x1453 /* byte: physical head */
-#define LDB86Q_CUR_PSEC    0x1454 /* byte: physical (512-byte) sector, 1-based */
-#define LDB86Q_CUR_BUFOFF  0x1455 /* word: offset of this logical record within secbuf */
-#define LDB86Q_SEEK_PARMS  0x145F /* byte[4]: FDC SEEK command table */
-#define LDB86Q_READ_PARMS  0x1463 /* byte[10]: FDC READ DATA command table */
-#define LDB86Q_WRITE_PARMS 0x146D /* byte[10]: FDC WRITE DATA command table */
-#define LDB86Q_SECBUF      0x1477 /* byte[fd_secsize=512]: one physical sector's worth of scratch buffer */
-#define LDB86Q_DPE0        0x1680 /* word: SELDSK's own DPH address (content unconsumed, not modeled -- see init.c-style precedent) -- probed via `--symbols`; shifts whenever tools/asm86.py's own encoding choices change (last: `_encode_alu`'s own accumulator-immediate short form, see that function's own header comment) */
-#define LDB86Q_SEGTABLE    0x1677 /* word: GETSEGT's own segment-table address (static cseg data, content unconsumed by anything ported so far) -- probed via `--symbols`; shifts whenever tools/asm86.py's own encoding choices change (last: `_encode_alu`'s own accumulator-immediate short form, see that function's own header comment) */
+#define LDB86Q_DISK        0x1424 /* byte: current disk number */
+#define LDB86Q_TRK         0x1425 /* byte: current track */
+#define LDB86Q_SECT        0x1426 /* byte: current sector */
+#define LDB86Q_DMA_ADR     0x1427 /* word: dma offset */
+#define LDB86Q_DMA_SEG     0x1429 /* word: dma segment */
+#define LDB86Q_CUR_CYL     0x142B /* byte: physical cylinder */
+#define LDB86Q_CUR_HEAD    0x142C /* byte: physical head */
+#define LDB86Q_CUR_PSEC    0x142D /* byte: physical (512-byte) sector, 1-based */
+#define LDB86Q_CUR_BUFOFF  0x142E /* word: offset of this logical record within secbuf */
+#define LDB86Q_SEEK_PARMS  0x1438 /* byte[4]: FDC SEEK command table */
+#define LDB86Q_READ_PARMS  0x143C /* byte[10]: FDC READ DATA command table */
+#define LDB86Q_WRITE_PARMS 0x1446 /* byte[10]: FDC WRITE DATA command table */
+#define LDB86Q_SECBUF      0x1450 /* byte[fd_secsize=512]: one physical sector's worth of scratch buffer */
+#define LDB86Q_DPE0        0x1660 /* word: SELDSK's own DPH address (content unconsumed, not modeled -- see init.c-style precedent) -- probed via `--symbols`; shifts whenever tools/asm86.py's own encoding choices change (last: `_encode_alu`'s own accumulator-immediate short form, see that function's own header comment) */
+#define LDB86Q_SEGTABLE    0x1650 /* word: GETSEGT's own segment-table address (static cseg data, content unconsumed by anything ported so far) -- probed via `--symbols`; shifts whenever tools/asm86.py's own encoding choices change (last: `_encode_alu`'s own accumulator-immediate short form, see that function's own header comment) */
 
 /* src/loader/LDBIOS.A86 -- the real iSBC 86/12 + iSBC 204 driver
  * LDBIOS86Q.A86 above replaces for the QEMU target. Same "no

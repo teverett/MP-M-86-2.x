@@ -2,14 +2,13 @@
 # runs the differential tests under tests/src-c/ that verify each one
 # against its real assembled src/<module> reference (see docs/src-c.md).
 #
-# There's no linked kernel/loader binary here yet -- the goal is a real
-# bootable MP/M-86 kernel, but each routine is first verified in
-# isolation (see docs/src-c.md's own "Status" section) before any
-# link/boot step is built. Each routine is only ever driven by its own
-# differential test, which compiles the same .c file itself (via
-# `cc ... -shared`) and calls into it with ctypes; `make build` below
-# is a separate, lighter compile-only pass (`-c`, matching flags) so a
-# type error shows up on its own instead of inside a test failure.
+# `kernel.elf` below links the boot stub and all kernel-port objects,
+# and boots far enough to print a signon under QEMU. It does not call
+# the ported routines, so it is not a working MP/M-86 kernel yet (see
+# docs/src-c.md). The differential tests compile each tested .c file
+# with host `cc` as a ctypes-loadable library; `make build` is a
+# separate cross-compiler pass (`-c`, matching flags) so type errors
+# show up independently of test failures.
 #
 # Usage (from this directory, src-c/):
 #   make            # build, then test

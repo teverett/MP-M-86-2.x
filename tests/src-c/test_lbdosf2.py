@@ -4,22 +4,10 @@ LBDOSF2.A86. See lbdosf2.c's own header comment for the full story on
 `ch` threading (scndm/srch/srchn/srchnext/delet) and getblock's own
 unrelated use of rotr.
 
-KNOWN BROKEN as of tools/asm86/isa.py's own `_encode_alu` fix (real
-8086 accumulator-immediate short form for AL/AX,imm, see that
-function's own header comment) -- NOT yet root-caused or fixed. The
-`initialize` test case's own reference run now runs off the end of
-this wrapper's own assembled code (falls through zero-filled memory
-for thousands of steps after a `JMP [BX+0]` -- a jump-table dispatch,
-`LEA BX,[6]` then indirect through it -- lands somewhere wrong) and
-eventually hits a genuinely unimplemented opcode far from any real
-code. Every other instance of this same encoding fix's fallout this
-session turned out to be a stale hardcoded probed address (see
-test_file1.py/test_file2.py/test_file3.py/test_file4.py/
-test_ldbios86q.py/test_ldmpm.py/test_load.py's own fixes, and
-test_load.py's own FCB_ADDR/cseg-collision fix specifically) -- this
-one is likely the same general class (a jump-table entry whose own
-real raw position moved) but wasn't tracked down before time ran out
-on this pass. Needs its own dedicated look.
+The BIOS entry points in this wrapper are modeled as boundary stubs.
+Some are reached by a tail `JMP` (for example `setdir`'s jump to
+`setdmf`), so the reference simulator must stub those targets as
+immediate returns as well as stubbing near `CALL` targets.
 """
 import ctypes
 import os
@@ -59,6 +47,7 @@ BUFFA_AT = 0x4100
 ALLOC_AT = 0x4400
 
 STUBS = {0x1b, 0x18, 0x27, 0x2a, 0x1e, 0x30, 0x21, 0x33, 0x24}
+JMP_STUBS = {0x21, 0x24}  # setsecf, setdmf
 
 
 def assemble_reference():
@@ -102,7 +91,7 @@ def run_reference(code, entry, mem, regs, stop_addrs=()):
         if val != 0:
             image[addr] = val
     sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry, stop_addrs=set(stop_addrs),
-                 call_stub_addrs=STUBS)
+                 call_stub_addrs=STUBS, jmp_stub_addrs=JMP_STUBS)
     sim.run()
     return sim.regs, image, sim
 

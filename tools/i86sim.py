@@ -158,7 +158,9 @@ class I86Sim:
     caller), this pops the return address the enclosing routine's own
     `call` already pushed and keeps running there, same "doesn't
     return, or resumes exactly here" reasoning as `call_stub_addrs`,
-    just for the JMP case instead of the CALL case.
+    just for the JMP case instead of the CALL case. If that popped
+    address is the simulator's `RET_SENTINEL`, the sim halts just as it
+    does for a RET.
 
     `far_call_stub_addrs`: addresses of a `CALL FAR [mem]` instruction
     itself (opcode `0xFF /3`, e.g. `callf dword ptr rtmmod[bx]`) that
@@ -897,15 +899,27 @@ class I86Sim:
             target = (self.ip + disp) & 0xFFFF
             if target in self.jmp_hooks:
                 self.jmp_hooks[target](self)  # ip stays as-is -- continue past this JMP
+            elif target in self.jmp_stub_addrs:
+                ret_addr = self._pop16()
+                if ret_addr == RET_SENTINEL:
+                    self.halted = True
+                else:
+                    self.ip = ret_addr
             else:
-                self.ip = self._pop16() if target in self.jmp_stub_addrs else target
+                self.ip = target
         elif op == 0xE9:  # JMP rel16
             disp = self._fetch_simm16()
             target = (self.ip + disp) & 0xFFFF
             if target in self.jmp_hooks:
                 self.jmp_hooks[target](self)  # ip stays as-is -- continue past this JMP
+            elif target in self.jmp_stub_addrs:
+                ret_addr = self._pop16()
+                if ret_addr == RET_SENTINEL:
+                    self.halted = True
+                else:
+                    self.ip = ret_addr
             else:
-                self.ip = self._pop16() if target in self.jmp_stub_addrs else target
+                self.ip = target
         elif op == 0xFA:  # CLI -- no interrupt model here; parsed and ignored
             pass
         elif op == 0xFB:  # STI -- ditto

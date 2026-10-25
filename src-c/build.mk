@@ -1,10 +1,8 @@
-# build.mk -- the real i686-elf cross toolchain settings shared by
-# src-c/Makefile (compile-only type-check pass over every ported
-# .c file) and src-c/boot/Makefile (the real linker/image-builder
-# pipeline, see that directory's own Makefile/boot.s for what it is
-# and isn't). Included by both (`include build.mk` / `include
-# ../build.mk`) so CC/LD/the common CFLAGS only ever get decided in
-# one place.
+# build.mk -- the real i686-elf cross toolchain settings used by
+# src-c/Makefile for both the compile-only type-check pass and the
+# kernel.elf linker/image-builder target (which includes boot/'s
+# hand-written entry stub). Keeping CC/LD/common CFLAGS here prevents
+# the build and link settings from drifting apart.
 #
 # i686-elf, not a host compiler and not an 8086 one: no 8086/80186 C
 # compiler exists on this machine (ia16-elf-gcc/Watcom/SDCC all

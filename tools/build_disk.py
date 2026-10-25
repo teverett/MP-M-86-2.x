@@ -292,11 +292,13 @@ def main():
 
     # The 19 src/utils/ utilities have no single build_*.py of their
     # own (the Makefile compiles+assembles each one directly) -- ask
-    # `make` for each build/utils/<NAME>.cseg.bin target the same way
-    # the three build_*.py calls above are themselves `make` targets.
-    util_targets = [f'build/utils/{name}.cseg.bin' for name in UTIL_NAMES]
-    rsp_targets = [f'build/rsp/{name}.cseg.bin' for name in RSP_NAMES]
-    result = subprocess.run(['make', *util_targets, *rsp_targets], cwd=ROOT,
+    # `src/Makefile` owns the utility/RSP rules and uses paths relative
+    # to src/, so invoke it there and address the shared build directory
+    # one level up.
+    util_targets = [f'../build/utils/{name}.cseg.bin' for name in UTIL_NAMES]
+    rsp_targets = [f'../build/rsp/{name}.cseg.bin' for name in RSP_NAMES]
+    result = subprocess.run(['make', *util_targets, *rsp_targets],
+                             cwd=os.path.join(ROOT, 'src'),
                              capture_output=True, text=True)
     if result.returncode != 0:
         sys.stderr.write(result.stdout)

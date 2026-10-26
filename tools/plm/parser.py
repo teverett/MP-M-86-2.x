@@ -527,6 +527,7 @@ class Parser:
             self.next()
             return ast.UnOp(op='-', operand=self.parse_unary())
         if self.at('.') or self.at('@'):
+            far = self.at('@')
             self.next()
             if self.at('('):
                 self.next()
@@ -536,7 +537,7 @@ class Parser:
                     elems.append(self.parse_expr())
                 self.expect(')')
                 return ast.InlineArray(elements=elems)
-            return ast.AddrOf(expr=self.parse_unary())
+            return ast.AddrOf(expr=self.parse_unary(), far=far)
         return self.parse_postfix_primary()
 
     def parse_postfix_primary(self):

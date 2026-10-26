@@ -1,245 +1,117 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/kernel/memif.c's own `entry` (MEMIF.MEM's
-inter-module MEM dispatch, wrapped in its own binary-semaphore acquire/
-release) against the real src/kernel/MEMIF.MEM, CPMMEM.MEM, MEMORY.MEM,
-SHARE.MEM, MAU.MEM, ML.MEM, and UTIL.MEM combined exactly the way
-src/kernel/MEM.A86 itself does. See memif.c's own header comment for
-the mutex logic this test is really checking (acquire-if-not-owner,
-recursive-safe release, pf_tempkeep/pf_ctlc handling) and
-tests/src-c/fixtures/memif_entry_wrapper.A86's own header comment for
-why every target's own internal `mpmif` calls are plain no-ops here
-(this test verifies `entry`'s own wiring, not each target's full
-internal behavior -- already covered by test_cpmmem.py/test_memory.py/
-test_mau.py/test_ml.py/test_share.py).
+"""Differential test for src-c/kernel/memif.c's memif_entry (MEMIF.MEM's
+inter-module MEM dispatch, wrapped in its binary-semaphore acquire/
+release) against the real MEM module, on real memory layout.
+
+The reference is src/kernel/MEM.A86 itself; see tests/src-c/memref.py.
+The SUPIF hook re-enters `entry` for the targets' own nested mpmif calls
+(recursively, as the real system does -- the caller already owns the
+mutex by then), and treats `entry`'s f_qread/f_qwrite (acquire/release
+of mxmemqpb) and f_terminate (pending ctl-C) as no-op boundary stubs.
+So every one of the 13 functions is checked end to end -- result, the
+mutex state (`mxmemowner`/`mxmemcount`), the caller's pf_tempkeep, and
+the whole image -- and the reference's boundary calls are checked
+against what memif.c's header says the C side models as no-ops.
 """
 import ctypes
 import os
-import subprocess
 import sys
-import tempfile
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(REPO_ROOT, 'tools'))
+from memref import BxCx, Checker, MemRef, MEM_C, PD_RUN, build_lib, c_buffer, phys, sd, wk, w16, r16, SYSDAT
 
-from asm86 import Assembler  # noqa: E402
-from i86sim import I86Sim  # noqa: E402
-
-WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'memif_entry_wrapper.A86')
-MEMIF_ENTRY_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f)
-                  for f in ('memif.c', 'cpmmem.c', 'memory.c', 'share.c', 'mau.c', 'ml.c', 'util_mem.c')]
-INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
-
-STACK_TOP = 0xFFF0
-SD_RLR = 0xA000
-SD_MXMEMOWNER, SD_MXMEMCOUNT, SD_MXMEMQPB = 0xA03A, 0xA03C, 0xB500
-P_FLAG = 6
-PF_TEMPKEEP, PF_CTLC = 0x0200, 0x0080
-
-PD_A, PD_B = 0x5000, 0x5100
-
-
-def mem_w16(mem, addr, val):
-    mem[addr] = val & 0xFF
-    mem[addr + 1] = (val >> 8) & 0xFF
-
-
-def mem_r16(mem, addr):
-    return mem[addr] | (mem[addr + 1] << 8)
-
-
-def assemble_reference():
-    asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
-    code = asm.segment_bytes('cseg')
-    dseg = asm.segment_bytes('dseg')
-    entry = asm.symtab['entry'].value
-    mpmif = asm.symtab['mpmif'].value
-    entry_out = asm.symtab['entry_out'].value
-    stop_addr = entry_out + 2  # "mov ax,bx" (2 bytes) then retf
-    assert code[stop_addr] == 0xCB, f"expected retf at {hex(stop_addr)}"
-    return code, dseg, entry, stop_addr, mpmif
-
-
-def build_c_library():
-    lib_path = tempfile.mktemp(suffix='.dylib' if sys.platform == 'darwin' else '.so')
-    subprocess.run(
-        ['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC',
-         '-I', INCLUDE_DIR, *MEMIF_ENTRY_C, '-o', lib_path],
-        check=True,
-    )
-    return lib_path
-
-
-def run_reference(code, dseg, entry, stop_addr, mpmif, mem, regs):
-    image = bytearray(0x10000)
-    image[0:len(code)] = code
-    # MEM.A86's own DSEG switch happens at cseg's own length (same
-    # continuous-addressing/overlay-from-boundary technique as
-    # src-c/kernel/xios.c's own differential test).
-    image[len(code):len(dseg)] = dseg[len(code):]
-    for addr, val in enumerate(mem):
-        if val != 0:
-            image[addr] = val
-    sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry,
-                 stop_addrs={stop_addr}, call_stub_addrs={mpmif},
-                 jmp_stub_addrs={mpmif})  # freeall_entry's own tail-jump into mpmif
-    sim.run(max_steps=20000)
-    return sim.regs, image
-
-
-def base_memory(rlr=PD_A):
-    mem = bytearray(0x10000)
-    mem_w16(mem, SD_RLR, rlr)
-    return mem
+u16 = ctypes.c_uint16
+MD_FREE1, MD_FREE2 = 0x2400, 0x2410
+MS1, MAU1, MFL_MD = 0x2500, 0x2600, 0x2700
+MAU_SEG = 0x0900
+PB = 0x0100        # the parameter block (MCB/MPB/MFPB/SPB/MAF) in u_wrkseg
 
 
 def main():
-    code, dseg, entry, stop_addr, mpmif = assemble_reference()
-    lib_path = build_c_library()
+    ref = MemRef()
+    s = ref.s
+    lib_path = build_lib(MEM_C)
     try:
         lib = ctypes.CDLL(lib_path)
-        c_u8p = ctypes.POINTER(ctypes.c_uint8)
+        lib.memif_entry.restype = BxCx
+        lib.memif_entry.argtypes = [ctypes.POINTER(ctypes.c_uint8), u16, ctypes.c_uint8, u16, u16]
+        ck = Checker(ref)
+        SATLEN = s['satlen']
+        F_QREAD, F_QWRITE, F_TERMINATE = 137, 139, 143
 
-        class EntryResult(ctypes.Structure):
-            _fields_ = [('bx', ctypes.c_uint16), ('cx', ctypes.c_uint16)]
+        def f(addr, field):
+            return sd(addr + s[field])
 
-        lib.memif_entry.restype = EntryResult
-        lib.memif_entry.argtypes = [c_u8p, ctypes.c_uint8, ctypes.c_uint16, ctypes.c_uint16]
+        def base_memory(owner=0, count=0, pflag=0):
+            """the caller (PD_RUN) with one MAU (MAU1 on mal, one
+            allocated segment MS1) and a free MFL region"""
+            mem = ref.base_memory()
+            w16(mem, sd(s['mxmemowner']), owner)
+            mem[sd(s['mxmemcount'])] = count
+            w16(mem, f(PD_RUN, 'p_flag'), pflag)
+            w16(mem, sd(s['thrdrt']), PD_RUN)
+            w16(mem, sd(s['mdul']), MD_FREE1)
+            w16(mem, f(MD_FREE1, 'm_link'), MD_FREE2)
+            w16(mem, sd(s['mfl']), MFL_MD)
+            w16(mem, f(MFL_MD, 'm_start'), 0x0A00)
+            w16(mem, f(MFL_MD, 'm_length'), 0x40)
+            w16(mem, sd(s['mal']), MAU1)
+            w16(mem, f(MAU1, 'm_start'), MAU_SEG)
+            w16(mem, f(MAU1, 'm_length'), 0x100)
+            mem[phys(MAU_SEG)] = 4
+            for n, (start, length, nall) in enumerate(((0x0910, 0x10, 1), (0x0920, 0x40, 0)), 1):
+                w16(mem, phys(MAU_SEG, n * SATLEN + s['sat_start']), start)
+                w16(mem, phys(MAU_SEG, n * SATLEN + s['sat_length']), length)
+                mem[phys(MAU_SEG, n * SATLEN + s['sat_nall'])] = nall
+            w16(mem, f(PD_RUN, 'p_mem'), MS1)
+            for fld, v in (('ms_start', 0x0910), ('ms_length', 0x10), ('ms_mau', MAU1)):
+                w16(mem, f(MS1, fld), v)
+            return mem
 
-        failures = []
+        def pb(mem, *words):
+            for i, v in enumerate(words):
+                w16(mem, wk(PB + 2 * i), v)
+            return mem
 
-        def check(label, ref, port):
-            status = "ok" if ref == port else "FAIL"
-            print(f"[{status}] {label}: reference {ref} | port {port}")
-            if status == "FAIL":
-                failures.append(label)
+        state = lambda i: (r16(i, sd(s['mxmemowner'])), i[sd(s['mxmemcount'])],  # noqa: E731
+                           r16(i, f(PD_RUN, 'p_flag')), r16(i, sd(s['mdul'])), r16(i, sd(s['mal'])),
+                           r16(i, sd(s['mfl'])), r16(i, f(PD_RUN, 'p_mem')))
 
-        def to_ctypes(mem):
-            return (ctypes.c_uint8 * 0x10000)(*mem)
+        def run(label, cl, mem, dx=PB, bx=0, boundary=None):
+            regs, img = ref.run('entry', mem, {'cx': cl, 'dx': dx, 'bx': bx}, stop_addrs={ref.entry_retf})
+            calls = [c for c in ref.calls if c not in ref.funcs]
+            buf = c_buffer(mem)
+            r = lib.memif_entry(buf, SYSDAT, cl, dx, bx)
+            ck.compare(label, img, buf, (regs['bx'], regs['cx']), (r.bx, r.cx), state)
+            if boundary is not None:
+                ck.check(f"{label}: reference boundary calls", boundary, calls)
 
-        def run_case(label, cl, mem, dx=0, bx=0, check_result=True):
-            ref_regs, ref_img = run_reference(code, dseg, entry, stop_addr, mpmif, mem,
-                                               {'cx': cl, 'dx': dx, 'bx': bx})
-            buf = to_ctypes(mem)
-            r = lib.memif_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(cl), ctypes.c_uint16(dx), ctypes.c_uint16(bx))
-            if check_result:
-                check(f"{label}: bx/cx", (ref_regs['bx'] & 0xFFFF, ref_regs['cx'] & 0xFFFF), (r.bx, r.cx))
-            return ref_img, bytes(buf)
+        acquire_release = [F_QREAD, F_QWRITE]
 
-        # Functions reached THROUGH CPMMEM.MEM's own thin `mpmif(f_malloc/
-        # f_memfree)`-passthrough wrappers (cases 0-5) can't have their own
-        # bx/cx checked here: there is exactly one real `mpmif` symbol
-        # shared by CPMMEM.MEM's own internal calls and `entry`'s own
-        # f_qread/f_qwrite/f_terminate calls once MEMIF.MEM is linked in
-        # for real (unlike cpmmem_wrapper.A86's OWN standalone test, which
-        # has no MEMIF.MEM and so can give `mpmif` a smart dispatcher
-        # instead) -- and tools/i86sim.py has no way to make a real `CALL
-        # FAR [mem]` (what `mpmif` itself executes) jump to a computed
-        # target at all, only stub it as a no-op at a fixed instruction
-        # address. So here `mpmif` is a plain no-op for every caller,
-        # which leaves `cx` reflecting the un-dispatched function code
-        # itself (128=f_malloc, 130=f_memfree, 143=f_terminate) on the
-        # REFERENCE side, while the C port's own getmemory()/free_memory()
-        # already call malloc_entry/mfree_entry directly for real (see
-        # cpmmem.c's own header comment) -- a genuine, structural
-        # asymmetry this harness can't close, not a dispatch bug. Cases
-        # 10-12 (MAU.MEM/ML.MEM) have the same kind of gap for a
-        # different reason: both need tools/i86sim.py's `segmented=True`
-        # mode plus a real `u_wrkseg` (see mau.c's/ml.c's own header
-        # comments, already handled by test_mau.py/test_ml.py's own
-        # dedicated setup), which this generic dispatcher test doesn't
-        # replicate. Every case below still verifies entry's own real
-        # contribution -- the mutex acquire/release around the dispatch
-        # -- in full; only the dispatched target's own bx/cx is skipped
-        # where one of these pre-existing gaps applies.
+        # every function, entered without the mutex: acquire, run, release
+        run("0 maxmem_entry", 0, pb(base_memory(), 0, 0x10, 0), boundary=acquire_release)
+        run("1 absmax_entry", 1, pb(base_memory(), 0x0A12, 0x10, 0), boundary=acquire_release)
+        run("2 cpmalloc_entry", 2, pb(base_memory(), 0, 0x10, 0), boundary=acquire_release)
+        run("3 cpmabsa_entry", 3, pb(base_memory(), 0x0A12, 0x10, 0), boundary=acquire_release)
+        run("4 cpmfree_entry (one segment)", 4, pb(base_memory(), 0x0910, 0, 0), boundary=acquire_release)
+        run("5 freeall_entry", 5, base_memory(), boundary=[F_QREAD, F_TERMINATE, F_QWRITE])
+        run("6 malloc_entry", 6, pb(base_memory(), 0, 8, 8, 0, 0), boundary=acquire_release)
+        run("7 mfree_entry", 7, pb(base_memory(), 0x0910, 0), boundary=acquire_release)
+        run("8 share_entry (with self)", 8, pb(base_memory(), 0, 0, 0x0910), boundary=acquire_release)
+        run("9 maualloc_entry", 9, pb(base_memory(), 0, 8, 8, 0, 0), bx=MAU1, boundary=acquire_release)
+        run("10 maufree_entry", 10, pb(base_memory(), MAU1, 0x0910, 0x0910), boundary=acquire_release)
+        run("11 mlalloc_entry", 11, pb(base_memory(), 0, 8, 8, 0, 0), bx=s['mfl'] - s['m_link'],
+            boundary=acquire_release)
+        run("12 mlfree_entry", 12, base_memory(), dx=MAU1, bx=s['mfl'] - s['m_link'], boundary=acquire_release)
 
-        # 0: maxmem_entry -- not holding the mutex yet: acquire, set
-        # pf_tempkeep, dispatch, release, clear pf_tempkeep again
-        # (the bit was off beforehand), mxmemowner back to 0.
-        mem = base_memory()
-        ref_img, port = run_case("0 maxmem_entry (acquire+release)", 0, mem, dx=0x7000, check_result=False)
-        check("0: mxmemowner cleared", mem_r16(ref_img, SD_MXMEMOWNER), mem_r16(port, SD_MXMEMOWNER))
-        check("0: mxmemcount cleared", ref_img[SD_MXMEMCOUNT], port[SD_MXMEMCOUNT])
-        check("0: p_flag tempkeep cleared", mem_r16(ref_img, PD_A + P_FLAG) & PF_TEMPKEEP,
-              mem_r16(port, PD_A + P_FLAG) & PF_TEMPKEEP)
-
-        # 1: absmax_entry -- already the owner (recursive call):
-        # shouldn't re-acquire or touch p_flag's own pre-existing
-        # tempkeep bit (set here to something `entry` itself did NOT
-        # set, to prove it's untouched either way).
-        mem = base_memory()
-        mem_w16(mem, SD_MXMEMOWNER, PD_A)
-        mem[SD_MXMEMCOUNT] = 1
-        mem_w16(mem, PD_A + P_FLAG, PF_TEMPKEEP)
-        ref_img, port = run_case("1 absmax_entry (already owner)", 1, mem, dx=0x7000, check_result=False)
-        check("1: mxmemowner unchanged (still ours)", mem_r16(ref_img, SD_MXMEMOWNER), mem_r16(port, SD_MXMEMOWNER))
-        check("1: mxmemcount back to 1", ref_img[SD_MXMEMCOUNT], port[SD_MXMEMCOUNT])
-        check("1: p_flag unchanged", mem_r16(ref_img, PD_A + P_FLAG), mem_r16(port, PD_A + P_FLAG))
-
-        # 2: cpmalloc_entry
-        mem = base_memory()
-        run_case("2 cpmalloc_entry", 2, mem, dx=0x7000, check_result=False)
-
-        # 3: cpmabsa_entry
-        mem = base_memory()
-        run_case("3 cpmabsa_entry", 3, mem, dx=0x7000, check_result=False)
-
-        # 4: cpmfree_entry
-        mem = base_memory()
-        run_case("4 cpmfree_entry", 4, mem, dx=0x7000, check_result=False)
-
-        # 5: freeall_entry -- boundary stub (mpmif(f_terminate) tail),
-        # no C target at all; just confirm entry's own mutex
-        # acquire/release still happens correctly around a no-op.
-        mem = base_memory()
-        ref_img, port = run_case("5 freeall_entry (boundary stub)", 5, mem, check_result=False)
-        check("5: mxmemowner cleared", mem_r16(ref_img, SD_MXMEMOWNER), mem_r16(port, SD_MXMEMOWNER))
-
-        # 6: malloc_entry
-        mem = base_memory()
-        run_case("6 malloc_entry", 6, mem, dx=0x7000)
-
-        # 7: mfree_entry
-        mem = base_memory()
-        run_case("7 mfree_entry", 7, mem, dx=0x7000)
-
-        # 8: share_entry
-        mem = base_memory()
-        run_case("8 share_entry", 8, mem, dx=0x7000)
-
-        # 9: maualloc_entry -- happens to match here too (both sides
-        # hit the same "no unused MD" early exit before needing
-        # segmented addressing), but not relied upon -- see the gap
-        # noted above for case 10.
-        mem = base_memory()
-        run_case("9 maualloc_entry", 9, mem, dx=0x7000, bx=0)
-
-        # 10: maufree_entry
-        mem = base_memory()
-        run_case("10 maufree_entry", 10, mem, dx=0x7000, check_result=False)
-
-        # 11: mlalloc_entry
-        mem = base_memory()
-        run_case("11 mlalloc_entry", 11, mem, dx=0x7000, bx=4, check_result=False)
-
-        # 12: mlfree_entry
-        mem = base_memory()
-        run_case("12 mlfree_entry", 12, mem, dx=0x7000, bx=4, check_result=False)
-
-        # ctl-C check: pending abort on the way out triggers
-        # mpmif(f_terminate) -- a boundary stub (falls through to
-        # entry_out), so just confirm it doesn't crash/hang and the
-        # mutex is still released cleanly.
-        mem = base_memory()
-        mem_w16(mem, PD_A + P_FLAG, PF_CTLC)
-        ref_img, port = run_case("0 maxmem_entry (ctl-C pending)", 0, mem, dx=0x7000, check_result=False)
-        check("ctlc: mxmemowner cleared", mem_r16(ref_img, SD_MXMEMOWNER), mem_r16(port, SD_MXMEMOWNER))
-
-        if failures:
-            print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")
-            return 1
-        print("\nall cases match.")
-        return 0
+        # already the owner (a nested call): no acquire/release at all
+        run("6 malloc_entry (already owner)", 6, pb(base_memory(PD_RUN, 1), 0, 8, 8, 0, 0), boundary=[])
+        # pf_tempkeep was already set: release leaves it set
+        run("2 cpmalloc_entry (pf_tempkeep already set)", 2,
+            pb(base_memory(pflag=s['pf_tempkeep']), 0, 0x10, 0), boundary=acquire_release)
+        # ctl-C arrived meanwhile: release, then f_terminate
+        run("2 cpmalloc_entry (ctl-C pending)", 2, pb(base_memory(pflag=s['pf_ctlc']), 0, 0x10, 0),
+            boundary=[F_QREAD, F_QWRITE, F_TERMINATE])
+        return ck.finish()
     finally:
         os.remove(lib_path)
 

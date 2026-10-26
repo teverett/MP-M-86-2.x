@@ -1,15 +1,15 @@
-; Standalone wrapper for src/kernel/QUE1.RTM's makeq_entry/openq_entry/
-; deleteq_entry/queverify and src/kernel/QUE2.RTM's rlsmx/getqdaddr/remqd/
-; qspace/qrelease. QUE1.RTM's readq_entry/creadq_entry/readq/writeq_entry/
-; cwriteq_entry/writeq are deferred -- see docs/src-c.md: they retry in a
-; loop after an mpmif(f_sleep) boundary call, which needs more careful
-; test design than a plain boundary stub.
+; Standalone wrapper for src/kernel/QUE1.RTM (all 10 routines) and
+; src/kernel/QUE2.RTM's rlsmx/getqdaddr/remqd/qspace/qrelease, on real
+; memory layout. tests/src-c/test_que.py runs this with tools/i86sim.py's
+; segmented=True: DS = the real SYSDAT segment, ES = the running
+; process's UDA (the RTM's ambient ES), QPBs and caller buffers in that
+; UDA's u_wrkseg.
 ;
-; `qlr`/`qul`/`qmau`/`endseg` are DSEG labels at the scratch addresses
-; src-c/kernel/defs.h and tests/src-c/test_que.py both use (see
-; idle_wrapper.A86's comment for why a plain EQU would be wrong for any of
-; these -- they're all read as memory, not used as jump targets).
-; `u_wrkseg` likewise (same address UDA_WRKSEG already uses elsewhere).
+; The real UDA.FMT/SYSDAT.FMT are included, so `rlr`/`qlr`/`qul`/`qmau`/
+; `endseg`/`u_wrkseg` resolve to their genuine offsets -- the same ones
+; src-c/kernel/que1.c/que2.c use. `sysdat` is the module's own cs:sysdat
+; cell (normally RTMIF.RTM's), kept at cseg offset 0. `mpmif` (f_sleep/
+; f_wakeup/f_cqwrite/f_maualloc/f_maufree) is a boundary stub.
 	include system.def
 	include pd.def
 	include err.def
@@ -17,19 +17,12 @@
 	include mpb.def
 	include modtab.def
 	include modfunc.def
-	dseg
-	org	0A000h
-rlr		dw	0
-	org	0A012h
-u_wrkseg	dw	0
-	org	0A020h
-qlr		dw	0
-qul		dw	0
-qmau		dw	0
-endseg		dw	0
 	cseg
-sysdat	dw	0		; normally supplied by RTMIF.RTM's own init
-mpmif	equ	9000h		; unported external call target (stub)
+sysdat	dw	0
+mpmif	equ	9000h
 	include que1.rtm
 	include que2.rtm
+
+	include uda.fmt
+	include sysdat.fmt
 	end

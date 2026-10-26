@@ -454,7 +454,9 @@ notdrive:	    mov di,offset clicmd
 			mov cl,126
 			mov di,offset clicmd
 			mov al, ' '
-			push cs ! pop es
+			push ds ! pop es	;clicmd is in DS -- this was
+					;`push cs`, scanning the code segment
+					;at clicmd's offset (docs/bugs.md #110)
 			repne scasb 
 			mov byte ptr[di], '$'
 			jmp clierror

@@ -50,8 +50,9 @@
 
 #include "defs.h"
 
-void rpl_entry(uint8_t *mem, uint16_t dx, uint16_t *bx_out, uint16_t *cx_out) {
-    (void)mem;
+void rpl_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t *bx_out, uint16_t *cx_out) {
+    (void)phys;
+    (void)sysdat;
     (void)dx;
     *bx_out = 1;
     *cx_out = e_no_queue;

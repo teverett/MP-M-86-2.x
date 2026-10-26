@@ -1,117 +1,82 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/echo.c against src/rsp/ECHO.A86's
-main:/loop: body.
-
-ECHO.A86 assembles standalone (no wrapper fixture needed -- it has no
-INCLUDEs at all). The reference run starts at `main` (so the one-time
-setup also executes) and stops at the address of the final `jmps loop`
-instruction -- the boundary this file's own header comment explains.
+`loop:` body, on real memory layout: ECHO's code at its own segment, DS
+= its data segment, ES = SYSDAT (`main:`'s `mov es,sdatseg`). The
+reference runs from `main` to the `jmps loop` at the end of one pass;
+every `int mpmint` (make/open/read queue, set priority, set console,
+write, detach) is a no-op boundary, as in echo.c, so the queue message
+-- the sending process's PD, then the command tail -- is preset in
+ECHO's qpb buffer (pdadr/cmdtail). Every case diffs the whole image.
 """
 import ctypes
 import os
-import subprocess
 import sys
-import tempfile
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(REPO_ROOT, 'tools'))
-
+from memref import REPO_ROOT, KERNEL_C, build_lib, c_buffer, phys, w16
 from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
 ECHO_A86 = os.path.join(REPO_ROOT, 'src', 'rsp', 'ECHO.A86')
-ECHO_C = os.path.join(REPO_ROOT, 'src-c', 'kernel', 'echo.c')
-INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
-
-STACK_TOP = 0xFFF0
-PD_ADDR = 0x1000
+SYSDAT, ECHO_CS, ECHO_DS = 0x0300, 0x0100, 0x0200
+STACK_SEG, STACK_TOP = 0x0800, 0x0100
+PD = 0x0900                 # the sender's PD (a SYSDAT offset)
 P_CNS = 0x20
-JMPS_LOOP_ADDR = 0x83  # the one and only `jmps loop`, confirmed via ndisasm
 
 
-def assemble_reference():
+def main():
     asm = Assembler()
     asm.assemble(ECHO_A86, [])
-    code = asm.segment_bytes('cseg')
-    main = asm.symtab['main'].value
-    mpm = asm.symtab['mpm'].value
-    pdadr = asm.symtab['pdadr'].value
-    cmdtail = asm.symtab['cmdtail'].value
-    console = asm.symtab['console'].value
-    return code, main, mpm, pdadr, cmdtail, console
-
-
-def build_c_library():
-    lib_path = tempfile.mktemp(suffix='.dylib' if sys.platform == 'darwin' else '.so')
-    subprocess.run(
-        ['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC',
-         '-I', INCLUDE_DIR, ECHO_C, '-o', lib_path],
-        check=True,
-    )
-    return lib_path
-
-
-def base_memory(pdadr, cmdtail, console_byte, tail_bytes):
-    mem = bytearray(0x10000)
-    mem_w16(mem, pdadr, PD_ADDR)
-    mem[PD_ADDR + P_CNS] = console_byte
-    mem[cmdtail:cmdtail + len(tail_bytes)] = tail_bytes
-    return mem
-
-
-def run_reference(code, main, mpm, mem):
-    image = bytearray(mem)
-    image[0:len(code)] = code
-    sim = I86Sim(image, {'sp': STACK_TOP}, main, stop_addrs={JMPS_LOOP_ADDR}, call_stub_addrs={mpm})
-    sim.run()
-    return image
-
-
-def run_port(lib, mem):
-    buf = (ctypes.c_uint8 * 0x10000)(*mem)
-    lib.echo_loop_once(ctypes.cast(buf, ctypes.POINTER(ctypes.c_uint8)))
-    return bytes(buf)
-
-
-def mem_w16(mem, addr, val):
-    mem[addr] = val & 0xFF
-    mem[addr + 1] = (val >> 8) & 0xFF
-
-
-CASES = [
-    ("$ terminator mid-buffer", 7, b"HELLO$WORLD" + b" " * 120),
-    ("NUL terminator mid-buffer", 3, b"DIR A:\x00" + b" " * 124),
-    ("no terminator, runs off the end", 0, b"X" * 131 + b" " * 10),
-    ("empty command tail", 9, b"\x00" + b" " * 130),
-]
-
-
-def main_test():
-    code, main, mpm, pdadr, cmdtail, console = assemble_reference()
-    lib_path = build_c_library()
+    code, data = asm.segment_bytes('cseg'), asm.segment_bytes('dseg')
+    s = {k: v.value for k, v in asm.symtab.items()}
+    jmps_loop = [i for i in range(s['loop'], len(code) - 1)
+                 if code[i] == 0xEB and (i + 2 + (code[i + 1] - 256 if code[i + 1] > 127 else code[i + 1])) == s['loop']]
+    assert len(jmps_loop) == 1, jmps_loop
+    skip = set(range(phys(ECHO_CS), phys(ECHO_CS, len(code)))) | \
+        set(range(phys(STACK_SEG, STACK_TOP - 8), phys(STACK_SEG, STACK_TOP)))
+    lib_path = build_lib([os.path.join(KERNEL_C, 'echo.c')])
     try:
         lib = ctypes.CDLL(lib_path)
-        lib.echo_loop_once.argtypes = [ctypes.POINTER(ctypes.c_uint8)]
+        lib.echo_loop_once.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint16]
+        lib.echo_loop_once.restype = None
         failures = []
-        for label, console_byte, tail_bytes in CASES:
-            mem = base_memory(pdadr, cmdtail, console_byte, tail_bytes)
-            ref = run_reference(code, main, mpm, mem)
-            port = run_port(lib, mem)
-            ref_slice = (ref[console], ref[cmdtail:cmdtail + 140])
-            port_slice = (port[console], port[cmdtail:cmdtail + 140])
-            status = "ok" if ref_slice == port_slice else "FAIL"
-            print(f"[{status}] {label}: reference console={ref_slice[0]} cmdtail={ref_slice[1][:20]!r} "
-                  f"| port console={port_slice[0]} cmdtail={port_slice[1][:20]!r}")
+
+        def check(label, ref, port):
+            status = "ok" if ref == port else "FAIL"
+            print(f"[{status}] {label}: reference {ref} | port {port}")
             if status == "FAIL":
                 failures.append(label)
+
+        for label, cns, tail in (("$ terminator mid-buffer", 7, b"HELLO$WORLD" + b" " * 120),
+                                 ("NUL terminator mid-buffer", 3, b"DIR A:\x00" + b" " * 124),
+                                 ("no terminator, runs off the end", 0, b"X" * 131 + b" " * 10),
+                                 ("empty command tail", 9, b"\x00" + b" " * 130)):
+            mem = bytearray(0x10000)
+            mem[phys(ECHO_DS):phys(ECHO_DS, len(data))] = data
+            w16(mem, phys(ECHO_DS, s['sdatseg']), SYSDAT)
+            w16(mem, phys(ECHO_DS, s['pdadr']), PD)
+            mem[phys(SYSDAT, PD + P_CNS)] = cns
+            mem[phys(ECHO_DS, s['cmdtail']):phys(ECHO_DS, s['cmdtail'] + len(tail))] = tail
+            ref = bytearray(mem)
+            ref[phys(ECHO_CS):phys(ECHO_CS, len(code))] = code
+            sim = I86Sim(ref, {'cs': ECHO_CS, 'ds': ECHO_DS, 'es': ECHO_DS, 'ss': STACK_SEG, 'sp': STACK_TOP},
+                         phys(ECHO_CS, s['main']), segmented=True, stop_addrs={phys(ECHO_CS, jmps_loop[0])},
+                         int_stub_nums={224})
+            sim.run()
+            buf = c_buffer(mem)
+            lib.echo_loop_once(buf, ECHO_DS)
+            snap = lambda m: (m[phys(ECHO_DS, s['console'])],  # noqa: E731
+                              bytes(m[phys(ECHO_DS, s['cmdtail']):phys(ECHO_DS, s['cmdtail'] + 24)]))
+            check(label, snap(ref), snap(buf))
+            check(f"{label}: no other bytes differ", [],
+                  [hex(a) for a in range(0x10000) if a not in skip and ref[a] != buf[a]][:8])
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")
             return 1
-        print(f"\nall {len(CASES)} cases match.")
+        print("\nall cases match.")
         return 0
     finally:
         os.remove(lib_path)
 
 
 if __name__ == '__main__':
-    sys.exit(main_test())
+    sys.exit(main())

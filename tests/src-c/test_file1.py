@@ -4,6 +4,11 @@ subset of src/kernel/FILE1.BDO. See file1.c's own header comment for
 exactly which routines are ported and why the one remaining holdout
 (CHECK_FCB) is still deferred -- its own MPM branch calls FILE2.BDO's
 still-unported CLOSE1.
+On real memory: file*.c take (phys, ds_bdos) and address DATA.BDO's
+fields, FCBs and directory buffers through the BDOS's DS (the combined
+SYSDAT+DATA.BDO segment). This test keeps that segment at 0, so its flat
+addresses are those DS offsets; tests/src-c/test_bdos_real.py covers
+the same code with SYSDAT at a nonzero segment.
 """
 import ctypes
 import os
@@ -180,7 +185,7 @@ def main():
         lib.rdbuff.argtypes = [c_u8p, ctypes.c_uint16]
         lib.wrbuff.argtypes = [c_u8p, ctypes.c_uint16]
         lib.seekdir.argtypes = [c_u8p, ctypes.c_uint16]
-        lib.seek.argtypes = [c_u8p]
+        lib.seek.argtypes = [c_u8p, ctypes.c_uint16]
         lib.get_atts.restype = ctypes.c_uint8
         lib.get_atts.argtypes = [c_u8p, ctypes.c_uint16]
         lib.get_s1.restype = ctypes.c_uint8
@@ -249,7 +254,11 @@ def main():
                 failures.append(label)
 
         def to_ctypes(mem):
-            return (ctypes.c_uint8 * 0x10000)(*mem)
+            # physical memory for the real-memory C side; this test keeps
+            # SYSDAT (the BDOS's DS) at segment 0, see the docstring
+            buf = (ctypes.c_uint8 * 0x100000)()
+            ctypes.memmove(buf, bytes(mem), len(mem))
+            return buf
 
         # -- pererror: sets aret, sets pf_ctlc when error_mode allows --
         mem = base_memory()
@@ -571,7 +580,8 @@ def main():
         ref_regs, _ = run_reference(code, dseg, entries['rddirbuf'], mem, {}, stop_addrs=STUBS)
         buf = to_ctypes(mem)
         lib.rddirbuf(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))  # pure boundary-stub setup, no observable effect
-        check("rddirbuf: no observable effect", bytes(mem), bytes(buf))
+        check("rddirbuf: no observable effect", bytes(mem), bytes(buf)[:0x10000])
+        check("rddirbuf: nothing written past 64KB", True, not any(bytes(buf)[0x10000:]))
 
         mem = base_memory()
         mem_w16(mem, BD_BUFFA, 0x4100)

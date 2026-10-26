@@ -29,6 +29,7 @@ PYTHON  := $(shell command -v python3 2>/dev/null || command -v python)
 PLMC    := $(PYTHON) ../tools/plmc.py
 ASM86   := $(PYTHON) ../tools/asm86.py
 STUB    := ../tools/plm/runtime_stub.A86
+PLMC_SRC := $(wildcard ../tools/plm/*.py)   # rebuild the utilities when the compiler changes
 BUILD   := ../build
 QEMU    := qemu-system-i386
 
@@ -165,10 +166,10 @@ run: $(DISK_IMG)
 # compiler's own trailing END so the stub's END is the one that counts,
 # see tools/README.md's "END is scoped to the file it appears in") ->
 # assemble.
-$(BUILD)/utils/%.gen.A86: utils/%.PLM | $(BUILD)/utils
+$(BUILD)/utils/%.gen.A86: utils/%.PLM $(PLMC_SRC) | $(BUILD)/utils
 	$(PLMC) $< -o $@
 
-$(BUILD)/toolchain/%.gen.A86: toolchain/%.PLM | $(BUILD)/toolchain
+$(BUILD)/toolchain/%.gen.A86: toolchain/%.PLM $(PLMC_SRC) | $(BUILD)/toolchain
 	$(PLMC) $< -o $@
 
 $(BUILD)/utils/%.combined.A86: $(BUILD)/utils/%.gen.A86 $(STUB)
@@ -216,7 +217,7 @@ $(BOOTSECT_BIN): loader/ROM86Q.A86 ../tools/build_bootsect.py | $(BUILD)/loader
 # -- mpm86q.img: ../tools/build_disk.py re-invokes build_bootsect.py/
 # build_mpmldr.py/build_mpmsys.py itself, so its own real dependencies
 # are those three scripts' own sources, not their outputs.
-$(DISK_IMG): loader/ROM86Q.A86 ../tools/build_bootsect.py loader/LDMPM.A86 loader/LDBDOS.A86 loader/LDBIOS86Q.A86 ../tools/build_mpmldr.py kernel/SYSDAT.A86 kernel/SUP.A86 kernel/RTM.A86 kernel/MEM.A86 kernel/CIO.A86 kernel/BDOS.A86 kernel/XIOS86Q.A86 ../tools/build_mpmsys.py ../tools/build_disk.py | $(BUILD)/disk
+$(DISK_IMG): loader/ROM86Q.A86 ../tools/build_bootsect.py loader/LDMPM.A86 loader/LDBDOS.A86 loader/LDBIOS86Q.A86 ../tools/build_mpmldr.py kernel/SYSDAT.A86 kernel/SUP.A86 kernel/RTM.A86 kernel/MEM.A86 kernel/CIO.A86 kernel/BDOS.A86 kernel/XIOS86Q.A86 ../tools/build_mpmsys.py ../tools/build_disk.py $(PLM_UTILS_BIN) $(RSP_BIN) | $(BUILD)/disk
 	$(PYTHON) ../tools/build_disk.py -o $@
 
 $(BUILD)/kernel/MPM.bin.cseg $(BUILD)/kernel/MPM.bin.dseg: $(MPMSYS_STAMP)

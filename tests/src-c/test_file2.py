@@ -11,6 +11,11 @@ header comment). `close`/`close1`/`search`/`searchn`/`open`/`open1`/
 way, but don't have their own new tests yet -- same "resolved in
 principle, not yet written" precedent as several other clusters
 elsewhere in this project (see docs/src-c.md).
+On real memory: file*.c take (phys, ds_bdos) and address DATA.BDO's
+fields, FCBs and directory buffers through the BDOS's DS (the combined
+SYSDAT+DATA.BDO segment). This test keeps that segment at 0, so its flat
+addresses are those DS offsets; tests/src-c/test_bdos_real.py covers
+the same code with SYSDAT at a nonzero segment.
 """
 import ctypes
 import os
@@ -82,10 +87,10 @@ def assemble_reference():
 
     # BDOSIF.BDO's own shared `xiosif` trampoline (readf/writef/homef/
     # seldskf/settrkf/setsecf/setdmf/setdmbf/sectran/flush all tail-jump
-    # into it) does one real indirect `callf dword ptr .xiosmod` -- no
-    # real redirect capability for that exists in tools/i86sim.py (same
-    # gap bdosif_wrapper.A86's own header comment hit), stubbed as a
-    # no-op like every other unreached far call in this project. Found
+    # into it) does one real indirect `callf dword ptr .xiosmod` --
+    # stubbed as a no-op like every other unreached far call in this
+    # project (tools/i86sim.py's `far_call_hooks` can model one when the
+    # effect matters, as test_bdosif_init.py does for `mpmif`). Found
     # by scanning xiosif's own body for the first `FF /3` (CALL FAR
     # [mem]) byte pattern, not a hardcoded address -- this file's own
     # `AND AL,imm8` encoding fix (tools/asm86/isa.py's own `_encode_alu`)
@@ -225,7 +230,11 @@ def main():
                 failures.append(label)
 
         def to_ctypes(mem):
-            return (ctypes.c_uint8 * 0x10000)(*mem)
+            # physical memory for the real-memory C side; this test keeps
+            # SYSDAT (the BDOS's DS) at segment 0, see the docstring
+            buf = (ctypes.c_uint8 * 0x100000)()
+            ctypes.memmove(buf, bytes(mem), len(mem))
+            return buf
 
         # -- get_nalbs --
         mem = base_memory()

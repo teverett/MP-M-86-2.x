@@ -29,43 +29,41 @@
  * convention -- under it, the wait always "succeeds" instantly, so
  * this port's job starts right after it, at the real Delay List walk.
  *
- * `notick_once` models `notick:`'s own body: `rlr`'s own PD's UDA
- * segment (`es = p_uda[bx]`) is only ever used as the segment the
- * following `mov u_wrkseg,ds` writes into -- moot under the flat
- * memory model, same ES-switch reasoning used throughout this
- * project, so this just writes the caller-supplied `ds` straight to
- * the fixed `UDA_WRKSEG` scratch address (same as sysent.c's own
- * `pd_entry`). Its own `mov al,io_stopclk ! call xiosif` (stop the
+ * `notick_once` models `notick:`'s own body: `mov es,p_uda[rlr] ! mov
+ * u_wrkseg,ds` -- the running (TICK) process's u_wrkseg becomes its DS,
+ * SYSDAT (TICK is a SUP process). Its own `mov al,io_stopclk ! call xiosif` (stop the
  * hardware clock) is a boundary stub, no-op; `notick:` always falls
  * straight through into `tick:`'s own flag-wait, so there's nothing
  * further for this function to model.
+ *
+ * Runs against real memory: `dlr`/`drl` and the PDs are SYSDAT-relative.
  */
 #include <stdint.h>
 
 #include "defs.h"
 
-/* notick_once -- stop the hardware clock (no one is on the delay list)
- *	input:	ds = this process's current data segment
- */
-void notick_once(uint8_t *mem, uint16_t ds) {
-    mem_w16(mem, UDA_WRKSEG, ds);
+/* notick_once -- stop the hardware clock (no one is on the delay list) */
+void notick_once(uint8_t *phys, uint16_t sysdat) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    seg_w16(far_ptr(phys, rlr_uda(sd), 0), u_wrkseg, sysdat);
     /* mov al,io_stopclk ! call xiosif -- boundary stub, no-op */
 }
 
 /* tick_once -- process exactly one real clock tick against the Delay
  * List, moving any now-expired entries onto the Ready List.
  */
-void tick_once(uint8_t *mem) {
+void tick_once(uint8_t *phys, uint16_t sysdat) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
     /* mov dx,flag_tick ! mov cx,f_flagwait ! int mpmint -- boundary
      * stub, no-op: waiting for the tick flag always "succeeds"
      * instantly under the convention */
-    uint16_t bx = mem_r16(mem, SD_DLR);
+    uint16_t bx = seg_r16(sd, SYSDAT_DLR);
     if (bx == 0) {
         return; /* drl_empty -> notick */
     }
 
-    uint16_t wait = (uint16_t)(mem_r16(mem, (uint16_t)(bx + p_wait)) - 1);
-    mem_w16(mem, (uint16_t)(bx + p_wait), wait);
+    uint16_t wait = (uint16_t)(seg_r16(sd, (uint16_t)(bx + p_wait)) - 1);
+    seg_w16(sd, (uint16_t)(bx + p_wait), wait);
     if (wait != 0) {
         return; /* next_tick -> tick */
     }
@@ -73,17 +71,17 @@ void tick_once(uint8_t *mem) {
     for (;;) {
         /* enddelay: this entry's wait just hit 0 -- unlink it from the
          * Delay List and push it onto the Ready List */
-        uint16_t si = mem_r16(mem, (uint16_t)(bx + p_link));
-        mem_w16(mem, SD_DLR, si);
-        mem[(uint16_t)(bx + p_stat)] = ps_run;
-        uint16_t ax = mem_r16(mem, SD_DRL);
-        mem_w16(mem, (uint16_t)(bx + p_link), ax);
-        mem_w16(mem, SD_DRL, bx);
+        uint16_t si = seg_r16(sd, (uint16_t)(bx + p_link));
+        seg_w16(sd, SYSDAT_DLR, si);
+        sd[(uint16_t)(bx + p_stat)] = ps_run;
+        uint16_t ax = seg_r16(sd, SYSDAT_DRL);
+        seg_w16(sd, (uint16_t)(bx + p_link), ax);
+        seg_w16(sd, SYSDAT_DRL, bx);
 
         if (si == 0) {
             return; /* drl_empty -> notick */
         }
-        if (mem_r16(mem, (uint16_t)(si + p_wait)) != 0) {
+        if (seg_r16(sd, (uint16_t)(si + p_wait)) != 0) {
             return; /* next_tick -> tick */
         }
         bx = si; /* another entry expires on this same tick -- repeat */

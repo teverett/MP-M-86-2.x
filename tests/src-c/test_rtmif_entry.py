@@ -1,28 +1,34 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/rtmif.c's own `entry` (RTMIF.RTM's
-inter-module RTM dispatch) against the real src/kernel/RTMIF.RTM,
-SYSENT.RTM, PROC.RTM, DSPTCH.RTM, FLAG.RTM, QUE1.RTM, QUE2.RTM,
-FINDPD.RTM, and ABORT.RTM combined exactly the way src/kernel/RTM.A86
-itself does. See rtmif.c's own header comment for the register-
-convention mapping this test checks, and
-tests/src-c/fixtures/rtmif_entry_wrapper.A86's own header comment for
-why every target's own internal `mpmif` calls are plain no-ops here
-(same convention test_cioif_entry.py's/test_memif_entry.py's own
-wrappers use) -- this test verifies `entry`'s own dispatch wiring, not
-each target's full internal behavior, already covered by
-test_sysent.py/test_proc.py/test_dsptch.py/test_flag.py/test_que.py/
-test_findpd.py/test_abort.py.
+inter-module RTM dispatch) against the real RTM module, on real memory
+layout. See rtmif.c's own header comment for the register-convention
+mapping this test checks.
 
-`readq_entry`/`creadq_entry`/`writeq_entry`/`cwriteq_entry` (cases
-7-10) each have a real infinite-loop risk under a no-op `mpmif`: with
-an empty/full queue they retry forever waiting for a wakeup that can
-never come (see que1.c's own header comment, and
-tests/src-c/fixtures/que_wrapper.A86's own deferral of exactly these
-four for the same reason). This test avoids the loop by giving each
-one a queue that already satisfies it on the first pass (one buffered
-0-length message already queued, or room for one more) -- the
-retry path itself stays untested here, same scope test_que.py already
-settled on.
+The reference is src/kernel/RTM.A86 itself -- the whole real module
+(RTMIF/SYSENT/PROC/DSPTCH/FLAG/QUE1/QUE2/FINDPD/ABORT + the real
+UDA.FMT/SYSDAT.FMT), so every field offset and code address is the
+genuine one, including ABORT.RTM's `terminate:` (rtmif.c's
+RTMIF_ABORT_TERMINATE_OFFSET, asserted below). It runs with
+tools/i86sim.py's segmented=True: DS = SYSDAT (segment 100h), ES = the
+running process's UDA, with PDs/QDs/flag table/lists SYSDAT-relative and
+QPBs/names/APBs in that UDA's u_wrkseg -- the same environment SUPIF's
+mpmif sets up before calling into the RTM.
+
+`mpmif`/`xiosif` and the dispatcher (`dsptch`/`pdisp`) are boundary
+stubs at their real addresses (call and jmp alike): this test verifies
+`entry`'s own dispatch wiring into each real target, whose full
+internal behavior is covered by test_sysent.py/test_proc.py/
+test_dsptch.py/test_flag.py/test_que.py/test_findpd.py/test_abort.py.
+`proc_creat` is stubbed too, which leaves case 14 (creat_proc_entry,
+`call proc_creat ! jmp pdisp`) dispatch-only: rtmif.c's side runs the
+real proc.c/dsptch.c, which a stubbed reference can't match.
+
+readq/creadq/writeq/cwriteq (cases 7-10) would retry forever under a
+no-op `mpmif` with an empty/full queue (see que1.c's own header
+comment), so each gets a queue that satisfies it on the first pass, or
+is the conditional variant that returns immediately.
+
+Every case diffs the whole image (except code and the harness stack).
 """
 import ctypes
 import os
@@ -36,56 +42,68 @@ sys.path.insert(0, os.path.join(REPO_ROOT, 'tools'))
 from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
-WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'rtmif_entry_wrapper.A86')
+RTM_A86 = os.path.join(REPO_ROOT, 'src', 'kernel', 'RTM.A86')
 RTMIF_ENTRY_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f)
-                  for f in ('rtmif.c', 'sysent.c', 'proc.c', 'dsptch.c', 'flag.c',
-                            'que1.c', 'que2.c', 'findpd.c', 'abort.c')]
-# proc.c/dsptch.c are linked (rtmif.c's own entry() calls into
-# creat_proc_entry, which calls real proc_creat/pdisp) even though the
-# REFERENCE side's own wrapper stubs dsptch/pdisp/proc_creat as plain
-# addresses (see rtmif_entry_wrapper.A86's own header comment for why
-# that asymmetry is unavoidable here) -- case 14 below is marked
-# check_result=False for exactly that reason.
+                 for f in ('rtmif.c', 'sysent.c', 'proc.c', 'dsptch.c', 'flag.c',
+                           'que1.c', 'que2.c', 'findpd.c', 'abort.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
+RTMIF_ABORT_TERMINATE_OFFSET = 0x0C68  # rtmif.c's #define
 
+SIM_MEM = 0x10000
+PHYS_MEM = 0x100000
 STACK_TOP = 0xFFF0
-SD_RLR, SD_DRL, SD_DLR = 0xA000, 0xA002, 0xA004
-SD_NFLAGS, SD_FLAGS = 0xA006, 0xA008
-UDA_DPARAM, UDA_WRKSEG, UDA_RETSEG = 0xA010, 0xA012, 0xA014
-SD_PLR, SD_SLR = 0xA01C, 0xA01E
-SD_QLR, SD_QUL = 0xA020, 0xA022
-SD_ENDSEG, SD_CCB, SD_THRDRT = 0xA026, 0xA030, 0xA032
-SD_PUL, SD_MXMEMOWNER, SD_MXMEMCOUNT = 0xA038, 0xA03A, 0xA03C
-SD_INDISP = 0xAC00
+SYSDAT = 0x0100
+UDA_RUN = 0x0500
+UDA_ABT = 0x0600
+WRKSEG = 0x0700
+ENDSEG = 0x0F00
 
-P_LINK, P_THREAD, P_STAT, P_PRIOR, P_FLAG, P_NAME, P_UDA, P_SCRATCH = 0, 2, 4, 5, 6, 8, 0x10, 0x2E
-Q_LINK, Q_FLAGS, Q_MSGLEN, Q_NMSGS, Q_MSGCNT, Q_MSGOUT, Q_BUF = 0, 4, 0x0E, 0x10, 0x16, 0x18, 0x1A
-QPB_QADDR, QPB_BUFFPTR = 2, 6
-PD_A = 0x5000
-QD_A = 0x6000
-QPB_A = 0x7000
+PD_A, PD_B = 0x2000, 0x2100        # SYSDAT offsets; PD_A is running
+QD_A, QD_B = 0x2400, 0x2440
+FLAG_TABLE, SYSLIST = 0x2600, 0x2700
+QPB, NAME, APB, QD_SRC = 0x0100, 0x0200, 0x0300, 0x0400   # u_wrkseg offsets
+FLAG_OFF, FLAG_ON = 0xFFFF, 0xFFFE
+
+SYMS = ('entry', 'rtm_ret', 'mpmif', 'xiosif', 'dsptch', 'pdisp', 'proc_creat', 'terminate',
+        'sysdat', 'rlr', 'drl', 'qlr', 'qul', 'endseg', 'thrdrt', 'nflags', 'flags', 'indisp',
+        'u_wrkseg', 'u_dparam', 'u_retseg',
+        'p_link', 'p_thread', 'p_stat', 'p_prior', 'p_name', 'p_uda', 'p_scratch',
+        'q_link', 'q_name', 'q_msglen', 'q_nmsgs', 'q_msgcnt', 'q_buf',
+        'qpb_qaddr', 'qpb_buffptr', 'qpb_name', 'apb_pd', 'apb_term')
 
 
-def mem_w16(mem, addr, val):
+def phys(seg, off=0):
+    return seg * 16 + off
+
+
+def sd(off):
+    return phys(SYSDAT, off)
+
+
+def wk(off):
+    return phys(WRKSEG, off)
+
+
+def w16(mem, addr, val):
     mem[addr] = val & 0xFF
     mem[addr + 1] = (val >> 8) & 0xFF
 
 
-def mem_r16(mem, addr):
+def r16(mem, addr):
     return mem[addr] | (mem[addr + 1] << 8)
 
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+    asm.assemble(RTM_A86, [os.path.join(REPO_ROOT, 'src', 'kernel')])
     code = asm.segment_bytes('cseg')
-    dseg = asm.segment_bytes('dseg')
-    entry = asm.symtab['entry'].value
-    mpmif = asm.symtab['mpmif'].value
-    xiosif = asm.symtab['xiosif'].value
-    rtm_ret = asm.symtab['rtm_ret'].value
-    assert code[rtm_ret] == 0xCB, f"expected retf at {hex(rtm_ret)}"
-    return code, dseg, entry, rtm_ret, mpmif, xiosif
+    s = {name: asm.symtab[name].value for name in SYMS}
+    assert code[s['rtm_ret']] == 0xCB, f"expected retf at {hex(s['rtm_ret'])}"
+    assert s['sysdat'] == 6
+    assert s['terminate'] == RTMIF_ABORT_TERMINATE_OFFSET, \
+        f"re-probe rtmif.c's RTMIF_ABORT_TERMINATE_OFFSET: terminate is now {s['terminate']:#x}"
+    assert len(code) < sd(0), "code must not overlap SYSDAT"
+    return code, s
 
 
 def build_c_library():
@@ -98,60 +116,48 @@ def build_c_library():
     return lib_path
 
 
-def run_reference(code, dseg, entry, stop_addr, mpmif, xiosif, mem, regs, max_steps=20000):
-    image = bytearray(0x10000)
-    image[0:len(code)] = code
-    image[len(code):len(dseg)] = dseg[len(code):]
-    for addr, val in enumerate(mem):
-        if val != 0:
-            image[addr] = val
-    # dsptch/pdisp/proc_creat (0x9000/0x9001/0x9002, see
-    # rtmif_entry_wrapper.A86's own header comment) are plain-EQU stub
-    # addresses, not real labels -- stubbed the same way mpmif/xiosif
-    # are, so a real `jmp dsptch`/`call proc_creat` doesn't try to
-    # execute whatever garbage happens to sit at an unmapped address.
-    stubs = {mpmif, xiosif, 0x9000, 0x9001, 0x9002}
-    sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry,
-                 stop_addrs={stop_addr}, call_stub_addrs=stubs,
-                 jmp_stub_addrs=stubs)
-    sim.run(max_steps=max_steps)
-    return sim.regs, image
-
-
-def base_memory():
-    mem = bytearray(0x10000)
-    mem_w16(mem, SD_RLR, PD_A)
-    return mem
-
-
-def setup_qd(mem, msgcnt, nmsgs, flags=0):
-    mem_w16(mem, SD_QLR, QD_A)
-    mem_w16(mem, QD_A + Q_LINK, 0)
-    mem_w16(mem, QD_A + Q_FLAGS, flags)
-    mem_w16(mem, QD_A + Q_MSGLEN, 0)  # 0-length messages -- skip the byte-copy loop
-    mem_w16(mem, QD_A + Q_NMSGS, nmsgs)
-    mem_w16(mem, QD_A + Q_MSGCNT, msgcnt)
-    mem_w16(mem, QD_A + Q_MSGOUT, 0)
-    mem_w16(mem, QPB_A + QPB_QADDR, QD_A)
-    mem_w16(mem, QPB_A + QPB_BUFFPTR, 0)
-
-
 def main():
-    code, dseg, entry, stop_addr, mpmif, xiosif = assemble_reference()
+    code, s = assemble_reference()
+    skip = set(range(len(code))) | set(range(0xFF00, SIM_MEM))  # code, harness stack (SS=0)
+    stubs = {s['mpmif'], s['xiosif'], s['dsptch'], s['pdisp'], s['proc_creat']}
+
+    def pd(addr, field):
+        return sd(addr + s[field])
+
+    def base_memory():
+        mem = bytearray(SIM_MEM)
+        w16(mem, sd(s['rlr']), PD_A)
+        w16(mem, pd(PD_A, 'p_uda'), UDA_RUN)
+        w16(mem, pd(PD_B, 'p_uda'), UDA_ABT)
+        w16(mem, phys(UDA_RUN, s['u_wrkseg']), WRKSEG)
+        w16(mem, sd(s['endseg']), ENDSEG)
+        w16(mem, sd(s['thrdrt']), PD_A)            # thread: A -> B
+        w16(mem, pd(PD_A, 'p_thread'), PD_B)
+        mem[pd(PD_A, 'p_name'):pd(PD_A, 'p_name') + 8] = b'RUNNER  '
+        mem[pd(PD_B, 'p_name'):pd(PD_B, 'p_name') + 8] = b'ECHO    '
+        return mem
+
+    def run_reference(mem, regs):
+        image = bytearray(mem)
+        image[0:len(code)] = code
+        w16(image, s['sysdat'], SYSDAT)
+        sim = I86Sim(image, {**regs, 'ds': SYSDAT, 'es': UDA_RUN, 'ss': 0, 'sp': STACK_TOP, 'cs': 0},
+                     s['entry'], segmented=True, stop_addrs={s['rtm_ret']},
+                     call_stub_addrs=stubs, jmp_stub_addrs=stubs)
+        sim.run(max_steps=20000)
+        return sim.regs, image
+
     lib_path = build_c_library()
     try:
         lib = ctypes.CDLL(lib_path)
-        c_u8p = ctypes.POINTER(ctypes.c_uint8)
+        u16 = ctypes.c_uint16
 
         class EntryResult(ctypes.Structure):
-            _fields_ = [('ax', ctypes.c_uint16), ('bx', ctypes.c_uint16), ('cx', ctypes.c_uint16),
-                        ('dx', ctypes.c_uint16), ('si', ctypes.c_uint16), ('di', ctypes.c_uint16),
-                        ('bp', ctypes.c_uint16)]
+            _fields_ = [(r, ctypes.c_uint16) for r in ('ax', 'bx', 'cx', 'dx', 'si', 'di', 'bp')]
 
         lib.rtmif_entry.restype = EntryResult
-        lib.rtmif_entry.argtypes = [c_u8p, ctypes.c_uint8, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16,
-                               ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16,
-                               ctypes.c_uint16, ctypes.c_uint16, c_u8p]
+        lib.rtmif_entry.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint8] + [u16] * 9 + \
+            [ctypes.POINTER(ctypes.c_uint8)]
 
         failures = []
 
@@ -161,146 +167,152 @@ def main():
             if status == "FAIL":
                 failures.append(label)
 
-        def to_ctypes(mem):
-            return (ctypes.c_uint8 * 0x10000)(*mem)
-
-        def run_case(label, cl, mem, dx=0, ax=0, bx=0, cx=0, si=0, di=0, bp=0, ds=0, sysdat=0,
-                     fields=('bx', 'cx'), check_result=True):
-            ref_regs, ref_img = run_reference(code, dseg, entry, stop_addr, mpmif, xiosif, mem,
-                                               {'cx': cl, 'dx': dx, 'ax': ax, 'bx': bx,
-                                                'si': si, 'di': di, 'bp': bp})
-            buf = to_ctypes(mem)
+        def run_case(label, cl, mem, dx=0, bx=0, fields=('bx', 'cx'), snap=lambda img: (),
+                     dispatch_only=False):
+            regs = {'cx': cl, 'dx': dx, 'ax': 0x1111, 'bx': bx, 'si': 0x2222, 'di': 0x3333, 'bp': 0x4444}
+            ref_regs, ref = run_reference(mem, regs)
+            buf = (ctypes.c_uint8 * PHYS_MEM)()
+            ctypes.memmove(buf, bytes(mem), len(mem))
             was_indisp = ctypes.c_uint8(0)
-            r = lib.rtmif_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(cl), ctypes.c_uint16(dx),
-                           ctypes.c_uint16(ax), ctypes.c_uint16(bx), ctypes.c_uint16(cx),
-                           ctypes.c_uint16(si), ctypes.c_uint16(di), ctypes.c_uint16(bp),
-                           ctypes.c_uint16(ds), ctypes.c_uint16(sysdat), ctypes.byref(was_indisp))
-            if check_result:
-                ref = tuple(ref_regs[f] & 0xFFFF for f in fields)
-                port = tuple(getattr(r, f) for f in fields)
-                check(label, ref, port)
-            return ref_img, bytes(buf)
+            r = lib.rtmif_entry(buf, cl, dx, regs['ax'], bx, cl, regs['si'], regs['di'], regs['bp'],
+                                SYSDAT, SYSDAT, ctypes.byref(was_indisp))
+            port = bytes(buf)
+            if dispatch_only:
+                print(f"[--] {label}: dispatched (not compared, see header)")
+                return
+            check(label, (tuple(ref_regs[f] for f in fields), snap(ref)),
+                  (tuple(getattr(r, f) for f in fields), snap(port)))
+            diffs = [hex(a) for a in range(SIM_MEM) if a not in skip and ref[a] != port[a]]
+            check(f"{label}: no other bytes differ", [], diffs[:8])
+            check(f"{label}: nothing written past 64KB", True, not any(port[SIM_MEM:]))
 
-        # 0: sysreset_entry
-        mem = base_memory()
-        run_case("0 sysreset_entry", 0, mem, fields=('bx',))
+        uda = lambda f: phys(UDA_RUN, s[f])  # noqa: E731
+
+        # 0: sysreset_entry -- terminates the running PD
+        run_case("0 sysreset_entry", 0, base_memory(), fields=('bx',),
+                 snap=lambda img: img[pd(PD_A, 'p_stat')])
 
         # 1: poll_entry
-        mem = base_memory()
-        run_case("1 poll_entry", 1, mem, dx=0, fields=())
+        run_case("1 poll_entry", 1, base_memory(), dx=7, fields=(),
+                 snap=lambda img: (img[pd(PD_A, 'p_stat')], r16(img, uda('u_dparam'))))
 
-        # 2: flag_wait_entry -- bad flag number -> deterministic error
-        mem = base_memory()
-        mem[SD_NFLAGS] = 1
-        mem_w16(mem, SD_FLAGS, 0x4000)
-        run_case("2 flag_wait_entry (bad flag#)", 2, mem, dx=5)
+        # 2/3: flag_wait_entry/flag_set_entry -- one flag starting `val`
+        def flag_memory(val):
+            mem = base_memory()
+            mem[sd(s['nflags'])] = 1
+            w16(mem, sd(s['flags']), FLAG_TABLE)
+            w16(mem, sd(FLAG_TABLE), val)
+            mem[sd(FLAG_TABLE + 2)] = 0xFF
+            return mem
 
-        # 3: flag_set_entry -- same bad flag number
-        mem = base_memory()
-        mem[SD_NFLAGS] = 1
-        mem_w16(mem, SD_FLAGS, 0x4000)
-        run_case("3 flag_set_entry (bad flag#)", 3, mem, dx=5)
+        flag = lambda img: r16(img, sd(FLAG_TABLE))  # noqa: E731
+        run_case("2 flag_wait_entry (bad flag#)", 2, flag_memory(FLAG_OFF), dx=5)
+        run_case("2 flag_wait_entry (on -> consumed)", 2, flag_memory(FLAG_ON), dx=0, snap=flag)
+        run_case("3 flag_set_entry (bad flag#)", 3, flag_memory(FLAG_OFF), dx=5)
+        run_case("3 flag_set_entry (off -> on)", 3, flag_memory(FLAG_OFF), dx=0, snap=flag)
 
-        # 4: makeq_entry -- empty unused-QD list -> e_no_qd
-        mem = base_memory()
-        run_case("4 makeq_entry (no unused QD)", 4, mem, dx=QD_A)
+        def queue_memory(msgcnt=0, nmsgs=4, msglen=0, name=b'MXQ'):
+            mem = base_memory()
+            w16(mem, sd(s['qlr']), QD_A)
+            w16(mem, sd(QD_A + s['q_link']), QD_B)
+            mem[sd(QD_A + s['q_name']):sd(QD_A + s['q_name']) + 8] = (name + b' ' * 8)[:8]
+            w16(mem, sd(QD_A + s['q_msglen']), msglen)
+            w16(mem, sd(QD_A + s['q_nmsgs']), nmsgs)
+            w16(mem, sd(QD_A + s['q_msgcnt']), msgcnt)
+            w16(mem, sd(QD_A + s['q_buf']), 0x2800)
+            w16(mem, wk(QPB + s['qpb_qaddr']), QD_A)
+            w16(mem, wk(QPB + s['qpb_buffptr']), 0x0500)
+            return mem
 
-        # 5: openq_entry -- queue not found
-        mem = base_memory()
-        mem_w16(mem, QPB_A + QPB_QADDR, QD_A)
-        run_case("5 openq_entry (not found)", 5, mem, dx=QPB_A)
+        # 4: makeq_entry -- QD in u_wrkseg, inside MPM range
+        for label, name in (("4 makeq_entry (success)", b'NEWQ'), ("4 makeq_entry (name in use)", b'MXQ')):
+            mem = queue_memory()
+            mem[wk(QD_SRC + s['q_name']):wk(QD_SRC + s['q_name']) + 8] = (name + b' ' * 8)[:8]
+            run_case(label, 4, mem, dx=QD_SRC, snap=lambda img: r16(img, sd(s['qlr'])))
 
-        # 6: deleteq_entry -- queue not found. dx is a QPB (qpb_qaddr
-        # -> the QD to delete), not the QD address directly -- an
-        # earlier version of this case passed dx=QD_A raw, which
-        # made `di` (read from a QPB that was never set up) land on
-        # 0, reading dq/nq from real code bytes near address 0 instead
-        # of a real QD's own fields, a test bug (not a dispatch bug)
-        # that happened to produce a different, but still genuinely
-        # matching-in-kind, error code on each side.
-        mem = base_memory()
-        mem_w16(mem, QPB_A + QPB_QADDR, QD_A)
-        run_case("6 deleteq_entry (not found)", 6, mem, dx=QPB_A)
+        # 5: openq_entry
+        for label, name in (("5 openq_entry (found)", b'MXQ'), ("5 openq_entry (not found)", b'NOPE')):
+            mem = queue_memory()
+            w16(mem, wk(QPB + s['qpb_qaddr']), 0)
+            mem[wk(QPB + s['qpb_name']):wk(QPB + s['qpb_name']) + 8] = (name + b' ' * 8)[:8]
+            run_case(label, 5, mem, dx=QPB, snap=lambda img: r16(img, wk(QPB + s['qpb_qaddr'])))
 
-        # 7: readq_entry -- one 0-length message already queued
-        mem = base_memory()
-        setup_qd(mem, msgcnt=1, nmsgs=4)
-        run_case("7 readq_entry (message ready)", 7, mem, dx=QPB_A)
+        # 6: deleteq_entry
+        run_case("6 deleteq_entry (success)", 6, queue_memory(), dx=QPB,
+                 snap=lambda img: r16(img, sd(s['qlr'])))
+        mem = queue_memory()
+        w16(mem, wk(QPB + s['qpb_qaddr']), 0x2480)  # not on qlr
+        run_case("6 deleteq_entry (not active)", 6, mem, dx=QPB)
 
-        # 8: creadq_entry -- empty queue, conditional -> e_q_empty (no loop risk either way)
-        mem = base_memory()
-        setup_qd(mem, msgcnt=0, nmsgs=4)
-        run_case("8 creadq_entry (empty, conditional)", 8, mem, dx=QPB_A)
-
-        # 9: writeq_entry -- room for one more message
-        mem = base_memory()
-        setup_qd(mem, msgcnt=0, nmsgs=4)
-        run_case("9 writeq_entry (room available)", 9, mem, dx=QPB_A)
-
-        # 10: cwriteq_entry -- full queue, conditional -> e_q_full
-        mem = base_memory()
-        setup_qd(mem, msgcnt=4, nmsgs=4)
-        run_case("10 cwriteq_entry (full, conditional)", 10, mem, dx=QPB_A)
+        # 7-10: read/write
+        mem = queue_memory(msgcnt=1, msglen=4)
+        mem[sd(0x2800):sd(0x2804)] = b'\x01\x02\x03\x04'
+        run_case("7 readq_entry (message ready)", 7, mem, dx=QPB,
+                 snap=lambda img: (bytes(img[wk(0x500):wk(0x504)]), r16(img, sd(QD_A + s['q_msgcnt']))))
+        run_case("8 creadq_entry (empty, conditional)", 8, queue_memory(msgcnt=0), dx=QPB)
+        mem = queue_memory(msgcnt=0, msglen=4)
+        mem[wk(0x500):wk(0x504)] = b'\xAA\xBB\xCC\xDD'
+        run_case("9 writeq_entry (room available)", 9, mem, dx=QPB,
+                 snap=lambda img: (bytes(img[sd(0x2800):sd(0x2804)]), r16(img, sd(QD_A + s['q_msgcnt']))))
+        run_case("10 cwriteq_entry (full, conditional)", 10, queue_memory(msgcnt=4), dx=QPB)
 
         # 11: delay_entry
-        mem = base_memory()
-        run_case("11 delay_entry", 11, mem, dx=100, fields=())
+        run_case("11 delay_entry", 11, base_memory(), dx=100, fields=(),
+                 snap=lambda img: (img[pd(PD_A, 'p_stat')], r16(img, uda('u_dparam'))))
 
-        # 12: dispatch_entry -- no-op boundary stub both sides
-        mem = base_memory()
-        run_case("12 dispatch_entry", 12, mem, fields=())
+        # 12: dispatch_entry -- jmp pdisp, boundary stub both sides
+        run_case("12 dispatch_entry", 12, base_memory(), fields=())
 
         # 13: terminate_entry
-        mem = base_memory()
-        run_case("13 terminate_entry", 13, mem, dx=0)
+        run_case("13 terminate_entry", 13, base_memory(), dx=0,
+                 snap=lambda img: img[pd(PD_A, 'p_stat')])
 
-        # 14: creat_proc_entry -- not independently verified here:
-        # the C port's own creat_proc_entry calls the REAL proc_creat/
-        # pdisp (proc.c/dsptch.c), but the reference side's own wrapper
-        # stubs `proc_creat`/`pdisp` as plain addresses (see
-        # rtmif_entry_wrapper.A86's own header comment for why that
-        # asymmetry can't be avoided once ABORT.RTM's own `jmp dsptch`
-        # tail needs the opposite treatment in the SAME combined
-        # module) -- same "known, documented gap" class as
-        # test_memif_entry.py's own cases 0-5/10-12. Just confirms the
-        # dispatch itself doesn't crash or hang.
-        mem = base_memory()
-        mem[SD_INDISP] = 0
-        run_case("14 creat_proc_entry (dispatch only, not independently verified)", 14, mem,
-                  dx=0, bp=0x1234, check_result=False)
+        # 14: creat_proc_entry -- dispatch only (see header)
+        run_case("14 creat_proc_entry", 14, base_memory(), dx=0, dispatch_only=True)
 
         # 15: set_prior_entry
-        mem = base_memory()
-        ref_img, port = run_case("15 set_prior_entry", 15, mem, dx=7, fields=())
-        check("15: p_prior side effect", ref_img[PD_A + P_PRIOR], port[PD_A + P_PRIOR])
+        run_case("15 set_prior_entry", 15, base_memory(), dx=7, fields=(),
+                 snap=lambda img: img[pd(PD_A, 'p_prior')])
 
-        # 16: pd_entry
-        mem = base_memory()
-        run_case("16 pd_entry", 16, mem, ds=0x1234, fields=('bx', 'cx'))
+        # 16: pd_entry -- u_retseg = caller's DS (SYSDAT, as SUPIF leaves it)
+        run_case("16 pd_entry", 16, base_memory(),
+                 snap=lambda img: r16(img, uda('u_retseg')))
 
-        # 17: abort_spec_entry -- APB with pd=0 (nothing to abort)
-        APB = 0x7200
+        # 17: abort_spec_entry -- PD_B on the dispatcher ready list, by
+        # address; and pd=0 with a name nobody has
         mem = base_memory()
-        mem_w16(mem, UDA_WRKSEG, 0)
-        run_case("17 abort_spec_entry (pd=0)", 17, mem, dx=APB)
+        w16(mem, sd(s['drl']), PD_B)
+        w16(mem, wk(APB + s['apb_pd']), PD_B)
+        w16(mem, wk(APB + s['apb_term']), 0x0077)
+        run_case("17 abort_spec_entry (success, real terminate offset)", 17, mem, dx=APB,
+                 snap=lambda img: (r16(img, sd(s['drl'])), r16(img, phys(UDA_ABT, 0xFE))))
+        mem = base_memory()
+        mem[wk(APB + 6):wk(APB + 14)] = b'NOBODY\x00\x00'
+        run_case("17 abort_spec_entry (pd=0, no such name)", 17, mem, dx=APB)
 
         # 18: sleep_entry
         mem = base_memory()
-        ref_img, port = run_case("18 sleep_entry", 18, mem, dx=0x99, fields=())
-        check("18: p_stat side effect", ref_img[PD_A + P_STAT], port[PD_A + P_STAT])
+        mem[pd(PD_A, 'p_stat')] = 3  # prior status, copied to p_scratch
+        run_case("18 sleep_entry", 18, mem, dx=0x99, fields=(),
+                 snap=lambda img: (img[pd(PD_A, 'p_stat')], img[pd(PD_A, 'p_scratch')],
+                                   r16(img, uda('u_dparam'))))
 
-        # 19: wakeup_entry -- empty System List (no-op)
-        SYSLIST = 0x7300
+        # 19: wakeup_entry -- empty list, and one sleeper moved to drl
+        run_case("19 wakeup_entry (empty list)", 19, base_memory(), dx=SYSLIST, fields=())
         mem = base_memory()
-        mem_w16(mem, SYSLIST, 0)
-        run_case("19 wakeup_entry (empty list)", 19, mem, dx=SYSLIST, fields=())
+        w16(mem, sd(SYSLIST), PD_B)
+        w16(mem, sd(s['drl']), 0x2999)
+        run_case("19 wakeup_entry (one sleeper)", 19, mem, dx=SYSLIST, fields=(),
+                 snap=lambda img: (r16(img, sd(SYSLIST)), r16(img, sd(s['drl'])),
+                                   r16(img, pd(PD_B, 'p_link'))))
 
-        # 20: findpdname_entry -- empty thread list -> not found
-        NAME = 0x7400
-        mem = base_memory()
-        for i, ch in enumerate(b'NOBODY\x00\x00'):
-            mem[NAME + i] = ch
-        run_case("20 findpdname_entry (not found)", 20, mem, dx=NAME, bx=PD_A - P_THREAD, fields=('bx', 'cx'))
+        # 20: findpdname_entry -- name in u_wrkseg, bx = thread root - p_thread
+        root = s['thrdrt'] - s['p_thread']
+        for label, name in (("20 findpdname_entry (found)", b'ECHO    '),
+                            ("20 findpdname_entry (not found)", b'NOBODY  ')):
+            mem = base_memory()
+            mem[wk(NAME):wk(NAME) + 8] = name
+            run_case(label, 20, mem, dx=NAME, bx=root)
 
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")

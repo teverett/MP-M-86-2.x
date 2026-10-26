@@ -48,7 +48,11 @@ load:		; Intermodule entry point to load .CMD file
 
 ld_read:
 	mov bx,load_fcb
-	mov fcb_nxtrec[bx],0		;read 1st record
+	push es ! mov es,u_wrkseg	;the fcb is in u_wrkseg -- this was a
+	mov es:fcb_nxtrec[bx],0		;bare DS (SYSDAT) store, which reset
+	pop es				;the wrong byte unless u_wrkseg happened
+					;to be SYSDAT (docs/bugs.md #109)
+					;read 1st record
 	mov dx,offset load_dma
 	mov cx,cs:sysdat	;bare form wrong, same bug class/fix as
 				;INIT.SUP's nrsp (see its comment)

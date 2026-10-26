@@ -3,15 +3,16 @@
  *
  * `sysdat_entry`/`tod_entry`/`serial_entry` were deferred as "copy from
  * module-local data this port doesn't have a home for yet" -- revisited:
- * `tod` is a real `SYSDAT.FMT` field (`tod`/`tod_day`/`tod_hr`/`tod_min`/
- * `tod_sec`), given its own harness-chosen scratch address (`SD_TOD`,
- * `todlen`=5) same as every other such field elsewhere in this tree;
- * `serial` is a fixed, literal 6-character string constant in
- * `RTMIF.RTM`'s own cseg data (`serial db '654321'`), modeled the same
- * way `chario.c`'s own `write_cstr` stands in for CS-resident literal
- * data (just inlined directly here, it's a single fixed value, not a
- * runtime-chosen message). `sysdat_entry` itself is trivial, same
- * `u_retseg=ds` pattern as `SYSENT.RTM`'s own already-ported `pd_entry`.
+ * `tod` is a real `SYSDAT.FMT` field (`SYSDAT_TOD`, `todlen`=5); `serial`
+ * is a fixed, literal 6-character string in the module's code segment
+ * (`serial db '654321'`), a C constant here like chario.c's CS-resident
+ * messages. `sysdat_entry` itself is trivial, same `u_retseg=ds` pattern
+ * as `SYSENT.RTM`'s own already-ported `pd_entry`.
+ *
+ * Runs against real memory: `vernum`/`mpmvernum`/`tod`/`rlr`/PDs are
+ * SYSDAT-relative, the caller's buffers are in the running process's
+ * u_wrkseg, and u_retseg is its UDA. SUPIF calls every SUP function with
+ * DS = SYSDAT, which is the DS `sysdat_entry` returns.
  *
  * `callbios_entry` was deferred as "calls into unported mpmif/xiosif" --
  * revisited: only one path (`BOOT`/`WBOOT`, `al<=1`) tail-jumps into
@@ -46,36 +47,41 @@ uint16_t bad_entry(uint16_t *cx_out) {
     return 0xFFFF;
 }
 
+static uint8_t *wrkseg_ptr(uint8_t *phys, const uint8_t *sd) {
+    return far_ptr(phys, seg_r16(far_ptr(phys, rlr_uda(sd), 0), u_wrkseg), 0);
+}
+
 /* version_entry -- Get Version # */
-uint16_t version_entry(const uint8_t *mem, uint16_t *cx_out) {
+uint16_t version_entry(uint8_t *phys, uint16_t sysdat, uint16_t *cx_out) {
     *cx_out = 0;
-    return mem_r16(mem, SD_VERNUM);
+    return seg_r16(far_ptr(phys, sysdat, 0), SYSDAT_VERNUM);
 }
 
 /* mpmversion_entry -- Get MP/M Version # */
-uint16_t mpmversion_entry(const uint8_t *mem, uint16_t *cx_out) {
+uint16_t mpmversion_entry(uint8_t *phys, uint16_t sysdat, uint16_t *cx_out) {
     *cx_out = 0;
-    return mem_r16(mem, SD_MPMVERNUM);
+    return seg_r16(far_ptr(phys, sysdat, 0), SYSDAT_MPMVERNUM);
 }
 
 /* sysdat_entry -- Ret Addr of System Data Area
- *	input:	ds = this process's current data segment
- *	output:	returns bx=cx=0
+ *	output:	u_retseg = DS (SYSDAT -- SUPIF calls every SUP function with
+ *		DS = cs:sysdat); returns bx=cx=0
  */
-uint16_t sysdat_entry(uint8_t *mem, uint16_t ds, uint16_t *cx_out) {
-    mem_w16(mem, UDA_RETSEG, ds);
+uint16_t sysdat_entry(uint8_t *phys, uint16_t sysdat, uint16_t *cx_out) {
+    seg_w16(far_ptr(phys, rlr_uda(far_ptr(phys, sysdat, 0)), 0), u_retseg, sysdat);
     *cx_out = 0;
     return 0;
 }
 
 /* tod_entry -- Return current Time of Day
  *	input:	dx = address of a todlen-byte buffer in u_wrkseg
- *	output:	copies the system's own tod struct into it; returns bx=cx=0
+ *	output:	copies SYSDAT's tod struct into it; returns bx=cx=0
  */
-uint16_t tod_entry(uint8_t *mem, uint16_t dx, uint16_t *cx_out) {
-    uint16_t wrkseg = mem_r16(mem, UDA_WRKSEG);
+uint16_t tod_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t *cx_out) {
+    const uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t *w = wrkseg_ptr(phys, sd);
     for (unsigned i = 0; i < todlen; i++) {
-        mem_w8_seg(mem, wrkseg, (uint16_t)(dx + i), mem[SD_TOD + i]);
+        seg_w8(w, (uint16_t)(dx + i), seg_r8(sd, (uint16_t)(SYSDAT_TOD + i)));
     }
     *cx_out = 0;
     return 0;
@@ -83,14 +89,14 @@ uint16_t tod_entry(uint8_t *mem, uint16_t dx, uint16_t *cx_out) {
 
 /* serial_entry -- Return Serial Number
  *	input:	dx = address of a 6-byte buffer in u_wrkseg
- *	output:	copies RTMIF.RTM's own fixed `serial db '654321'` into it;
- *		returns bx=cx=0
+ *	output:	copies the SUP's own `serial db '654321'` (in its code
+ *		segment) into it; returns bx=cx=0
  */
-uint16_t serial_entry(uint8_t *mem, uint16_t dx, uint16_t *cx_out) {
+uint16_t serial_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t *cx_out) {
     static const uint8_t serial[6] = {'6', '5', '4', '3', '2', '1'};
-    uint16_t wrkseg = mem_r16(mem, UDA_WRKSEG);
+    uint8_t *w = wrkseg_ptr(phys, far_ptr(phys, sysdat, 0));
     for (unsigned i = 0; i < 6; i++) {
-        mem_w8_seg(mem, wrkseg, (uint16_t)(dx + i), serial[i]);
+        seg_w8(w, (uint16_t)(dx + i), serial[i]);
     }
     *cx_out = 0;
     return 0;
@@ -115,9 +121,10 @@ typedef struct {
  *		contrast really is dead on every path, nothing to port
  *		for it)
  */
-callbios_result callbios_entry(uint8_t *mem, uint16_t dx) {
-    uint16_t wrkseg = mem_r16(mem, UDA_WRKSEG);
-    uint8_t al = mem_r8_seg(mem, wrkseg, dx);
+callbios_result callbios_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    const uint8_t *sd = far_ptr(phys, sysdat, 0);
+    const uint8_t *w = wrkseg_ptr(phys, sd);
+    uint8_t al = seg_r8(w, dx);
 
     if (al <= 1) {
         callbios_result r = {0, 0, 1, 0, 0, 0, 0};
@@ -128,13 +135,13 @@ callbios_result callbios_entry(uint8_t *mem, uint16_t dx) {
         return r;
     }
 
-    uint16_t rlr = mem_r16(mem, SD_RLR);
-    uint8_t dl, cl = mem_r8_seg(mem, wrkseg, (uint16_t)(dx + 1));
+    uint16_t rlr = seg_r16(sd, SYSDAT_RLR);
+    uint8_t dl, cl = seg_r8(w, (uint16_t)(dx + 1));
     if (al <= 4) {
-        dl = mem[(uint16_t)(rlr + p_cns)];
+        dl = seg_r8(sd, (uint16_t)(rlr + p_cns));
         if (al != 4) cl = dl;
     } else {
-        dl = mem[(uint16_t)(rlr + p_lst)];
+        dl = seg_r8(sd, (uint16_t)(rlr + p_lst));
         if (al == 15) cl = dl;
     }
     callbios_result r = {0, 0, 2, (uint8_t)(al - 2), 0, cl, dl};

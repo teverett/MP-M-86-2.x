@@ -3,36 +3,24 @@
  * (+ internal mla_value, mla_makemau, mla_initmau), mlfree_entry
  * (+ internal ml_insert).
  *
- * This file is exactly the case docs/src-c.md's own "Deferred, with
- * real infrastructure gaps" section flagged as needing real
- * segment-relative addressing, not just the boundary-stub convention:
- * `mla_initmau` dynamically switches ES/DS to a brand-new MAU's own
- * segment (`m_start[bx]`, a real, different segment each call) and
- * writes fixed SAT-header offsets relative to it; `mla_value` reads
- * its caller's own MPB through yet another dynamically-supplied
- * segment, `u_wrkseg`'s own stored value. Now portable:
- * `tools/i86sim.py` gained an opt-in `segmented=True` mode (see its
- * own docstring) performing the identical `(seg * 16 + offset) &
- * 0xFFFF` arithmetic for the real asm reference run, and this port
- * uses `defs.h`'s new `mem_r16_seg`/`mem_w16_seg`/`mem_r8_seg`/
- * `mem_w8_seg` helpers to do the same thing explicitly wherever the
- * real asm reads/writes through one of these dynamic segments.
- *
  * `getmd`/`freemd` (src/kernel/UTIL.MEM, already ported in
  * util_mem.c) are called as ordinary internal calls, not boundary
  * stubs -- same convention as `memory.c`'s own calls into them.
  *
- * `mla_initmau`'s own closing `mov ds,cs:sysdat` restores the ambient
- * DS for its caller -- this port has no "ambient DS" register to
- * restore (every access is explicit), so it's moot, same reasoning
- * as every other plain DS/ES-switch-back elsewhere in this project.
+ * Runs against real memory (defs.h's far_ptr): `phys` is the base of
+ * real physical memory and `sysdat` the real SYSDAT segment (the MEM
+ * module's DS). Three segments are involved, each exactly as the asm
+ * reaches it:
+ *   - Memory List elements (the `m_*`-offset MDs `bx`/`si`/`di` walk)
+ *     are SYSDAT-relative, like every other MD.
+ *   - The caller's MPB is in the running process's u_wrkseg (the asm's
+ *     `mov es,u_wrkseg`, ES being the running UDA), read from its UDA.
+ *   - `mla_initmau` lays out a new MAU's SAT in that MAU's own segment,
+ *     `m_start[bx]` (the asm's `mov es,dx`/`mov ds,dx`). Its closing
+ *     `mov ds,cs:sysdat` only restores the caller's DS -- moot here.
  *
- * Memory List elements (the `m_*`-offset MD structures `bx`/`si`/`di`
- * walk throughout) are SYSDAT-resident -- ordinary flat-model
- * addresses, same as every other RTM/SUP list this project already
- * ports (`thrdrt`, `drl`, `dlr`, ...). Only the MPB (reached through
- * `u_wrkseg`) and a newly-made MAU's own SAT (reached through
- * `m_start[bx]`) are genuinely different segments.
+ * `mlfree_entry` returns bx = cx = 0, as the asm does (`sub bx,bx ! mov
+ * cx,bx`); memif.c's dispatch passes that through.
  */
 #include <stdint.h>
 
@@ -50,31 +38,31 @@ typedef struct {
     uint16_t bx, cx;
 } md_bxcx;
 
-extern md_bxcx getmd(uint8_t *mem);
-extern void freemd(uint8_t *mem, uint16_t bx);
+extern md_bxcx getmd(uint8_t *phys, uint16_t sysdat);
+extern void freemd(uint8_t *phys, uint16_t sysdat, uint16_t bx);
 
 /*
  * mla_value -- score how well the Memory List window starting at
- * m_link[bx] satisfies the MPB at (wrkseg:si).
+ * m_link[bx] satisfies the MPB at si in the caller's u_wrkseg (wseg).
  *	output: cx = value (0 = perfect, 0xFFFF = no fit), ax = # of
  *		elements the value covers
  */
-static ml_value_result mla_value(uint8_t *mem, uint16_t bx, uint16_t si, uint16_t wrkseg) {
+static ml_value_result mla_value(const uint8_t *sd, const uint8_t *wseg, uint16_t bx, uint16_t si) {
     uint16_t ax = 0;
     uint16_t dx = 0;
-    uint16_t di = mem_r16(mem, (uint16_t)(bx + m_link));
+    uint16_t di = seg_r16(sd, (uint16_t)(bx + m_link));
     if (di == 0) {
         return (ml_value_result){0xFFFF, 0}; /* mlav_err */
     }
 
-    uint16_t mpb_start_val = mem_r16_seg(mem, wrkseg, (uint16_t)(si + mpb_start));
+    uint16_t mpb_start_val = seg_r16(wseg, (uint16_t)(si + mpb_start));
     if (mpb_start_val != 0) {
         /* an absolute request -- confirm this window actually covers it */
-        uint16_t cx = (uint16_t)(mem_r16(mem, (uint16_t)(di + m_start)) + 2 * satlen);
+        uint16_t cx = (uint16_t)(seg_r16(sd, (uint16_t)(di + m_start)) + 2 * satlen);
         if (mpb_start_val < cx) {
             return (ml_value_result){0xFFFF, 0};
         }
-        cx = (uint16_t)(cx + mem_r16(mem, (uint16_t)(di + m_length)) - 2 * satlen);
+        cx = (uint16_t)(cx + seg_r16(sd, (uint16_t)(di + m_length)) - 2 * satlen);
         if (mpb_start_val >= cx) {
             return (ml_value_result){0xFFFF, 0};
         }
@@ -82,7 +70,7 @@ static ml_value_result mla_value(uint8_t *mem, uint16_t bx, uint16_t si, uint16_
 
     for (;;) {
         /* mlav_next */
-        uint16_t cx = mem_r16_seg(mem, wrkseg, (uint16_t)(si + mpb_max));
+        uint16_t cx = seg_r16(wseg, (uint16_t)(si + mpb_max));
         int go_add = (cx >= dx);
         if (!go_add) {
             /* mlav_chk */
@@ -93,18 +81,18 @@ static ml_value_result mla_value(uint8_t *mem, uint16_t bx, uint16_t si, uint16_
         if (go_add) {
             /* mlav_add */
             if (ax != 0) {
-                uint16_t range_end = (uint16_t)(mem_r16(mem, (uint16_t)(bx + m_start)) +
-                                                 mem_r16(mem, (uint16_t)(bx + m_length)));
-                if (range_end != mem_r16(mem, (uint16_t)(di + m_start))) {
+                uint16_t range_end = (uint16_t)(seg_r16(sd, (uint16_t)(bx + m_start)) +
+                                                 seg_r16(sd, (uint16_t)(bx + m_length)));
+                if (range_end != seg_r16(sd, (uint16_t)(di + m_start))) {
                     do_chkmin = 1;
                 }
             }
             if (!do_chkmin) {
                 /* mlav_ad1 */
                 ax++;
-                dx = (uint16_t)(dx + mem_r16(mem, (uint16_t)(di + m_length)));
+                dx = (uint16_t)(dx + seg_r16(sd, (uint16_t)(di + m_length)));
                 bx = di;
-                di = mem_r16(mem, (uint16_t)(bx + m_link));
+                di = seg_r16(sd, (uint16_t)(bx + m_link));
                 if (di != 0) {
                     continue; /* back to mlav_next */
                 }
@@ -112,7 +100,7 @@ static ml_value_result mla_value(uint8_t *mem, uint16_t bx, uint16_t si, uint16_
             }
         }
         if (do_chkmin) {
-            uint16_t cx2 = (uint16_t)(mem_r16_seg(mem, wrkseg, (uint16_t)(si + mpb_min)) + 2 * satlen);
+            uint16_t cx2 = (uint16_t)(seg_r16(wseg, (uint16_t)(si + mpb_min)) + 2 * satlen);
             if (cx2 > dx) {
                 return (ml_value_result){0xFFFF, 0}; /* mlav_err */
             }
@@ -122,7 +110,7 @@ static ml_value_result mla_value(uint8_t *mem, uint16_t bx, uint16_t si, uint16_
 
     uint16_t count = ax;
     uint16_t scaled = (uint16_t)((uint16_t)(ax - 1) << 5);
-    uint16_t cx = (uint16_t)(mem_r16_seg(mem, wrkseg, (uint16_t)(si + mpb_max)) + 2 * satlen);
+    uint16_t cx = (uint16_t)(seg_r16(wseg, (uint16_t)(si + mpb_max)) + 2 * satlen);
     if (cx > dx) {
         /* "cmp cx,dx ! jbe mlav_ab ! xchg dx,cx" -- the swap only
          * happens on this (cx > dx) branch; jbe skips it */
@@ -143,20 +131,21 @@ static ml_value_result mla_value(uint8_t *mem, uint16_t bx, uint16_t si, uint16_
  * `satlen`.
  *	output: bx unchanged, cx = 0
  */
-static ml_bxcx mla_initmau(uint8_t *mem, uint16_t bx) {
-    uint16_t seg = mem_r16(mem, (uint16_t)(bx + m_start));
-    uint16_t length = mem_r16(mem, (uint16_t)(bx + m_length));
+static ml_bxcx mla_initmau(uint8_t *phys, const uint8_t *sd, uint16_t bx) {
+    uint16_t seg = seg_r16(sd, (uint16_t)(bx + m_start));
+    uint16_t length = seg_r16(sd, (uint16_t)(bx + m_length));
+    uint8_t *mau = far_ptr(phys, seg, 0);
 
     for (uint16_t i = 0; i < 32 * satlen; i++) {
-        mem_w8_seg(mem, seg, i, 0);
+        seg_w8(mau, i, 0);
     }
-    mem_w8_seg(mem, seg, 0, 31);
+    seg_w8(mau, 0, 31);
 
     uint16_t avail_start = (uint16_t)(seg + 2 * satlen);
     uint16_t avail_len = (uint16_t)(length - 2 * satlen);
-    mem_w16_seg(mem, seg, (uint16_t)(satlen + sat_start), avail_start);
-    mem_w16_seg(mem, seg, (uint16_t)(satlen + sat_length), avail_len);
-    mem_w8_seg(mem, seg, (uint16_t)(satlen + sat_nall), 0);
+    seg_w16(mau, (uint16_t)(satlen + sat_start), avail_start);
+    seg_w16(mau, (uint16_t)(satlen + sat_length), avail_len);
+    seg_w8(mau, (uint16_t)(satlen + sat_nall), 0);
 
     return (ml_bxcx){bx, 0};
 }
@@ -170,44 +159,45 @@ static ml_bxcx mla_initmau(uint8_t *mem, uint16_t bx) {
  *	  chained via each element's own `m_link`), merging their
  *	  total length.
  */
-static ml_bxcx mla_makemau(uint8_t *mem, uint16_t bx, uint16_t ax) {
+static ml_bxcx mla_makemau(uint8_t *phys, uint16_t sysdat, uint16_t bx, uint16_t ax) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
     if (ax <= 1) {
-        uint16_t si = mem_r16(mem, (uint16_t)(bx + m_link));
-        uint16_t cx = mem_r16(mem, (uint16_t)(si + m_link));
-        mem_w16(mem, (uint16_t)(bx + m_link), cx);
+        uint16_t si = seg_r16(sd, (uint16_t)(bx + m_link));
+        uint16_t cx = seg_r16(sd, (uint16_t)(si + m_link));
+        seg_w16(sd, (uint16_t)(bx + m_link), cx);
         bx = si;
-        mem_w16(mem, (uint16_t)(bx + m_plist), 0);
-        mem_w16(mem, (uint16_t)(bx + m_link), 0);
-        return mla_initmau(mem, bx);
+        seg_w16(sd, (uint16_t)(bx + m_plist), 0);
+        seg_w16(sd, (uint16_t)(bx + m_link), 0);
+        return mla_initmau(phys, sd, bx);
     }
 
-    md_bxcx got = getmd(mem);
+    md_bxcx got = getmd(phys, sysdat);
     uint16_t di = got.bx;
     if (got.cx != 0) {
         return (ml_bxcx){0, got.cx};
     }
 
-    mem_w16(mem, (uint16_t)(di + m_link), 0);
-    mem_w16(mem, (uint16_t)(di + m_length), 0);
-    uint16_t si = mem_r16(mem, (uint16_t)(bx + m_link));
-    mem_w16(mem, (uint16_t)(di + m_plist), si);
-    mem_w16(mem, (uint16_t)(di + m_start), mem_r16(mem, (uint16_t)(si + m_start)));
+    seg_w16(sd, (uint16_t)(di + m_link), 0);
+    seg_w16(sd, (uint16_t)(di + m_length), 0);
+    uint16_t si = seg_r16(sd, (uint16_t)(bx + m_link));
+    seg_w16(sd, (uint16_t)(di + m_plist), si);
+    seg_w16(sd, (uint16_t)(di + m_start), seg_r16(sd, (uint16_t)(si + m_start)));
 
     for (;;) {
-        uint16_t len = mem_r16(mem, (uint16_t)(si + m_length));
-        mem_w16(mem, (uint16_t)(di + m_length), (uint16_t)(mem_r16(mem, (uint16_t)(di + m_length)) + len));
+        uint16_t len = seg_r16(sd, (uint16_t)(si + m_length));
+        seg_w16(sd, (uint16_t)(di + m_length), (uint16_t)(seg_r16(sd, (uint16_t)(di + m_length)) + len));
         ax--;
         if (ax == 0) {
             break;
         }
-        si = mem_r16(mem, (uint16_t)(si + m_link));
+        si = seg_r16(sd, (uint16_t)(si + m_link));
     }
 
     uint16_t orig_bx = bx;
-    bx = mem_r16(mem, (uint16_t)(si + m_link));
-    mem_w16(mem, (uint16_t)(si + m_link), 0);
-    mem_w16(mem, (uint16_t)(orig_bx + m_link), bx);
-    return mla_initmau(mem, di);
+    bx = seg_r16(sd, (uint16_t)(si + m_link));
+    seg_w16(sd, (uint16_t)(si + m_link), 0);
+    seg_w16(sd, (uint16_t)(orig_bx + m_link), bx);
+    return mla_initmau(phys, sd, di);
 }
 
 /*
@@ -218,15 +208,16 @@ static ml_bxcx mla_makemau(uint8_t *mem, uint16_t bx, uint16_t ax) {
  * perfect (0) score.
  *	output: bx = MAU address (0 if error), cx = error code
  */
-ml_bxcx mlalloc_entry(uint8_t *mem, uint16_t dx, uint16_t bx) {
+ml_bxcx mlalloc_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t bx) {
+    const uint8_t *sd = far_ptr(phys, sysdat, 0);
+    const uint8_t *wseg = far_ptr(phys, seg_r16(far_ptr(phys, rlr_uda(sd), 0), u_wrkseg), 0);
     uint16_t si = dx;
-    uint16_t wrkseg = mem_r16(mem, UDA_WRKSEG);
     uint16_t best_score = 0xFFFF;
     uint16_t best_bx = 0;
     uint16_t best_count = 0;
 
-    while (mem_r16(mem, (uint16_t)(bx + m_link)) != 0) {
-        ml_value_result v = mla_value(mem, bx, si, wrkseg);
+    while (seg_r16(sd, (uint16_t)(bx + m_link)) != 0) {
+        ml_value_result v = mla_value(sd, wseg, bx, si);
         if (v.cx < best_score) {
             best_score = v.cx;
             best_count = v.ax;
@@ -235,33 +226,33 @@ ml_bxcx mlalloc_entry(uint8_t *mem, uint16_t dx, uint16_t bx) {
                 break; /* mla_found: perfect fit */
             }
         }
-        bx = mem_r16(mem, (uint16_t)(bx + m_link));
+        bx = seg_r16(sd, (uint16_t)(bx + m_link));
     }
 
     if (best_bx == 0) {
         return (ml_bxcx){0, e_no_memory};
     }
-    return mla_makemau(mem, best_bx, best_count);
+    return mla_makemau(phys, sysdat, best_bx, best_count);
 }
 
 /*
  * ml_insert -- insert MD si into the Memory List rooted at bx, kept
  * sorted ascending by m_start.
  */
-static void ml_insert(uint8_t *mem, uint16_t si, uint16_t bx) {
+static void ml_insert(uint8_t *sd, uint16_t si, uint16_t bx) {
     for (;;) {
-        uint16_t di = mem_r16(mem, (uint16_t)(bx + m_link));
+        uint16_t di = seg_r16(sd, (uint16_t)(bx + m_link));
         if (di == 0) {
             break;
         }
-        if (mem_r16(mem, (uint16_t)(di + m_start)) > mem_r16(mem, (uint16_t)(si + m_start))) {
+        if (seg_r16(sd, (uint16_t)(di + m_start)) > seg_r16(sd, (uint16_t)(si + m_start))) {
             break;
         }
         bx = di;
     }
-    uint16_t ax = mem_r16(mem, (uint16_t)(bx + m_link));
-    mem_w16(mem, (uint16_t)(bx + m_link), si);
-    mem_w16(mem, (uint16_t)(si + m_link), ax);
+    uint16_t ax = seg_r16(sd, (uint16_t)(bx + m_link));
+    seg_w16(sd, (uint16_t)(bx + m_link), si);
+    seg_w16(sd, (uint16_t)(si + m_link), ax);
 }
 
 /*
@@ -272,18 +263,20 @@ static void ml_insert(uint8_t *mem, uint16_t si, uint16_t bx) {
  * pool (freemd).
  *	output: bx = 0, cx = 0 (always, per the real asm)
  */
-void mlfree_entry(uint8_t *mem, uint16_t dx, uint16_t bx) {
+ml_bxcx mlfree_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t bx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
     uint16_t si = dx;
-    if (mem_r16(mem, (uint16_t)(si + m_plist)) == 0) {
-        ml_insert(mem, si, bx);
-        return;
+    if (seg_r16(sd, (uint16_t)(si + m_plist)) == 0) {
+        ml_insert(sd, si, bx);
+        return (ml_bxcx){0, 0};
     }
     uint16_t di = si;
-    si = mem_r16(mem, (uint16_t)(si + m_plist));
+    si = seg_r16(sd, (uint16_t)(si + m_plist));
     while (si != 0) {
-        uint16_t next = mem_r16(mem, (uint16_t)(si + m_link));
-        ml_insert(mem, si, bx);
+        uint16_t next = seg_r16(sd, (uint16_t)(si + m_link));
+        ml_insert(sd, si, bx);
         si = next;
     }
-    freemd(mem, di);
+    freemd(phys, sysdat, di);
+    return (ml_bxcx){0, 0};
 }

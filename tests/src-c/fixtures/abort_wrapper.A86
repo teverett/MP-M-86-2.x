@@ -9,15 +9,13 @@
 ; src/kernel/FINDPD.RTM (for `findpdname_entry`), both called as
 ; ordinary internal calls by ABORT.RTM, not boundary stubs.
 ;
-; `rlr`/`drl`/`dlr`/`plr`/`slr`/`qlr`/`ccb`/`thrdrt`/`flags`/
-; `u_wrkseg` are DSEG labels at the scratch addresses src-c/kernel/
-; defs.h and tests/src-c/test_abort.py both use (see idle_wrapper.A86's
-; comment for why, same reasoning as there). `u_wrkseg` in particular
-; is a plain DSEG label here (not `include uda.fmt`'s own `eseg` one,
-; see findpd_wrapper.A86 for that alternative) -- the bare `mov
-; es,u_wrkseg` in `findpdname_entry` then reads it DS-relative (DS
-; defaults to 0), landing on this same flat scratch address, matching
-; every other wrapper's own `u_wrkseg` convention.
+; On real memory layout: the real UDA.FMT/SYSDAT.FMT are included, so
+; `rlr`/`drl`/`dlr`/`plr`/`slr`/`qlr`/`ccb`/`thrdrt`/`nflags`/`flags`/
+; `mxmemowner`/`mxmemcount`/`mxmemqpb` and `u_wrkseg`/`u_error_mode`/
+; `u_dparam`/`u_in_int`/`u_sp`/`u_ss` resolve to their genuine offsets
+; -- the same ones src-c/kernel/abort.c uses. tests/src-c/test_abort.py
+; runs it with tools/i86sim.py's segmented=True (DS = SYSDAT, ES = the
+; running process's UDA).
 	include system.def
 	include pd.def
 	include err.def
@@ -31,56 +29,12 @@ mpmif	equ	9000h		; unported external call target (stub)
 dsptch	equ	9001h		; unported dispatcher entry (stub, JMP boundary
 				; -- see abort.c's own header comment)
 pdisp	equ	9002h		; ditto
-	dseg
-	org	0A000h
-rlr		dw	0
-	org	0A002h
-drl		dw	0
-	org	0A004h
-dlr		dw	0
-	org	0A006h
-nflags		db	0
-	org	0A008h
-flags		dw	0
-	org	0A012h
-u_wrkseg	dw	0
-	org	0A01Ch
-plr		dw	0
-	org	0A01Eh
-slr		dw	0
-	org	0A020h
-qlr		dw	0
-	org	0A024h
-endseg		dw	0
-	org	0A026h
-qmau		rb	8
-qul		dw	0
-	org	0A030h
-ccb		dw	0
-	org	0A032h
-thrdrt		dw	0
-	org	0A03Ah
-mxmemowner	dw	0
-	org	0A03Ch
-mxmemcount	db	0
-	org	0A040h
-mxmemqpb	rb	16
-	org	0A064h
-u_error_mode	db	0
-; src/kernel/UDA.FMT -- redeclared as a real eseg block, same
-; reasoning/subset style as proc_wrapper.A86's own (only the fields
-; this port touches: `abort_spec_entry`'s own fake-return-address
-; setup on the aborted process's own UDA).
-	eseg
-	org	0
-u_dparam	dw	0
-	org	1Bh
-u_in_int	db	0
-u_sp		dw	0
-u_ss		dw	0
 	cseg
-sysdat	dw	0		; normally supplied by this module's own init
+sysdat	dw	0		; normally supplied by RTMIF.RTM's own init
 	include que2.rtm
 	include findpd.rtm
 	include abort.rtm
+
+	include uda.fmt
+	include sysdat.fmt
 	end

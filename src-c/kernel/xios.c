@@ -39,57 +39,60 @@
  * disk-parameter bookkeeping, STRTCLK/STOPCLK's clockon flag, and the
  * fixed-answer MAXCONSOLE/MAXLIST/GETSEGT/SELMEMORY/FLUSHBUF -- is
  * ordinary data-in-data-out logic, ported directly.
+ *
+ * Runs against real memory (defs.h's far_ptr): `phys` is the base of
+ * real physical memory and `sysdat` the XIOS's segment -- SYSDAT, which
+ * this XIOS lives in (CS = DS) -- holding its fields at their real
+ * XIOS.A86 offsets (XIOS_* in defs.h).
  */
 #include <stdint.h>
 
 #include "defs.h"
 
 /* settrk -- Function 8: Set Track. Real code only moves CL (8 bits). */
-void settrk(uint8_t *mem, uint8_t cl) {
-    mem[XIOS_TRK] = cl;
+void settrk(uint8_t *phys, uint16_t sysdat, uint8_t cl) {
+    seg_w8(far_ptr(phys, sysdat, 0), XIOS_TRK, cl);
 }
 
 /* setsec -- Function 9: Set Sector. Real code only moves CL (8 bits). */
-void setsec(uint8_t *mem, uint8_t cl) {
-    mem[XIOS_SECT] = cl;
+void setsec(uint8_t *phys, uint16_t sysdat, uint8_t cl) {
+    seg_w8(far_ptr(phys, sysdat, 0), XIOS_SECT, cl);
 }
 
 /* setdma -- Function 10: Set DMA Offset */
-void setdma(uint8_t *mem, uint16_t cx) {
-    mem_w16(mem, XIOS_DMA_ADR, cx);
+void setdma(uint8_t *phys, uint16_t sysdat, uint16_t cx) {
+    seg_w16(far_ptr(phys, sysdat, 0), XIOS_DMA_ADR, cx);
 }
 
 /* setdmab -- Function 15: Set DMA Base (segment) */
-void setdmab(uint8_t *mem, uint16_t cx) {
-    mem_w16(mem, XIOS_DMA_SEG, cx);
+void setdmab(uint8_t *phys, uint16_t sysdat, uint16_t cx) {
+    seg_w16(far_ptr(phys, sysdat, 0), XIOS_DMA_SEG, cx);
 }
 
 /* sectran -- Function 14: Sector Translate. If the translate table
  * address (dx) is 0, the sector number passes through unchanged;
  * otherwise it's a byte offset into a real caller-supplied table. */
-uint16_t sectran(const uint8_t *mem, uint16_t cx, uint16_t dx) {
+uint16_t sectran(uint8_t *phys, uint16_t sysdat, uint16_t cx, uint16_t dx) {
     if (dx == 0) {
         return cx;
     }
-    return mem[(uint16_t)(cx + dx)];
+    return seg_r8(far_ptr(phys, sysdat, 0), (uint16_t)(cx + dx));
 }
 
 /* seldsk -- Function 7: Select Disk.
  * Returns 0 if cl names an illegal disk, else the DPH address for it
- * (XIOS_DPBASE + 16 * physical drive number). dtrntbl is XIOS.A86's
- * own compile-time logical-to-physical translation table (A-P, memdisk
- * disabled -- only A/B are valid, real offsets 0/1). */
-uint16_t seldsk(uint8_t *mem, uint8_t cl) {
-    static const uint8_t dtrntbl[16] = {
-        0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    };
-    uint8_t al = dtrntbl[cl & 0x0f];
+ * (dpbase + 16 * physical drive number). dtrntbl is XIOS.A86's
+ * logical-to-physical table (A-P, memdisk disabled -- only A/B are
+ * valid, drives 0/1), indexed by the whole of CL as the asm does; the
+ * `shl al,cl` multiply is 8 bits wide. */
+uint16_t seldsk(uint8_t *phys, uint16_t sysdat, uint8_t cl) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t al = seg_r8(sd, (uint16_t)(XIOS_DTRNTBL + cl));
     if (al == 0xff) {
         return 0;
     }
-    mem[XIOS_DISK] = al;
-    return (uint16_t)(((uint16_t)al << 4) + XIOS_DPBASE);
+    seg_w8(sd, XIOS_DISK, al);
+    return (uint16_t)((uint8_t)(al << 4) + XIOS_DPBASE);
 }
 
 /* maxconsole -- Function 20: Maximum Consoles (XIOS.A86's own `nconsoles equ 4`) */
@@ -119,11 +122,11 @@ uint8_t flushbuf(void) {
 /* strtclk -- Function 18: Start Clock (enable flagsets on tick interrupts).
  * `mov clockon,true` -- true is SYSTEM.DEF's own 0ffffh, truncated to
  * clockon's own byte size. */
-void strtclk(uint8_t *mem) {
-    mem[XIOS_CLOCKON] = 0xff;
+void strtclk(uint8_t *phys, uint16_t sysdat) {
+    seg_w8(far_ptr(phys, sysdat, 0), XIOS_CLOCKON, 0xff);
 }
 
 /* stopclk -- Function 19: Stop Clock (disable flagsets on tick interrupts) */
-void stopclk(uint8_t *mem) {
-    mem[XIOS_CLOCKON] = 0;
+void stopclk(uint8_t *phys, uint16_t sysdat) {
+    seg_w8(far_ptr(phys, sysdat, 0), XIOS_CLOCKON, 0);
 }

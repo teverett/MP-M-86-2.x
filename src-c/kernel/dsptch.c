@@ -4,14 +4,22 @@
  * schedule, switch_, and the whole dsp_table dispatch: sleep_act,
  * poll_act, delay_act, swap_act, flag_act, term_act, disp_act).
  *
- * Written specifically as a reading/debugging aid for the live
- * scheduler-hang investigation (docs/bugs.md #83-98 and onward), per
- * the user's own request -- NOT as a component of a linked, bootable
- * kernel (this project has no 8086 real-mode toolchain; see docs/
- * src-c.md's own "Status" section for what /src-c is and isn't).
+ * First written as a reading/debugging aid for the live scheduler-hang
+ * investigation (docs/bugs.md #83-98 and onward), per the user's own
+ * request; now also linked into src-c's kernel.elf on real memory.
  * Keep this file and src/kernel/DSPTCH.RTM in sync: whenever one
  * changes, re-read the other and update both, same as this project's
  * own AGENTS.md instructions for every /src <-> /src-c pair.
+ *
+ * Runs against real memory (defs.h's far_ptr), like proc.c: `phys` is
+ * the base of the real 8086 physical address space and `sysdat` the
+ * real SYSDAT segment (the real asm's DS/cs:sysdat). PDs, the ready/
+ * dispatch/poll/delay/swap lists, flags, memory descriptors, indisp
+ * and mxmemowner are SYSDAT-relative; u_* fields go through the UDA
+ * segment of whichever process the real asm has in ES at that point
+ * (p_uda[rlr] -- before the rlr pop for the outgoing process, after
+ * it for the incoming one); the saved/restored interrupt vectors are
+ * at segment 0.
  *
  * `call cs:dsp_table[bx]` is ported as a plain C switch
  * (`dispatch_action`) on `p_stat`'s own value, same technique as
@@ -70,18 +78,18 @@
 
 #include "defs.h"
 
-extern void freepd(uint8_t *mem, uint16_t si);
+extern void freepd(uint8_t *phys, uint16_t sysdat, uint16_t si);
 
-static void insert_process(uint8_t *mem, uint16_t bx, uint16_t si) {
-    uint16_t cx = (uint16_t)(mem_r16(mem, (uint16_t)(si + p_flag)) & pf_resource);
+static void insert_process(uint8_t *sd, uint16_t bx, uint16_t si) {
+    uint16_t cx = (uint16_t)(seg_r16(sd, (uint16_t)(si + p_flag)) & pf_resource);
     uint16_t di;
     for (;;) {
-        di = mem_r16(mem, (uint16_t)(bx + p_link));
+        di = seg_r16(sd, (uint16_t)(bx + p_link));
         if (di == 0) {
             break; /* ins_out */
         }
-        uint8_t al = mem[di + p_prior];
-        uint8_t sp = mem[si + p_prior];
+        uint8_t al = seg_r8(sd, (uint16_t)(di + p_prior));
+        uint8_t sp = seg_r8(sd, (uint16_t)(si + p_prior));
         if (al > sp) {
             break; /* ins_out */
         }
@@ -96,11 +104,11 @@ static void insert_process(uint8_t *mem, uint16_t bx, uint16_t si) {
         break; /* ins_out */
     }
     if (cx != 0) {
-        mem_w16(mem, (uint16_t)(si + p_flag),
-                (uint16_t)(mem_r16(mem, (uint16_t)(si + p_flag)) & (uint16_t)~pf_resource));
+        seg_w16(sd, (uint16_t)(si + p_flag),
+                (uint16_t)(seg_r16(sd, (uint16_t)(si + p_flag)) & (uint16_t)~pf_resource));
     }
-    mem_w16(mem, (uint16_t)(si + p_link), di);
-    mem_w16(mem, (uint16_t)(bx + p_link), si);
+    seg_w16(sd, (uint16_t)(si + p_link), di);
+    seg_w16(sd, (uint16_t)(bx + p_link), si);
 }
 
 typedef struct {
@@ -116,13 +124,12 @@ typedef struct {
  *	no change and isn't modeled; ds/es-restore + iret have no C
  *	equivalent, see header comment)
  */
-static void int_disp_exit(uint8_t *mem) {
-    uint16_t rlr = mem_r16(mem, SD_RLR);
-    uint16_t uda = mem_r16(mem, (uint16_t)(rlr + p_uda));
-    mem_w8_seg(mem, uda, u_in_int, 0); /* false */
-    uint8_t stat = mem_r8_seg(mem, uda, u_stat_sav);
-    mem[rlr + p_stat] = stat;
-    mem[SD_INDISP] = 0;
+static void int_disp_exit(uint8_t *phys, uint8_t *sd) {
+    uint16_t rlr = seg_r16(sd, SYSDAT_RLR);
+    uint8_t *uda = far_ptr(phys, seg_r16(sd, (uint16_t)(rlr + p_uda)), 0);
+    seg_w8(uda, u_in_int, 0); /* false */
+    seg_w8(sd, (uint16_t)(rlr + p_stat), seg_r8(uda, u_stat_sav));
+    seg_w8(sd, SYSDAT_INDISP, 0);
 }
 
 /*
@@ -130,36 +137,37 @@ static void int_disp_exit(uint8_t *mem) {
  * its own saved interrupt vectors (real, observable) and its own
  * saved registers (returned, see header comment on why).
  */
-static switch_result switch_(uint8_t *mem) {
-    uint16_t bx = mem_r16(mem, SD_RLR);
-    uint16_t uda = mem_r16(mem, (uint16_t)(bx + p_uda));
+static switch_result switch_(uint8_t *phys, uint8_t *sd) {
+    uint16_t bx = seg_r16(sd, SYSDAT_RLR);
+    uint8_t *uda = far_ptr(phys, seg_r16(sd, (uint16_t)(bx + p_uda)), 0);
+    uint8_t *ivt = far_ptr(phys, 0, 0);
 
     for (unsigned i = 0; i < 10; i++) {
-        mem_w16(mem, (uint16_t)(2 * i), mem_r16_seg(mem, uda, (uint16_t)(u_ivectors + 2 * i)));
+        seg_w16(ivt, (uint16_t)(2 * i), seg_r16(uda, (uint16_t)(u_ivectors + 2 * i)));
     }
     for (unsigned i = 0; i < 4; i++) {
-        mem_w16(mem, (uint16_t)(i_mpm_ip + 2 * i), mem_r16_seg(mem, uda, (uint16_t)(u_mpm_ip + 2 * i)));
+        seg_w16(ivt, (uint16_t)(i_mpm_ip + 2 * i), seg_r16(uda, (uint16_t)(u_mpm_ip + 2 * i)));
     }
 
     switch_result r;
-    r.ax = mem_r16_seg(mem, uda, u_ax);
-    r.bx = mem_r16_seg(mem, uda, u_bx);
-    r.cx = mem_r16_seg(mem, uda, u_cx);
-    r.dx = mem_r16_seg(mem, uda, u_dx);
-    r.si = mem_r16_seg(mem, uda, u_si);
-    r.di = mem_r16_seg(mem, uda, u_di);
-    r.bp = mem_r16_seg(mem, uda, u_bp);
-    r.new_ss = mem_r16_seg(mem, uda, u_ss);
-    r.new_sp = mem_r16_seg(mem, uda, u_sp);
+    r.ax = seg_r16(uda, u_ax);
+    r.bx = seg_r16(uda, u_bx);
+    r.cx = seg_r16(uda, u_cx);
+    r.dx = seg_r16(uda, u_dx);
+    r.si = seg_r16(uda, u_si);
+    r.di = seg_r16(uda, u_di);
+    r.bp = seg_r16(uda, u_bp);
+    r.new_ss = seg_r16(uda, u_ss);
+    r.new_sp = seg_r16(uda, u_sp);
 
-    if (mem_r8_seg(mem, uda, u_in_int)) {
-        int_disp_exit(mem);
+    if (seg_r8(uda, u_in_int)) {
+        int_disp_exit(phys, sd);
         r.went_to_int_disp_exit = 1;
     } else {
         /* dret -- the real IF-restore-timing fix (docs/bugs.md
          * #90/#92) has no C equivalent (no real FLAGS register);
          * its only other observable effect is clearing indisp */
-        mem[SD_INDISP] = 0;
+        seg_w8(sd, SYSDAT_INDISP, 0);
         r.went_to_int_disp_exit = 0;
     }
     return r;
@@ -170,150 +178,144 @@ static switch_result switch_(uint8_t *mem) {
  * not-ready, see header comment), drain the Dispatch Ready List onto
  * the Ready List, then switch to the first ready process.
  */
-static switch_result schedule(uint8_t *mem) {
-    uint16_t di = (uint16_t)(SD_PLR - p_link);
+static switch_result schedule(uint8_t *phys, uint8_t *sd) {
+    uint16_t di = (uint16_t)(SYSDAT_PLR - p_link);
     for (;;) {
-        uint16_t si = mem_r16(mem, (uint16_t)(di + p_link));
+        uint16_t si = seg_r16(sd, (uint16_t)(di + p_link));
         if (si == 0) {
             break; /* drltorlr */
         }
         uint8_t al = 0; /* xiosif(io_polldev) -- boundary stub, fixed not-ready */
         if (al != 0) {
-            uint16_t next = mem_r16(mem, (uint16_t)(si + p_link));
-            mem_w16(mem, (uint16_t)(di + p_link), next);
-            mem[si + p_stat] = ps_run;
-            insert_process(mem, (uint16_t)(SD_RLR - p_link), si);
+            seg_w16(sd, (uint16_t)(di + p_link), seg_r16(sd, (uint16_t)(si + p_link)));
+            seg_w8(sd, (uint16_t)(si + p_stat), ps_run);
+            insert_process(sd, (uint16_t)(SYSDAT_RLR - p_link), si);
             /* di stays put -- see header comment on polld_another/polld_next */
         } else {
             di = si;
         }
     }
     for (;;) {
-        uint16_t si = mem_r16(mem, SD_DRL);
+        uint16_t si = seg_r16(sd, SYSDAT_DRL);
         if (si == 0) {
             break; /* switch */
         }
-        uint16_t ax = mem_r16(mem, (uint16_t)(si + p_link));
-        mem_w16(mem, SD_DRL, ax);
-        mem[si + p_stat] = ps_run;
-        insert_process(mem, (uint16_t)(SD_RLR - p_link), si);
+        seg_w16(sd, SYSDAT_DRL, seg_r16(sd, (uint16_t)(si + p_link)));
+        seg_w8(sd, (uint16_t)(si + p_stat), ps_run);
+        insert_process(sd, (uint16_t)(SYSDAT_RLR - p_link), si);
     }
-    return switch_(mem);
+    return switch_(phys, sd);
 }
 
-static switch_result sleep_act(uint8_t *mem, uint16_t si, uint16_t si_uda) {
-    uint16_t bx = mem_r16_seg(mem, si_uda, u_dparam);
-    insert_process(mem, bx, si);
-    mem_w16(mem, (uint16_t)(si + p_flag), (uint16_t)(mem_r16(mem, (uint16_t)(si + p_flag)) | pf_resource));
-    mem[si + p_stat] = mem[si + p_scratch];
-    return schedule(mem);
+static switch_result sleep_act(uint8_t *phys, uint8_t *sd, uint16_t si, const uint8_t *si_uda) {
+    insert_process(sd, seg_r16(si_uda, u_dparam), si);
+    seg_w16(sd, (uint16_t)(si + p_flag), (uint16_t)(seg_r16(sd, (uint16_t)(si + p_flag)) | pf_resource));
+    seg_w8(sd, (uint16_t)(si + p_stat), seg_r8(sd, (uint16_t)(si + p_scratch)));
+    return schedule(phys, sd);
 }
 
-static switch_result poll_act(uint8_t *mem, uint16_t si, uint16_t si_uda) {
-    uint16_t dx = mem_r16_seg(mem, si_uda, u_dparam);
-    mem_w16(mem, (uint16_t)(si + p_wait), dx);
-    uint16_t ax = mem_r16(mem, SD_PLR);
-    mem_w16(mem, (uint16_t)(si + p_link), ax);
-    mem_w16(mem, SD_PLR, si);
-    return schedule(mem);
+static switch_result poll_act(uint8_t *phys, uint8_t *sd, uint16_t si, const uint8_t *si_uda) {
+    seg_w16(sd, (uint16_t)(si + p_wait), seg_r16(si_uda, u_dparam));
+    seg_w16(sd, (uint16_t)(si + p_link), seg_r16(sd, SYSDAT_PLR));
+    seg_w16(sd, SYSDAT_PLR, si);
+    return schedule(phys, sd);
 }
 
-static switch_result delay_act(uint8_t *mem, uint16_t si, uint16_t si_uda) {
+static switch_result delay_act(uint8_t *phys, uint8_t *sd, uint16_t si, const uint8_t *si_uda) {
     /* xiosif(io_strtclk) -- boundary stub, no-op (result unused) */
-    uint16_t bx = (uint16_t)(SD_DLR - p_link);
-    uint16_t cx = (uint16_t)(mem_r16_seg(mem, si_uda, u_dparam) + 1);
+    uint16_t bx = (uint16_t)(SYSDAT_DLR - p_link);
+    uint16_t cx = (uint16_t)(seg_r16(si_uda, u_dparam) + 1);
     if (cx == 0) {
         cx = (uint16_t)(cx - 1);
     }
     uint16_t di;
     for (;;) {
-        di = mem_r16(mem, (uint16_t)(bx + p_link));
+        di = seg_r16(sd, (uint16_t)(bx + p_link));
         if (di == 0) {
             break; /* del_o */
         }
-        uint16_t ax = mem_r16(mem, (uint16_t)(di + p_wait));
+        uint16_t ax = seg_r16(sd, (uint16_t)(di + p_wait));
         if (ax > cx) {
             break; /* del_o */
         }
         cx = (uint16_t)(cx - ax);
         bx = di;
     }
-    mem_w16(mem, (uint16_t)(si + p_link), di);
-    mem_w16(mem, (uint16_t)(bx + p_link), si);
-    mem_w16(mem, (uint16_t)(si + p_wait), cx);
+    seg_w16(sd, (uint16_t)(si + p_link), di);
+    seg_w16(sd, (uint16_t)(bx + p_link), si);
+    seg_w16(sd, (uint16_t)(si + p_wait), cx);
     if (di != 0) {
-        mem_w16(mem, (uint16_t)(di + p_wait), (uint16_t)(mem_r16(mem, (uint16_t)(di + p_wait)) - cx));
+        seg_w16(sd, (uint16_t)(di + p_wait), (uint16_t)(seg_r16(sd, (uint16_t)(di + p_wait)) - cx));
     }
-    return schedule(mem);
+    return schedule(phys, sd);
 }
 
-static switch_result swap_act(uint8_t *mem, uint16_t si) {
-    insert_process(mem, (uint16_t)(SD_SLR - p_link), si);
-    return schedule(mem);
+static switch_result swap_act(uint8_t *phys, uint8_t *sd, uint16_t si) {
+    insert_process(sd, (uint16_t)(SYSDAT_SLR - p_link), si);
+    return schedule(phys, sd);
 }
 
-static switch_result disp_act(uint8_t *mem, uint16_t si) {
-    mem[si + p_stat] = ps_run;
-    insert_process(mem, (uint16_t)(SD_RLR - p_link), si);
-    return schedule(mem);
+static switch_result disp_act(uint8_t *phys, uint8_t *sd, uint16_t si) {
+    seg_w8(sd, (uint16_t)(si + p_stat), ps_run);
+    insert_process(sd, (uint16_t)(SYSDAT_RLR - p_link), si);
+    return schedule(phys, sd);
 }
 
-static switch_result flag_act(uint8_t *mem, uint16_t si, uint16_t si_uda) {
-    uint16_t bx = mem_r16_seg(mem, si_uda, u_dparam);
-    if (mem_r16(mem, (uint16_t)(bx + flg_pd)) == flag_on) {
-        mem_w16(mem, (uint16_t)(bx + flg_pd), flag_off);
-        return disp_act(mem, si);
+static switch_result flag_act(uint8_t *phys, uint8_t *sd, uint16_t si, const uint8_t *si_uda) {
+    uint16_t bx = seg_r16(si_uda, u_dparam);
+    if (seg_r16(sd, (uint16_t)(bx + flg_pd)) == flag_on) {
+        seg_w16(sd, (uint16_t)(bx + flg_pd), flag_off);
+        return disp_act(phys, sd, si);
     }
-    mem_w16(mem, (uint16_t)(bx + flg_pd), si);
-    mem_w16(mem, (uint16_t)(si + p_link), 0);
-    return schedule(mem);
+    seg_w16(sd, (uint16_t)(bx + flg_pd), si);
+    seg_w16(sd, (uint16_t)(si + p_link), 0);
+    return schedule(phys, sd);
 }
 
-static switch_result term_act(uint8_t *mem, uint16_t si) {
-    uint16_t ax = mem_r16(mem, SD_RLR);
-    mem_w16(mem, (uint16_t)(si + p_link), ax);
-    mem_w16(mem, SD_RLR, si);
+static switch_result term_act(uint8_t *phys, uint8_t *sd, uint16_t sysdat, uint16_t si) {
+    seg_w16(sd, (uint16_t)(si + p_link), seg_r16(sd, SYSDAT_RLR));
+    seg_w16(sd, SYSDAT_RLR, si);
 
-    uint8_t ncondev = mem[SD_NCONDEV];
+    uint8_t ncondev = seg_r8(sd, SYSDAT_NCONDEV);
     for (int16_t cl = (int16_t)ncondev - 1; cl >= 0; cl--) {
-        mem[si + p_cns] = (uint8_t)cl;
+        seg_w8(sd, (uint16_t)(si + p_cns), (uint8_t)cl);
         /* mpmif(f_condetach) -- boundary stub, no-op */
     }
-    uint8_t nlstdev = mem[SD_NLSTDEV];
+    uint8_t nlstdev = seg_r8(sd, SYSDAT_NLSTDEV);
     for (int16_t cl = (int16_t)nlstdev - 1; cl >= 0; cl--) {
-        mem[si + p_lst] = (uint8_t)(cl + ncondev);
+        seg_w8(sd, (uint16_t)(si + p_lst), (uint8_t)(cl + ncondev));
         /* mpmif(f_lstdetach) -- boundary stub, no-op */
     }
 
     /* free this process's own memory list -- see header comment on
      * why this diverges from the real asm's own loop shape */
-    uint16_t seg = mem_r16(mem, (uint16_t)(si + p_mem));
+    uint16_t seg = seg_r16(sd, (uint16_t)(si + p_mem));
     while (seg != 0) {
-        uint16_t next = mem_r16(mem, (uint16_t)(seg + ms_link));
+        uint16_t next = seg_r16(sd, (uint16_t)(seg + ms_link));
         /* mpmif(f_memfree) -- boundary stub, no-op */
         seg = next;
     }
 
-    mem_w16(mem, SD_MXMEMOWNER, 0);
+    seg_w16(sd, SYSDAT_MXMEMOWNER, 0);
     /* mpmif(f_qwrite, mxmemqpb) -- boundary stub, no-op */
 
-    ax = mem_r16(mem, (uint16_t)(si + p_link));
-    mem_w16(mem, SD_RLR, ax);
-    mem_w16(mem, (uint16_t)(si + p_link), 0);
-    freepd(mem, si);
-    return schedule(mem);
+    seg_w16(sd, SYSDAT_RLR, seg_r16(sd, (uint16_t)(si + p_link)));
+    seg_w16(sd, (uint16_t)(si + p_link), 0);
+    freepd(phys, sysdat, si);
+    return schedule(phys, sd);
 }
 
-static switch_result dispatch_action(uint8_t *mem, uint16_t si, uint16_t si_uda, uint8_t stat) {
+static switch_result dispatch_action(uint8_t *phys, uint8_t *sd, uint16_t sysdat, uint16_t si,
+                                     const uint8_t *si_uda, uint8_t stat) {
     switch (stat) {
-        case 0: case 6: case 7: return disp_act(mem, si); /* run, (nop)-dq, (nop)-nq */
-        case 1: return poll_act(mem, si, si_uda);
-        case 2: return delay_act(mem, si, si_uda);
-        case 3: return swap_act(mem, si);
-        case 4: return term_act(mem, si);
-        case 5: return sleep_act(mem, si, si_uda);
-        case 8: return flag_act(mem, si, si_uda);
-        default: return disp_act(mem, si); /* 9 = ciowait: no real table entry */
+        case 0: case 6: case 7: return disp_act(phys, sd, si); /* run, (nop)-dq, (nop)-nq */
+        case 1: return poll_act(phys, sd, si, si_uda);
+        case 2: return delay_act(phys, sd, si, si_uda);
+        case 3: return swap_act(phys, sd, si);
+        case 4: return term_act(phys, sd, sysdat, si);
+        case 5: return sleep_act(phys, sd, si, si_uda);
+        case 8: return flag_act(phys, sd, si, si_uda);
+        default: return disp_act(phys, sd, si); /* 9 = ciowait: no real table entry */
     }
 }
 
@@ -328,53 +330,56 @@ static switch_result dispatch_action(uint8_t *mem, uint16_t si, uint16_t si_uda,
  *		immediately (the real asm's own "popf!ret") if a
  *		dispatch was already in progress
  */
-switch_result dsptch(uint8_t *mem, uint16_t ax, uint16_t bx, uint16_t cx, uint16_t dx,
-                      uint16_t si, uint16_t di, uint16_t bp, uint8_t *was_already_indisp) {
-    if (mem[SD_INDISP]) {
+switch_result dsptch(uint8_t *phys, uint16_t sysdat, uint16_t ax, uint16_t bx, uint16_t cx,
+                     uint16_t dx, uint16_t si, uint16_t di, uint16_t bp,
+                     uint8_t *was_already_indisp) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    if (seg_r8(sd, SYSDAT_INDISP)) {
         *was_already_indisp = 1;
         switch_result none = {0};
         return none;
     }
     *was_already_indisp = 0;
-    mem[SD_INDISP] = 1;
+    seg_w8(sd, SYSDAT_INDISP, 1);
 
-    uint16_t cur = mem_r16(mem, SD_RLR);
-    uint16_t cur_uda = mem_r16(mem, (uint16_t)(cur + p_uda));
-    mem_w16_seg(mem, cur_uda, u_ax, ax);
-    mem_w16_seg(mem, cur_uda, u_bx, bx);
-    mem_w16_seg(mem, cur_uda, u_cx, cx);
-    mem_w16_seg(mem, cur_uda, u_dx, dx);
-    mem_w16_seg(mem, cur_uda, u_di, di);
-    mem_w16_seg(mem, cur_uda, u_si, si);
-    mem_w16_seg(mem, cur_uda, u_bp, bp);
+    uint16_t cur = seg_r16(sd, SYSDAT_RLR);
+    uint8_t *cur_uda = far_ptr(phys, seg_r16(sd, (uint16_t)(cur + p_uda)), 0);
+    seg_w16(cur_uda, u_ax, ax);
+    seg_w16(cur_uda, u_bx, bx);
+    seg_w16(cur_uda, u_cx, cx);
+    seg_w16(cur_uda, u_dx, dx);
+    seg_w16(cur_uda, u_di, di);
+    seg_w16(cur_uda, u_si, si);
+    seg_w16(cur_uda, u_bp, bp);
 
+    const uint8_t *ivt = far_ptr(phys, 0, 0);
     for (unsigned i = 0; i < 10; i++) {
-        mem_w16_seg(mem, cur_uda, (uint16_t)(u_ivectors + 2 * i), mem_r16(mem, (uint16_t)(2 * i)));
+        seg_w16(cur_uda, (uint16_t)(u_ivectors + 2 * i), seg_r16(ivt, (uint16_t)(2 * i)));
     }
     for (unsigned i = 0; i < 4; i++) {
-        mem_w16_seg(mem, cur_uda, (uint16_t)(u_mpm_ip + 2 * i), mem_r16(mem, (uint16_t)(i_mpm_ip + 2 * i)));
+        seg_w16(cur_uda, (uint16_t)(u_mpm_ip + 2 * i), seg_r16(ivt, (uint16_t)(i_mpm_ip + 2 * i)));
     }
 
-    uint16_t next = mem_r16(mem, (uint16_t)(cur + p_link));
-    mem_w16(mem, SD_RLR, next);
-    mem_w16(mem, (uint16_t)(cur + p_link), 0);
+    seg_w16(sd, SYSDAT_RLR, seg_r16(sd, (uint16_t)(cur + p_link)));
+    seg_w16(sd, (uint16_t)(cur + p_link), 0);
 
-    uint8_t stat = mem[cur + p_stat];
-    return dispatch_action(mem, cur, cur_uda, stat);
+    return dispatch_action(phys, sd, sysdat, cur, cur_uda, seg_r8(sd, (uint16_t)(cur + p_stat)));
 }
 
 /* pdisp/farpdisp -- call the dispatcher with no special action (the
  * current process just goes back on the Ready List as-is) */
-switch_result pdisp(uint8_t *mem, uint16_t ax, uint16_t bx, uint16_t cx, uint16_t dx,
-                     uint16_t si, uint16_t di, uint16_t bp, uint8_t *was_already_indisp) {
-    uint16_t rlr = mem_r16(mem, SD_RLR);
-    mem[rlr + p_stat] = ps_run;
-    return dsptch(mem, ax, bx, cx, dx, si, di, bp, was_already_indisp);
+switch_result pdisp(uint8_t *phys, uint16_t sysdat, uint16_t ax, uint16_t bx, uint16_t cx,
+                    uint16_t dx, uint16_t si, uint16_t di, uint16_t bp,
+                    uint8_t *was_already_indisp) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    seg_w8(sd, (uint16_t)(seg_r16(sd, SYSDAT_RLR) + p_stat), ps_run);
+    return dsptch(phys, sysdat, ax, bx, cx, dx, si, di, bp, was_already_indisp);
 }
 
-switch_result farpdisp(uint8_t *mem, uint16_t ax, uint16_t bx, uint16_t cx, uint16_t dx,
-                        uint16_t si, uint16_t di, uint16_t bp, uint8_t *was_already_indisp) {
-    return pdisp(mem, ax, bx, cx, dx, si, di, bp, was_already_indisp);
+switch_result farpdisp(uint8_t *phys, uint16_t sysdat, uint16_t ax, uint16_t bx, uint16_t cx,
+                       uint16_t dx, uint16_t si, uint16_t di, uint16_t bp,
+                       uint8_t *was_already_indisp) {
+    return pdisp(phys, sysdat, ax, bx, cx, dx, si, di, bp, was_already_indisp);
 }
 
 /*
@@ -382,19 +387,20 @@ switch_result farpdisp(uint8_t *mem, uint16_t ax, uint16_t bx, uint16_t cx, uint
  * interrupt routines). "pop ds!iret" (already-in-dispatch case) has
  * no C equivalent; see header comment.
  */
-switch_result fdisp(uint8_t *mem, uint16_t ax, uint16_t bx, uint16_t cx, uint16_t dx,
-                     uint16_t si, uint16_t di, uint16_t bp, uint8_t *was_already_indisp) {
-    if (mem[SD_INDISP]) {
+switch_result fdisp(uint8_t *phys, uint16_t sysdat, uint16_t ax, uint16_t bx, uint16_t cx,
+                    uint16_t dx, uint16_t si, uint16_t di, uint16_t bp,
+                    uint8_t *was_already_indisp) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    if (seg_r8(sd, SYSDAT_INDISP)) {
         *was_already_indisp = 1;
         switch_result none = {0};
         return none;
     }
-    uint16_t rlr = mem_r16(mem, SD_RLR);
-    uint16_t rlr_uda = mem_r16(mem, (uint16_t)(rlr + p_uda));
-    mem_w8_seg(mem, rlr_uda, u_in_int, 0xFF); /* true */
+    uint16_t rlr = seg_r16(sd, SYSDAT_RLR);
+    uint8_t *rlr_uda_p = far_ptr(phys, seg_r16(sd, (uint16_t)(rlr + p_uda)), 0);
+    seg_w8(rlr_uda_p, u_in_int, 0xFF); /* true */
     /* pop u_ds_sav -- no C equivalent (no real DS register), not modeled */
-    uint8_t stat_sav = mem[rlr + p_stat];
-    mem_w8_seg(mem, rlr_uda, u_stat_sav, stat_sav);
-    mem[rlr + p_stat] = ps_run;
-    return dsptch(mem, ax, bx, cx, dx, si, di, bp, was_already_indisp);
+    seg_w8(rlr_uda_p, u_stat_sav, seg_r8(sd, (uint16_t)(rlr + p_stat)));
+    seg_w8(sd, (uint16_t)(rlr + p_stat), ps_run);
+    return dsptch(phys, sysdat, ax, bx, cx, dx, si, di, bp, was_already_indisp);
 }

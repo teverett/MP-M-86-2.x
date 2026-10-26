@@ -1,0 +1,39 @@
+; Wrapper for src/kernel/BDOSIF.BDO's `init` (tests/src-c/
+; test_bdosif_init.py), on real memory layout: the whole real BDOS
+; module, assembled exactly as file1_wrapper.A86 does (BDOS.A86's own
+; include order), so `init`, `mpmif`, the cseg header (`sysdat` at 6,
+; `supervisor` at 8) and the combined SYSDAT.FMT+DATA.BDO data segment
+; (`supmod`, `rlr`, `qlr`, `mxdiskqd` at F92h, `mxdiskqpb` at FAEh, with
+; DATA.BDO's real initial values) are all the genuine article.
+;
+; QUE1.RTM/QUE2.RTM are appended so the queue routines `init` reaches
+; through `mpmif` run for real too. BDOSIF's `mpmif` ends in `callf
+; cs:dword ptr .supervisor` (into SUPIF.SUP's `entry`); the test models
+; that one far call with tools/i86sim.py's `far_call_hooks`, applying
+; SUPIF's own mpmif protocol (u_wrkseg = caller's DS for the call, DS =
+; SYSDAT) and running the real queue entry in a nested sim. QUE1's own
+; `call mpmif` (writeq's f_wakeup) resolves to the same BDOSIF `mpmif`
+; here and so reaches the same hook, which treats it as the usual no-op
+; boundary stub. QUE1/QUE2's `cs:sysdat` is BDOSIF's own cell, which
+; `init` sets first thing.
+	include cpyright.def
+	include equ.bdo
+	include system.def
+	include pd.def
+	include err.def
+	include qd.def
+	include mpb.def
+	include modfunc.def
+	include xioscb.def
+	include bdosif.bdo
+	include file1.bdo
+	include file2.bdo
+	include file3.bdo
+	include file4.bdo
+	include uda.fmt
+	include sysdat.fmt
+	include data.bdo
+	cseg
+	include que1.rtm
+	include que2.rtm
+	end

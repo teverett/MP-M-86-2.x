@@ -332,6 +332,11 @@ fpdq_nxtq:			; DI is QD currently scanning
 	mov di,q_link[di]	; Next QD adr
 	test di,di		; End of queues ?
 	    jz fpdq_no_pd
+	push di			; Save QD adr -- was pushed below, after
+				; the lea had already turned DI into the
+				; DQ/NQ list root, so the next pop/q_link
+				; followed that list's first PD as if it
+				; were the next QD (see docs/bugs.md #104)
 	test al,al		; DQ or NQ ?
 	    jz fpdq_dq_lst
 	lea di,(q_nq-p_link)[di]
@@ -339,7 +344,6 @@ fpdq_nxtq:			; DI is QD currently scanning
 fpdq_dq_lst:
 	lea di,(q_dq-p_link)[di]	; root address of list to search
 fpdq_nxt_pd:
-	push di			; Save QD adr
 	call find_pd
 	jcxz fpdq_nxtq		; PD not in this QD, try next QD
 	pop dx			; Clean stack

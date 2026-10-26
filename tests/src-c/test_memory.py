@@ -1,354 +1,179 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/kernel/memory.c against src/kernel/
-MEMORY.MEM's malloc_entry and mfree_entry (+ internal mall_try_mau,
-mfree_it, both static in the C port and exercised only indirectly).
+"""Differential test for src-c/kernel/memory.c (malloc_entry +
+mall_try_mau, mfree_entry + mfree_it) against src/kernel/MEMORY.MEM, on
+real memory layout.
 
-malloc_entry's own mall_try_mau/mall_ml and mfree_entry's own mfree_it
-now all make real mpmif(f_maualloc)/mpmif(f_mlalloc)/mpmif(f_maufree)/
-mpmif(f_mlfree) calls into the real MAU.MEM/ML.MEM (bundled into this
-test's own wrapper, with mpmif itself a small real dispatcher -- see
-the wrapper's own header comment and memory.c's own header comment).
-Needs tools/i86sim.py's opt-in `segmented=True` mode (see test_mau.py's
-own docstring) now that mfree_it's own real call into maufree_entry
-reaches MAU.MEM's own dynamically-computed MAU segment -- confirmed
-safe to enable for every case here, not just the new ones (plain
-unprefixed accesses behave identically either way).
+The reference is the whole real MEM module (src/kernel/MEM.A86); see
+tests/src-c/memref.py. Its `mpmif` calls (f_maualloc/f_mlalloc/
+f_maufree/f_mlfree) re-enter MEM's real `entry` through the SUPIF hook,
+so allocation/free run through the real MAU.MEM/ML.MEM end to end on
+both sides. PDs, p_mem lists, MDs, `mal`/`mfl` are SYSDAT-relative; the
+MPB/MFPB is in the running process's u_wrkseg; mfree_it's on-stack MAF
+lands in the running UDA's stack area (SS = the UDA). Every case diffs
+the whole image.
 """
 import ctypes
 import os
-import subprocess
 import sys
-import tempfile
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(REPO_ROOT, 'tools'))
+from memref import BxCx, Checker, MemRef, MEM_C, PD_RUN, build_lib, c_buffer, phys, sd, wk, w16, r16, SYSDAT
 
-from asm86 import Assembler  # noqa: E402
-from i86sim import I86Sim  # noqa: E402
-
-WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'memory_mem_wrapper.A86')
-MEMORY_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', 'memory.c'),
-            os.path.join(REPO_ROOT, 'src-c', 'kernel', 'util_mem.c'),
-            os.path.join(REPO_ROOT, 'src-c', 'kernel', 'mau.c'),
-            os.path.join(REPO_ROOT, 'src-c', 'kernel', 'ml.c')]
-INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
-
-STACK_TOP = 0xFFF0
-SD_RLR, SD_THRDRT, SD_MDUL, SD_MAL, SD_MFL = 0xA000, 0xA032, 0xA028, 0xA02A, 0xA02C
-UDA_WRKSEG = 0xA012
-
-MPB_START, MPB_MIN, MPB_MAX, MPB_PDADR, MPB_FLAGS = 0, 2, 4, 6, 8
-MFPB_START, MFPB_PD = 0, 2
-MS_LINK, MS_START, MS_LENGTH, MS_FLAGS, MS_MAU = 0, 2, 4, 6, 8
-M_LINK = 0
-P_THREAD = 2
-P_MEM = 0x16
-E_NO_UMD, E_ACTIVE_PD, E_NO_MEMORY = 0x12, 0x22, 0x03
-F_MAUALLOC, F_MAUFREE, F_MLALLOC = 0x309, 0x30A, 0x30B
-
-SAT_START, SAT_LENGTH, SAT_NALL, SATLEN = 0, 2, 4, 5
-MAU_SEG = 0x0100
-MAU_REC = 0x4600
-
-
-def phys(seg):
-    return (seg * 16) & 0xFFFF
-
-
-def put_sat(mem, seg, entry_no, start, length, nall, ents=4):
-    base = phys(seg)
-    mem[base] = ents
-    off = base + entry_no * SATLEN
-    mem_w16(mem, off + SAT_START, start)
-    mem_w16(mem, off + SAT_LENGTH, length)
-    mem[off + SAT_NALL] = nall
-
-SYSDAT = 0x2000
-
-
-def assemble_reference():
-    asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
-    code = asm.segment_bytes('cseg')
-    entries = {name: asm.symtab[name].value for name in ('malloc_entry', 'mfree_entry')}
-    return code, entries
-
-
-def build_c_library():
-    lib_path = tempfile.mktemp(suffix='.dylib' if sys.platform == 'darwin' else '.so')
-    subprocess.run(
-        ['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC',
-         '-I', INCLUDE_DIR, *MEMORY_C, '-o', lib_path],
-        check=True,
-    )
-    return lib_path
-
-
-def mem_w16(mem, addr, val):
-    mem[addr] = val & 0xFF
-    mem[addr + 1] = (val >> 8) & 0xFF
-
-
-def mem_r16(mem, addr):
-    return mem[addr] | (mem[addr + 1] << 8)
-
-
-def base_memory():
-    mem = bytearray(0x10000)
-    mem_w16(mem, UDA_WRKSEG, SYSDAT)  # dx maps straight into "MPM range"
-    mem_w16(mem, SD_RLR, 0x8000)  # the running process's own PD, by default
-    return mem
-
-
-def run_reference(code, entry, mem, regs, sysdat_word=SYSDAT):
-    image = bytearray(mem)
-    image[0:len(code)] = code
-    image[0] = sysdat_word & 0xFF  # `sysdat dw 0` sits at cseg offset 0
-    image[1] = (sysdat_word >> 8) & 0xFF
-    # mpmif is a real dispatcher now (see the wrapper's own comment),
-    # not a flat call_stub_addrs target -- f_maualloc/f_mlalloc tail
-    # into the real MAU.MEM/ML.MEM, everything else just ret's.
-    sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry, segmented=True)
-    sim.run()
-    return sim.regs, image
+u16 = ctypes.c_uint16
+c_u8p = ctypes.POINTER(ctypes.c_uint8)
+OTHER = 0x2100               # another PD on the thread list
+MD_FREE1, MD_FREE2, MD_FREE3 = 0x2400, 0x2410, 0x2420   # unused MDs
+MS1, MS2 = 0x2500, 0x2510    # the caller's memory segments
+MAU1 = 0x2600                # an existing MAU's MD
+MFL_MD = 0x2700              # one Memory Free List region
+MAU_SEG = 0x0900
+MPB, MFPB = 0x0100, 0x0180
 
 
 def main():
-    code, entries = assemble_reference()
-    lib_path = build_c_library()
+    ref = MemRef()
+    s = ref.s
+    lib_path = build_lib([p for p in MEM_C if p.endswith(('memory.c', 'mau.c', 'ml.c', 'util_mem.c'))])
     try:
         lib = ctypes.CDLL(lib_path)
-        c_u8p = ctypes.POINTER(ctypes.c_uint8)
+        for name in ('malloc_entry', 'mfree_entry'):
+            fn = getattr(lib, name)
+            fn.restype = BxCx
+            fn.argtypes = [c_u8p, u16, u16]
+        ck = Checker(ref)
+        SATLEN = s['satlen']
 
-        class BxCx(ctypes.Structure):
-            _fields_ = [('bx', ctypes.c_uint16), ('cx', ctypes.c_uint16)]
+        def f(addr, field):
+            return sd(addr + s[field])
 
-        lib.malloc_entry.restype = BxCx
-        lib.malloc_entry.argtypes = [c_u8p, ctypes.c_uint16]
-        lib.mfree_entry.restype = BxCx
-        lib.mfree_entry.argtypes = [c_u8p, ctypes.c_uint16]
+        def base_memory(mdul=(MD_FREE1, MD_FREE2, MD_FREE3)):
+            mem = ref.base_memory()
+            w16(mem, sd(s['thrdrt']), PD_RUN)
+            w16(mem, f(PD_RUN, 'p_thread'), OTHER)
+            w16(mem, sd(s['mdul']), mdul[0] if mdul else 0)
+            for i, md in enumerate(mdul):
+                w16(mem, f(md, 'm_link'), mdul[i + 1] if i + 1 < len(mdul) else 0)
+            return mem
 
-        failures = []
+        def put_mfl(mem, start=0x0A00, length=0x100):
+            w16(mem, sd(s['mfl']), MFL_MD)
+            w16(mem, f(MFL_MD, 'm_start'), start)
+            w16(mem, f(MFL_MD, 'm_length'), length)
 
-        def check(label, ref, port):
-            status = "ok" if ref == port else "FAIL"
-            print(f"[{status}] {label}: reference {ref} | port {port}")
-            if status == "FAIL":
-                failures.append(label)
+        def put_mau(mem, sats, ents=4):
+            """MAU1 on `mal`, its SAT in MAU_SEG: sats = [(start, length, nall)]"""
+            w16(mem, sd(s['mal']), MAU1)
+            w16(mem, f(MAU1, 'm_start'), MAU_SEG)
+            w16(mem, f(MAU1, 'm_length'), 0x100)
+            mem[phys(MAU_SEG)] = ents
+            for n, (start, length, nall) in enumerate(sats, 1):
+                w16(mem, phys(MAU_SEG, n * SATLEN + s['sat_start']), start)
+                w16(mem, phys(MAU_SEG, n * SATLEN + s['sat_length']), length)
+                mem[phys(MAU_SEG, n * SATLEN + s['sat_nall'])] = nall
 
-        def to_ctypes(mem):
-            return (ctypes.c_uint8 * 0x10000)(*mem)
+        def put_ms(mem, ms, link, start, length, mau=MAU1, flags=0):
+            for fld, v in (('ms_link', link), ('ms_start', start), ('ms_length', length),
+                           ('ms_flags', flags), ('ms_mau', mau)):
+                w16(mem, f(ms, fld), v)
 
-        def call_malloc(mem, dx):
-            buf = to_ctypes(mem)
-            r = lib.malloc_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(dx))
-            return (r.bx, r.cx), bytes(buf)
+        def put_mpb(mem, start, mn, mx, pdadr=0, flags=0):
+            for fld, v in (('mpb_start', start), ('mpb_min', mn), ('mpb_max', mx),
+                           ('mpb_pdadr', pdadr), ('mpb_flags', flags)):
+                w16(mem, wk(MPB + s[fld]), v)
 
-        def call_mfree(mem, dx):
-            buf = to_ctypes(mem)
-            r = lib.mfree_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(dx))
-            return (r.bx, r.cx), bytes(buf)
+        def put_mfpb(mem, start, pd=0):
+            w16(mem, wk(MFPB + s['mfpb_start']), start)
+            w16(mem, wk(MFPB + s['mfpb_pd']), pd)
 
-        # -- malloc_entry: MD free list empty -> e_no_umd propagates straight through --
+        def run(label, entry, mem, dx, snap=lambda img: ()):
+            regs, img = ref.run(entry, mem, {'dx': dx})
+            buf = c_buffer(mem)
+            r = getattr(lib, entry)(buf, SYSDAT, dx)
+            ck.compare(label, img, buf, (regs['bx'], regs['cx']), (r.bx, r.cx), snap)
+
+        lists = lambda i: (r16(i, sd(s['mdul'])), r16(i, sd(s['mal'])), r16(i, sd(s['mfl'])),  # noqa: E731
+                           r16(i, f(PD_RUN, 'p_mem')))
+        mpb = lambda i: tuple(r16(i, wk(MPB + s[x])) for x in ('mpb_start', 'mpb_min', 'mpb_pdadr'))  # noqa: E731
+
+        # -- malloc_entry --
+        mem = base_memory(mdul=())
+        put_mpb(mem, 0, 4, 8)
+        run("malloc_entry: no unused MDs -> e_no_umd", 'malloc_entry', mem, MPB)
+
         mem = base_memory()
-        mem_w16(mem, SD_MDUL, 0)
-        MPB = 0x5000
-        mem_w16(mem, MPB + MPB_PDADR, 0)
-        ref_regs, _ = run_reference(code, entries['malloc_entry'], mem, {'dx': MPB})
-        port, _ = call_malloc(mem, MPB)
-        check("malloc_entry: no unused MDs", (ref_regs['bx'], ref_regs['cx']), port)
+        put_mpb(mem, 0, 4, 8, pdadr=OTHER)
+        run("malloc_entry: active PD other than the caller -> e_active_pd", 'malloc_entry', mem, MPB)
 
-        # -- malloc_entry: requested PD is on the thread list and active, but
-        # isn't the caller -- e_active_pd (exercises the correctly-written
-        # p_thread walk malloc_entry always had) --
         mem = base_memory()
-        MD = 0x4400
-        mem_w16(mem, SD_MDUL, MD)
-        OTHER_PD = 0x8100
-        mem_w16(mem, SD_THRDRT, OTHER_PD)
-        mem_w16(mem, OTHER_PD + P_THREAD, 0)
-        MPB = 0x5000
-        mem_w16(mem, MPB + MPB_PDADR, OTHER_PD)
-        ref_regs, _ = run_reference(code, entries['malloc_entry'], mem, {'dx': MPB})
-        port, _ = call_malloc(mem, MPB)
-        check("malloc_entry: active PD other than the caller", (ref_regs['bx'], ref_regs['cx']), port)
+        put_mpb(mem, 0, 4, 8)
+        run("malloc_entry: no MAU, empty MFL -> fails, MD freed back", 'malloc_entry', mem, MPB,
+            lambda i: (lists(i), mpb(i)))
 
-        # -- malloc_entry: PD has no MDs of its own yet -- falls straight to
-        # mall_ml, whose mlalloc boundary stub always "fails" (cx=f_mlalloc) --
         mem = base_memory()
-        MD = 0x4400
-        mem_w16(mem, SD_MDUL, MD)
-        mem_w16(mem, SD_THRDRT, 0)
-        PD = 0x8000
-        mem_w16(mem, PD + P_MEM + MS_LINK, 0)  # this PD's p_mem list is empty
-        MPB = 0x5000
-        mem_w16(mem, MPB + MPB_PDADR, PD)
-        mem_w16(mem, MPB + MPB_START, 0x30)
-        mem_w16(mem, MPB + MPB_MIN, 0x10)
-        mem_w16(mem, MPB + MPB_FLAGS, 0x04)
-        ref_regs, ref_img = run_reference(code, entries['malloc_entry'], mem, {'dx': MPB})
-        port, port_img = call_malloc(mem, MPB)
-        ref = ((ref_regs['bx'], ref_regs['cx']), mem_r16(ref_img, SD_MDUL))
-        got = (port, mem_r16(port_img, SD_MDUL))
-        check("malloc_entry: new-MAU, mlalloc genuinely fails (empty MFL), MD freed back", ref, got)
+        put_mfl(mem)
+        put_mpb(mem, 0, 4, 8, flags=s['mf_code'])
+        run("malloc_entry: new MAU off the MFL, then allocated from it", 'malloc_entry', mem, MPB,
+            lambda i: (lists(i), mpb(i), bytes(i[f(MD_FREE1, 'ms_link'):f(MD_FREE1, 'ms_link') + 10]),
+                       bytes(i[phys(0x0A00):phys(0x0A00, 16)])))
 
-        # -- mfree_entry: explicit pdadr equal to the caller's own rlr --
-        # (mfree_chkpd's "bx==0" fast path is covered by the next two cases,
-        # which leave MFPB_PD at 0; this one takes the PD-active-check branch
-        # with bx==rlr, landing straight on mfree_gotpd without walking the
-        # thread list at all)
+        # the caller already uses MAU1, which has room: allocate there, and
+        # link the new MS right after the one that pointed at MAU1
         mem = base_memory()
-        RLR = mem_r16(mem, SD_RLR)
-        mem_w16(mem, SD_THRDRT, 0)
-        mem_w16(mem, RLR + P_MEM + MS_LINK, 0)  # empty p_mem list -> e_no_memory
-        MFPB = 0x5100
-        mem_w16(mem, MFPB + MFPB_PD, RLR)
-        mem_w16(mem, MFPB + MFPB_START, 0x30)
-        ref_regs, _ = run_reference(code, entries['mfree_entry'], mem, {'dx': MFPB})
-        port, _ = call_mfree(mem, MFPB)
-        check("mfree_entry: explicit pdadr == rlr, empty list -> e_no_memory", (ref_regs['bx'], ref_regs['cx']), port)
+        put_mau(mem, [(0x0910, 0x10, 1), (0x0920, 0x40, 0)])
+        w16(mem, f(PD_RUN, 'p_mem'), MS1)
+        put_ms(mem, MS1, 0, 0x0910, 0x10)
+        put_mpb(mem, 0, 8, 8, pdadr=PD_RUN)
+        run("malloc_entry: allocated from a MAU the PD already uses", 'malloc_entry', mem, MPB,
+            lambda i: (lists(i), mpb(i), r16(i, f(MS1, 'ms_link')),
+                       bytes(i[phys(MAU_SEG):phys(MAU_SEG, 4 * SATLEN)])))
 
-        # -- mfree_entry: active PD other than the caller -- e_active_pd.
-        # This is the exact walk docs/src-c.md's own fix (p_link -> p_thread)
-        # targets: before that fix this test would desync from the real
-        # assembly (also just fixed) the moment OTHER_PD's thread-list entry
-        # didn't happen to collide with p_link's offset by coincidence. --
+        # -- mfree_entry --
         mem = base_memory()
-        OTHER_PD = 0x8100
-        mem_w16(mem, SD_THRDRT, OTHER_PD)
-        mem_w16(mem, OTHER_PD + P_THREAD, 0)
-        MFPB = 0x5100
-        mem_w16(mem, MFPB + MFPB_PD, OTHER_PD)
-        mem_w16(mem, MFPB + MFPB_START, 0x30)
-        ref_regs, _ = run_reference(code, entries['mfree_entry'], mem, {'dx': MFPB})
-        port, _ = call_mfree(mem, MFPB)
-        check("mfree_entry: active PD other than the caller", (ref_regs['bx'], ref_regs['cx']), port)
+        put_mfpb(mem, 0x0910, pd=PD_RUN)
+        run("mfree_entry: explicit pdadr == rlr, empty list -> e_no_memory", 'mfree_entry', mem, MFPB)
 
-        # -- mfree_entry: bx==0 (free from the calling process), no MD covers
-        # the requested start paragraph -> e_no_memory --
         mem = base_memory()
-        RLR = mem_r16(mem, SD_RLR)
-        MD = 0x4500
-        mem_w16(mem, RLR + P_MEM + MS_LINK, MD)
-        mem_w16(mem, MD + MS_START, 0x40)
-        mem_w16(mem, MD + MS_LENGTH, 0x10)
-        mem_w16(mem, MD + MS_LINK, 0)
-        MFPB = 0x5100
-        mem_w16(mem, MFPB + MFPB_PD, 0)
-        mem_w16(mem, MFPB + MFPB_START, 0x30)  # below every MD's own range
-        ref_regs, _ = run_reference(code, entries['mfree_entry'], mem, {'dx': MFPB})
-        port, _ = call_mfree(mem, MFPB)
-        check("mfree_entry: no MD covers the target paragraph", (ref_regs['bx'], ref_regs['cx']), port)
+        put_mfpb(mem, 0x0910, pd=OTHER)
+        run("mfree_entry: active PD other than the caller -> e_active_pd", 'mfree_entry', mem, MFPB)
 
-        # -- mfree_entry: exact-start match -> tail-calls mfree_it, whose own
-        # real maufree_entry call genuinely fails here (ms_mau names a
-        # bogus, nonexistent MAU record -- maufree_entry's own "ents"
-        # read off that garbage segment comes back 0, failing the very
-        # first entry-count check) -- mfree_entry returns mfree_it's
-        # result directly without checking cx (same as the real jmps);
-        # the MD's own length is correctly left untouched on this
-        # failure path --
+        def owned(sats, ents=4):
+            mem = base_memory()
+            put_mau(mem, sats, ents)
+            w16(mem, f(PD_RUN, 'p_mem'), MS1)
+            put_ms(mem, MS1, MS2, 0x0910, 0x10)
+            put_ms(mem, MS2, 0, 0x0930, 0x20)
+            return mem
+
+        mem = owned([(0x0910, 0x10, 1), (0x0920, 0x10, 0), (0x0930, 0x20, 1)])
+        put_mfpb(mem, 0x0905)
+        run("mfree_entry: no MD covers the target paragraph -> e_no_memory", 'mfree_entry', mem, MFPB)
+
+        mem = owned([(0x0910, 0x10, 1), (0x0920, 0x10, 0), (0x0930, 0x20, 1)])
+        put_mfpb(mem, 0x0938)
+        run("mfree_entry: target inside an MS -> SAT split, length decreased", 'mfree_entry', mem, MFPB,
+            lambda i: (lists(i), r16(i, f(MS2, 'ms_length')), bytes(i[phys(MAU_SEG):phys(MAU_SEG, 5 * SATLEN)])))
+
+        mem = owned([(0x0910, 0x10, 1), (0x0920, 0x10, 0), (0x0930, 0x20, 1)])
+        put_mfpb(mem, 0x0910)
+        run("mfree_entry: exact start, MAU still in use", 'mfree_entry', mem, MFPB,
+            lambda i: (lists(i), r16(i, f(MS1, 'ms_link')), bytes(i[phys(MAU_SEG):phys(MAU_SEG, 5 * SATLEN)])))
+
+        # the freed SAT was the MAU's last allocation: MAU off `mal`, back
+        # to the MFL
         mem = base_memory()
-        RLR = mem_r16(mem, SD_RLR)
-        MD = 0x4500
-        mem_w16(mem, RLR + P_MEM + MS_LINK, MD)
-        mem_w16(mem, MD + MS_START, 0x30)
-        mem_w16(mem, MD + MS_LENGTH, 0x10)
-        mem_w16(mem, MD + MS_LINK, 0)
-        mem_w16(mem, MD + MS_MAU, 0x9999)
-        MFPB = 0x5100
-        mem_w16(mem, MFPB + MFPB_PD, 0)
-        mem_w16(mem, MFPB + MFPB_START, 0x30)
-        ref_regs, ref_img = run_reference(code, entries['mfree_entry'], mem, {'dx': MFPB})
-        port, port_img = call_mfree(mem, MFPB)
-        ref = ((ref_regs['bx'], ref_regs['cx']), mem_r16(ref_img, MD + MS_LENGTH))
-        got = (port, mem_r16(port_img, MD + MS_LENGTH))
-        check("mfree_entry: exact-start match, bogus MAU -> maufree_entry genuinely fails", ref, got)
+        put_mau(mem, [(0x0910, 0x10, 1)], ents=2)
+        w16(mem, f(PD_RUN, 'p_mem'), MS1)
+        put_ms(mem, MS1, 0, 0x0910, 0x10)
+        put_mfpb(mem, 0x0910)
+        run("mfree_entry: exact start, MAU now empty -> released to the MFL", 'mfree_entry', mem, MFPB,
+            lambda i: (lists(i), r16(i, f(MAU1, 'm_link'))))
 
-        # -- mfree_entry: target falls strictly inside one MD's range (not
-        # exact start) -- real maufree_entry call genuinely succeeds (a
-        # real SAT split, via mau_split), so mfree_it's own decrease-
-        # length path runs for real: ms_length[si] shrinks by
-        # (target - start), independently of whatever mau_split did to
-        # the MAU's own internal SAT bookkeeping --
-        mem = base_memory()
-        RLR = mem_r16(mem, SD_RLR)
-        MD = 0x4500
-        mem_w16(mem, RLR + P_MEM + MS_LINK, MD)
-        mem_w16(mem, MD + MS_START, 0x30)
-        mem_w16(mem, MD + MS_LENGTH, 0x20)
-        mem_w16(mem, MD + MS_LINK, 0)
-        mem_w16(mem, MD + MS_MAU, MAU_REC)
-        mem_w16(mem, MAU_REC + MS_START, MAU_SEG)
-        mem_w16(mem, MAU_REC + MS_LENGTH, 0x1000)
-        put_sat(mem, MAU_SEG, 1, 0x30, 0x20, 1)  # allocated, covers [0x30, 0x50)
-        put_sat(mem, MAU_SEG, 2, 0x50, 0x10, 1)  # sentinel/boundary entry
-        MFPB = 0x5100
-        mem_w16(mem, MFPB + MFPB_PD, 0)
-        mem_w16(mem, MFPB + MFPB_START, 0x38)  # inside [0x30, 0x50), not exact start
-        ref_regs, ref_img = run_reference(code, entries['mfree_entry'], mem, {'dx': MFPB})
-        port, port_img = call_mfree(mem, MFPB)
-        ref = ((ref_regs['bx'], ref_regs['cx']), mem_r16(ref_img, MD + MS_LENGTH))
-        got = (port, mem_r16(port_img, MD + MS_LENGTH))
-        check("mfree_entry: target inside a larger MD, real maufree_entry split, length decreased", ref, got)
-
-        # -- mfree_entry: exact-start match, real maufree_entry call --
-        # MAU still has another allocated SAT entry, so mau_collapse's
-        # own scan finds it and reports "not empty" (mfree_exit) --
-        mem = base_memory()
-        RLR = mem_r16(mem, SD_RLR)
-        MD = 0x4500
-        mem_w16(mem, RLR + P_MEM + MS_LINK, MD)
-        mem_w16(mem, MD + MS_START, 0x300)
-        mem_w16(mem, MD + MS_LENGTH, 0x10)
-        mem_w16(mem, MD + MS_LINK, 0)
-        mem_w16(mem, MD + MS_MAU, MAU_REC)
-        mem_w16(mem, MAU_REC + MS_START, MAU_SEG)
-        mem_w16(mem, MAU_REC + MS_LENGTH, 0x1000)
-        put_sat(mem, MAU_SEG, 1, 0x300, 0x10, 1)  # the target, currently allocated
-        put_sat(mem, MAU_SEG, 2, 0x310, 0x10, 1)  # a neighbor that stays allocated
-        MFPB = 0x5100
-        mem_w16(mem, MFPB + MFPB_PD, 0)
-        mem_w16(mem, MFPB + MFPB_START, 0x300)
-        ref_regs, ref_img = run_reference(code, entries['mfree_entry'], mem, {'dx': MFPB})
-        port, port_img = call_mfree(mem, MFPB)
-        ref = ((ref_regs['bx'], ref_regs['cx']), ref_img[phys(MAU_SEG) + 1 * SATLEN + SAT_NALL])
-        got = (port, port_img[phys(MAU_SEG) + 1 * SATLEN + SAT_NALL])
-        check("mfree_entry: real maufree_entry call, MAU still in use", ref, got)
-
-        # -- mfree_entry: exact-start match, real maufree_entry call --
-        # the freed SAT is the MAU's only real entry, so mau_collapse
-        # reports "empty" -- the MAU is then unlinked from the active
-        # MAU list (SD_MAL) and handed back to the Memory Free List
-        # (SD_MFL) via a real mlfree_entry call --
-        mem = base_memory()
-        RLR = mem_r16(mem, SD_RLR)
-        MD = 0x4500
-        mem_w16(mem, RLR + P_MEM + MS_LINK, MD)
-        mem_w16(mem, MD + MS_START, 0x300)
-        mem_w16(mem, MD + MS_LENGTH, 0x10)
-        mem_w16(mem, MD + MS_LINK, 0)
-        mem_w16(mem, MD + MS_MAU, MAU_REC)
-        mem_w16(mem, MAU_REC + MS_START, MAU_SEG)
-        mem_w16(mem, MAU_REC + MS_LENGTH, 0x1000)
-        put_sat(mem, MAU_SEG, 1, 0x300, 0x10, 1, ents=2)  # the MAU's only real entry
-        mem_w16(mem, SD_MAL + M_LINK, MAU_REC)
-        mem_w16(mem, MAU_REC + M_LINK, 0)
-        mem_w16(mem, SD_MFL + M_LINK, 0)
-        MFPB = 0x5100
-        mem_w16(mem, MFPB + MFPB_PD, 0)
-        mem_w16(mem, MFPB + MFPB_START, 0x300)
-        ref_regs, ref_img = run_reference(code, entries['mfree_entry'], mem, {'dx': MFPB})
-        port, port_img = call_mfree(mem, MFPB)
-        ref = ((ref_regs['bx'], ref_regs['cx']), mem_r16(ref_img, SD_MAL), mem_r16(ref_img, SD_MFL))
-        got = (port, mem_r16(port_img, SD_MAL), mem_r16(port_img, SD_MFL))
-        check("mfree_entry: real maufree_entry call, MAU now empty, released to MFL", ref, got)
-
-        if failures:
-            print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")
-            return 1
-        print("\nall cases match.")
-        return 0
+        # docs/bugs.md #106: freeing the first of two allocated segments
+        # must leave the MAU on `mal` (it used to be released while the
+        # second was still allocated)
+        mem = owned([(0x0910, 0x10, 1), (0x0930, 0x20, 1)])
+        put_mfpb(mem, 0x0910)
+        run("mfree_entry: last SAT still allocated -> MAU kept (bug #106)", 'mfree_entry', mem, MFPB, lists)
+        return ck.finish()
     finally:
         os.remove(lib_path)
 

@@ -4,9 +4,10 @@
 #
 # `kernel.elf` below links the boot stub and all kernel-port objects,
 # and boots under QEMU into the real ported XIOS (xios86q.c's
-# init_entry/xios_conout_entry drive the real UART/PIT/PIC/FDC). The
-# layers above the XIOS aren't called yet, so it is not a working
-# MP/M-86 kernel (see docs/src-c.md). The differential tests compile each tested .c file
+# init_entry/xios_conout_entry drive the real UART/PIT/PIC/FDC), then
+# runs the real ported sup_init (init.c) against real low memory. The
+# rest of the kernel isn't called yet, so it is not a working MP/M-86
+# kernel (see docs/src-c.md). The differential tests compile each tested .c file
 # with host `cc` as a ctypes-loadable library; `make build` is a
 # separate cross-compiler pass (`-c`, matching flags) so type errors
 # show up independently of test failures.
@@ -79,14 +80,14 @@ $(foreach m,$(MODULES),$(BUILD_DIR)/$(m)) $(BUILD_DIR)/boot $(BUILD_DIR)/freesta
 	mkdir -p $@
 
 # boot/'s own stub -- boot.s isn't a .c file (no CFLAGS, no defs.h,
-# hence not folded into MODULE_RULE above) and kernel_main.c has no
-# defs.h of its own either (it's not a ported module, see its own
-# header comment).
+# hence not folded into MODULE_RULE above). kernel_main.c isn't a
+# ported module, but it calls into kernel/ and uses kernel/defs.h's
+# real field offsets, hence `-I kernel`.
 $(BUILD_DIR)/boot/boot.o: $(BOOT_DIR)/boot.s | $(BUILD_DIR)/boot
 	$(CC) -c $< -o $@
 
-$(BUILD_DIR)/boot/kernel_main.o: $(BOOT_DIR)/kernel_main.c | $(BUILD_DIR)/boot
-	$(CC) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/boot/kernel_main.o: $(BOOT_DIR)/kernel_main.c kernel/defs.h | $(BUILD_DIR)/boot
+	$(CC) $(CFLAGS) -I kernel -c $< -o $@
 
 $(STRING_SHIM_OBJ): freestanding-include/string_shim.c | $(BUILD_DIR)/freestanding-include
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -99,13 +100,13 @@ boot: $(BOOT_OBJS)
 # src-c/loader/ -- see KERNEL_OBJS's own comment above) into one
 # image via the real `ld` + linker.ld. This links successfully and
 # boots under QEMU into the real ported XIOS (kernel_main.c calls
-# xios86q.c's init_entry/xios_conout_entry with real inb/outb) -- but
-# "bootable(ish)" because that still doesn't mean a working MP/M-86
-# kernel: nothing above the XIOS is called yet (see docs/src-c.md's
-# own "`src-c/boot/`" section for why: those routines take a
-# `uint8_t *mem` array + a 16-bit offset, built for host-side
-# differential testing, not real pointers in a real 32-bit protected-
-# mode address space).
+# xios86q.c's init_entry/xios_conout_entry with real inb/outb) and
+# then sup_init on real memory -- but "bootable(ish)" because that
+# still doesn't mean a working MP/M-86 kernel: nothing else is called
+# yet (see docs/src-c.md's own "`src-c/boot/`" section for why: the
+# other routines take a `uint8_t *mem` array + a 16-bit offset, built
+# for host-side differential testing, not real pointers in a real
+# 32-bit protected-mode address space).
 #
 # Getting the link itself to succeed needed real fixes, not just
 # flag-tuning -- several genuinely different real routines in
@@ -126,8 +127,8 @@ kernel.elf: $(BOOT_OBJS) $(KERNEL_OBJS) $(STRING_SHIM_OBJ) linker.ld
 	i686-elf-grub-file --is-x86-multiboot kernel.elf
 
 # run -- boot kernel.elf under QEMU with serial output on stdout.
-# Halts forever right after the two signons (by design, see
-# boot/kernel_main.c), so this just idles once they're printed --
+# Halts forever right after the signons and the sup_init report (by
+# design, see boot/kernel_main.c), so this just idles once printed --
 # Ctrl-C to stop.
 run: kernel.elf
 	$(QEMU) -kernel kernel.elf -serial stdio -display none -no-reboot -no-shutdown

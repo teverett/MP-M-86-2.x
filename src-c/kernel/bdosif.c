@@ -35,41 +35,28 @@
  * merely deferred) while wiring this up -- see file4.c's own header
  * comment -- and is now ported too.
  *
- * Every one of these 10 targets' own `ds_bdos` parameter is passed as
- * a flat `0` here, matching `tests/src-c/test_file4.py`'s own
- * established convention for them (see that file's own `func52`
- * case) -- `BD_DLOG`/`BD_RODSK`/`BD_RETURNSEG` etc. are harness-
- * chosen flat scratch addresses, not real `DATA.BDO` offsets, same
- * class as every other `SD_*`/`BD_*` field in this tree.
+ * `init` and `entry` both run against real memory (defs.h's far_ptr),
+ * like the RTM: `phys` is the base of real physical memory and the
+ * SYSDAT segment is the BDOS's DS (SUPIF enters it with DS = sysdat; the
+ * combined SYSDAT+DATA.BDO data segment, so `BD_*` are DATA.BDO's real
+ * offsets in it). `entry` passes it to every target as their `ds_bdos`.
+ * `init` also takes `cs`, this module's own code segment. `init`:
  *
- * `init` does two things:
- *
- *   1. The same `sysdat`/`supervisor` copy as `CIOIF.CIO`/`MEMIF.MEM`/
- *      `RTMIF.RTM`'s own `init` (see cioif.c's own header comment).
- *      This module's own `init` has no far `CALL` and nothing that
- *      forces genuine segmented addressing the way `RTMIF.RTM`'s own
- *      `init` did (see that file's own header comment), so it's
- *      tested non-segmented, same as `CIOIF.CIO`/`MEMIF.MEM` --
- *      `SD_SUPMOD_OFF`/`SD_SUPMOD_SEG` flat scratch addresses, not
- *      real `SYSDAT.FMT` raw offsets.
+ *   1. Saves `ds_sysdat` in this module's own `cs:sysdat` cell and copies
+ *      SYSDAT's module_table[SUP] entry far pointer into
+ *      `cs:supervisor` (same shape as CIOIF.CIO/MEMIF.MEM/RTMIF.RTM's
+ *      `init`).
  *
  *   2. Creates, opens, and writes the MX disk queue via three real
- *      `mpmif` calls. Traced via `MODFUNC.DEF`'s `f_qmake`(134)/
- *      `f_qopen`(135)/`f_qwrite`(139) through `SYSTEM.DAT`'s own
- *      `sysent` table to `RTMIF.RTM`'s own `function` table entries
- *      4/5/9 -- all already ported in `que1.c` as `makeq_entry`/
- *      `openq_entry`/`writeq_entry`. `mxdiskqd`/`mxdiskqpb`
- *      (`src/kernel/DATA.BDO`) are addressed via `dx`, same flat-
- *      scratch convention as every other `SD_*`-relative field in
- *      this tree (`SD_MXDISKQD`/`SD_MXDISKQPB`, `defs.h`) -- not
- *      their real raw offset within the combined `SYSDAT.FMT`+
- *      `DATA.BDO` dseg (probed directly: 0xf92/0xfae), since
- *      `que1.c`'s own already-verified routines (`SD_QLR`/`SD_RLR`/
- *      etc.) are themselves only correct under that same flat
- *      convention (confirmed via `tests/src-c/test_que.py`'s own
- *      `UDA_WRKSEG == sysdat` setup, which makes `getqdaddr`'s own
- *      "already in MPM range" path a no-op passthrough regardless of
- *      `dx`'s actual value).
+ *      `mpmif` calls -- `f_qmake`/`f_qopen`/`f_qwrite`, which reach
+ *      que1.c's makeq_entry/openq_entry/writeq_entry (also on real
+ *      memory). `mxdiskqd`/`mxdiskqpb` are DATA.BDO's real offsets in
+ *      the combined SYSDAT+DATA.BDO data segment (SYSDAT_MXDISKQD/
+ *      SYSDAT_MXDISKQPB). The real call goes through BDOSIF's and then
+ *      SUPIF's `mpmif`, and the latter sets the running process's
+ *      u_wrkseg to the caller's DS (SYSDAT here) for the call and
+ *      restores it afterwards -- the queue code resolves dx through
+ *      u_wrkseg, so the direct calls here do the same.
  */
 #include <stdint.h>
 
@@ -79,32 +66,42 @@ typedef struct {
     uint16_t bx, cx;
 } bdos_bxcx;
 
-extern bdos_bxcx makeq_entry(uint8_t *mem, uint16_t dx, uint16_t sysdat);
-extern bdos_bxcx openq_entry(uint8_t *mem, uint16_t dx);
-extern bdos_bxcx writeq_entry(uint8_t *mem, uint16_t dx);
+extern bdos_bxcx makeq_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern bdos_bxcx openq_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern bdos_bxcx writeq_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
 
-void bdosif_init(uint8_t *mem, uint16_t ds_sysdat) {
-    mem_w16(mem, BDOSIF_SYSDAT, ds_sysdat);
-    mem_w16(mem, BDOSIF_SUPERVISOR_OFF, mem_r16(mem, SD_SUPMOD_OFF));
-    mem_w16(mem, BDOSIF_SUPERVISOR_SEG, mem_r16(mem, SD_SUPMOD_SEG));
+void bdosif_init(uint8_t *phys, uint16_t ds_sysdat, uint16_t cs) {
+    uint8_t *sysdat = far_ptr(phys, ds_sysdat, 0);
+    uint8_t *bdos_cs = far_ptr(phys, cs, 0);
+
+    wr16(bdos_cs + BDOSIF_SYSDAT, ds_sysdat);
+    wr16(bdos_cs + BDOSIF_SUPERVISOR_OFF, rd16(sysdat + SYSDAT_SUPMOD));
+    wr16(bdos_cs + BDOSIF_SUPERVISOR_SEG, rd16(sysdat + SYSDAT_SUPMOD + 2));
+
+    /* mpmif: u_wrkseg = caller's DS for the call, restored after */
+    uint8_t *uda = far_ptr(phys, rlr_uda(sysdat), 0);
+    uint16_t saved_wrkseg = rd16(uda + u_wrkseg);
+    wr16(uda + u_wrkseg, ds_sysdat);
 
     /* create disk mx queue */
-    (void)makeq_entry(mem, SD_MXDISKQD, ds_sysdat);
+    (void)makeq_entry(phys, ds_sysdat, SYSDAT_MXDISKQD);
     /* open mx disk queue */
-    (void)openq_entry(mem, SD_MXDISKQPB);
+    (void)openq_entry(phys, ds_sysdat, SYSDAT_MXDISKQPB);
     /* write mx disk queue */
-    (void)writeq_entry(mem, SD_MXDISKQPB);
+    (void)writeq_entry(phys, ds_sysdat, SYSDAT_MXDISKQPB);
+
+    wr16(uda + u_wrkseg, saved_wrkseg);
 }
 
-extern uint16_t func24_entry(const uint8_t *mem, uint16_t ds_bdos, uint16_t *cx_out);
-extern uint16_t func25_entry(const uint8_t *mem, uint16_t *cx_out);
-extern void func26_entry(uint8_t *mem, uint16_t dx, uint16_t *bx_out, uint16_t *cx_out);
-extern uint16_t func29_entry(const uint8_t *mem, uint16_t ds_bdos, uint16_t *cx_out);
-extern uint16_t func32_entry(uint8_t *mem, uint8_t dl, uint16_t *cx_out);
-extern void func44_entry(uint8_t *mem, uint8_t dl, uint16_t *bx_out, uint16_t *cx_out);
-extern void func45_entry(uint8_t *mem, uint8_t dl, uint16_t *bx_out, uint16_t *cx_out);
-extern void func51_entry(uint8_t *mem, uint16_t dx, uint16_t *bx_out, uint16_t *cx_out);
-extern uint16_t func52_entry(uint8_t *mem, uint16_t ds_bdos, uint16_t ds, uint16_t *cx_out);
+extern uint16_t func24_entry(uint8_t *phys, uint16_t ds_bdos, uint16_t *cx_out);
+extern uint16_t func25_entry(uint8_t *phys, uint16_t ds_bdos, uint16_t *cx_out);
+extern void func26_entry(uint8_t *phys, uint16_t ds_bdos, uint16_t dx, uint16_t *bx_out, uint16_t *cx_out);
+extern uint16_t func29_entry(uint8_t *phys, uint16_t ds_bdos, uint16_t *cx_out);
+extern uint16_t func32_entry(uint8_t *phys, uint16_t ds_bdos, uint8_t dl, uint16_t *cx_out);
+extern void func44_entry(uint8_t *phys, uint16_t ds_bdos, uint8_t dl, uint16_t *bx_out, uint16_t *cx_out);
+extern void func45_entry(uint8_t *phys, uint16_t ds_bdos, uint8_t dl, uint16_t *bx_out, uint16_t *cx_out);
+extern void func51_entry(uint8_t *phys, uint16_t ds_bdos, uint16_t dx, uint16_t *bx_out, uint16_t *cx_out);
+extern uint16_t func52_entry(uint8_t *phys, uint16_t ds_bdos, uint16_t *cx_out);
 
 typedef struct {
     uint16_t bx, cx;
@@ -132,19 +129,19 @@ typedef struct {
  * leaves it at exactly that) and each other case overwrites it with
  * its own target's real result, same as every other dispatcher in
  * this tree. */
-entry_result bdosif_entry(uint8_t *mem, uint8_t cl, uint16_t dx, uint16_t bx, uint16_t ds) {
+entry_result bdosif_entry(uint8_t *phys, uint16_t sysdat, uint8_t cl, uint16_t dx, uint16_t bx) {
     entry_result r = {bx, cl, 0};
     uint8_t dl = (uint8_t)dx;
     switch (cl) {
-    case 11: r.bx = func24_entry(mem, 0, &r.cx); break;
-    case 12: r.bx = func25_entry(mem, &r.cx); break;
-    case 13: func26_entry(mem, dx, &r.bx, &r.cx); break;
-    case 16: r.bx = func29_entry(mem, 0, &r.cx); break;
-    case 19: r.bx = func32_entry(mem, dl, &r.cx); break;
-    case 31: func44_entry(mem, dl, &r.bx, &r.cx); break;
-    case 32: func45_entry(mem, dl, &r.bx, &r.cx); break;
-    case 36: func51_entry(mem, dx, &r.bx, &r.cx); break;
-    case 37: r.bx = func52_entry(mem, 0, ds, &r.cx); break;
+    case 11: r.bx = func24_entry(phys, sysdat, &r.cx); break;
+    case 12: r.bx = func25_entry(phys, sysdat, &r.cx); break;
+    case 13: func26_entry(phys, sysdat, dx, &r.bx, &r.cx); break;
+    case 16: r.bx = func29_entry(phys, sysdat, &r.cx); break;
+    case 19: r.bx = func32_entry(phys, sysdat, dl, &r.cx); break;
+    case 31: func44_entry(phys, sysdat, dl, &r.bx, &r.cx); break;
+    case 32: func45_entry(phys, sysdat, dl, &r.bx, &r.cx); break;
+    case 36: func51_entry(phys, sysdat, dx, &r.bx, &r.cx); break;
+    case 37: r.bx = func52_entry(phys, sysdat, &r.cx); break;
     case 45: break; /* func107/funcret: pure no-op, bx/cx stay ambient */
     default: r.reached_getdiskmx = 1; break;
     }

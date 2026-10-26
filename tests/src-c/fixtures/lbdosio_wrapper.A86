@@ -10,8 +10,8 @@
 ;
 ; `kbchar`/`compcol`/`column`/`listcp`/`aret` are DSEG labels at the
 ; scratch addresses src-c/loader/defs.h and tests/src-c/test_lbdosio.py
-; both use (see idle_wrapper.A86's comment for why, same reasoning as
-; there) -- declared directly here rather than via `include
+; both use (DSEG labels, not EQUs, so `mov bx,kbchar` assembles as a
+; memory read, not an immediate load) -- declared directly here rather than via `include
 ; lbdosdat.a86`, which places them at that file's own in-sequence cseg
 ; position and pulls in a lot of unrelated BDOS filesystem data this
 ; wrapper has no use for.

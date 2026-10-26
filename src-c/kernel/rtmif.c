@@ -32,9 +32,7 @@
  * either (both sides agree on that, so it's not a gap this dispatcher
  * introduces). `pd_entry` (case 16) needs the caller's own `ds`;
  * `findpdname_entry` (case 20) needs the caller's own `bx` (thread-
- * list-root context) and reads its own `name` argument straight out
- * of `mem` at `dx` (matching its own real "DX -> name in u_wrkseg"
- * convention, under this project's flat-memory host model).
+ * list-root context); its `dx` is the name's offset in u_wrkseg.
  * `abort_spec_entry` (case 17) needs `RTMIF_ABORT_TERMINATE_OFFSET`
  * -- not a per-call register at all, but a real, fixed address
  * within this same combined module (`ABORT.RTM`'s own `terminate:`
@@ -49,68 +47,42 @@
  * observable transformation of its own under the boundary-stub
  * convention) -- nothing extra needed here.
  *
- * Unlike `CIOIF.CIO`/`MEMIF.MEM`'s own `init` (a trivial 7-instruction
- * body), this one is substantially larger, but -- confirmed directly
- * against the real asm, not assumed -- still has no `callf`/far `CALL`
- * of any kind (only one ordinary near `call proc_creat`), so it needs
- * none of `tools/i86sim.py`'s far-call machinery either.
+ * `init` (rtmif_init) runs against real memory, the same way init.c's
+ * sup_init does (defs.h's far_ptr): `phys` is the base of the real
+ * 8086 physical address space, and every field is reached through its
+ * real segment at its real offset. `entry` and every target it
+ * dispatches to run on real memory too. `init`:
  *
- * `init` does four things in sequence:
+ *   1. Saves `ds_sysdat` in this module's own `cs:sysdat` cell and
+ *      copies SYSDAT's module_table[SUP] entry far pointer into
+ *      `cs:supervisor` (same shape as CIOIF.CIO/MEMIF.MEM's `init`).
  *
- *   1. The same `sysdat`/`supervisor` copy as `CIOIF.CIO`/`MEMIF.MEM`'s
- *      own `init` (see that file's own header comment) -- copies
- *      `SD_SUPMOD_OFF`/`SD_SUPMOD_SEG` into this module's own real
- *      cseg cells (`RTMIF_SUPERVISOR_OFF`/`RTMIF_SUPERVISOR_SEG`).
+ *   2. Points SYSDAT's `dispatcher`/`rtm_pdisp` far pointers at
+ *      DSPTCH.RTM's own `fdisp`/`farpdisp` in this same `cs`. Those
+ *      offsets are RTM-internal labels nothing here can resolve, so
+ *      they're parameters (same as init.c's notick/idle/user_entry).
  *
- *   2. Initializes `SYSDAT.FMT`'s own `dispatcher`/`rtm_pdisp` far
- *      pointers to `DSPTCH.RTM`'s own `fdisp`/`farpdisp` (both
- *      already ported, `dsptch.c`) within this same `cs` -- these are
- *      genuinely external/ambient offsets nothing in this file can
- *      resolve on its own (same reasoning as `init.c`'s own
- *      `notick_offset`/`idle_offset`/`user_entry_offset`), so they're
- *      parameters here too.
+ *   3. Sets up the tick and idle processes' UDAs. Each PD's `p_uda` is
+ *      a paragraph offset relative to SYSDAT (GENSYS's stock template),
+ *      so the real UDA segment is `p_uda + cs:sysdat`. That segment is
+ *      only used to reach the UDA, never stored back into `p_uda`.
+ *      Each UDA gets `u_initcs` = the Supervisor's segment (both
+ *      processes first run through SUPIF.SUP's `user_entry`) and
+ *      `u_initss` = SYSDAT's segment, the already-fixed /src bug the
+ *      real asm's own comment documents.
  *
- *   3. Creates the tick and idle processes' own UDA setup: each
- *      one's own `p_uda` field (`SD_TICKPD`/`SD_IDLEPD`) is a
- *      paragraph offset relative to `sysdat`'s own base, not yet an
- *      absolute segment (the same "GENSYS stock template" relocation
- *      class the real asm's own comment on `u_initss` documents in
- *      detail) -- relocated here by adding `ds_sysdat`. Each one's
- *      own UDA gets `u_initcs` set to the *Supervisor* module's own
- *      segment (`RTMIF_SUPERVISOR_SEG`, just written in step 1) --
- *      both processes first run through `SUPIF.SUP`'s own
- *      `user_entry`, not a real user `CS` -- and `u_initss` set to
- *      `sysdat`'s own segment, the already-fixed `/src` bug the real
- *      asm's own comment documents at length (confirmed fixed in the
- *      current `src/kernel/RTMIF.RTM`, not re-fixed here).
+ *   4. `mov dx,offset idlepd ! call proc_creat` -- a real call into
+ *      proc.c's proc_creat (also on real memory), which drains the
+ *      pending-creation chain starting at idlepd. The real asm discards
+ *      its result (`retf` follows immediately).
  *
- *   4. One real call into `proc.c`'s already-ported `proc_creat`
- *      (`dx = SD_IDLEPD`, the real asm's own last-assigned `bx`,
- *      since `proc_creat` itself walks the whole pending-creation
- *      chain `p_link` threads together -- one call handles both
- *      tick and idle). Its own output is never read by the real asm
- *      (`retf` follows immediately), so it's discarded here too,
- *      same as `sysent.c`'s own `creat_proc_entry` already discards
- *      several of `proc_creat`'s own side effects it can't usefully
- *      re-expose (see that file's own header comment).
- *
- * `cs`/`ds_sysdat` are genuinely external/ambient values, same
- * convention as `init.c`'s own identically-named parameters.
- * `ds_sysdat` additionally has to be a *real* segment here (unlike
- * every other such parameter elsewhere in this project, which can be
- * an arbitrary tag value under non-segmented testing): this routine
- * reads/writes several genuine `SYSDAT.FMT`-relative fields
- * (`supmod`/`dispatcher`/`rtm_pdisp`/`idlepd`/`tickpd`, all real
- * `DS`-relative references in the real asm) via `mem_*_seg(mem,
- * ds_sysdat, ...)` and `defs.h`'s own `SYSDAT_*` raw offsets, rather
- * than a flat `SD_*` scratch address -- see `defs.h`'s own header
- * comment on those constants for why.
+ * No `callf`/far CALL anywhere in `init`.
  */
 #include <stdint.h>
 
 #include "defs.h"
 
-extern uint16_t proc_creat(uint8_t *mem, uint16_t dx, uint16_t sysdat, uint16_t *dx_out);
+extern uint16_t proc_creat(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t *dx_out);
 
 /* ABORT.RTM's own real `terminate:` label address within the combined
  * RTM.A86 build -- see this file's own header comment. Probed via
@@ -128,62 +100,67 @@ typedef struct {
     uint8_t went_to_int_disp_exit;
 } switch_result;
 
-extern uint16_t sysreset_entry(uint8_t *mem);
-extern void poll_entry(uint8_t *mem, uint16_t dx);
-extern entry_bxcx flag_wait_entry(uint8_t *mem, uint8_t dl);
-extern entry_bxcx flag_set_entry(uint8_t *mem, uint8_t dl);
-extern entry_bxcx makeq_entry(uint8_t *mem, uint16_t dx, uint16_t sysdat);
-extern entry_bxcx openq_entry(uint8_t *mem, uint16_t dx);
-extern entry_bxcx deleteq_entry(uint8_t *mem, uint16_t dx);
-extern entry_bxcx readq_entry(uint8_t *mem, uint16_t dx);
-extern entry_bxcx creadq_entry(uint8_t *mem, uint16_t dx);
-extern entry_bxcx writeq_entry(uint8_t *mem, uint16_t dx);
-extern entry_bxcx cwriteq_entry(uint8_t *mem, uint16_t dx);
-extern void delay_entry(uint8_t *mem, uint16_t dx);
+extern uint16_t sysreset_entry(uint8_t *phys, uint16_t sysdat);
+extern void poll_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern entry_bxcx flag_wait_entry(uint8_t *phys, uint16_t sysdat, uint8_t dl);
+extern entry_bxcx flag_set_entry(uint8_t *phys, uint16_t sysdat, uint8_t dl);
+extern entry_bxcx makeq_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern entry_bxcx openq_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern entry_bxcx deleteq_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern entry_bxcx readq_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern entry_bxcx creadq_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern entry_bxcx writeq_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern entry_bxcx cwriteq_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern void delay_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
 extern void dispatch_entry(void);
-extern entry_bxcx terminate_entry(uint8_t *mem, uint16_t dx);
-extern switch_result creat_proc_entry(uint8_t *mem, uint16_t dx, uint16_t sysdat,
+extern entry_bxcx terminate_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern switch_result creat_proc_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx,
                                        uint16_t ax, uint16_t bx, uint16_t cx,
                                        uint16_t si, uint16_t di, uint16_t bp,
                                        uint8_t *was_already_indisp);
-extern void set_prior_entry(uint8_t *mem, uint8_t dl);
-extern uint16_t pd_entry(uint8_t *mem, uint16_t ds, uint16_t *cx_out);
-extern entry_bxcx abort_spec_entry(uint8_t *mem, uint16_t dx, uint16_t terminate_offset);
-extern void sleep_entry(uint8_t *mem, uint16_t dx);
-extern void wakeup_entry(uint8_t *mem, uint16_t dx);
-extern uint16_t findpdname_entry(uint8_t *mem, uint16_t bx, const uint8_t *name, uint16_t *cx_out);
+extern void set_prior_entry(uint8_t *phys, uint16_t sysdat, uint8_t dl);
+extern uint16_t pd_entry(uint8_t *phys, uint16_t sysdat, uint16_t ds, uint16_t *cx_out);
+extern entry_bxcx abort_spec_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t terminate_offset);
+extern void sleep_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern void wakeup_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern uint16_t findpdname_entry(uint8_t *phys, uint16_t sysdat, uint16_t bx, uint16_t dx, uint16_t *cx_out);
 
-void rtmif_init(uint8_t *mem, uint16_t ds_sysdat, uint16_t cs,
-          uint16_t fdisp_offset, uint16_t farpdisp_offset) {
-    mem_w16(mem, RTMIF_SYSDAT, ds_sysdat);
+/* set up one process's UDA: its PD's p_uda is relative to SYSDAT */
+static void init_uda(uint8_t *phys, uint8_t *rtm_cs, uint8_t *sysdat, uint16_t pd) {
+    uint16_t uda_seg = (uint16_t)(rd16(sysdat + pd + p_uda) + rd16(rtm_cs + RTMIF_SYSDAT));
+    uint8_t *uda = far_ptr(phys, uda_seg, 0);
+    wr16(uda + u_initcs, rd16(rtm_cs + RTMIF_SUPERVISOR_SEG));
+    wr16(uda + u_initss, rd16(rtm_cs + RTMIF_SYSDAT));
+}
 
-    mem_w16(mem, RTMIF_SUPERVISOR_OFF, mem_r16_seg(mem, ds_sysdat, SYSDAT_SUPMOD));
-    mem_w16(mem, RTMIF_SUPERVISOR_SEG, mem_r16_seg(mem, ds_sysdat, (uint16_t)(SYSDAT_SUPMOD + 2)));
+/* rtmif_init -- RTM module initialization; see this file's header.
+ *	input:	phys = base of real physical memory; ds_sysdat = DS at
+ *		entry (the real sysdat segment); cs = this module's own
+ *		real code segment; fdisp_offset/farpdisp_offset =
+ *		DSPTCH.RTM's own `fdisp`/`farpdisp` offsets in that cs
+ */
+void rtmif_init(uint8_t *phys, uint16_t ds_sysdat, uint16_t cs,
+                uint16_t fdisp_offset, uint16_t farpdisp_offset) {
+    uint8_t *sysdat = far_ptr(phys, ds_sysdat, 0);
+    uint8_t *rtm_cs = far_ptr(phys, cs, 0);
+
+    wr16(rtm_cs + RTMIF_SYSDAT, ds_sysdat);
+    wr16(rtm_cs + RTMIF_SUPERVISOR_OFF, rd16(sysdat + SYSDAT_SUPMOD));
+    wr16(rtm_cs + RTMIF_SUPERVISOR_SEG, rd16(sysdat + SYSDAT_SUPMOD + 2));
 
     /* init interrupt pdisp / intermodule pdisp */
-    mem_w16_seg(mem, ds_sysdat, SYSDAT_DISPATCHER, fdisp_offset);
-    mem_w16_seg(mem, ds_sysdat, (uint16_t)(SYSDAT_DISPATCHER + 2), cs);
-    mem_w16_seg(mem, ds_sysdat, SYSDAT_RTM_PDISP, farpdisp_offset);
-    mem_w16_seg(mem, ds_sysdat, (uint16_t)(SYSDAT_RTM_PDISP + 2), cs);
+    wr16(sysdat + SYSDAT_DISPATCHER, fdisp_offset);
+    wr16(sysdat + SYSDAT_DISPATCHER + 2, cs);
+    wr16(sysdat + SYSDAT_RTM_PDISP, farpdisp_offset);
+    wr16(sysdat + SYSDAT_RTM_PDISP + 2, cs);
 
     /* create tick and idle process */
-    uint16_t sup_seg = mem_r16(mem, RTMIF_SUPERVISOR_SEG);
+    init_uda(phys, rtm_cs, sysdat, SYSDAT_TICKPD);
+    init_uda(phys, rtm_cs, sysdat, SYSDAT_IDLEPD);
 
-    uint16_t tick_uda = (uint16_t)(mem_r16_seg(mem, ds_sysdat, (uint16_t)(SYSDAT_TICKPD + p_uda)) + ds_sysdat);
-    mem_w16_seg(mem, tick_uda, u_initcs, sup_seg);
-    mem_w16_seg(mem, tick_uda, u_initss, ds_sysdat);
-
-    uint16_t idle_uda = (uint16_t)(mem_r16_seg(mem, ds_sysdat, (uint16_t)(SYSDAT_IDLEPD + p_uda)) + ds_sysdat);
-    mem_w16_seg(mem, idle_uda, u_initcs, sup_seg);
-    mem_w16_seg(mem, idle_uda, u_initss, ds_sysdat);
-
-    /* dx = offset idlepd (the real asm's own last-assigned bx), a
-     * real, flat-equivalent PD address under this port's own
-     * convention: SYSDAT itself is flat-mapped at ds_sysdat*16 */
-    uint16_t idlepd_flat = (uint16_t)(ds_sysdat * 16 + SYSDAT_IDLEPD);
-    uint16_t dx_after;
-    (void)proc_creat(mem, idlepd_flat, ds_sysdat, &dx_after);
-    /* init is now a process and can run concurrently with idle process */
+    /* mov dx,offset idlepd ! call proc_creat -- drains the tick/idle
+     * creation chain; the real asm discards the result (retf) */
+    (void)proc_creat(phys, ds_sysdat, SYSDAT_IDLEPD, 0);
 }
 
 typedef struct {
@@ -200,39 +177,42 @@ typedef struct {
  *		comment)
  *	output:	*was_already_indisp is only meaningful after case 14
  *		(creat_proc_entry) -- see dsptch.c's own header comment
+ *
+ * Every target runs on real memory (see this file's header): `phys` is
+ * the base of physical memory and `sysdat` the real SYSDAT segment.
  */
-entry_result rtmif_entry(uint8_t *mem, uint8_t cl, uint16_t dx, uint16_t ax, uint16_t bx, uint16_t cx,
+entry_result rtmif_entry(uint8_t *phys, uint8_t cl, uint16_t dx, uint16_t ax, uint16_t bx, uint16_t cx,
                     uint16_t si, uint16_t di, uint16_t bp, uint16_t ds, uint16_t sysdat,
                     uint8_t *was_already_indisp) {
     entry_result r = {ax, bx, cx, dx, si, di, bp};
     uint8_t dl = (uint8_t)dx;
     uint16_t cx_out = 0;
     switch (cl) {
-    case 0: r.bx = sysreset_entry(mem); break;
-    case 1: poll_entry(mem, dx); break;
-    case 2: { entry_bxcx v = flag_wait_entry(mem, dl); r.bx = v.bx; r.cx = v.cx; break; }
-    case 3: { entry_bxcx v = flag_set_entry(mem, dl); r.bx = v.bx; r.cx = v.cx; break; }
-    case 4: { entry_bxcx v = makeq_entry(mem, dx, sysdat); r.bx = v.bx; r.cx = v.cx; break; }
-    case 5: { entry_bxcx v = openq_entry(mem, dx); r.bx = v.bx; r.cx = v.cx; break; }
-    case 6: { entry_bxcx v = deleteq_entry(mem, dx); r.bx = v.bx; r.cx = v.cx; break; }
-    case 7: { entry_bxcx v = readq_entry(mem, dx); r.bx = v.bx; r.cx = v.cx; break; }
-    case 8: { entry_bxcx v = creadq_entry(mem, dx); r.bx = v.bx; r.cx = v.cx; break; }
-    case 9: { entry_bxcx v = writeq_entry(mem, dx); r.bx = v.bx; r.cx = v.cx; break; }
-    case 10: { entry_bxcx v = cwriteq_entry(mem, dx); r.bx = v.bx; r.cx = v.cx; break; }
-    case 11: delay_entry(mem, dx); break;
+    case 0: r.bx = sysreset_entry(phys, sysdat); break;
+    case 1: poll_entry(phys, sysdat, dx); break;
+    case 2: { entry_bxcx v = flag_wait_entry(phys, sysdat, dl); r.bx = v.bx; r.cx = v.cx; break; }
+    case 3: { entry_bxcx v = flag_set_entry(phys, sysdat, dl); r.bx = v.bx; r.cx = v.cx; break; }
+    case 4: { entry_bxcx v = makeq_entry(phys, sysdat, dx); r.bx = v.bx; r.cx = v.cx; break; }
+    case 5: { entry_bxcx v = openq_entry(phys, sysdat, dx); r.bx = v.bx; r.cx = v.cx; break; }
+    case 6: { entry_bxcx v = deleteq_entry(phys, sysdat, dx); r.bx = v.bx; r.cx = v.cx; break; }
+    case 7: { entry_bxcx v = readq_entry(phys, sysdat, dx); r.bx = v.bx; r.cx = v.cx; break; }
+    case 8: { entry_bxcx v = creadq_entry(phys, sysdat, dx); r.bx = v.bx; r.cx = v.cx; break; }
+    case 9: { entry_bxcx v = writeq_entry(phys, sysdat, dx); r.bx = v.bx; r.cx = v.cx; break; }
+    case 10: { entry_bxcx v = cwriteq_entry(phys, sysdat, dx); r.bx = v.bx; r.cx = v.cx; break; }
+    case 11: delay_entry(phys, sysdat, dx); break;
     case 12: dispatch_entry(); break; /* real jmp-pdisp tail, boundary stub */
-    case 13: { entry_bxcx v = terminate_entry(mem, dx); r.bx = v.bx; r.cx = v.cx; break; }
+    case 13: { entry_bxcx v = terminate_entry(phys, sysdat, dx); r.bx = v.bx; r.cx = v.cx; break; }
     case 14: {
-        switch_result v = creat_proc_entry(mem, dx, sysdat, ax, bx, cx, si, di, bp, was_already_indisp);
+        switch_result v = creat_proc_entry(phys, sysdat, dx, ax, bx, cx, si, di, bp, was_already_indisp);
         r.ax = v.ax; r.bx = v.bx; r.cx = v.cx; r.dx = v.dx; r.si = v.si; r.di = v.di; r.bp = v.bp;
         break;
     }
-    case 15: set_prior_entry(mem, dl); break;
-    case 16: r.bx = pd_entry(mem, ds, &cx_out); r.cx = cx_out; break;
-    case 17: { entry_bxcx v = abort_spec_entry(mem, dx, RTMIF_ABORT_TERMINATE_OFFSET); r.bx = v.bx; r.cx = v.cx; break; }
-    case 18: sleep_entry(mem, dx); break;
-    case 19: wakeup_entry(mem, dx); break;
-    case 20: r.bx = findpdname_entry(mem, bx, &mem[dx], &cx_out); r.cx = cx_out; break;
+    case 15: set_prior_entry(phys, sysdat, dl); break;
+    case 16: r.bx = pd_entry(phys, sysdat, ds, &cx_out); r.cx = cx_out; break;
+    case 17: { entry_bxcx v = abort_spec_entry(phys, sysdat, dx, RTMIF_ABORT_TERMINATE_OFFSET); r.bx = v.bx; r.cx = v.cx; break; }
+    case 18: sleep_entry(phys, sysdat, dx); break;
+    case 19: wakeup_entry(phys, sysdat, dx); break;
+    case 20: r.bx = findpdname_entry(phys, sysdat, bx, dx, &cx_out); r.cx = cx_out; break;
     default: break;
     }
     return r;

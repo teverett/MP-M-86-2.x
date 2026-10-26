@@ -18,6 +18,12 @@
  * re-declared here identically to dsptch.c's own (private) typedef --
  * needed verbatim, field-for-field, for the ABI of a function returning
  * it by value.
+ *
+ * Runs against real memory (defs.h's far_ptr), like proc.c/dsptch.c:
+ * `phys` is the base of real physical memory, `sysdat` the real SYSDAT
+ * segment (the real asm's DS). PDs and lists are SYSDAT-relative;
+ * u_dparam/u_retseg go to the running process's UDA (the real asm's
+ * ambient ES, p_uda[rlr]).
  */
 #include <stdint.h>
 
@@ -29,26 +35,32 @@ typedef struct {
     uint8_t went_to_int_disp_exit;
 } switch_result;
 
-uint16_t proc_creat(uint8_t *mem, uint16_t dx, uint16_t sysdat, uint16_t *dx_out);
-switch_result pdisp(uint8_t *mem, uint16_t ax, uint16_t bx, uint16_t cx, uint16_t dx,
-                     uint16_t si, uint16_t di, uint16_t bp, uint8_t *was_already_indisp);
+uint16_t proc_creat(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t *dx_out);
+switch_result pdisp(uint8_t *phys, uint16_t sysdat, uint16_t ax, uint16_t bx, uint16_t cx,
+                    uint16_t dx, uint16_t si, uint16_t di, uint16_t bp,
+                    uint8_t *was_already_indisp);
+
+/* the running process's UDA (the real asm's ambient ES) */
+static uint8_t *cur_uda(uint8_t *phys, const uint8_t *sd) {
+    return far_ptr(phys, rlr_uda(sd), 0);
+}
 
 /* poll_entry -- Poll device
  *	input:	dx = device
  */
-void poll_entry(uint8_t *mem, uint16_t dx) {
-    uint16_t bx = mem_r16(mem, SD_RLR);
-    mem[(uint16_t)(bx + p_stat)] = ps_poll;
-    mem_w16(mem, UDA_DPARAM, dx);
+void poll_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    seg_w8(sd, (uint16_t)(seg_r16(sd, SYSDAT_RLR) + p_stat), ps_poll);
+    seg_w16(cur_uda(phys, sd), u_dparam, dx);
 }
 
 /* delay_entry -- Delay
  *	input:	dx = ticks
  */
-void delay_entry(uint8_t *mem, uint16_t dx) {
-    uint16_t bx = mem_r16(mem, SD_RLR);
-    mem[(uint16_t)(bx + p_stat)] = ps_delay;
-    mem_w16(mem, UDA_DPARAM, dx);
+void delay_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    seg_w8(sd, (uint16_t)(seg_r16(sd, SYSDAT_RLR) + p_stat), ps_delay);
+    seg_w16(cur_uda(phys, sd), u_dparam, dx);
 }
 
 /* dispatch_entry -- Call dispatch (no inputs, no memory side effects) */
@@ -58,44 +70,46 @@ void dispatch_entry(void) {
 /* set_prior_entry -- Set Priority
  *	input:	dl = priority
  */
-void set_prior_entry(uint8_t *mem, uint8_t dl) {
-    uint16_t bx = mem_r16(mem, SD_RLR);
-    mem[(uint16_t)(bx + p_prior)] = dl;
+void set_prior_entry(uint8_t *phys, uint16_t sysdat, uint8_t dl) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    seg_w8(sd, (uint16_t)(seg_r16(sd, SYSDAT_RLR) + p_prior), dl);
 }
 
 /* pd_entry -- Return addr of PD
- *	input:	ds = this process's current data segment
- *	output:	returns bx = rlr (the running process's PD address)
- *		*cx_out = 0
+ *	input:	ds = the real asm's DS at this point (sysdat, when
+ *		entered through the RTM's own dispatcher)
+ *	output:	returns bx = rlr (the running process's PD address);
+ *		u_retseg = ds, so the caller gets ds:rlr; *cx_out = 0
  */
-uint16_t pd_entry(uint8_t *mem, uint16_t ds, uint16_t *cx_out) {
-    mem_w16(mem, UDA_RETSEG, ds);
+uint16_t pd_entry(uint8_t *phys, uint16_t sysdat, uint16_t ds, uint16_t *cx_out) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    seg_w16(cur_uda(phys, sd), u_retseg, ds);
     *cx_out = 0;
-    return mem_r16(mem, SD_RLR);
+    return seg_r16(sd, SYSDAT_RLR);
 }
 
 /* sleep_entry -- Put Calling PD on System List
  *	input:	dx = wait parameter
  */
-void sleep_entry(uint8_t *mem, uint16_t dx) {
-    uint16_t bx = mem_r16(mem, SD_RLR);
-    mem_w16(mem, UDA_DPARAM, dx);
-    uint8_t al = mem[(uint16_t)(bx + p_stat)];
-    mem[(uint16_t)(bx + p_scratch)] = al;
-    mem[(uint16_t)(bx + p_stat)] = ps_sleep;
+void sleep_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint16_t bx = seg_r16(sd, SYSDAT_RLR);
+    seg_w16(cur_uda(phys, sd), u_dparam, dx);
+    seg_w8(sd, (uint16_t)(bx + p_scratch), seg_r8(sd, (uint16_t)(bx + p_stat)));
+    seg_w8(sd, (uint16_t)(bx + p_stat), ps_sleep);
 }
 
 /* wakeup_entry -- wakeup top PD in System List
- *	input:	dx -> System List root
+ *	input:	dx -> System List root (in sysdat)
  */
-void wakeup_entry(uint8_t *mem, uint16_t dx) {
-    uint16_t bx = dx;
-    uint16_t si = mem_r16(mem, bx);
+void wakeup_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint16_t si = seg_r16(sd, dx);
     if (si == 0) return; /* wke_out */
-    mem_w16(mem, bx, mem_r16(mem, (uint16_t)(si + p_link)));
-    mem_w16(mem, (uint16_t)(si + p_link), mem_r16(mem, SD_DRL));
-    mem_w16(mem, SD_DRL, si);
-    mem[(uint16_t)(si + p_stat)] = ps_run;
+    seg_w16(sd, dx, seg_r16(sd, (uint16_t)(si + p_link)));
+    seg_w16(sd, (uint16_t)(si + p_link), seg_r16(sd, SYSDAT_DRL));
+    seg_w16(sd, SYSDAT_DRL, si);
+    seg_w8(sd, (uint16_t)(si + p_stat), ps_run);
     /* call pdisp -- boundary stub, modeled as an instant no-op return */
 }
 
@@ -139,11 +153,11 @@ void wakeup_entry(uint8_t *mem, uint16_t dx) {
  * to expose its own entire internal scratch state as output -- not
  * worth it for a value no real caller can rely on anyway.
  */
-switch_result creat_proc_entry(uint8_t *mem, uint16_t dx, uint16_t sysdat,
+switch_result creat_proc_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx,
                                 uint16_t ax, uint16_t bx, uint16_t cx,
                                 uint16_t si, uint16_t di, uint16_t bp,
                                 uint8_t *was_already_indisp) {
     uint16_t dx_after;
-    proc_creat(mem, dx, sysdat, &dx_after);
-    return pdisp(mem, ax, bx, cx, dx_after, si, di, bp, was_already_indisp);
+    proc_creat(phys, sysdat, dx, &dx_after);
+    return pdisp(phys, sysdat, ax, bx, cx, dx_after, si, di, bp, was_already_indisp);
 }

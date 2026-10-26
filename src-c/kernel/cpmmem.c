@@ -8,40 +8,33 @@
  * cx,f_terminate ! sub dx,dx ! jmp mpmif", a boundary tail-jump from
  * the very first instruction, nothing to port.
  *
- * getmemory's own mpmif(f_malloc) call IS now a real call into
- * memory.c's already-ported malloc_entry, not a boundary stub --
- * the real asm's own "push ax/bx/dx/0/0 ! mov dx,sp ! mov ds,ss" trick
- * isn't a register-passing convention at all: dx/ds:dx just point the
- * callee at a genuine MPB.DEF block (start/min/max/pdadr/flags) living
- * on the caller's own stack, which MAU.MEM's mau_split writes
- * mpb_start back into on success (see src/kernel/MAU.MEM's own "mov
- * es:mpb_start[si],ax"). getmemory's own trailing "pop ax" after the
- * call reads that same slot back, not a stale echo of its own input --
- * so under this port's flat memory model the on-stack block is simply
- * a fixed scratch MPB at SD_CPMMEM_MPB (defs.h), built before the call
- * and read back after. mpb_min is never written by anything in the
- * real chain, so getmemory's own output "dx = length" is genuinely
- * just an echo of its own min input (matching the real "pop dx"
- * reading back the same unmodified push) -- not a bug, just how the
- * real asm itself behaves.
+ * getmemory's own mpmif(f_malloc) call is a real call into memory.c's
+ * malloc_entry, not a boundary stub. The asm's "push ax/bx/dx/0/0 !
+ * mov dx,sp ! mov ds,ss" builds a genuine MPB.DEF block
+ * (start/min/max/pdadr/flags) on its own stack and hands it over with
+ * DS = SS, which SUPIF's mpmif turns into u_wrkseg = SS -- the running
+ * UDA during a system call. On success MAU.MEM's maua_alloc writes the
+ * allocated start and length back into it (mpb_start, and mpb_min =
+ * mpb_max = the length), and getmemory's trailing "pop ax ! pop dx"
+ * reads mpb_start/mpb_min back. An earlier version of this port echoed
+ * the min input as the length instead, which only agreed when min ==
+ * max (cpmalloc/cpmabsa): maxmem/absmax (min 0) returned length 0
+ * instead of what was actually allocated.
  *
- * free_memory's own mpmif(f_memfree) call IS now a real call into
- * memory.c's mfree_entry too (now that memory.c's own mfree_it has its
- * real mpmif(f_maufree)/mpmif(f_mlfree) calls -- see that file's own
- * header comment). The real asm's own on-stack "push cx(0)!push dx"
- * is, same as getmemory's own MPB, a genuine MFPB.DEF block (start/
- * pdadr) built at a stack address with DS=SS -- under this port's
- * flat model, just a fixed scratch block (SD_CPMMEM_MFB, defs.h).
- * free_memory's own real tail ("pop dx!pop dx!pop ds!ret") never
- * restores BX or CX after the call, so free_memory's own real output
- * genuinely IS mfree_entry's own {bx, cx} passed straight through --
- * this is a correction, not just an upgrade: cpmfree_entry's own
- * mcb_ext != 0xFF path is a real tail-*jump* into free_memory in the
- * real asm (`jne free_memory`), so its own final output is free_memory's
- * real bx too, not a fixed 0 -- the previous boundary-stub-era
- * assumption that BX there was "undefined, so fixed at 0" was only
- * ever true because free_memory itself never set BX meaningfully; now
- * that it does, cpmfree_entry passes it through unchanged instead.
+ * free_memory's own mpmif(f_memfree) call is likewise a real call into
+ * memory.c's mfree_entry, with a genuine on-stack MFPB.DEF block
+ * (start/pdadr). Its real tail ("pop dx!pop dx!pop ds!ret") never
+ * restores BX or CX, so its output is mfree_entry's own {bx, cx}
+ * passed straight through, and so is cpmfree_entry's on the
+ * mcb_ext != 0xFF path (a real tail-jump, `jne free_memory`).
+ *
+ * Runs against real memory (defs.h's far_ptr): `phys` is the base of
+ * real physical memory and `sysdat` the real SYSDAT segment (the MEM
+ * module's DS). The MCB is in the running process's u_wrkseg (the
+ * asm's `mov ds,u_wrkseg`), the `p_mem` walk SYSDAT-relative. The two
+ * on-stack blocks go at the fixed UDA stack-area spots UDA_STK_MPB/
+ * UDA_STK_MFPB (defs.h), with u_wrkseg pointed at the UDA for the call
+ * and restored afterwards, as mpmif does.
  */
 #include <stdint.h>
 
@@ -51,27 +44,38 @@ typedef struct {
     uint16_t bx, cx;
 } mem_bxcx;
 
-extern mem_bxcx malloc_entry(uint8_t *mem, uint16_t dx);
-extern mem_bxcx mfree_entry(uint8_t *mem, uint16_t dx);
+extern mem_bxcx malloc_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern mem_bxcx mfree_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+
+static uint8_t *mcb_ptr(uint8_t *phys, const uint8_t *sd) {
+    return far_ptr(phys, seg_r16(far_ptr(phys, rlr_uda(sd), 0), u_wrkseg), 0);
+}
 
 /*
  * getmemory
  *	input:	ax = start, bx = min, dx = max
- *	output:	ax = start (as actually allocated), dx = length (== the
- *		original min input -- see header comment), cx = error code
+ *	output:	ax = start, dx = length (both as actually allocated, read
+ *		back from the MPB -- see header comment), cx = error code
  */
 typedef struct {
     uint16_t ax, dx, cx;
 } mem_axdxcx;
 
-static mem_axdxcx getmemory(uint8_t *mem, uint16_t ax, uint16_t bx, uint16_t dx) {
-    mem_w16(mem, (uint16_t)(SD_CPMMEM_MPB + mpb_start), ax);
-    mem_w16(mem, (uint16_t)(SD_CPMMEM_MPB + mpb_min), bx);
-    mem_w16(mem, (uint16_t)(SD_CPMMEM_MPB + mpb_max), dx);
-    mem_w16(mem, (uint16_t)(SD_CPMMEM_MPB + mpb_pdadr), 0);
-    mem_w16(mem, (uint16_t)(SD_CPMMEM_MPB + mpb_flags), 0);
-    mem_bxcx r = malloc_entry(mem, SD_CPMMEM_MPB);
-    mem_axdxcx out = {mem_r16(mem, (uint16_t)(SD_CPMMEM_MPB + mpb_start)), bx, r.cx};
+static mem_axdxcx getmemory(uint8_t *phys, uint16_t sysdat, uint16_t ax, uint16_t bx, uint16_t dx) {
+    const uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint16_t uda_seg = rlr_uda(sd);
+    uint8_t *uda = far_ptr(phys, uda_seg, 0);
+    seg_w16(uda, (uint16_t)(UDA_STK_MPB + mpb_start), ax);
+    seg_w16(uda, (uint16_t)(UDA_STK_MPB + mpb_min), bx);
+    seg_w16(uda, (uint16_t)(UDA_STK_MPB + mpb_max), dx);
+    seg_w16(uda, (uint16_t)(UDA_STK_MPB + mpb_pdadr), 0);
+    seg_w16(uda, (uint16_t)(UDA_STK_MPB + mpb_flags), 0);
+    uint16_t saved_wrkseg = seg_r16(uda, u_wrkseg);
+    seg_w16(uda, u_wrkseg, uda_seg); /* mpmif with DS = SS */
+    mem_bxcx r = malloc_entry(phys, sysdat, UDA_STK_MPB);
+    seg_w16(uda, u_wrkseg, saved_wrkseg);
+    mem_axdxcx out = {seg_r16(uda, (uint16_t)(UDA_STK_MPB + mpb_start)),
+                      seg_r16(uda, (uint16_t)(UDA_STK_MPB + mpb_min)), r.cx};
     return out;
 }
 
@@ -81,10 +85,17 @@ static mem_axdxcx getmemory(uint8_t *mem, uint16_t ax, uint16_t bx, uint16_t dx)
  *	output:	returns mfree_entry's own {bx, cx} straight through -- see
  *		header comment
  */
-static mem_bxcx free_memory(uint8_t *mem, uint16_t dx) {
-    mem_w16(mem, (uint16_t)(SD_CPMMEM_MFB + mfpb_start), dx);
-    mem_w16(mem, (uint16_t)(SD_CPMMEM_MFB + mfpb_pd), 0);
-    return mfree_entry(mem, SD_CPMMEM_MFB);
+static mem_bxcx free_memory(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    const uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint16_t uda_seg = rlr_uda(sd);
+    uint8_t *uda = far_ptr(phys, uda_seg, 0);
+    seg_w16(uda, (uint16_t)(UDA_STK_MFPB + mfpb_start), dx);
+    seg_w16(uda, (uint16_t)(UDA_STK_MFPB + mfpb_pd), 0);
+    uint16_t saved_wrkseg = seg_r16(uda, u_wrkseg);
+    seg_w16(uda, u_wrkseg, uda_seg); /* mpmif with DS = SS */
+    mem_bxcx r = mfree_entry(phys, sysdat, UDA_STK_MFPB);
+    seg_w16(uda, u_wrkseg, saved_wrkseg);
+    return r;
 }
 
 /*
@@ -92,18 +103,20 @@ static mem_bxcx free_memory(uint8_t *mem, uint16_t dx) {
  *	input:	dx = address of MCB in u_wrkseg
  *	output:	bx = 0xFFFF if failure, 0 if success; cx = error code
  */
-mem_bxcx maxmem_entry(uint8_t *mem, uint16_t dx) {
+mem_bxcx maxmem_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t *mcb = mcb_ptr(phys, sd);
     uint16_t si = dx;
-    uint16_t max = mem_r16(mem, (uint16_t)(si + mcb_length));
-    mem_axdxcx got = getmemory(mem, 0, 0, max);
+    uint16_t max = seg_r16(mcb, (uint16_t)(si + mcb_length));
+    mem_axdxcx got = getmemory(phys, sysdat, 0, 0, max);
     if (got.cx != 0) {
         mem_bxcx r = {0xFFFF, got.cx};
         return r;
     }
     /* mm_gm */
-    mem_w16(mem, (uint16_t)(si + mcb_length), got.dx);
-    mem_w16(mem, (uint16_t)(si + mcb_base), got.ax);
-    mem[(uint16_t)(si + mcb_ext)] = 1;
+    seg_w16(mcb, (uint16_t)(si + mcb_length), got.dx);
+    seg_w16(mcb, (uint16_t)(si + mcb_base), got.ax);
+    seg_w8(mcb, (uint16_t)(si + mcb_ext), 1);
     mem_bxcx r = {0, 0};
     return r;
 }
@@ -113,18 +126,20 @@ mem_bxcx maxmem_entry(uint8_t *mem, uint16_t dx) {
  *	input:	dx = address of MCB in u_wrkseg
  *	output:	bx = 0xFFFF if failure, 0 if success; cx = error code
  */
-mem_bxcx absmax_entry(uint8_t *mem, uint16_t dx) {
+mem_bxcx absmax_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t *mcb = mcb_ptr(phys, sd);
     uint16_t si = dx;
-    uint16_t start = mem_r16(mem, (uint16_t)(si + mcb_base));
-    uint16_t max = mem_r16(mem, (uint16_t)(si + mcb_length));
-    mem_axdxcx got = getmemory(mem, start, 0, max);
+    uint16_t start = seg_r16(mcb, (uint16_t)(si + mcb_base));
+    uint16_t max = seg_r16(mcb, (uint16_t)(si + mcb_length));
+    mem_axdxcx got = getmemory(phys, sysdat, start, 0, max);
     if (got.cx != 0) {
         mem_bxcx r = {0xFFFF, got.cx};
         return r;
     }
     /* am_gm */
-    mem_w16(mem, (uint16_t)(si + mcb_length), got.dx);
-    mem_w16(mem, (uint16_t)(si + mcb_base), got.ax);
+    seg_w16(mcb, (uint16_t)(si + mcb_length), got.dx);
+    seg_w16(mcb, (uint16_t)(si + mcb_base), got.ax);
     mem_bxcx r = {0, 0};
     return r;
 }
@@ -134,17 +149,19 @@ mem_bxcx absmax_entry(uint8_t *mem, uint16_t dx) {
  *	input:	dx = address of MCB in u_wrkseg
  *	output:	bx = 0xFFFF if failure, 0 if success; cx = error code
  */
-mem_bxcx cpmalloc_entry(uint8_t *mem, uint16_t dx) {
+mem_bxcx cpmalloc_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t *mcb = mcb_ptr(phys, sd);
     uint16_t si = dx;
-    uint16_t length = mem_r16(mem, (uint16_t)(si + mcb_length));
-    mem_axdxcx got = getmemory(mem, 0, length, length);
+    uint16_t length = seg_r16(mcb, (uint16_t)(si + mcb_length));
+    mem_axdxcx got = getmemory(phys, sysdat, 0, length, length);
     if (got.cx != 0) {
         mem_bxcx r = {0xFFFF, got.cx};
         return r;
     }
     /* ca_gm */
-    mem_w16(mem, (uint16_t)(si + mcb_length), got.dx);
-    mem_w16(mem, (uint16_t)(si + mcb_base), got.ax);
+    seg_w16(mcb, (uint16_t)(si + mcb_length), got.dx);
+    seg_w16(mcb, (uint16_t)(si + mcb_base), got.ax);
     mem_bxcx r = {0, 0};
     return r;
 }
@@ -154,18 +171,20 @@ mem_bxcx cpmalloc_entry(uint8_t *mem, uint16_t dx) {
  *	input:	dx = address of MCB in u_wrkseg
  *	output:	bx = 0xFFFF if failure, 0 if success; cx = error code
  */
-mem_bxcx cpmabsa_entry(uint8_t *mem, uint16_t dx) {
+mem_bxcx cpmabsa_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t *mcb = mcb_ptr(phys, sd);
     uint16_t si = dx;
-    uint16_t start = mem_r16(mem, (uint16_t)(si + mcb_base));
-    uint16_t length = mem_r16(mem, (uint16_t)(si + mcb_length));
-    mem_axdxcx got = getmemory(mem, start, length, length);
+    uint16_t start = seg_r16(mcb, (uint16_t)(si + mcb_base));
+    uint16_t length = seg_r16(mcb, (uint16_t)(si + mcb_length));
+    mem_axdxcx got = getmemory(phys, sysdat, start, length, length);
     if (got.cx != 0) {
         mem_bxcx r = {0xFFFF, got.cx};
         return r;
     }
     /* caa_gm */
-    mem_w16(mem, (uint16_t)(si + mcb_length), got.dx);
-    mem_w16(mem, (uint16_t)(si + mcb_base), got.ax);
+    seg_w16(mcb, (uint16_t)(si + mcb_length), got.dx);
+    seg_w16(mcb, (uint16_t)(si + mcb_base), got.ax);
     mem_bxcx r = {0, 0};
     return r;
 }
@@ -177,47 +196,42 @@ mem_bxcx cpmabsa_entry(uint8_t *mem, uint16_t dx) {
  *	output:	returns free_memory's own {bx, cx} straight through on the
  *		mcb_ext != 0xFF path (a real tail-jump in the real asm) --
  *		see header comment
+ *
+ * The free-all walk used to `and` each segment's flags with mf_load
+ * (wiping a kept Load segment's other flag bits) where a test was
+ * meant, and retried a segment that failed to free forever; both are
+ * fixed here and in src/kernel/CPMMEM.MEM (docs/bugs.md #107).
  */
-mem_bxcx cpmfree_entry(uint8_t *mem, uint16_t dx) {
+mem_bxcx cpmfree_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t *mcb = mcb_ptr(phys, sd);
     uint16_t si = dx;
-    uint8_t ext = mem[(uint16_t)(si + mcb_ext)];
-    uint16_t target = mem_r16(mem, (uint16_t)(si + mcb_base));
+    uint8_t ext = seg_r8(mcb, (uint16_t)(si + mcb_ext));
+    uint16_t target = seg_r16(mcb, (uint16_t)(si + mcb_base));
     if (ext != 0xFF) {
-        return free_memory(mem, target);
+        return free_memory(phys, sysdat, target);
     }
 
     /* cpmf_root: walk the calling process's own p_mem list, freeing
      * every segment that isn't a Load segment */
-    uint16_t root = (uint16_t)(mem_r16(mem, SD_RLR) + p_mem - ms_link);
+    uint16_t root = (uint16_t)(seg_r16(sd, SYSDAT_RLR) + p_mem - ms_link);
     uint16_t bx = root;
     for (;;) {
-        uint16_t walk = mem_r16(mem, (uint16_t)(bx + ms_link));
+        uint16_t walk = seg_r16(sd, (uint16_t)(bx + ms_link));
         if (walk == 0) {
             mem_bxcx r = {0, 0};
             return r;
         }
-        /* try_seg: the real "and ms_flags[si],mf_load" clobbers every
-         * other flag bit in place, not just tests one -- translated
-         * faithfully */
-        uint16_t masked = (uint16_t)(mem_r16(mem, (uint16_t)(walk + ms_flags)) & mf_load);
-        mem_w16(mem, (uint16_t)(walk + ms_flags), masked);
-        if (masked != 0) {
-            bx = walk; /* try_seg's mf_load branch: mov bx,si */
+        /* try_seg: Load segments stay */
+        if (seg_r16(sd, (uint16_t)(walk + ms_flags)) & mf_load) {
+            bx = walk; /* mov bx,si */
             continue;
         }
         /* free_seg: on a real free (cx==0) go back to cpmf_root, since
-         * the list just changed under us. On failure (cx != 0) the real
-         * asm's "jmps cpmf_next" leaves bx untouched -- NOT advanced to
-         * walk -- which would spin forever if free_memory genuinely,
-         * repeatedly failed to free a segment the list itself claims is
-         * there: same class of issue as QUE1.RTM's cioattach "must
-         * actually wait" path. Translated faithfully; not expected to
-         * be hit in practice since every segment on this PD's own
-         * p_mem list should always be freeable, see docs/src-c.md */
-        uint16_t target2 = mem_r16(mem, (uint16_t)(walk + ms_start));
-        mem_bxcx fr = free_memory(mem, target2);
-        if (fr.cx == 0) {
-            bx = root; /* cpmf_root -- the list changed, restart the walk */
-        }
+         * the list just changed under us; on failure step past this
+         * segment */
+        uint16_t target2 = seg_r16(sd, (uint16_t)(walk + ms_start));
+        mem_bxcx fr = free_memory(phys, sysdat, target2);
+        bx = (fr.cx == 0) ? root : walk;
     }
 }

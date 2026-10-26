@@ -32,11 +32,14 @@ se_c:	mov bp,bx			; BP = New MD
 	    mov bx,rlr
 se_r:	cmp si,0 ! jne se_s
 	    mov si,rlr
-se_s:	cmp si,bx ! je se_ge
+se_s:	cmp si,bx ! je se_self	;was "je se_ge", which kept the new MD
+					;(see docs/bugs.md #105)
 
 	    lea di,(p_mem-ms_link)[bx]
 se_go:	    mov di,ms_link[di]
-	    cmp di,0 ! je se_err
+	    cmp di,0 ! je se_free	;was "je se_err", which skipped freeing
+					;the new MD -- se_err1 below frees it
+					;(see docs/bugs.md #105)
 		cmp ms_start[di],dx ! jne se_go
 
 			; DI = Owner MS to share
@@ -65,8 +68,10 @@ se_m:			    mov si,ms_link[bx]
 se_link:		    mov ms_link[di],si
 			    mov ms_link[bx],di
 			    jmps se_ge
-se_err1:	    pop ds ! mov bx,bp ! call freemd
+se_err1:	    pop ds
+se_free:	    mov bx,bp ! call freemd
 se_err:	    mov cx,e_no_memory
 se_err2:    mov bx,0ffffh ! ret
+se_self:mov bx,bp ! call freemd	;sharing with self: nothing to do
 se_ge:	sub bx,bx ! mov cx,bx ! ret
 

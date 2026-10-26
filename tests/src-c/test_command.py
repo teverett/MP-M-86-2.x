@@ -1,376 +1,364 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/kernel/command.c against src/kernel/
-COMMAND.SUP's shifttail, fileopen, user_retf, chain_entry, and
-clicmd_entry (both the ordinary and chain-mode paths -- see
-command.c's own header comment for the three real differences between
-them). `cli_gopen`'s own chain-mode `cli_ld1` UDA hand-off block is
-NOT differentially tested here, for the same reason `cli_gopen`'s own
-non-chain continuation past `prfilnam` isn't either (see command.c's
-own header comment): reaching it requires a real, matching directory
-entry `fileopen` can't be made to produce in any test in this project.
+"""Differential test for src-c/kernel/command.c (COMMAND.SUP: clicmd_entry,
+chain_entry and what they call) against the real system, on real memory
+layout -- see tests/src-c/supref.py.
 
-clicmd_entry's own reference run is against command_wrapper.A86, which
-bundles QUE1.RTM (openq_entry/readq_entry/writeq_entry/cwriteq_entry),
-CONSOLE.CIO+CHARIO.CIO (cconattch_entry/conassign_entry/conout_entry/
-conprint_entry), and PARSE.SUP (parse_entry) for real, via a real
-`mpmif` dispatcher assembled right into the wrapper (see its own
-header comment) -- not a flat Python stub like the other 3 routines'
-own simpler reference run still uses.
+The reference is the real SUP with the real RTM, MEM, CIO and BDOS loaded
+beside it, so the CLI's own `mpmif` calls run the real code: the MXCli/
+MXLoad/RSP queues (RTM), the console (CIO, whose XIOS calls go to the
+same scripted Xios as chario.c's hook), f_parsefilename and f_load/
+f_cload (SUP, and through load the MEM and BDOS calls test_load.py
+covers). f_createproc and f_terminate are dispatcher boundaries, as in
+the C; f_setprior's handler does what sysent.c's set_prior_entry does
+(the real one ends in `jmp pdisp`).
 
-Run entirely non-segmented (the project-wide default, same as
-que_wrapper.A86/console_wrapper.A86/parse_wrapper.A86's own tests):
-every "mov ds,u_wrkseg"/"mov es,u_wrkseg" in the bundled real asm is a
-no-op under i86sim.py's own non-segmented convention (only the offset
-matters, the segment register's value is ignored), which is exactly
-the simplification src-c/kernel/*.c's own flat SD_*/CLI_* addressing
-throughout this whole project already assumes. UDA_WRKSEG is set to 0
-below for the same reason: clicmd_entry's own `cli_copy` step is the
-one place in this file that does genuine segment arithmetic
-(`mem_r8_seg(mem, wrkseg, ...)`), and with wrkseg=0 that's
-`seg*16+off == off`, matching the non-segmented reference run's own
-flat read of the exact same bytes.
+f_fopen/f_fclose and load's f_freadseq go through the BDOS's unported
+getdiskmx path: a scripted disk (`Disk`) answers them on both sides --
+the reference's handlers, and command.c's `cli_set_bdos` / load.c's
+`load_set_readseq` hooks. Every case compares bx/cx and diffs the whole
+image (code and the UDA's stack area aside; after a chain's cli_ld1 the
+caller runs on SYSDAT's inituda block, whose stack area is skipped too).
 """
 import ctypes
 import os
-import subprocess
 import sys
-import tempfile
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(REPO_ROOT, 'tools'))
+from supref import (SysRef, Checker, MOD_NUM, PD_RUN, SYSDAT, UDA, WRKSEG, UDA_STACK, BxCx, build_lib, c_buffer,
+                    phys, sd, wk, w16, r16, KERNEL_C)
+from cioref import Xios, XIOS_FN
 
-from asm86 import Assembler  # noqa: E402
-from i86sim import I86Sim  # noqa: E402
+COMMAND_C = [os.path.join(KERNEL_C, f) for f in
+             ('command.c', 'que1.c', 'que2.c', 'console.c', 'chario.c', 'findpd.c', 'parse.c', 'sysent.c', 'proc.c', 'dsptch.c',
+              'load.c', 'memory.c', 'util_mem.c', 'mau.c', 'ml.c', 'cpmmem.c',
+              'file1.c', 'file2.c', 'file3.c', 'file4.c')]
+u16 = ctypes.c_uint16
+c_u8p = ctypes.POINTER(ctypes.c_uint8)
+BDOS_FN = ctypes.CFUNCTYPE(u16, c_u8p, ctypes.c_uint8, u16, u16)
+READSEQ_FN = ctypes.CFUNCTYPE(ctypes.c_uint8, c_u8p, u16, u16, u16, u16)
 
-WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'command_wrapper.A86')
-COMMAND_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f) for f in
-             ('command.c', 'que1.c', 'que2.c', 'console.c', 'chario.c', 'parse.c',
-              'file1.c', 'file2.c', 'file3.c', 'file4.c',
-              'load.c', 'memory.c', 'util_mem.c', 'mau.c', 'ml.c', 'cpmmem.c')]
-INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
-
-STACK_TOP = 0xFFF0
-SD_RLR = 0xA000
-UDA_WRKSEG = 0xA012
-SD_QLR = 0xA020
-SD_PUL = 0xA038
-SD_DAYFILE, SD_SRCHDISK = 0xA068, 0xA069
-SD_CLI_ERR = 0xA058
-UDA_DMA_OFST, UDA_DMA_SEG = 0xA060, 0xA062
-SD_CLI_CHAIN, SD_CLI_TERM = 0xA055, 0xA056
-
-CLI_FCB, CLI_CUSPQPB, CLI_CMDTAIL = 0xB300, 0xB320, 0xB360
-CLI_PCB = 0xB350
-MXCLIQPB = 0xB400
-PCB_FLNMPTR, PCB_FCBPTR = 0x00, 0x02
-FCB_DR, FCB_NAME, FCB_TYPE, FCB_PLEN = 0x00, 0x01, 0x09, 0x1A
-
-Q_LINK, Q_FLAGS, Q_NAME, Q_MSGLEN, Q_NMSGS = 0x00, 0x04, 0x06, 0x0E, 0x10
-Q_DQ, Q_NQ, Q_MSGCNT, Q_MSGOUT, Q_BUF = 0x12, 0x14, 0x16, 0x18, 0x1A
-QF_MX, QF_RSP = 0x01, 0x08
-QPB_QADDR, QPB_NMSGS, QPB_BUFFPTR, QPB_NAME = 0x02, 0x04, 0x06, 0x08
-
-P_LINK, P_FLAG, P_DSK, P_USER, P_CNS, P_LST = 0x00, 0x06, 0x12, 0x13, 0x20, 0x24
-
-PD = 0x5000
-FREE_PD = 0x5100
-MXQD = 0x9000
-QD1 = 0x9100
-CMDBUF = 0x9800
-CMDCB_CMD = 1
-
-e_q_full, e_no_queue, e_bad_open = 0x0F, 0x09, 30
+CMDBUF = 0x0200              # the caller's CLICB, in u_wrkseg
+DMABUF = 0x0300              # the caller's DMA buffer (chain), in u_wrkseg
+CCB_TABLE = 0x1300           # SYSDAT offsets
+FREE_PD = 0x1400
+RSPQD = 0x1500
+RSP_PD = 0x1540
+MD_FREE = (0x1600, 0x1610, 0x1620, 0x1630, 0x1640, 0x1650)
+MFL_MD = 0x1700
+MFL_SEG = 0x0C00
 
 
-def mem_w16(mem, addr, val):
-    mem[addr] = val & 0xFF
-    mem[addr + 1] = (val >> 8) & 0xFF
+def cmd_header(entries):
+    rec = bytearray(128)
+    for i, (form, length, base, mn, mx) in enumerate(entries):
+        rec[i * 9] = form
+        for j, val in enumerate((length, base, mn, mx)):
+            w16(rec, i * 9 + 1 + 2 * j, val)
+    return bytes(rec)
 
 
-def mem_r16(mem, addr):
-    return mem[addr] | (mem[addr + 1] << 8)
+PROG = [cmd_header([(1, 8, 0, 8, 8)]), bytes([0xCC] * 128)]
 
 
-def put_name(mem, addr, name):
-    padded = (name.upper() + ' ' * 8)[:8].encode('ascii')
-    mem[addr:addr + 8] = padded
+class Disk:
+    """files: {(disk, user, 'NAME    TYP'): (sys, records)}. Open finds
+    the FCB's name on its disk (fcb_dr, else the running PD's p_dsk) and
+    user (p_user); reads go through the FCB's nxtrec. The same model on
+    both sides (a fresh one per side)."""
+    def __init__(self, files, fail_read=False):
+        self.files, self.fail_read = files, fail_read
+        self.rlr_field = self.uda_state = None   # set per call: the running PD's fields, and
+        # (u_error_mode, u_dma_ofst, u_dma_seg) of its UDA, which a real open uses
+        self.open_file = None
+        self.log = []
 
+    def bdos(self, getb, setb, func, fcb):
+        if func == 16:
+            self.log.append(('close', self.uda_state()))
+            return 0
+        dr = getb(fcb)
+        disk = dr - 1 if dr else getb(self.rlr_field('p_dsk'))
+        user = getb(self.rlr_field('p_user'))
+        name = bytes(getb(fcb + 1 + i) & 0x7F for i in range(11)).decode('ascii')
+        self.log.append(('open', disk, user, name, self.uda_state()))
+        f = self.files.get((disk, user, name))
+        if f is None:
+            return 0x00FF
+        sys_, self.open_file = f
+        if sys_:
+            setb(fcb + 10, getb(fcb + 10) | 0x80)
+        return 0
 
-def assemble_reference():
-    asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
-    code = asm.segment_bytes('cseg')
-    entries = {name: asm.symtab[name].value for name in
-               ('shifttail', 'fileopen', 'user_retf', 'clicmd_entry', 'chain_entry')}
-    chunk = code[entries['user_retf']:entries['user_retf'] + 40]
-    int_offset = chunk.index(b'\xcd')
-    entries['user_retf_int'] = entries['user_retf'] + int_offset
-    return code, entries
-
-
-def build_c_library():
-    lib_path = tempfile.mktemp(suffix='.dylib' if sys.platform == 'darwin' else '.so')
-    subprocess.run(
-        ['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC',
-         '-I', INCLUDE_DIR, *COMMAND_C, '-o', lib_path],
-        check=True,
-    )
-    return lib_path
-
-
-def base_memory():
-    mem = bytearray(0x10000)
-    mem_w16(mem, SD_RLR, PD)
-    mem_w16(mem, UDA_WRKSEG, 0)
-    # MXCli semaphore queue: one token available, so the unconditional
-    # mxread (readq_entry) in clicmd_entry's own prologue, and the
-    # unconditional mxwrite (writeq_entry) in clicmd_exit, each succeed
-    # on their first attempt without retrying (see this file's own
-    # header comment, and que1.c's own header comment on why that
-    # matters: both calls would otherwise retry forever under the
-    # boundary-stubbed mpmif(f_sleep) convention).
-    mem_w16(mem, SD_QLR, MXQD)
-    mem_w16(mem, MXQD + Q_LINK, 0)
-    mem_w16(mem, MXQD + Q_FLAGS, QF_MX)
-    mem_w16(mem, MXQD + Q_MSGLEN, 0)
-    mem_w16(mem, MXQD + Q_NMSGS, 1)
-    mem_w16(mem, MXQD + Q_MSGCNT, 1)
-    mem_w16(mem, MXCLIQPB + QPB_QADDR, MXQD)
-    # cli_pcb's own pcb_flnmptr/pcb_fcbptr are never written anywhere
-    # in the real COMMAND.SUP source (command.c's own header comment)
-    # -- the real system's own boot-time init sets them once, and
-    # since cli_copy always lands the raw command text at the same
-    # fixed CLI_CMDTAIL address, they're fixed boot-time constants
-    # here too (cli_pfn, command.c's own stand-in for that same
-    # boot-time init, sets them again on every call -- redundant with
-    # this, but harmless).
-    mem_w16(mem, CLI_PCB + PCB_FLNMPTR, CLI_CMDTAIL)
-    mem_w16(mem, CLI_PCB + PCB_FCBPTR, CLI_FCB)
-    return mem
-
-
-def put_command(mem, text):
-    """Write `text` as the command name into CMDBUF's own CLICB.DEF-
-    shaped buffer (clicb_net byte + clicb_cmd text), the same shape
-    clicmd_entry's own `dx` argument (in the caller's own, here
-    wrkseg=0, flat-addressed) points at."""
-    mem[CMDBUF] = 0  # clicb_net
-    body = text.encode('ascii')
-    mem[CMDBUF + CMDCB_CMD:CMDBUF + CMDCB_CMD + len(body)] = body
-
-
-def run_reference(code, entry, mem, regs, stop_addrs=(), call_stub_addrs=()):
-    image = bytearray(mem)
-    image[0:len(code)] = code
-    sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry, stop_addrs=set(stop_addrs),
-                 call_stub_addrs=set(call_stub_addrs))
-    sim.run()
-    return sim.regs, image
-
-
-def to_ctypes(mem):
-    return (ctypes.c_uint8 * 0x10000)(*mem)
+    def read(self, getb, setb, fcb, dma):
+        if self.fail_read or self.open_file is None:
+            return 0xFF
+        nxt = getb(fcb + 32)
+        if nxt >= len(self.open_file):
+            return 1
+        for i, b in enumerate(self.open_file[nxt]):
+            setb(dma + i, b)
+        setb(fcb + 32, nxt + 1)
+        return 0
 
 
 def main():
-    code, entries = assemble_reference()
-    lib_path = build_c_library()
+    ref = SysRef(('SUP', 'RTM', 'MEM', 'CIO', 'BDOS'))
+    v = ref.v
+    cio = ref.mods['CIO']
+    user_retf = v('user_retf')
+    base_skip = set(ref.skip)
+    inituda_stack = set(range(sd(v('inituda') + UDA_STACK[0]), sd(v('inituda') + UDA_STACK[1])))
+    lib_path = build_lib(COMMAND_C)
     try:
         lib = ctypes.CDLL(lib_path)
-        c_u8p = ctypes.POINTER(ctypes.c_uint8)
-
-        class FileopenResult(ctypes.Structure):
-            _fields_ = [('bl', ctypes.c_uint8), ('bh', ctypes.c_uint8)]
-
-        class BxCx(ctypes.Structure):
-            _fields_ = [('bx', ctypes.c_uint16), ('cx', ctypes.c_uint16)]
-
-        lib.shifttail.argtypes = [c_u8p, ctypes.c_uint16]
-        lib.fileopen.argtypes = [c_u8p]
-        lib.fileopen.restype = FileopenResult
-        lib.user_retf.argtypes = [c_u8p]
-        lib.clicmd_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16]
+        lib.cli_set_bdos.argtypes = [BDOS_FN]
+        lib.load_set_readseq.argtypes = [READSEQ_FN]
+        lib.cio_set_xios.argtypes = [XIOS_FN]
+        lib.shifttail.argtypes = [c_u8p, u16, u16]
+        lib.fileopen.restype = u16
+        lib.fileopen.argtypes = [c_u8p, u16]
+        lib.user_retf.argtypes = [c_u8p, u16]
         lib.clicmd_entry.restype = BxCx
-        lib.chain_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16]
+        lib.clicmd_entry.argtypes = [c_u8p, u16, u16, u16, u16]
         lib.chain_entry.restype = BxCx
-        # sysdat/user_retf_offset/cs only matter on cli_gopen's own real
-        # f_load path (load.c's load), never reached by either case
-        # below (RSP dispatch succeeds before cli_fload; the no-RSP-match
-        # case fails at fileopen before reaching cli_gopen) -- 0 is inert.
+        lib.chain_entry.argtypes = [c_u8p, u16, u16, u16]
+        ck = Checker(ref)
+        f = lambda addr, name: sd(addr + v(name))  # noqa: E731
+        cli = lambda name: sd(v(name))  # noqa: E731
 
-        failures = []
+        def rlr_field(name):
+            return lambda mem: sd(r16(mem, sd(v('rlr'))) + v(name))
 
-        def check(label, ref, port):
-            status = "ok" if ref == port else "FAIL"
-            print(f"[{status}] {label}: reference {ref} | port {port}")
-            if status == "FAIL":
-                failures.append(label)
+        def uda_state(mem):
+            uda = r16(mem, sd(r16(mem, sd(v('rlr'))) + v('p_uda')))
+            return (mem[phys(uda, v('u_error_mode'))], r16(mem, phys(uda, v('u_dma_ofst'))),
+                    r16(mem, phys(uda, v('u_dma_seg'))))
 
-        # -- shifttail: ax == 0 -> clears cli_cmdtail --
+        def base_memory(dayfile=0):
+            mem = ref.base_memory()
+            mem[cli('dayfile')] = dayfile
+            mem[cli('srchdisk')] = 0
+            mem[cli('ncondev')] = 1
+            mem[cli('nlstdev')] = 1
+            mem[cli('ncns')] = 1
+            w16(mem, cli('pul'), 0)
+            mem[f(PD_RUN, 'p_name'):f(PD_RUN, 'p_name') + 8] = b'TMP0    '
+            mem[f(PD_RUN, 'p_dsk')] = 2
+            mem[f(PD_RUN, 'p_user')] = 3
+            mem[f(PD_RUN, 'p_lst')] = 1
+            w16(mem, phys(UDA, v('u_dma_ofst')), DMABUF)
+            w16(mem, phys(UDA, v('u_dma_seg')), WRKSEG)
+            mem[phys(UDA, v('u_error_mode'))] = 0x11
+            # consoles: one CCB, unattached; one list device
+            w16(mem, cli('ccb'), CCB_TABLE)
+            for n in range(2):
+                mem[sd(CCB_TABLE + n * cio.v('ccblen') + cio.v('c_mimic'))] = 0xFF
+                mem[sd(CCB_TABLE + n * cio.v('ccblen') + cio.v('c_msource'))] = 0xFF
+            mem[cli('tod') + 2:cli('tod') + 5] = b'\x12\x34\x56'
+            # MXCli and MXLoad: one token each, on qlr
+            qcli, qload = v('mxcliqd'), v('mxloadqd')
+            w16(mem, cli('qlr'), qcli)
+            w16(mem, sd(qcli + v('q_link')), qload)
+            w16(mem, sd(qcli + v('q_msgcnt')), 1)
+            w16(mem, sd(qload + v('q_link')), 0)
+            w16(mem, sd(qload + v('q_msgcnt')), 1)
+            # MEM: its mutex already ours; free MDs; one free region
+            w16(mem, cli('mxmemowner'), PD_RUN)
+            mem[cli('mxmemcount')] = 1
+            w16(mem, cli('mdul'), MD_FREE[0])
+            for i, md in enumerate(MD_FREE):
+                w16(mem, f(md, 'm_link'), MD_FREE[i + 1] if i + 1 < len(MD_FREE) else 0)
+            w16(mem, cli('mfl'), MFL_MD)
+            w16(mem, f(MFL_MD, 'm_start'), MFL_SEG)
+            w16(mem, f(MFL_MD, 'm_length'), 0x0300)
+            w16(mem, cli('thrdrt'), PD_RUN)
+            return mem
+
+        def free_pd(mem):
+            w16(mem, cli('pul'), FREE_PD)
+            w16(mem, f(FREE_PD, 'p_link'), 0)
+
+        def rsp(mem, name=b'FOOBAR  '):
+            # an RSP queue on qlr, and its process on the thread list
+            w16(mem, sd(v('mxloadqd') + v('q_link')), RSPQD)
+            w16(mem, f(RSPQD, 'q_link'), 0)
+            w16(mem, f(RSPQD, 'q_flags'), v('qf_rsp'))
+            mem[f(RSPQD, 'q_name'):f(RSPQD, 'q_name') + 8] = name
+            w16(mem, f(RSPQD, 'q_msglen'), 4)
+            w16(mem, f(RSPQD, 'q_nmsgs'), 1)
+            w16(mem, f(RSPQD, 'q_buf'), 0x1580)
+            w16(mem, f(PD_RUN, 'p_thread'), RSP_PD)
+            mem[f(RSP_PD, 'p_name'):f(RSP_PD, 'p_name') + 8] = name
+
+        def command(mem, text):
+            mem[wk(CMDBUF)] = 0
+            mem[wk(CMDBUF + 1):wk(CMDBUF + 1) + len(text) + 1] = text + b'\0'
+
+        def run(label, entry, mem, regs, call, files=None, result=lambda r: (r['bx'], r['cx']),
+                port=lambda r: (r.bx, r.cx), snap=lambda i: (), stop=(), chain=False, fail_read=False):
+            files = files or {}
+            ref.skip = base_skip | (inituda_stack if chain else set())
+            rdisk, rx = Disk(files, fail_read), Xios()
+
+            def disk_handler(func):
+                def h(sim):
+                    rdisk.rlr_field = lambda name: rlr_field(name)(sim.mem)
+                    rdisk.uda_state = lambda: uda_state(sim.mem)
+                    uda = r16(sim.mem, sd(r16(sim.mem, sd(v('rlr'))) + v('p_uda')))
+                    fcb = phys(r16(sim.mem, phys(uda, v('u_wrkseg'))), sim.regs['dx'])
+                    getb, setb = (lambda a: sim.mem[a]), (lambda a, b: sim.mem.__setitem__(a, b))
+                    if func == 7:
+                        dma = phys(r16(sim.mem, phys(uda, v('u_dma_seg'))), r16(sim.mem, phys(uda, v('u_dma_ofst'))))
+                        res = rdisk.read(getb, setb, fcb, dma)
+                    else:
+                        res = rdisk.bdos(getb, setb, 15 if func == 2 else 16, fcb)
+                    sim.regs['ax'] = sim.regs['bx'] = res
+                return h
+
+            def setprior(sim):
+                sim.mem[sd(r16(sim.mem, sd(v('rlr'))) + v('p_prior'))] = sim.regs['dx'] & 0xFF
+            ref.handlers = {(MOD_NUM['BDOS'], 2): disk_handler(2), (MOD_NUM['BDOS'], 3): disk_handler(3),
+                            (MOD_NUM['BDOS'], 7): disk_handler(7), (MOD_NUM['RTM'], 15): setprior}
+
+            def ref_xios(sim):
+                sim.regs['ax'] = sim.regs['bx'] = rx.call(sim.regs['ax'] & 0xFF, sim.regs['cx'] & 0xFF,
+                                                          sim.regs['dx'] & 0xFF)
+            ref.xios = ref_xios
+            ref_regs, img = ref.run(entry, mem, regs, stop_addrs=stop)
+            ref_calls = list(ref.calls)
+            buf = c_buffer(mem)
+            cdisk, cx = Disk(files, fail_read), Xios()
+
+            def c_bdos(p, func, seg, off):
+                cdisk.rlr_field = lambda name: rlr_field(name)(p)
+                cdisk.uda_state = lambda: uda_state(p)
+                return cdisk.bdos(lambda a: p[a], lambda a, b: p.__setitem__(a, b), func, phys(seg, off))
+
+            def c_read(p, fseg, foff, dseg, doff):
+                return cdisk.read(lambda a: p[a], lambda a, b: p.__setitem__(a, b), phys(fseg, foff), phys(dseg, doff))
+            hooks = (BDOS_FN(c_bdos), READSEQ_FN(c_read), XIOS_FN(lambda fn, cl, dl: cx.call(fn, cl, dl)))
+            lib.cli_set_bdos(hooks[0])
+            lib.load_set_readseq(hooks[1])
+            lib.cio_set_xios(hooks[2])
+            got = call(buf)
+            ck.compare(label, img, buf, result(ref_regs), port(got), snap)
+            ck.check(f"{label}: same disk calls", rdisk.log, cdisk.log)
+            ck.check(f"{label}: same console output", rx.log, cx.log)
+            return ref_calls
+
+        clicmd = lambda b: lib.clicmd_entry(b, SYSDAT, CMDBUF, user_retf, 0)  # noqa: E731
+        chain = lambda b: lib.chain_entry(b, SYSDAT, user_retf, 0)  # noqa: E731
+        nores = dict(result=lambda r: (), port=lambda r: ())
+        tail = cli('cli_cmdtail')
+
+        # -- shifttail --
         mem = base_memory()
-        mem[CLI_CMDTAIL] = 0xFF
-        ref_regs, ref_img = run_reference(code, entries['shifttail'], mem, {'ax': 0})
-        buf = to_ctypes(mem)
-        lib.shifttail(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0))
-        check("shifttail: no tail -> cli_cmdtail cleared", ref_img[CLI_CMDTAIL], bytes(buf)[CLI_CMDTAIL])
-
-        # -- shifttail: a real tail gets shifted down to the buffer start --
+        mem[tail] = 0xFF
+        run("shifttail: no tail -> cli_cmdtail cleared", 'shifttail', mem, {'ax': 0},
+            lambda b: lib.shifttail(b, SYSDAT, 0), **nores)
         mem = base_memory()
-        TAIL_AT = CLI_CMDTAIL + 10
-        mem[TAIL_AT:TAIL_AT + 6] = b'HELLO$'
-        ref_regs, ref_img = run_reference(code, entries['shifttail'], mem, {'ax': TAIL_AT})
-        buf = to_ctypes(mem)
-        lib.shifttail(ctypes.cast(buf, c_u8p), ctypes.c_uint16(TAIL_AT))
-        ref = bytes(ref_img[CLI_CMDTAIL:CLI_CMDTAIL + 6])
-        port = bytes(buf)[CLI_CMDTAIL:CLI_CMDTAIL + 6]
-        check("shifttail: tail shifted to buffer start", ref, port)
+        mem[tail + 10:tail + 16] = b'HELLO\0'
+        run("shifttail: tail shifted to the buffer start", 'shifttail', mem, {'ax': v('cli_cmdtail') + 10},
+            lambda b: lib.shifttail(b, SYSDAT, v('cli_cmdtail') + 10), **nores)
 
-        # -- fileopen: sets the read-only bit on cli_fcb's own name[5].
-        # fileopen is a real call into file4.c's func15 now (see
-        # command.c's own header comment) -- the wrapper's own
-        # reference run still uses f_fopen's old fixed-stub result
-        # (BL=0xFF/BH=0), since bundling the real BDOS.A86 module here
-        # would just hit the same, already-documented FILE2.BDO
-        # cseg/dseg collision test_file4.py's own func15 ports around
-        # (see file2.c's own header comment) -- but with no matching
-        # directory entry anywhere in this empty fixture, func15's own
-        # real logic genuinely, deterministically fails the same way
-        # (confirmed directly: bl=0xff/bh=0), so the two sides still
-        # agree, just for a real reason on the port side now instead
-        # of a coincidence --
+        # -- fileopen (stops at its ret: the sim has no caller) --
+        fo_ret = [i for i in range(v('fileopen'), v('fileopen') + 0x20) if ref.sup.code[i] == 0xC3][0]
+        for label, files in (("fileopen: found, sets f6' (read-only)", {(2, 3, 'FOO     CMD'): (False, PROG)}),
+                             ("fileopen: not found -> 00FFh", {})):
+            mem = base_memory()
+            mem[cli('cli_fcb'):cli('cli_fcb') + 12] = b'\0FOO     CMD'
+            run(label, 'fileopen', mem, {}, lambda b: lib.fileopen(b, SYSDAT), files,
+                result=lambda r: (r['bx'],), port=lambda r: (r,), stop={fo_ret})
+
+        # -- user_retf: clears keep/tempkeep/ctlc/sys only --
         mem = base_memory()
-        mem[CLI_FCB + FCB_NAME + 5] = 0x41  # some pre-existing bits
-        mem[CLI_FCB + FCB_NAME:CLI_FCB + FCB_NAME + 8] = b'FOOBAR  '
-        ref_regs, ref_img = run_reference(code, entries['fileopen'], mem, {})
-        buf = to_ctypes(mem)
-        got = lib.fileopen(ctypes.cast(buf, c_u8p))
-        check("fileopen: sets the read-only bit", ref_img[CLI_FCB + FCB_NAME + 5], bytes(buf)[CLI_FCB + FCB_NAME + 5])
-        check("fileopen: real func15 call, no matching dir entry -> BL/BH", (0xFF, 0), (got.bl, got.bh))
+        w16(mem, f(PD_RUN, 'p_flag'), 0x06C3 | v('pf_tempkeep'))
+        ur_int = [i for i in range(user_retf, user_retf + 0x20) if ref.sup.code[i] == 0xCD][0]
+        run("user_retf: clears keep/tempkeep/ctlc/sys", 'user_retf', mem, {},
+            lambda b: lib.user_retf(b, SYSDAT), stop={ur_int + 2}, **nores)
 
-        # -- user_retf: clears pf_keep/pf_tempkeep/pf_ctlc/pf_sys, leaves
-        # every other bit (including pf_raw/pf_ctld here) untouched --
-        PF_SYS, PF_KEEP, PF_RAW, PF_CTLC, PF_TEMPKEEP, PF_CTLD = 0x0001, 0x0002, 0x0040, 0x0080, 0x0200, 0x0400
+        # -- clicmd_entry: an RSP --
+        q = lambda i: (r16(i, sd(RSPQD + v('q_msgcnt'))), bytes(i[sd(0x1580):sd(0x1584)]))  # noqa: E731
         mem = base_memory()
-        mem_w16(mem, PD + P_FLAG, PF_SYS | PF_KEEP | PF_RAW | PF_CTLC | PF_TEMPKEEP | PF_CTLD)
-        ref_regs, ref_img = run_reference(code, entries['user_retf'], mem, {}, stop_addrs={entries['user_retf_int']})
-        buf = to_ctypes(mem)
-        lib.user_retf(ctypes.cast(buf, c_u8p))
-        ref = mem_r16(ref_img, PD + P_FLAG)
-        port = mem_r16(bytes(buf), PD + P_FLAG)
-        check("user_retf: clears keep/tempkeep/ctlc/sys, not raw/ctld", ref, port)
-
-        # -- clicmd_entry: a typed command matching a registered RSP
-        # queue dispatches to it (cli_checkque's own success path) --
+        rsp(mem)
+        command(mem, b'foobar some args')
+        run("clicmd_entry: RSP -> command queued, console assigned", 'clicmd_entry', mem, {'dx': CMDBUF},
+            clicmd, snap=q)
+        mem = base_memory(dayfile=0xFF)
+        rsp(mem)
+        command(mem, b'FOOBAR')
+        run("clicmd_entry: RSP, dayfile -> time and 'Msg Qued' printed", 'clicmd_entry', mem, {'dx': CMDBUF},
+            clicmd, snap=q)
         mem = base_memory()
-        mem_w16(mem, MXQD + Q_LINK, QD1)
-        mem_w16(mem, QD1 + Q_LINK, 0)
-        mem_w16(mem, QD1 + Q_FLAGS, QF_RSP)
-        put_name(mem, QD1 + Q_NAME, 'FOOBAR')
-        mem_w16(mem, QD1 + Q_MSGLEN, 0)
-        mem_w16(mem, QD1 + Q_NMSGS, 1)
-        mem_w16(mem, QD1 + Q_MSGCNT, 0)
-        put_command(mem, 'FOOBAR')
-        ref_regs, ref_img = run_reference(code, entries['clicmd_entry'], mem, {'dx': CMDBUF})
-        buf = to_ctypes(mem)
-        got = lib.clicmd_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(CMDBUF),
-                                ctypes.c_uint16(0), ctypes.c_uint16(0), ctypes.c_uint16(0))
-        port_img = bytes(buf)
-        check("clicmd_entry: RSP dispatch -> bx/cx",
-              (ref_regs['bx'], ref_regs['cx']), (got.bx, got.cx))
-        check("clicmd_entry: RSP dispatch -> cli_err",
-              mem_r16(ref_img, SD_CLI_ERR), mem_r16(port_img, SD_CLI_ERR))
-        check("clicmd_entry: RSP dispatch -> parsed fcb name",
-              bytes(ref_img[CLI_FCB + FCB_NAME:CLI_FCB + FCB_NAME + 8]),
-              bytes(port_img[CLI_FCB + FCB_NAME:CLI_FCB + FCB_NAME + 8]))
-        check("clicmd_entry: RSP dispatch -> queue got the message",
-              mem_r16(ref_img, QD1 + Q_MSGCNT), mem_r16(port_img, QD1 + Q_MSGCNT))
+        rsp(mem)
+        w16(mem, f(RSPQD, 'q_msgcnt'), 1)
+        command(mem, b'FOOBAR')
+        run("clicmd_entry: RSP queue full -> e_q_full", 'clicmd_entry', mem, {'dx': CMDBUF}, clicmd, snap=q)
 
-        # -- clicmd_entry: a typed command matching no RSP queue falls
-        # through to cli_fload, whose own real fileopen call fails for
-        # real (no matching directory entry in this empty fixture,
-        # same as the dedicated fileopen case above) -- e_bad_open --
+        # -- clicmd_entry: errors before a load --
         mem = base_memory()
-        put_command(mem, 'NOPE')
-        mem_w16(mem, SD_PUL, FREE_PD)
-        mem_w16(mem, FREE_PD + P_LINK, 0)
-        ref_regs, ref_img = run_reference(code, entries['clicmd_entry'], mem, {'dx': CMDBUF})
-        buf = to_ctypes(mem)
-        got = lib.clicmd_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(CMDBUF),
-                                ctypes.c_uint16(0), ctypes.c_uint16(0), ctypes.c_uint16(0))
-        port_img = bytes(buf)
-        check("clicmd_entry: no RSP match -> bx/cx",
-              (ref_regs['bx'], ref_regs['cx']), (got.bx, got.cx))
-        check("clicmd_entry: no RSP match -> cli_err == e_bad_open",
-              mem_r16(ref_img, SD_CLI_ERR), mem_r16(port_img, SD_CLI_ERR))
-        check("clicmd_entry: no RSP match -> PD released back onto pul",
-              mem_r16(ref_img, SD_PUL), mem_r16(port_img, SD_PUL))
-
-        # -- chain_entry: dx==0 chain mode, cli_copy's own DMA-buffer
-        # source branch (see command.c's own header comment, point 1)
-        # -- no RSP match, falls through to cli_fload the same way the
-        # non-chain case above does (real fileopen call fails for real,
-        # no matching directory entry) --
+        command(mem, b'A:B:C')
+        run("clicmd_entry: bad command line -> parse error", 'clicmd_entry', mem, {'dx': CMDBUF}, clicmd)
         mem = base_memory()
-        DMABUF = 0x9900
-        mem[DMABUF:DMABUF + 4] = b'NOPE'
-        mem[DMABUF + 4] = 0
-        mem_w16(mem, UDA_DMA_OFST, DMABUF)
-        mem_w16(mem, UDA_DMA_SEG, 0)
-        mem_w16(mem, SD_PUL, FREE_PD)
-        mem_w16(mem, FREE_PD + P_LINK, 0)
-        ref_regs, ref_img = run_reference(code, entries['chain_entry'], mem, {})
-        buf = to_ctypes(mem)
-        got = lib.chain_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(0), ctypes.c_uint16(0))
-        port_img = bytes(buf)
-        check("chain_entry: no RSP match -> bx/cx",
-              (ref_regs['bx'], ref_regs['cx']), (got.bx, got.cx))
-        check("chain_entry: no RSP match -> cli_err == e_bad_open",
-              mem_r16(ref_img, SD_CLI_ERR), mem_r16(port_img, SD_CLI_ERR))
-        check("chain_entry: no RSP match -> PD released back onto pul",
-              mem_r16(ref_img, SD_PUL), mem_r16(port_img, SD_PUL))
-        check("chain_entry: no RSP match -> DMA-copy landed in cli_cmdtail",
-              bytes(ref_img[CLI_FCB + FCB_NAME:CLI_FCB + FCB_NAME + 8]),
-              bytes(port_img[CLI_FCB + FCB_NAME:CLI_FCB + FCB_NAME + 8]))
+        command(mem, b'NOPE')
+        run("clicmd_entry: no free PD -> e_no_pd", 'clicmd_entry', mem, {'dx': CMDBUF}, clicmd)
+        for label, files, srch in (
+                ("clicmd_entry: not found anywhere -> e_bad_open, PD released", {}, 1),
+                ("clicmd_entry: search disk is the default -> one open only", {}, 2),
+                ("clicmd_entry: non-SYS file on the search disk, user 0 has none -> e_bad_open",
+                 {(1, 3, 'NOPE    CMD'): (False, PROG)}, 1),
+                ("clicmd_entry: non-SYS file on the search disk and user 0 -> e_bad_open",
+                 {(1, 3, 'NOPE    CMD'): (False, PROG), (1, 0, 'NOPE    CMD'): (False, PROG)}, 1)):
+            mem = base_memory()
+            free_pd(mem)
+            mem[cli('srchdisk')] = srch
+            command(mem, b'NOPE')
+            run(label, 'clicmd_entry', mem, {'dx': CMDBUF}, clicmd, files)
 
-        # -- chain_entry: dx==0 chain mode, a command matching a
-        # registered RSP queue (same queue setup as the non-chain RSP
-        # case above) -- cli_qful sets cli_term, and clicmd_exit's own
-        # chain+term tail (point 3 in command.c's own header comment)
-        # skips clirls (mxwrite) entirely: MXQD's own Q_MSGCNT, unlike
-        # the non-chain case, never changes. bx/cx are a documented
-        # fixed artifact on this path (see header comment) and not
-        # checked here -- only the real, meaningful side effect
-        # (p_flag's own mask) is.
+        # -- clicmd_entry: a .CMD file, loaded --
+        bp = lambda i: bytes(i[phys(MFL_SEG):phys(MFL_SEG, 0x100)])  # noqa: E731
+        for label, text, files, dayfile, srch in (
+                ("clicmd_entry: found on the default disk, loaded", b'prog', {(2, 3, 'PROG    CMD'): (False, PROG)},
+                 0, 1),
+                ("clicmd_entry: SYS file on the search disk, two arguments, dayfile",
+                 b'prog a:one.txt;pw b:two', {(1, 3, 'PROG    CMD'): (True, PROG)}, 0xFF, 1),
+                ("clicmd_entry: SYS file under user 0 on the search disk", b'prog x',
+                 {(1, 0, 'PROG    CMD'): (True, PROG), (1, 3, 'PROG    CMD'): (False, PROG)}, 0, 1)):
+            mem = base_memory(dayfile)
+            free_pd(mem)
+            mem[cli('srchdisk')] = srch
+            command(mem, text)
+            calls = run(label, 'clicmd_entry', mem, {'dx': CMDBUF}, clicmd, files, snap=bp)
+            ck.check(f"{label}: f_createproc reached", True, (MOD_NUM['RTM'], 14) in calls)
         mem = base_memory()
-        mem_w16(mem, MXQD + Q_LINK, QD1)
-        mem_w16(mem, QD1 + Q_LINK, 0)
-        mem_w16(mem, QD1 + Q_FLAGS, QF_RSP)
-        put_name(mem, QD1 + Q_NAME, 'FOOBAR')
-        mem_w16(mem, QD1 + Q_MSGLEN, 0)
-        mem_w16(mem, QD1 + Q_NMSGS, 1)
-        mem_w16(mem, QD1 + Q_MSGCNT, 0)
-        mem[DMABUF:DMABUF + 6] = b'FOOBAR'
-        mem[DMABUF + 6] = 0
-        mem_w16(mem, UDA_DMA_OFST, DMABUF)
-        mem_w16(mem, UDA_DMA_SEG, 0)
-        PF_KEEP, PF_SYS, PF_CTLC, PF_TEMPKEEP = 0x0002, 0x0001, 0x0080, 0x0200
-        mem_w16(mem, PD + P_FLAG, PF_KEEP | PF_SYS | PF_CTLC | PF_TEMPKEEP)
-        ref_regs, ref_img = run_reference(code, entries['chain_entry'], mem, {})
-        buf = to_ctypes(mem)
-        lib.chain_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(0), ctypes.c_uint16(0))
-        port_img = bytes(buf)
-        check("chain_entry: RSP dispatch -> cli_term set",
-              ref_img[SD_CLI_TERM], port_img[SD_CLI_TERM])
-        check("chain_entry: RSP dispatch, chain+term tail -> p_flag masked",
-              mem_r16(ref_img, PD + P_FLAG), mem_r16(port_img, PD + P_FLAG))
-        check("chain_entry: RSP dispatch, chain+term tail -> clirls skipped (mxwrite never ran)",
-              mem_r16(ref_img, QD1 + Q_MSGCNT), mem_r16(port_img, QD1 + Q_MSGCNT))
+        free_pd(mem)
+        command(mem, b'prog')
+        run("clicmd_entry: load fails -> e_bad_read, PD released", 'clicmd_entry', mem, {'dx': CMDBUF}, clicmd,
+            {(2, 3, 'PROG    CMD'): (False, PROG)}, fail_read=True)
+        mem = base_memory()
+        free_pd(mem)
+        w16(mem, f(PD_RUN, 'p_flag'), v('pf_ctlc'))
+        command(mem, b'prog')
+        run("clicmd_entry: ctl-C pending -> e_abort, nothing loaded", 'clicmd_entry', mem, {'dx': CMDBUF}, clicmd,
+            {(2, 3, 'PROG    CMD'): (False, PROG)})
 
-        if failures:
-            print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")
-            return 1
-        print("\nall cases match.")
-        return 0
+        # -- chain_entry: the command in the caller's DMA buffer; a chain
+        # that reaches an RSP or loads terminates (bx/cx not compared) --
+        def chain_memory(text):
+            mem = base_memory()
+            mem[wk(DMABUF):wk(DMABUF) + len(text) + 1] = text + b'\0'
+            return mem
+        mem = chain_memory(b'NOPE')
+        free_pd(mem)
+        run("chain_entry: not found -> e_bad_open", 'chain_entry', mem, {}, chain)
+        mem = chain_memory(b'FOOBAR')
+        rsp(mem)
+        w16(mem, f(PD_RUN, 'p_flag'), 0x0283)
+        run("chain_entry: RSP -> queued, terminates (MXCli kept)", 'chain_entry', mem, {}, chain, snap=q, **nores)
+        mem = chain_memory(b'prog arg')
+        free_pd(mem)
+        run("chain_entry: loaded -> UDA handed to the new PD, terminates", 'chain_entry', mem, {}, chain,
+            {(2, 3, 'PROG    CMD'): (False, PROG)}, chain=True, snap=bp, **nores)
+        return ck.finish()
     finally:
         os.remove(lib_path)
 

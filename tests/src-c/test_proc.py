@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/proc.c against src/kernel/
-PROC.RTM's freepd/proc_creat (+ internal getpdadr).
+PROC.RTM's freepd/proc_creat (+ internal getpdadr), both on real
+memory layout.
 
-Needs tools/i86sim.py's opt-in `segmented=True` mode (see src-c/
-kernel/ml.c's own header comment) -- proc_creat dynamically switches
-DS/ES to a brand-new child process's own UDA segment and, later, to
-that same child's own user-stack segment. It also needs the real
-assembled code shifted away from absolute address 0 (CSEG_BASE, same
-technique as tests/src-c/test_tmp.py's own docstring explains) since
-proc_creat genuinely reads the real, absolute interrupt vector table
-at segment 0 -- unlike every other file ported so far, which only
-ever read scratch/SYSDAT-relative fields that could be placed
-anywhere. Segment 0 can't be relocated, so the routine's own code has
-to move instead, and `cs:sysdat`'s own segmented-mode effective
-address has to be corrected for that shift by setting the `cs`
-register explicitly (see base_regs() below).
+proc.c addresses real memory (defs.h's far_ptr), so the reference runs
+with tools/i86sim.py's segmented=True and real segments:
+tests/src-c/fixtures/proc_wrapper.A86 includes the real SYSDAT.FMT/
+UDA.FMT/VEC.FMT, SYSDAT is at segment 100h with PDs at SYSDAT-relative
+offsets (DS-relative, as the real asm reaches them), the creator's UDA
+is the reference's ES and its PD's p_uda (the C side's rlr_uda), and
+the child UDAs/user stacks are real segments. Field offsets come from
+the assembled symbol table.
+
+The code is relocated to physical 800h (CS=80h) because proc_creat
+reads the real interrupt vectors at segment 0; i86sim fetches from the
+physical IP, and near calls/jumps are relative, so only `cs:sysdat`
+needs the CS register to match. Every case also diffs the whole image
+(outside the code and the reference's stack) to catch stray writes.
 """
 import ctypes
 import os
@@ -33,50 +35,50 @@ PROC_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', 'proc.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 KERNEL_DIR = os.path.join(REPO_ROOT, 'src', 'kernel')
 
+SIM_MEM = 0x10000
+PHYS_MEM = 0x100000
 STACK_TOP = 0xFFF0
+STACK = range(0xFF00, 0x10000)  # reference's own stack (SS=0)
 CSEG_BASE = 0x0800
 CS_REG = CSEG_BASE >> 4
-# `mpmif equ 9000h` in the wrapper is resolved at *assemble* time assuming
-# cseg loads at absolute 0; since this wrapper's cseg is actually loaded at
-# CSEG_BASE (see run_reference's own comment), the CALL's encoded rel16
-# displacement lands on 9000h+CSEG_BASE at runtime, not bare 9000h.
+# `mpmif equ 9000h` assembles assuming cseg at 0; relocated, its call
+# lands at 9000h+CSEG_BASE
 MPMIF_STUB = 0x9000 + CSEG_BASE
 
-SD_RLR, SD_DRL, UDA_WRKSEG, SD_ENDSEG = 0xA000, 0xA002, 0xA012, 0xA026
-SD_THRDRT, SD_NLSTDEV, SD_NCONDEV, SD_PUL = 0xA032, 0xA035, 0xA036, 0xA038
+SYSDAT = 0x0100
+ENDSEG = 0x0F00
 
 P_LINK, P_THREAD, P_FLAG, P_UDA, P_MEM, P_LST, P_PARENT = 0, 2, 6, 0x10, 0x16, 0x24, 0x1E
-PF_TABLE, PF_RESOURCE, PF_CHILDABORT = 0x10, 0x20, 0x800
+PF_TABLE, PF_CHILDABORT = 0x10, 0x800
 PDLEN = 0x30
-E_NO_PD = 0x0C
 MS_LINK = 0
 
-U_DPARAM, U_DMA_SEG, U_ERROR_MODE, U_MULT_CNT = 0, 4, 0x10, 0x11
-U_DF_PASSWORD, U_PD_CNT, U_IN_INT, U_SP, U_SS = 0x12, 0x1A, 0x1B, 0x1C, 0x1E
-U_DS_SAV, U_STACK_SP, U_IVECTORS, U_ES_SAV, U_FLAG_SAV = 0x32, 0x34, 0x38, 0x4C, 0x4E
-U_INITCS, U_INITDS, U_INITES, U_INITSS, U_MPM_IP, U_INSYS = 0x50, 0x52, 0x54, 0x56, 0x58, 0x60
+FIELDS = ('freepd', 'proc_creat', 'rlr', 'drl', 'pul', 'thrdrt', 'endseg', 'ncondev', 'nlstdev',
+          'i_mpm_ip', 'u_wrkseg', 'u_sp', 'u_ss', 'u_stack_sp', 'u_df_password', 'u_ivectors',
+          'u_mpm_ip', 'u_initcs', 'u_initds', 'u_initss', 'u_inites', 'u_error_mode', 'u_mult_cnt',
+          'u_pd_cnt', 'u_in_int', 'u_insys', 'u_ds_sav', 'u_dma_seg', 'u_es_sav', 'u_dparam',
+          'u_flag_sav')
 
 
-def phys(seg):
-    return (seg * 16) & 0xFFFF
+def phys(seg, off=0):
+    return seg * 16 + off
 
 
-def mem_w16(mem, addr, val):
-    mem[addr & 0xFFFF] = val & 0xFF
-    mem[(addr + 1) & 0xFFFF] = (val >> 8) & 0xFF
+def w16(mem, addr, val):
+    mem[addr] = val & 0xFF
+    mem[addr + 1] = (val >> 8) & 0xFF
 
 
-def mem_r16(mem, addr):
-    addr &= 0xFFFF
-    return mem[addr] | (mem[(addr + 1) & 0xFFFF] << 8)
+def r16(mem, addr):
+    return mem[addr] | (mem[addr + 1] << 8)
 
 
 def assemble_reference():
     asm = Assembler()
     asm.assemble(WRAPPER, [KERNEL_DIR])
     code = asm.segment_bytes('cseg')
-    entries = {name: asm.symtab[name].value for name in ('freepd', 'proc_creat')}
-    return code, entries
+    sym = {name: asm.symtab[name].value for name in FIELDS}
+    return code, sym
 
 
 def build_c_library():
@@ -89,35 +91,34 @@ def build_c_library():
     return lib_path
 
 
-def run_reference(code, entry_off, mem, regs, sysdat_word):
-    image = bytearray(0x10000)
+def run_reference(code, entry_off, mem, regs):
+    image = bytearray(mem)
     image[CSEG_BASE:CSEG_BASE + len(code)] = code
-    for addr, val in enumerate(mem):
-        if val != 0:
-            image[addr] = val
-    image[CSEG_BASE] = sysdat_word & 0xFF       # `sysdat dw 0` sits at cseg offset 0
-    image[CSEG_BASE + 1] = (sysdat_word >> 8) & 0xFF
-    entry = CSEG_BASE + entry_off
-    sim = I86Sim(image, {**regs, 'sp': STACK_TOP, 'cs': CS_REG}, entry,
-                 call_stub_addrs={MPMIF_STUB}, segmented=True)
+    w16(image, CSEG_BASE, SYSDAT)  # `sysdat dw 0` sits at cseg offset 0
+    sim = I86Sim(image, {'ds': SYSDAT, 'ss': 0, 'sp': STACK_TOP, 'cs': CS_REG, **regs},
+                 CSEG_BASE + entry_off, call_stub_addrs={MPMIF_STUB}, segmented=True)
     sim.run()
     return sim.regs, image
 
 
-def to_ctypes(mem):
-    return (ctypes.c_uint8 * 0x10000)(*mem)
+def run_port(lib, fn, mem, *args):
+    buf = (ctypes.c_uint8 * PHYS_MEM)()
+    ctypes.memmove(buf, bytes(mem), len(mem))
+    result = fn(buf, ctypes.c_uint16(SYSDAT), *[ctypes.c_uint16(a) for a in args],
+                *([None] if fn.__name__ == 'proc_creat' else []))
+    return result, bytes(buf)
 
 
 def main():
-    code, entries = assemble_reference()
+    code, sym = assemble_reference()
+    code_range = range(CSEG_BASE, CSEG_BASE + len(code))
     lib_path = build_c_library()
     try:
         lib = ctypes.CDLL(lib_path)
-        c_u8p = ctypes.POINTER(ctypes.c_uint8)
-
-        lib.freepd.argtypes = [c_u8p, ctypes.c_uint16]
+        u8p = ctypes.POINTER(ctypes.c_uint8)
+        lib.freepd.argtypes = [u8p, ctypes.c_uint16, ctypes.c_uint16]
         lib.proc_creat.restype = ctypes.c_uint16
-        lib.proc_creat.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.POINTER(ctypes.c_uint16)]
+        lib.proc_creat.argtypes = [u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.POINTER(ctypes.c_uint16)]
 
         failures = []
 
@@ -127,166 +128,140 @@ def main():
             if status == "FAIL":
                 failures.append(label)
 
+        def check_images(label, ref, port):
+            diffs = [hex(a) for a in range(SIM_MEM)
+                     if a not in code_range and a not in STACK and ref[a] != port[a]]
+            check(f"{label}: no other bytes differ", [], diffs[:8])
+            check(f"{label}: nothing written past 64KB", True, not any(port[SIM_MEM:]))
+
+        sd = lambda off: phys(SYSDAT, off)  # noqa: E731
+
         # ================= freepd =================
-
-        # -- freepd: pf_table NOT set -> just unlinked from the thread list --
-        mem = bytearray(0x10000)
-        PD_X, PD_Y = 0x5000, 0x5100
-        mem_w16(mem, SD_THRDRT, PD_X)
-        mem_w16(mem, PD_X + P_THREAD, PD_Y)
-        mem_w16(mem, PD_Y + P_THREAD, 0)
-        mem_w16(mem, PD_Y + P_FLAG, 0)
-        mem_w16(mem, SD_PUL, 0)
-        ref_regs, ref_img = run_reference(code, entries['freepd'], mem, {'si': PD_Y}, 0x1000)
-        ref = (mem_r16(ref_img, SD_THRDRT), mem_r16(ref_img, PD_X + P_THREAD), mem_r16(ref_img, SD_PUL))
-        buf = to_ctypes(mem)
-        lib.freepd(ctypes.cast(buf, c_u8p), ctypes.c_uint16(PD_Y))
-        port_img = bytes(buf)
-        port = (mem_r16(port_img, SD_THRDRT), mem_r16(port_img, PD_X + P_THREAD), mem_r16(port_img, SD_PUL))
-        check("freepd: pf_table not set -> unlinked only", ref, port)
-
-        # -- freepd: pf_table set -> also pushed onto pul --
-        mem = bytearray(0x10000)
-        mem_w16(mem, SD_THRDRT, PD_X)
-        mem_w16(mem, PD_X + P_THREAD, PD_Y)
-        mem_w16(mem, PD_Y + P_THREAD, 0)
-        mem_w16(mem, PD_Y + P_FLAG, PF_TABLE)
-        mem_w16(mem, SD_PUL, 0x4000)
-        ref_regs, ref_img = run_reference(code, entries['freepd'], mem, {'si': PD_Y}, 0x1000)
-        ref = (mem_r16(ref_img, SD_THRDRT), mem_r16(ref_img, PD_X + P_THREAD),
-               mem_r16(ref_img, SD_PUL), mem_r16(ref_img, PD_Y + P_LINK))
-        buf = to_ctypes(mem)
-        lib.freepd(ctypes.cast(buf, c_u8p), ctypes.c_uint16(PD_Y))
-        port_img = bytes(buf)
-        port = (mem_r16(port_img, SD_THRDRT), mem_r16(port_img, PD_X + P_THREAD),
-                mem_r16(port_img, SD_PUL), mem_r16(port_img, PD_Y + P_LINK))
-        check("freepd: pf_table set -> also pushed onto pul", ref, port)
+        PD_X, PD_Y = 0x2000, 0x2100
+        for label, flag, pul in (("freepd: pf_table not set -> unlinked only", 0, 0),
+                                 ("freepd: pf_table set -> also pushed onto pul", PF_TABLE, 0x2600)):
+            mem = bytearray(SIM_MEM)
+            w16(mem, sd(sym['thrdrt']), PD_X)
+            w16(mem, sd(PD_X + P_THREAD), PD_Y)
+            w16(mem, sd(PD_Y + P_THREAD), 0)
+            w16(mem, sd(PD_Y + P_FLAG), flag)
+            w16(mem, sd(sym['pul']), pul)
+            _, ref = run_reference(code, sym['freepd'], mem, {'si': PD_Y})
+            _, port = run_port(lib, lib.freepd, mem, PD_Y)
+            snap = lambda img: (r16(img, sd(sym['thrdrt'])), r16(img, sd(PD_X + P_THREAD)),  # noqa: E731
+                                r16(img, sd(sym['pul'])), r16(img, sd(PD_Y + P_LINK)))
+            check(label, snap(ref), snap(port))
+            check_images(label, ref, port)
 
         # ================= proc_creat =================
 
-        # -- proc_creat: dx == 0 -> nothing to do --
-        mem = bytearray(0x10000)
-        ref_regs, ref_img = run_reference(code, entries['proc_creat'], mem, {'dx': 0}, 0x1000)
-        buf = to_ctypes(mem)
-        bx = lib.proc_creat(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(0x1000), None)
-        check("proc_creat: dx==0", ref_regs['bx'], bx)
+        # -- dx == 0 -> nothing to do --
+        mem = bytearray(SIM_MEM)
+        regs, ref = run_reference(code, sym['proc_creat'], mem, {'dx': 0})
+        bx, port = run_port(lib, lib.proc_creat, mem, 0)
+        check("proc_creat: dx==0", regs['bx'], bx)
+        check_images("proc_creat: dx==0", ref, port)
 
-        # -- proc_creat: getpdadr fails (pul exhausted) -> bx=0xFFFF --
-        mem = bytearray(0x10000)
-        SYSDAT = 0x3100
-        mem_w16(mem, UDA_WRKSEG, 0x0100)  # far below sysdat -> out of range
-        mem_w16(mem, SD_ENDSEG, 0x7000)
-        mem_w16(mem, SD_PUL, 0)
-        ref_regs, ref_img = run_reference(code, entries['proc_creat'], mem, {'dx': 0x5100}, SYSDAT)
-        buf = to_ctypes(mem)
-        bx = lib.proc_creat(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0x5100), ctypes.c_uint16(SYSDAT), None)
-        check("proc_creat: getpdadr fails -> 0xFFFF", ref_regs['bx'], bx)
+        PARENT_PD, PARENT_UDA = 0x2000, 0x0400
+        MS1 = 0x2400
 
-        # -- proc_creat: single, full success --
-        def build_success_mem():
-            mem = bytearray(0x10000)
-            SYSDAT = WRKSEG = 0x3100
-            mem_w16(mem, UDA_WRKSEG, WRKSEG)
-            mem_w16(mem, SD_ENDSEG, 0x7000)
-            mem_w16(mem, SD_NLSTDEV, 4)
-            mem_w16(mem, SD_NCONDEV, 2)
-            mem[SD_NLSTDEV] = 4
-            mem[SD_NCONDEV] = 2
-
-            PARENT_PD = 0x5000
-            CHILD_PD = 0x5100  # dx -- wrkseg==sysdat so getpdadr's si == dx
-            UDA_SEG = 0x3300
-            PARENT_UDA_SEG = 0x3600
-            MS1 = 0x5400
-
-            mem_w16(mem, SD_RLR, PARENT_PD)
-            mem_w16(mem, PARENT_PD + P_FLAG, PF_CHILDABORT)
-            mem_w16(mem, PARENT_PD + P_UDA, PARENT_UDA_SEG)
-            mem_w16(mem, PARENT_PD + P_MEM, MS1)  # exercises the share loop
-            mem_w16(mem, MS1 + MS_LINK, 0)
-
-            mem_w16(mem, CHILD_PD + P_LINK, 0)  # end of the creation chain
-            mem_w16(mem, CHILD_PD + P_UDA, (UDA_SEG - WRKSEG) & 0xFFFF)  # relative, per real asm
-            mem[CHILD_PD + P_LST] = 1  # < nlstdev -> kept, then + ncondev
-            mem_w16(mem, CHILD_PD + P_MEM, 0)
-
+        def creator_mem(wrkseg, pul=0):
+            mem = bytearray(SIM_MEM)
+            w16(mem, sd(sym['endseg']), ENDSEG)
+            mem[sd(sym['nlstdev'])] = 4
+            mem[sd(sym['ncondev'])] = 2
+            w16(mem, sd(sym['pul']), pul)
+            w16(mem, sd(sym['rlr']), PARENT_PD)
+            w16(mem, sd(PARENT_PD + P_FLAG), PF_CHILDABORT)
+            w16(mem, sd(PARENT_PD + P_UDA), PARENT_UDA)
+            w16(mem, sd(PARENT_PD + P_MEM), MS1)  # exercises the share loop
+            w16(mem, sd(MS1 + MS_LINK), 0)
+            w16(mem, phys(PARENT_UDA, sym['u_wrkseg']), wrkseg)
             for i in range(8):
-                mem[phys(PARENT_UDA_SEG) + U_DF_PASSWORD + i] = 0x30 + i
-            mem_w16(mem, phys(UDA_SEG) + U_STACK_SP, 0x00F0)
-            # every u_init* field starts 0 -> defaults to wrkseg
-
+                mem[phys(PARENT_UDA, sym['u_df_password'] + i)] = 0x30 + i
             for i in range(10):
-                mem_w16(mem, 2 * i, 0x1100 + i)  # IVT ints 0-4, recognizable pattern
+                w16(mem, 2 * i, 0x1100 + i)  # IVT ints 0-4, recognizable pattern
             for i in range(4):
-                mem_w16(mem, 0x380 + 2 * i, 0x2200 + i)  # i_mpm_ip block
+                w16(mem, sym['i_mpm_ip'] + 2 * i, 0x2200 + i)
+            return mem
 
-            return mem, SYSDAT, CHILD_PD, UDA_SEG, WRKSEG, PARENT_UDA_SEG
+        def child_pd(mem, wrkseg, pd_addr, uda_seg, lst, link=0, initss=0):
+            w16(mem, pd_addr + P_LINK, link)
+            w16(mem, pd_addr + P_UDA, (uda_seg - wrkseg) & 0xFFFF)  # relative, per real asm
+            mem[pd_addr + P_LST] = lst
+            w16(mem, pd_addr + P_MEM, 0)
+            w16(mem, phys(uda_seg, sym['u_stack_sp']), 0x00F0)
+            w16(mem, phys(uda_seg, sym['u_initss']), initss)
 
-        def success_snapshot(img, child_pd, uda_seg, wrkseg):
-            ub = phys(uda_seg)
-            # the IRET-frame step's own `di`/`ax` are read via the
-            # ambient ES (uda_seg), not the just-switched user-stack
-            # segment -- see src-c/kernel/proc.c's own header comment
-            # on this; only the final frame *write* uses wrkseg
-            di = mem_r16(img, ub + U_SP)
-            frame = phys(wrkseg) + di
+        def uda_snapshot(img, pd, uda_seg):
+            u = lambda name, k=0: phys(uda_seg, sym[name] + k)  # noqa: E731
+            stack_seg = r16(img, u('u_ss'))
+            frame = phys(stack_seg, r16(img, u('u_sp')))
             return (
-                mem_r16(img, child_pd + P_UDA),
-                mem_r16(img, child_pd + P_PARENT),
-                img[child_pd + P_LST],
-                mem_r16(img, child_pd + P_FLAG),
-                bytes(img[ub + U_DF_PASSWORD:ub + U_DF_PASSWORD + 8]),
-                mem_r16(img, ub + U_INITCS), mem_r16(img, ub + U_INITDS),
-                mem_r16(img, ub + U_INITSS), mem_r16(img, ub + U_INITES),
-                [mem_r16(img, ub + U_IVECTORS + 2 * i) for i in range(10)],
-                [mem_r16(img, ub + U_MPM_IP + 2 * i) for i in range(4)],
-                mem_r16(img, ub + U_SS), mem_r16(img, ub + U_SP),
-                img[ub + U_ERROR_MODE], img[ub + U_PD_CNT], img[ub + U_MULT_CNT],
-                img[ub + U_IN_INT], img[ub + U_INSYS],
-                mem_r16(img, ub + U_DS_SAV), mem_r16(img, ub + U_DMA_SEG),
-                mem_r16(img, ub + U_ES_SAV), mem_r16(img, ub + U_DPARAM),
-                mem_r16(img, ub + U_FLAG_SAV),
-                mem_r16(img, frame + 2), mem_r16(img, frame + 4),
-                mem_r16(img, SD_THRDRT), mem_r16(img, child_pd + P_THREAD),
-                mem_r16(img, SD_DRL), mem_r16(img, child_pd + P_LINK),
+                r16(img, sd(pd + P_UDA)), r16(img, sd(pd + P_PARENT)), img[sd(pd + P_LST)],
+                r16(img, sd(pd + P_FLAG)),
+                bytes(img[u('u_df_password'):u('u_df_password', 8)]),
+                [r16(img, u(f)) for f in ('u_initcs', 'u_initds', 'u_initss', 'u_inites')],
+                [r16(img, u('u_ivectors', 2 * i)) for i in range(10)],
+                [r16(img, u('u_mpm_ip', 2 * i)) for i in range(4)],
+                r16(img, u('u_ss')), r16(img, u('u_sp')),
+                [img[u(f)] for f in ('u_error_mode', 'u_pd_cnt', 'u_mult_cnt', 'u_in_int', 'u_insys')],
+                [r16(img, u(f)) for f in ('u_ds_sav', 'u_dma_seg', 'u_es_sav', 'u_dparam', 'u_flag_sav')],
+                r16(img, frame + 2), r16(img, frame + 4),
             )
 
-        mem, SYSDAT, CHILD_PD, UDA_SEG, WRKSEG, PARENT_UDA_SEG = build_success_mem()
-        ref_regs, ref_img = run_reference(code, entries['proc_creat'], mem, {'dx': CHILD_PD, 'es': PARENT_UDA_SEG}, SYSDAT)
-        buf = to_ctypes(mem)
-        bx = lib.proc_creat(ctypes.cast(buf, c_u8p), ctypes.c_uint16(CHILD_PD), ctypes.c_uint16(SYSDAT), None)
-        port_img = bytes(buf)
-        ref = (ref_regs['bx'],) + success_snapshot(ref_img, CHILD_PD, UDA_SEG, WRKSEG)
-        port = (bx,) + success_snapshot(port_img, CHILD_PD, UDA_SEG, WRKSEG)
-        check("proc_creat: single success (defaults, password, ivectors, iret frame, lists)", ref, port)
+        def lists_snapshot(img, pds):
+            return ([r16(img, sd(sym[n])) for n in ('thrdrt', 'drl', 'pul')] +
+                    [(r16(img, sd(pd + P_THREAD)), r16(img, sd(pd + P_LINK))) for pd in pds] +
+                    [r16(img, sd(PARENT_PD + P_FLAG))])
 
-        # -- proc_creat: a 2-long creation chain (tail-loop drains both) --
-        mem, SYSDAT, CHILD_PD, UDA_SEG, WRKSEG, PARENT_UDA_SEG = build_success_mem()
-        CHILD2_PD = 0x5300
-        UDA_SEG2 = 0x3500
-        mem_w16(mem, CHILD_PD + P_LINK, CHILD2_PD)  # chain to a second creation
-        mem_w16(mem, CHILD2_PD + P_LINK, 0)
-        mem_w16(mem, CHILD2_PD + P_UDA, (UDA_SEG2 - WRKSEG) & 0xFFFF)
-        mem_w16(mem, CHILD2_PD + P_MEM, 0)
-        mem[CHILD2_PD + P_LST] = 9  # >= nlstdev -> reset to 0, then + ncondev
+        def run_case(label, mem, dx, pds_udas):
+            regs, ref = run_reference(code, sym['proc_creat'], mem, {'dx': dx, 'es': PARENT_UDA})
+            bx, port = run_port(lib, lib.proc_creat, mem, dx)
+            check(f"{label}: bx", regs['bx'], bx)
+            for pd, uda_seg in pds_udas:
+                check(f"{label}: PD {pd:04X}h + UDA {uda_seg:04X}h",
+                      uda_snapshot(ref, pd, uda_seg), uda_snapshot(port, pd, uda_seg))
+            pds = [pd for pd, _ in pds_udas]
+            check(f"{label}: thread/ready/unused lists", lists_snapshot(ref, pds), lists_snapshot(port, pds))
+            check_images(label, ref, port)
+            return port
 
-        ref_regs, ref_img = run_reference(code, entries['proc_creat'], mem, {'dx': CHILD_PD, 'es': PARENT_UDA_SEG}, SYSDAT)
-        buf = to_ctypes(mem)
-        bx = lib.proc_creat(ctypes.cast(buf, c_u8p), ctypes.c_uint16(CHILD_PD), ctypes.c_uint16(SYSDAT), None)
-        port_img = bytes(buf)
+        # -- getpdadr fails: u_wrkseg + dx/16 = 0020h, below SYSDAT, and
+        # the PD-unused list is empty --
+        mem = creator_mem(wrkseg=0x0010)
+        regs, ref = run_reference(code, sym['proc_creat'], mem, {'dx': 0x0100, 'es': PARENT_UDA})
+        bx, port = run_port(lib, lib.proc_creat, mem, 0x0100)
+        check("proc_creat: getpdadr fails -> 0xFFFF", regs['bx'], bx)
+        check("proc_creat: getpdadr fails -> 0xFFFF (expected value)", 0xFFFF, bx)
+        check_images("proc_creat: getpdadr fails", ref, port)
 
-        def chain_snapshot(img):
-            return (
-                mem_r16(img, SD_THRDRT),
-                mem_r16(img, CHILD2_PD + P_THREAD), mem_r16(img, CHILD_PD + P_THREAD),
-                mem_r16(img, SD_DRL),
-                mem_r16(img, CHILD2_PD + P_LINK), mem_r16(img, CHILD_PD + P_LINK),
-                img[CHILD2_PD + P_LST],
-                mem_r16(img, CHILD_PD + P_UDA), mem_r16(img, CHILD2_PD + P_UDA),
-            )
+        # -- single success: u_init* defaults (initss kept), password,
+        # ivectors, iret frame on the user stack, lists --
+        CHILD_PD, UDA_SEG = 0x2100, 0x0500
+        mem = creator_mem(wrkseg=SYSDAT)
+        child_pd(mem, SYSDAT, sd(CHILD_PD), UDA_SEG, lst=1, initss=0x0700)
+        run_case("proc_creat: single success", mem, CHILD_PD, [(CHILD_PD, UDA_SEG)])
 
-        check("proc_creat: 2-long chain", (ref_regs['bx'],) + chain_snapshot(ref_img),
-              (bx,) + chain_snapshot(port_img))
+        # -- 2-long creation chain (tail loop drains both) --
+        CHILD2_PD, UDA_SEG2 = 0x2300, 0x0600
+        mem = creator_mem(wrkseg=SYSDAT)
+        child_pd(mem, SYSDAT, sd(CHILD_PD), UDA_SEG, lst=1, link=CHILD2_PD, initss=0x0700)
+        child_pd(mem, SYSDAT, sd(CHILD2_PD), UDA_SEG2, lst=9)  # >= nlstdev -> 0, then + ncondev
+        run_case("proc_creat: 2-long chain", mem, CHILD_PD, [(CHILD_PD, UDA_SEG), (CHILD2_PD, UDA_SEG2)])
+
+        # -- getpdadr copies an out-of-range PD into the PD table --
+        WRKSEG_OUT = 0x0F80          # >= endseg -> outside MP/M
+        SRC_DX = 0x0010              # PD at wrkseg:0010h
+        TABLE_PD, TABLE_NEXT = 0x2600, 0x2700
+        UDA_SEG3 = 0x0800
+        mem = creator_mem(wrkseg=WRKSEG_OUT, pul=TABLE_PD)
+        w16(mem, sd(TABLE_PD + P_LINK), TABLE_NEXT)
+        child_pd(mem, WRKSEG_OUT, phys(WRKSEG_OUT, SRC_DX), UDA_SEG3, lst=1)
+        w16(mem, phys(UDA_SEG3, sym['u_stack_sp']), 0x0040)
+        port = run_case("proc_creat: PD copied into table", mem, SRC_DX, [(TABLE_PD, UDA_SEG3)])
+        check("proc_creat: copied PD flagged pf_table", PF_TABLE, r16(port, sd(TABLE_PD + P_FLAG)) & PF_TABLE)
+        check("proc_creat: pul advanced", TABLE_NEXT, r16(port, sd(sym['pul'])))
 
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")

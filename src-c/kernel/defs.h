@@ -39,6 +39,25 @@ typedef struct {
     uint16_t bx, cx;
 } cio_bxcx;
 
+/* chario.c's XIOS boundary hook: called with the asm's AL (io_*
+ * function), CL and DL for every character-I/O call, returns the
+ * XIOS's AX/BX. Unset, every call returns 0 (chario.c's header). */
+typedef uint16_t (*cio_xios_fn)(uint8_t func, uint8_t cl, uint8_t dl);
+void cio_set_xios(cio_xios_fn fn);
+
+/* load.c's f_freadseq boundary: read the next sequential record of the
+ * FCB at fcb_seg:fcb_off into dma_seg:dma_off; returns the BDOS's AL
+ * (0 = ok, 1 = end of file, 0FFh = error). Unset, reads fail (0FFh). */
+typedef uint8_t (*load_readseq_fn)(uint8_t *phys, uint16_t fcb_seg, uint16_t fcb_off,
+                                   uint16_t dma_seg, uint16_t dma_off);
+void load_set_readseq(load_readseq_fn fn);
+
+/* command.c's BDOS boundary: f_fopen (15) / f_fclose (16) of the FCB at
+ * fcb_seg:fcb_off, both getdiskmx functions (unported); returns the
+ * BDOS's BX (aret). Unset, an open fails (00FFh) and a close returns 0. */
+typedef uint16_t (*cli_bdos_fn)(uint8_t *phys, uint8_t func, uint16_t fcb_seg, uint16_t fcb_off);
+void cli_set_bdos(cli_bdos_fn fn);
+
 /*
  * get_dir_ext_result -- src-c/kernel/file2.c's own `get_dir_ext`
  * output (also used directly by src-c/kernel/file3.c's own `rseek`):
@@ -69,6 +88,7 @@ typedef struct {
 #define p_uda     0x10 /* word: segment address of this PD's UDA */
 /* src/kernel/UDA.FMT */
 #define u_wrkseg  0x2E /* word: current segment addr of buf */
+#define u_retseg  0x30 /* word: usr ES return */
 /* src/kernel/RSP.DEF */
 #define rsp_pd    0x10 /* byte: offset of the Process Descriptor within an RSP's own data segment */
 #define rsp_link  0x00 /* word, es-relative: next RSP's own segment address (linked list) */
@@ -154,73 +174,8 @@ typedef struct {
 /* src/kernel/XIOSCB.DEF */
 #define io_idle 0x17
 
-/*
- * The fields below live in SYSDAT.FMT (System Data Area) or UDA.FMT (one
- * process's User Data Area) on real hardware -- each its OWN segment,
- * unrelated to the code segment or to each other. tools/i86sim.py and this
- * port both model memory as a single flat 64KB array with no real segment
- * registers (see i86sim's docstring), so these real hardware offsets
- * (small, e.g. SYSDAT.FMT's rlr=0x68) would collide with a routine's own
- * code if reused directly. Every Tier-1+ test instead places them at these
- * fixed, harness-chosen scratch addresses -- consistently, across every
- * ported routine that touches them, matching how they really are "the
- * same location" system-wide. The corresponding wrapper .A86 under
- * tests/src-c/fixtures/ declares each as a real DSEG label at the same
- * address (never a plain EQU, which would wrongly assemble "mov bx,rlr"
- * as an immediate load instead of a memory read) so the assembled
- * reference bytes and this port agree on what's a pointer-to and what's
- * the thing itself.
- */
-#define SD_RLR        0xA000 /* word: Ready List Root -- running process's PD */
-#define SD_DRL        0xA002 /* word: Dispatcher Ready List */
-#define SD_DLR        0xA004 /* word: Delay List Root */
-#define SD_NFLAGS     0xA006 /* byte: number of logical interrupt flags */
-#define SD_FLAGS      0xA008 /* word: address of the Flag Table */
-#define SD_VERNUM     0xA00A /* word: MP/M-86 w/BDOS version */
-#define SD_MPMVERNUM  0xA00C /* word: MP/M-86 version */
-#define UDA_DPARAM    0xA010 /* word: arg to dispatch */
-#define UDA_WRKSEG    0xA012 /* word: current segment addr of buf */
-#define UDA_RETSEG    0xA014 /* word: return segment for a far return */
-#define SD_PLR        0xA01C /* word: Poll List Root */
-#define SD_SLR        0xA01E /* word: Swap List Root */
-#define SD_QLR        0xA020 /* word: root of the active Queue Descriptor list */
-#define SD_QUL        0xA022 /* word: root of the unused-QD free list */
-#define SD_QMAU       0xA024 /* word: MAU root queue buffers allocate from */
-#define SD_ENDSEG     0xA026 /* word: segment just past the end of the system */
-#define SD_MDUL       0xA028 /* word: root of the unused MD free list */
-#define SD_MAL        0xA02A /* word: root of the active MAU list */
-#define SD_MFL        0xA02C /* word: root of the Memory Free List */
-#define SD_CCB        0xA030 /* word: base address of the CCB table */
-#define SD_THRDRT     0xA032 /* word: Process Thread Root */
-#define SD_NCNS       0xA034 /* byte: number of system console devices */
-#define SD_NLSTDEV    0xA035 /* byte: number of XIOS list devices */
-#define SD_NCONDEV    0xA036 /* byte: number of XIOS console devices */
-#define SD_PUL        0xA038 /* word: Process Descriptor Unused List */
-#define SD_MXMEMOWNER 0xA03A /* word: PD owning the MX memory queue mutex */
-#define SD_MXMEMCOUNT 0xA03C /* byte: mutex nesting count */
-#define SD_NCIODEV    0xA037 /* byte: number of character i/o devices */
-/* src/kernel/INIT.SUP's own scratch fields -- confirmed via
- * `--symbols` against tests/src-c/fixtures/init_wrapper.A86 (that
- * wrapper's own DSEG layout, not independently chosen then matched
- * up by hand -- same reasoning as the BD_* block in file1.c for why
- * this avoids drift between the constant and the test). `SD_INTFLAG`
- * above is a different, pre-existing, still-unconsumed scratch slot
- * for this same SYSDAT.FMT field under a different file's own
- * wrapper layout -- not reused here for the same reason no two
- * files' own independently-chosen BD_ or SD_ addresses are expected
- * to agree unless they come from the very same combined wrapper. */
-#define SD_INIT_VERSION   0xA800 /* word: addr. version str in SUP code segment */
-#define SD_INIT_TICK_TOS  0xA802 /* word: addr of TICK.SUP's own notick entry */
-#define SD_INIT_IDLE_TOS  0xA804 /* word: addr of IDLE.SUP's own idle entry */
-#define SD_INIT_INTFLAG   0xA806 /* byte: if 0, interrupts not enabled */
-#define SD_RSPSEG         0xA80B /* word: segment of first RSP (linked list head) */
-#define SD_INITPD         0xA80D /* byte[pdlen=0x30]: INIT.SUP's own init process's PD */
-#define SD_INITUDA        0xA84D /* byte[ulen=0x100]: INIT.SUP's own init process's UDA */
-#define SD_SUPMOD_OFF     0xA88D /* word: SYSDAT module_table[SUP]'s own entry-pointer offset half (supmod+0) */
-#define SD_SUPMOD_SEG     0xA88F /* word: SYSDAT module_table[SUP]'s own entry-pointer segment half (supmod+2) */
-/* src/kernel/INIT.SUP's own `sysdat`/`supervisor` cseg cells (not a
- * harness-chosen scratch address like the fields above -- these are
- * the module's own real, already-resolved cseg offsets, same
+/* src/kernel/INIT.SUP's own `sysdat`/`supervisor` cseg cells -- the
+ * module's own real, already-resolved cseg offsets, same
  * reasoning as the BD_* block in this file: INIT.SUP itself declares
  * them at its own cseg's very start, right after its own 2 `jmp`s
  * (`jmp init ! jmp entry`, 3 bytes each = 6), so `sysdat`=6 and
@@ -240,7 +195,7 @@ typedef struct {
  * own `supervisor` offset half is a fixed compile-time constant, its
  * own `entry` label -- see init.c's own header comment), these two
  * modules' own `init` copies *both* halves of `supervisor` from
- * SYSDAT's own module_table[SUP] entry (SD_SUPMOD_OFF/SD_SUPMOD_SEG),
+ * SYSDAT's own module_table[SUP] entry (SYSDAT_SUPMOD),
  * since their own `supervisor` has to point at a genuinely different
  * module's own `entry` label, not a fixed offset within itself. */
 #define CIOIF_SYSDAT          0x0006 /* word: CIOIF.CIO's own saved sysdat segment (cs:sysdat) */
@@ -256,23 +211,10 @@ typedef struct {
 #define BDOSIF_SUPERVISOR_OFF  0x0008 /* word: BDOSIF.BDO's own `supervisor` far-ptr offset half */
 #define BDOSIF_SUPERVISOR_SEG  0x000A /* word: BDOSIF.BDO's own `supervisor` far-ptr segment half */
 
-/* src/kernel/SYSDAT.FMT's own `dispatcher`/`rtm_pdisp` (4-byte far
- * pointers, set by RTMIF.RTM's own `init` to DSPTCH.RTM's own
- * `fdisp`/`farpdisp`) and `idlepd`/`tickpd` (real PDs, `pdlen` bytes
- * each) -- *real* SYSDAT.FMT byte offsets this time (probed
- * directly), unlike `SD_SUPMOD_OFF`/`SD_SUPMOD_SEG` above: those work
- * as flat addresses only because every caller that reads them
- * (`cioif.c`/`memif.c`/`init.c`) is tested non-segmented, where the
- * segment register is ignored anyway. `rtmif.c`'s own `init` is the
- * first of this group that genuinely needs `segmented=True` (for its
- * own real `proc_creat` call), and under that mode a plain
- * `mov ax,dispatcher`-shaped reference really is `DS`-relative --
- * `DS` is a real, non-zero `sysdat` segment in the real system
- * (confirmed: `dispatcher`'s own raw offset, 0x38, sits *inside*
- * `RTMIF.RTM`'s own `init` body if `sysdat` is ever treated as flat
- * 0, so it cannot be flattened the way `SD_SUPMOD_OFF` is) --
- * `rtmif.c` reads/writes these via `mem_*_seg(mem, ds_sysdat, ...)`
- * instead of a flat `SD_*` constant. */
+/* src/kernel/SYSDAT.FMT -- real SYSDAT offsets (the SYSDAT segment is
+ * every module's DS). `dispatcher`/`rtm_pdisp` are 4-byte far pointers,
+ * set by RTMIF.RTM's own `init` to DSPTCH.RTM's own `fdisp`/`farpdisp`;
+ * `idlepd`/`tickpd` are real PDs, `pdlen` bytes each. */
 #define SYSDAT_SUPMOD     0x0000 /* word[2]: SYSDAT.FMT's own module_table[SUP] entry far ptr */
 #define SYSDAT_DISPATCHER 0x0038 /* word[2]: far ptr to DSPTCH.RTM's own fdisp */
 #define SYSDAT_RTM_PDISP  0x003C /* word[2]: far ptr to DSPTCH.RTM's own farpdisp */
@@ -282,10 +224,90 @@ typedef struct {
     UDA (probed directly, same file as SYSDAT_SUPMOD/etc above) -- doubles as
     COMMAND.SUP's own chain-mode scratch UDA (`cli_ld1`'s own `offset inituda`
     relocation, `command.c`'s own `cli_gopen`) */
-#define SD_INDISP     0xAC00 /* byte: currently in dispatch? */
-#define SD_INTFLAG    0xAC01 /* byte: if 0, interrupts not enabled */
-#define SD_ES_SAV     0xAC02 /* word */
-#define SD_BX_SAV     0xAC04 /* word */
+/* More real SYSDAT.FMT offsets, the fields INIT.SUP's own `init`
+ * touches (init.c reads/writes them through real memory, see
+ * far_ptr() below). tests/src-c/test_init.py checks each against the
+ * real assembled SYSDAT.FMT symbol, not a hand-copied value. */
+#define SYSDAT_RSPSEG     0x0042 /* word: segment of first RSP (linked list head) */
+#define SYSDAT_VERSION    0x0078 /* word: addr. version str in SUP code segment */
+#define SYSDAT_NCONDEV    0x0083 /* byte: # XIOS consoles */
+#define SYSDAT_NLSTDEV    0x0084 /* byte: # XIOS list devices */
+#define SYSDAT_NCNS       0x0047 /* byte: # system consoles */
+#define SYSDAT_TOD        0x007E /* tod_day word + tod_hr/min/sec bytes */
+#define SYSDAT_VERNUM     0x007A /* word: MP/M-86 w/BDOS version */
+#define SYSDAT_MPMVERNUM  0x007C /* word: MP/M-86 version */
+#define SYSDAT_SYSENT     0x00A0 /* the system-entry (function -> module) table */
+#define SYSDAT_SRCHDISK   0x004B /* byte: default search disk */
+#define SYSDAT_DAYFILE    0x004F /* byte: 0xFF -- display command info */
+/* LOAD.SUP's variables (SYSDAT.FMT) */
+#define SYSDAT_MXLOADQPB      0x03BC /* the MXLoad queue's QPB (pre-opened) */
+#define SYSDAT_MXCLIQPB       0x03E8 /* the MXCli queue's QPB (pre-opened) */
+#define SYSDAT_LOAD_DMA       0x0424 /* byte[128]: load's record buffer */
+#define SYSDAT_LOAD_UDA       0x04A4 /* word */
+#define SYSDAT_LOAD_LSTK      0x04A6 /* word */
+#define SYSDAT_LOAD_BASEP     0x04A8 /* word */
+#define SYSDAT_LOAD_8080      0x04AA /* byte */
+#define SYSDAT_LOAD_NRELSEGS  0x04AB /* byte */
+#define SYSDAT_LOAD_NLDTABENTS 0x04AC /* word */
+#define SYSDAT_LOAD_PD        0x04AE /* word: pd of load prog */
+#define SYSDAT_LOAD_FCB       0x04B0 /* word: addr of open FCB in u_wrkseg */
+#define SYSDAT_LOAD_MAXWANTED 0x04B2 /* word */
+#define SYSDAT_LOAD_MINWANTED 0x04B4 /* word */
+#define SYSDAT_LOAD_INDMA     0x04B6 /* word */
+#define SYSDAT_LOAD_CHAIN     0x04B8 /* byte: true (0FFh) on a chain load */
+#define SYSDAT_LDTAB          0x04B9 /* ldtab[], ldtablen bytes per entry */
+#define ldtabsiz              0x00AA /* LDTAB.DEF: 10 entries */
+/* src/kernel/XIOSCB.DEF's character I/O function numbers (xiosif's AL) */
+#define io_const   0
+#define io_conin   1
+#define io_conout  2
+#define io_list    3
+#define SYSDAT_NCIODEV    0x0085 /* byte: # character i/o devices */
+#define SYSDAT_INITPD     0x09C0 /* byte[pdlen]: INIT.SUP's own init process's PD */
+#define SYSDAT_IDLE_TOS   0x0A7A /* word: IDLE.SUP's own initial top-of-stack (its entry) */
+#define SYSDAT_TICK_TOS   0x0AAA /* word: TICK.SUP's own initial top-of-stack (its entry) */
+#define SYSDAT_INTFLAG    0x0B5F /* byte: if 0, interrupts not enabled */
+#define INIT_VER          0x0037 /* INIT.SUP's own `ver` string, offset in the SUP code segment */
+/* Real SYSDAT.FMT offsets for the process lists and dispatcher state
+ * proc.c/dsptch.c/sysent.c use on real memory (from RTM.A86's
+ * --symbols). PD addresses on these lists are offsets within the
+ * SYSDAT segment, since the real asm reaches every PD DS-relative. */
+#define SYSDAT_ENDSEG     0x0044 /* word: 1st paragraph outside MP/M */
+#define SYSDAT_NFLAGS     0x004A /* byte: number of system flags */
+#define SYSDAT_FLAGS      0x0056 /* word: address of the Flag Table (in SYSDAT) */
+#define SYSDAT_PUL        0x005C /* word: Process Descriptor Unused List */
+#define SYSDAT_RLR        0x0068 /* word: Ready List Root -- running process's PD */
+#define SYSDAT_DLR        0x006A /* word: Delay List Root */
+#define SYSDAT_DRL        0x006C /* word: Dispatcher Ready List */
+#define SYSDAT_PLR        0x006E /* word: Poll List Root */
+#define SYSDAT_SLR        0x0070 /* word: Swap List Root */
+#define SYSDAT_THRDRT     0x0072 /* word: Process Thread Root */
+#define SYSDAT_INDISP     0x0B5E /* byte: currently in dispatch? */
+#define SYSDAT_MXMEMOWNER 0x0B64 /* word: PD owning the MX memory queue mutex */
+#define SYSDAT_MXMEMCOUNT 0x0B66 /* byte: mutex nesting count */
+#define SYSDAT_CCB        0x0054 /* word: address of the CCB table (in SYSDAT) */
+#define SYSDAT_QUL        0x005E /* word: root of the unused-QD free list */
+#define SYSDAT_QMAU       0x0060 /* word[]: MAU queue buffers allocate from */
+#define SYSDAT_QLR        0x0074 /* word: root of the active Queue Descriptor list */
+#define SYSDAT_MDUL       0x0058 /* word: root of the unused MD free list */
+#define SYSDAT_MFL        0x005A /* word: root of the Memory Free List */
+#define SYSDAT_MAL        0x0076 /* word: root of the active MAU list */
+/* Fixed spots in the running process's UDA stack area for the parameter
+ * blocks the MEM asm builds on its own stack and hands to `mpmif` with
+ * DS = SS. During a system call SS is the running UDA and SP starts at
+ * ulen (SUPIF.SUP's user_entry: `mov ss,es ! mov sp,ulen`), so the real
+ * blocks live in the UDA's stack area too (above its last field, u_stat_sav
+ * at 61h); the C port has no 8086 stack, so it uses these fixed offsets,
+ * kept apart because free_memory's MFPB is still live during mfree_it. */
+#define UDA_STK_MAF       0x0090 /* word[3]: memory.c mfree_it's MAF.DEF block */
+#define UDA_STK_MFPB      0x0098 /* word[2]: cpmmem.c free_memory's MFPB.DEF block */
+#define UDA_STK_MPB       0x00A0 /* word[5]: cpmmem.c getmemory's MPB.DEF block */
+#define UDA_STK_LOAD_MCB  0x00B0 /* byte[5]: load.c ld_freeit's MCB (f_freemem) */
+#define UDA_STK_LOAD_MFPB 0x00B8 /* word[2]: load.c's MFPB (f_memfree) */
+/* src/kernel/DATA.BDO's mxdiskqd/mxdiskqpb, BDOS module data in the
+ * combined SYSDAT+DATA.BDO data segment (BDOS.A86's --symbols) */
+#define SYSDAT_MXDISKQD   0x0F92 /* byte[qdlen]: the MX disk queue's QD */
+#define SYSDAT_MXDISKQPB  0x0FAE /* byte[qpblen]: its QPB */
 
 /* src/kernel/CHAR.DEF */
 #define ctlc   0x03
@@ -631,18 +653,6 @@ typedef struct {
 #define BD_OPEN_MAX    0x008C /* byte: max simultaneous open files/locks allowed */
 #define BD_LOCK_MAX    0x008A /* byte: max simultaneous locked records allowed */
 
-/* src-c/kernel/chario.c's own scratch addresses for the literal CS-
- * resident strings src/kernel/CHARIO.CIO embeds inline (ptrmsg,
- * abortmsg, attachmsg) -- this port has nowhere else to put them, so it
- * writes each one into one of these fixed, harness-chosen addresses
- * just before printing it (same "fixed scratch address" reasoning as
- * every other scratch constant above), rather than reproducing the
- * real segment-override dance CHARIO.CIO's prcsmsg/prname use to read a
- * CS- or DS-resident string transparently. */
-#define CHARIO_PTRMSG    0xB200
-#define CHARIO_ABORTMSG  0xB220
-#define CHARIO_ATTACHMSG 0xB240
-
 static inline uint16_t mem_r16(const uint8_t *mem, uint16_t addr) {
     return (uint16_t)(mem[addr] | (mem[(uint16_t)(addr + 1)] << 8));
 }
@@ -676,14 +686,58 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
     mem[(uint16_t)((uint16_t)(seg * 16) + offset)] = val;
 }
 
-/* The bare segment:offset -> physical-address computation, with no
- * read/write of its own -- for passing a genuinely segment-relative
- * address into a generic, already-flat helper (src-c/kernel/file1.c's
- * own `move`/`compare`, file1.c's own `cmpec0`, etc.) that takes a
- * plain uint16_t address and has no segment parameter of its own,
- * rather than threading a new parameter through it too. */
-static inline uint16_t mem_seg_addr(uint16_t seg, uint16_t offset) {
-    return (uint16_t)((uint16_t)(seg * 16) + offset);
+/* Real-memory addressing -- what every src-c/kernel file runs on. (The
+ * flat 64KB mem_* helpers above are for src-c/loader, which still uses
+ * that model.)
+ * `phys` is the base of the real 8086 physical address space: the
+ * linked kernel passes the start of physical memory, a test passes a
+ * host buffer standing in for it. seg:off is the real 8086 address
+ * seg*16 + off -- 20 bits, no 16-bit wrap, real offsets throughout. */
+static inline uint8_t *far_ptr(uint8_t *phys, uint16_t seg, uint16_t off) {
+    return phys + ((uint32_t)seg << 4) + off;
+}
+
+static inline uint16_t rd16(const uint8_t *p) {
+    return (uint16_t)(p[0] | (p[1] << 8));
+}
+
+static inline void wr16(uint8_t *p, uint16_t v) {
+    p[0] = (uint8_t)(v & 0xFF);
+    p[1] = (uint8_t)(v >> 8);
+}
+
+/* Byte/word at `off` within a segment, given the segment's base
+ * (from far_ptr). `off` is uint16_t, so `si + p_link`-style arithmetic
+ * passed straight in wraps at 64KB the way a real 8086 offset does. */
+static inline uint8_t seg_r8(const uint8_t *seg, uint16_t off) {
+    return seg[off];
+}
+
+static inline void seg_w8(uint8_t *seg, uint16_t off, uint8_t v) {
+    seg[off] = v;
+}
+
+static inline uint16_t seg_r16(const uint8_t *seg, uint16_t off) {
+    return rd16(seg + off);
+}
+
+static inline void seg_w16(uint8_t *seg, uint16_t off, uint16_t v) {
+    wr16(seg + off, v);
+}
+
+/* The running process's UDA segment. The real asm reaches u_* fields
+ * through its ambient ES, which always holds this while a process is
+ * running (fdisp sets it explicitly: `mov es,p_uda[rlr]`). */
+static inline uint16_t rlr_uda(const uint8_t *sysdat) {
+    return seg_r16(sysdat, (uint16_t)(seg_r16(sysdat, SYSDAT_RLR) + p_uda));
+}
+
+/* SUPIF.SUP's user_entry, as an RSP's `int mpmint` reaches a function:
+ * u_wrkseg = the caller's DS (left that way afterwards, as user_entry
+ * does on a call from user level). Its stack switch, u_insys count and
+ * u_retseg/u_stack_* saves aren't modeled. */
+static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
+    seg_w16(far_ptr(phys, rlr_uda(far_ptr(phys, sysdat, 0)), 0), u_wrkseg, ds);
 }
 
 /* src/kernel/MAU.MEM's own SAT (suballocation table) header offsets,
@@ -769,120 +823,9 @@ static inline uint16_t mem_seg_addr(uint16_t seg, uint16_t offset) {
 #define f_cload          0x10E /* (sup*0x100)+14 */
 #define f_conprint       0x40E /* (cio*0x100)+14 */
 
-/* src/kernel/SYSDAT.FMT -- time-of-day bytes src-c/kernel/command.c's
- * own prtime reads, at fixed harness-chosen scratch addresses (same
- * reasoning as every other SD_* constant above) */
-#define SD_TOD_HR  0xA040
-#define SD_TOD_MIN 0xA041
-#define SD_TOD_SEC 0xA042
-
-/* src/rsp/CLOCK.A86's own TOD (time-of-day) structure in SYSDAT
- * (day:word, hour:byte, min:byte, sec:byte, real offsets 0/2/3/4) --
- * a separate harness-chosen scratch base from SD_TOD_HR/MIN/SEC above
- * (COMMAND.SUP's own, independently chosen, not confirmed to be the
- * same physical struct), same "fixed scratch address" reasoning */
-#define SD_CLOCK_TOD_BASE 0xA044 /* word[1]+byte[3]: day/hour/min/sec */
-
-/* src/kernel/SYSDAT.FMT's own `tod`/`tod_day`/`tod_hr`/`tod_min`/
- * `tod_sec` (real offsets 0/0/2/3/4, `tod` itself a zero-size alias
- * for `tod_day`) -- src/kernel/SYSFUNC.SUP's own `tod_entry` reads
- * this same real struct `rep movs`-style (`todlen`=5 bytes), but at
- * its own independently-chosen scratch base, same reasoning as
- * SD_CLOCK_TOD_BASE just above (not confirmed to be the same real
- * struct as either SD_TOD_HR/MIN/SEC or SD_CLOCK_TOD_BASE) */
-#define SD_TOD     0xA049 /* word[1]+byte[3]: tod_day/tod_hr/tod_min/tod_sec */
+/* src/kernel/SYSDAT.FMT -- the tod structure's length (tod_entry's
+ * copy); the structure itself is at SYSDAT_TOD */
 #define todlen     5
-
-/* src/kernel/FILE3.BDO/FILE4.BDO's own `OFFSET TOD` (day:word, hour:
- * byte, min:byte, sec:byte, real offsets 0/2/3/4) -- `STAMP1`'s/
- * `STAMP2`'s own source. Its own independently-chosen scratch base,
- * same reasoning as `SD_CLOCK_TOD_BASE`/`SD_TOD` above (not confirmed
- * to be the same real struct as either). */
-#define SD_FILE_TOD 0xA780 /* word[1]+byte[3]: day/hour/min/sec */
-
-/* src/kernel/SYSDAT.FMT -- src/kernel/COMMAND.SUP's own scratch
- * variables (the subset src-c/kernel/command.c's ported subroutines
- * touch), at fixed harness-chosen scratch addresses */
-#define SD_CLI_CNS     0xA050
-#define SD_CLI_USER    0xA051
-#define SD_CLI_DSK     0xA052
-
-/* src/kernel/UDA.FMT -- the subset of UDA fields src-c/kernel/file4.c's
- * own ported routines touch, at fixed harness-chosen scratch addresses
- * (same reasoning as every other UDA_ and SD_ constant above: UDA.FMT
- * declares its own `eseg`/`org 0`, a real separate hardware segment,
- * so its own real small offsets -- e.g. u_dma_ofst=2, u_retseg=0x30 in
- * the combined BDOS bundle -- collide with cseg's own early code once
- * collapsed into tools/i86sim.py's single flat 64KB array; same class
- * of gap as SYSDAT.FMT's own rlr=0x68, see that comment above) */
-#define UDA_DMA_OFST    0xA060 /* word: BDOS dma offset */
-#define UDA_DMA_SEG     0xA062 /* word: BDOS dma segment */
-#define UDA_ERROR_MODE  0xA064 /* byte: BDOS error mode */
-#define UDA_MULT_CNT    0xA065 /* byte: BDOS multi-sector count */
-
-/* src/rsp/TMP.A86's own DSEG fields src-c/kernel/tmp.c touches, at
- * fixed harness-chosen scratch addresses -- TMP.A86's real `org
- * rsp_top`/`org rsp_pd`/`org rsp_bottom` DSEG offsets (e.g. clicb_cmd
- * at 0x1e0) land squarely inside its own 0x423-byte cseg once
- * collapsed into tools/i86sim.py's single flat 64KB array (confirmed
- * via `--symbols`), unlike ECHO.A86/CLOCK.A86 where this happened not
- * to collide; same class of gap as SYSDAT.FMT's own rlr=0x68, see that
- * comment above */
-#define SD_TMP_CMDSENT    0xA070 /* byte: true once a CLI command has been sent */
-#define SD_TMP_READ_BLEN  0xA071 /* byte: length of the last console-read command */
-#define SD_TMP_FCB        0xA072 /* byte[32]: parsefilename's own output FCB */
-#define SD_TMP_PARSERET   0xA092 /* word: clicall's own parsefilename result (bx) */
-#define SD_TMP_PCB        0xA094 /* word[2]: parsefilename's own local PCB.DEF block */
-#define SD_CPMMEM_MPB     0xA0A0 /* word[5]: getmemory's own on-stack MPB.DEF block --
-    see cpmmem.c's own header comment on why this is memory, not registers */
-#define SD_MFREE_MAF      0xA0AC /* word[3]: mfree_it's own on-stack MAF.DEF block --
-    see memory.c's own header comment */
-#define SD_CPMMEM_MFB     0xA0B4 /* word[2]: free_memory's own on-stack MFPB.DEF block --
-    see cpmmem.c's own header comment */
-#define SD_MXDISKQD       0xA0C0 /* qdlen=30 bytes: src/kernel/DATA.BDO's own
-    mxdiskqd -- a flat scratch address, same convention as SD_SUPMOD_OFF above
-    (BDOSIF.BDO's own init is tested non-segmented, see bdosif.c's own header
-    comment), not mxdiskqd's real raw offset within the combined SYSDAT.FMT+
-    DATA.BDO dseg (probed: 0xf92) */
-#define SD_MXDISKQPB      0xA0E0 /* qpblen=16 bytes: src/kernel/DATA.BDO's own
-    mxdiskqpb, same flat-scratch convention as SD_MXDISKQD above (probed real
-    raw offset: 0xfae) */
-#define SD_TMP_CLICB_CMD  0xA100 /* byte[129]: the command text itself */
-#define SD_TMP_CLICB      (SD_TMP_CLICB_CMD - 1) /* byte: clicb_net, immediately
-                                                     before SD_TMP_CLICB_CMD's own
-                                                     cmdcb_cmd field -- see tmp.c's
-                                                     own header comment */
-#define SD_TMP_SAVEBUF    0xA200 /* byte[128]: clicall's own copy, '$'-terminated */
-
-/* src/rsp/SUBMIT.A86's own DSEG fields src-c/kernel/submit.c touches,
- * at fixed harness-chosen scratch addresses -- same collision as
- * TMP.A86 (its real DSEG offsets, e.g. cmdtail at 0x80, land inside
- * its own 0x665-byte cseg), see defs.h's comment on SD_TMP_* above. */
-#define SD_SUBMIT_CMDTAIL    0xA300 /* byte[1+128]: length byte + raw command tail */
-#define SD_SUBMIT_DEBLANKBUF 0xA400 /* byte[129]: deblanked command tail */
-#define SD_SUBMIT_ARGTABLE   0xA500 /* byte[64]: each argument's start offset into DEBLANKBUF */
-#define SD_SUBMIT_NUMARGS    0xA540 /* word: number of arguments found */
-#define SD_SUBMIT_CMDBUF     0xA5F0 /* byte: readbuffer's own max-length byte */
-#define SD_SUBMIT_BLEN       0xA5F1 /* byte: readbuffer's own count byte */
-#define SD_SUBMIT_CMD        0xA5F2 /* byte[129]: one line read from the SUB file */
-#define SD_SUBMIT_CLICMD     0xA700 /* byte[129]: cmd with $0-$9 args substituted in */
-#define SD_SUBMIT_DMA        0xA800 /* byte[128]: the SUB file's current 128-byte DMA page */
-#define SD_SUBMIT_BUF_PTR    0xA880 /* byte: current read position within SD_SUBMIT_DMA */
-#define SD_SUBMIT_PDADR      0xA890 /* word: this process's own PD address */
-#define SD_SUBMIT_SUBFILENAME 0xA8A0 /* byte[11]: the SUB file's own name, for the abort prompt */
-#define SD_SUBMIT_FCB        0xA8B0 /* byte[36]: the SUB file's own FCB */
-#define SD_SUBMIT_CMDSENT    0xA8E0 /* byte: true once a CLI command has been sent */
-#define SD_SUBMIT_DEFDISK    0xA8E1 /* byte: current default disk */
-#define SD_SUBMIT_DEFUSER    0xA8E2 /* byte: current default user number */
-#define SD_SUBMIT_PROMPTUTENS 0xA8E3 /* byte: prompt's own user-number tens digit (or 13 if none) */
-#define SD_SUBMIT_PROMPTUONES 0xA8E4 /* byte: prompt's own user-number ones digit */
-#define SD_SUBMIT_PROMPTDISK  0xA8E5 /* byte: prompt's own disk-letter character */
-#define SD_SUBMIT_PARSERESULT 0xA8E6 /* byte[36]: notdrive's own parsefilename output FCB */
-#define SD_SUBMIT_PARSERET   0xA90A /* word: notdrive's own parsefilename result (bx) */
-#define SD_SUBMIT_PCB        0xA90C /* word[2]: parsefilename's own local PCB.DEF block */
-#define SD_SUBMIT_CLICB      (SD_SUBMIT_CLICMD - 1) /* byte: clicb_net, immediately
-                                                        before SD_SUBMIT_CLICMD -- see
-                                                        submit.c's own header comment */
 
 /* src/kernel/SYSTEM.DEF */
 #define ulen    0x100 /* size of uda */
@@ -938,52 +881,6 @@ static inline uint16_t mem_seg_addr(uint16_t seg, uint16_t offset) {
 #define ls_roffset  0x5C /* word */
 #define ls_rcseg    0x5E /* word */
 
-/* src/kernel/SYSDAT.FMT -- "Data Used by Load Program", the subset
- * src-c/kernel/load.c's own load_finish touches, at fixed
- * harness-chosen scratch addresses (same reasoning as every other
- * SD_* constant above) */
-#define SD_LOAD_PD          0xA900 /* word: pd of load prog */
-#define SD_LOAD_FCB         0xA902 /* word: addr of open FCB in u_wrkseg */
-#define SD_LOAD_NLDTABENTS  0xA904 /* word */
-#define SD_LOAD_BASEP       0xA906 /* word */
-#define SD_LOAD_8080        0xA908 /* byte */
-#define SD_LOAD_UDA         0xA909 /* word */
-#define SD_LOAD_LSTK        0xA90B /* word */
-#define SD_LOAD_LDTAB       0xA910 /* ldtab[], ldtablen bytes per entry (up to
-                                       10 entries, wrapper reserves 200 bytes
-                                       -- ends at 0xA9D8) */
-#define SD_LOAD_INDMA       0xA9E7 /* word: starting paragraph # currently
-                                       sitting in SD_LOAD_DMA (tests/src-c/
-                                       fixtures/load_wrapper.A86's own real
-                                       `load_indma`, confirmed via --symbols) */
-#define SD_LOAD_DMA         0xAB00 /* 128-byte (8-paragraph) shared record
-                                       buffer, src-c/kernel/load.c's own
-                                       load_group/load_finish (load_wrapper.
-                                       A86's own real `load_dma`) */
-
-/* `diskread`'s/`load_group`'s own real `mpmif(f_freadseq)` dependency
- * (see src-c/kernel/load.c's own header comment): a deliberately
- * simplified single-extent "virtual disk" standing in for a real
- * sequential BDOS file read. `SD_LOAD_DISK` is laid out as
- * consecutive `SD_LOAD_DISK_RECS`-many 128-byte CP/M records,
- * starting at `fcb_nxtrec`'s own real record 0; this port supports
- * only a single extent (no disk-map/extent-switch logic), which every
- * file this project's own tests load is small enough to stay within
- * -- real multi-extent handling is out of scope here, same spirit as
- * every other "deliberate simplification, documented" case elsewhere
- * in this tree. Both scratch addresses are this port's own (no real
- * SYSDAT.FMT equivalent -- the real BDOS keeps no such flat array). */
-#define SD_LOAD_DISK_RECS   0xA9E9 /* word: # of 128-byte records in SD_LOAD_DISK */
-#define SD_LOAD_DISK        0xB000 /* record 0 starts here, 128 bytes/record */
-
-/* `load`'s own `load_giveup` cleanup builds a throwaway MFPB (see
- * MPB.DEF: {start, pd}) on the real stack to call mfree_entry with;
- * this port uses a small fixed scratch area instead, same spirit as
- * every other SD_* constant here. */
-#define SD_LOAD_MFPB        0xA9EB /* mfpb_start/mfpb_pd, 4 bytes */
-#define SD_LOAD_MCB         0xA9EF /* mcb_base/mcb_length/mcb_ext, 5 bytes --
-    cload_entry's own ld_freeit free-all-but-Load scratch block */
-
 /* src/kernel/APB.DEF -- Abort Parameter Block (abort_spec_entry's own
  * input, reached through u_wrkseg same as every other *PB above) */
 #define abt_prior   32
@@ -998,89 +895,48 @@ static inline uint16_t mem_seg_addr(uint16_t seg, uint16_t offset) {
  * own terminate_entry uses (bdos*0x100)+46 */
 #define f_bdosterm 0x12E
 
-#define CLI_FCB        0xB300 /* byte[fcblen+1] */
-#define CLI_CUSPQPB    0xB320 /* byte[16] */
-#define CLI_ACB        0xB340 /* byte[12] */
-#define CLI_PCB        0xB350 /* word[2] */
-#define CLI_CMDTAIL    0xB360 /* byte[130] */
-#define MXCLIQPB       0xB400 /* byte[16] */
-
 #define fcb_pptr 0x18 /* word: password-length word's own address, src/kernel/FCB.DEF */
 
-/* src/kernel/COMMAND.SUP's own remaining SYSDAT scratch fields
- * src-c/kernel/command.c's own clicmd_entry touches (SD_CLI_CNS/USER/
- * DSK above are the same convention, prepared earlier but unused
- * until now). `CLI_PCB`'s own two words (`pcb_flnmptr`/`pcb_fcbptr`)
- * are set explicitly by this port's own `cli_pfn` helper on every
- * call, standing in for the real system's own boot-time SYSDAT init
- * (COMMAND.SUP's own code never writes `pcb_fcbptr` at all, and only
- * ever adjusts `pcb_flnmptr` temporarily for the "2nd argument"
- * parse, restoring it right after -- see that file's own header
- * comment). */
-#define SD_DAYFILE      0xA068 /* byte: 0xFF -- display command info (dayfile mode) */
-#define SD_SRCHDISK     0xA069 /* byte: default search disk */
-#define SD_CLI_PD       0xA053 /* word: the newly-allocated PD, if any */
-#define SD_CLI_CHAIN    0xA055 /* byte: true if this is a chain load */
-#define SD_CLI_TERM     0xA056 /* byte: true if this process should terminate on exit */
-#define SD_CLI_DFIL     0xA057 /* byte: true if dayfile info is being shown */
-#define SD_CLI_ERR      0xA058 /* word: error code to report at cli_exit */
-#define SD_CLI_ERR_MODE 0xA05A /* byte: the calling process's own saved u_error_mode */
-#define SD_CLI_DMA_OFST 0xA05B /* word: the calling process's own saved u_dma_ofst */
-#define SD_CLI_DMA_SEG  0xA05D /* word: the calling process's own saved u_dma_seg */
-/* SD_CLI_PFLAG/PPD/LDDSK/BPAGE land past SD_CLI_NET/DAYFILE/SRCHDISK
- * (0xA072+, not 0xA05F+) because that lower range overlaps
- * UDA_DMA_OFST/UDA_DMA_SEG/UDA_ERROR_MODE/UDA_MULT_CNT (0xA060-0xA065)
- * -- both this process's own saved copy and the live UDA field are
- * touched in the same clicmd_exit call, so they can't share bytes */
-#define SD_CLI_PFLAG    0xA072 /* word: the calling process's own saved p_flag */
-#define SD_CLI_PPD      0xA074 /* word: the calling (parent) process's own PD */
-#define SD_CLI_LDDSK    0xA076 /* byte: the FCB's own disk letter, for the Base Page */
-#define SD_CLI_BPAGE    0xA077 /* word: the newly-loaded program's own Base Page segment */
-#define SD_CLI_NET      0xA066 /* byte: clicb_net, copied from the command buffer */
+/* src/kernel/SYSDAT.FMT -- COMMAND.SUP's cli_* fields (real SYSDAT
+ * offsets). SYSTEM.DAT initializes cli_pcb (flnmptr = cli_cmdtail,
+ * fcbptr = cli_fcb) and cli_cuspqpb (buffptr = cli_ppd: an RSP's queue
+ * message is the parent PD followed by the command tail); COMMAND.SUP
+ * itself never sets either, except pcb_flnmptr around the second
+ * argument parse. */
+#define SYSDAT_CLI_DMA      0x0563 /* byte[dskrecl] */
+#define SYSDAT_CLI_DMA_OFST 0x05E3 /* word: the caller's saved u_dma_ofst */
+#define SYSDAT_CLI_DMA_SEG  0x05E5 /* word: the caller's saved u_dma_seg */
+#define SYSDAT_CLI_CHAIN    0x05E7 /* byte: true for a chain */
+#define SYSDAT_CLI_TERM     0x05E8 /* byte: true: terminate on exit */
+#define SYSDAT_CLI_PFLAG    0x05E9 /* word: the caller's saved p_flag */
+#define SYSDAT_CLI_NET      0x05EB /* byte */
+#define SYSDAT_CLI_PPD      0x05EC /* word: parent PD */
+#define SYSDAT_CLI_CMDTAIL  0x05EE /* byte[130] */
+#define SYSDAT_CLI_FCB      0x0670 /* byte[fcblen+1] */
+#define SYSDAT_CLI_CUSPQPB  0x0691 /* byte[16] */
+#define SYSDAT_CLI_ACB      0x06A1 /* byte[12] */
+#define SYSDAT_CLI_PCB      0x06AD /* word[2] */
+#define SYSDAT_CLI_PD       0x06B1 /* word: PD of the loaded program */
+#define SYSDAT_CLI_ERR      0x06B3 /* word */
+#define SYSDAT_CLI_BPAGE    0x06B5 /* word */
+#define SYSDAT_CLI_LDDSK    0x06B7 /* byte */
+#define SYSDAT_CLI_CNS      0x06B8 /* byte */
+#define SYSDAT_CLI_USER     0x06B9 /* byte */
+#define SYSDAT_CLI_DSK      0x06BA /* byte */
+#define SYSDAT_CLI_ERR_MODE 0x06BB /* byte */
+#define SYSDAT_CLI_DFIL     0x06BC /* byte: true if showing dayfile info */
 
-#define questr_addr  0xB410 /* byte[10]: " Msg Qued\0" literal, write_cstr'd on demand */
-#define userstr_addr 0xB420 /* byte[9]: "(User 0)\0" literal, write_cstr'd on demand */
-
-/* src/kernel/SYSDAT.FMT's own `mxmemqpb` -- the MX memory queue
- * MEMIF.MEM's own `entry` acquires/releases `SD_MXMEMOWNER`/
- * `SD_MXMEMCOUNT` (above) around every dispatch through, via
- * `f_qread`/`f_qwrite`. A fixed harness-chosen scratch address, same
- * reasoning as every other SD_* field; its own 16-byte content is
- * never read by this port (those two calls are boundary stubs, see
- * src-c/kernel/memif.c's own header comment) -- only its address is
- * ever used, as `f_qread`/`f_qwrite`'s own `dx` argument. */
-#define SD_MXMEMQPB   0xB500 /* byte[16], content unconsumed */
-
-/* src/kernel/XIOS.A86's own private DSEG fields src-c/kernel/xios.c
- * touches, at fixed harness-chosen scratch addresses (XIOS.A86 is a
- * standalone module with no shared SYSDAT storage of its own -- same
- * "fixed scratch address" reasoning as TMP.A86's own SD_TMP_* fields,
- * see that comment above) */
-#define XIOS_TRK     0xAC00 /* byte: current track (SETTRK) */
-#define XIOS_SECT    0xAC01 /* byte: current sector (SETSEC) */
-#define XIOS_DMA_ADR 0xAC02 /* word: current DMA offset (SETDMA) */
-#define XIOS_DMA_SEG 0xAC04 /* word: current DMA segment (SETDMAB) */
-#define XIOS_DISK    0xAC06 /* byte: physical disk selected (SELDSK) */
-#define XIOS_CLOCKON 0xAC07 /* byte: tick flag enable (STRTCLK/STOPCLK) */
-
-/* XIOS.A86's own `offset dpbase` -- the compile-time base address of
- * its Disk Parameter Header table (`include singles.lib`, right after
- * dskwrttbl), not a runtime field; SELDSK just adds a disk's own
- * 16-byte stride to it. A fixed harness-chosen stand-in address, same
- * reasoning as questr_addr/userstr_addr above. */
-#define XIOS_DPBASE  0xAC20
-
-/* src/kernel/SYSDAT.FMT's own `module_map` and `sysent` (a 256*3-byte
- * table: one 3-byte entry per user function number) -- their real,
- * small SYSDAT.FMT-relative offsets, used DS-relative (same `_seg`
- * convention `src-c/kernel/file1.c`'s own BD_* fields use for
- * BDOS.A86's fields, with `tools/i86sim.py`'s `segmented=True` mode
- * on the reference side -- unlike XIOS_ or every other SD_ constant
- * above, these are real offsets, not harness-chosen flat scratch
- * addresses, because `src-c/kernel/supif.c`'s own `func1` has a
- * genuine "DS = sysdat segment" precondition, not a moot DS switch). */
-#define SD_MODULE_MAP 0x46
-#define SD_SYSENT     0xA0
+/* src/kernel/XIOS.A86's fields: real offsets in its segment (XIOS.A86
+ * includes sysdat.lib and orgs past it -- the DRI XIOS lives in the
+ * SYSDAT segment, CS = DS = SYSDAT) */
+#define XIOS_DMA_ADR 0x16A4 /* word: current DMA offset (SETDMA) */
+#define XIOS_DMA_SEG 0x16A6 /* word: current DMA segment (SETDMAB) */
+#define XIOS_TRK     0x16AB /* byte: current track (SETTRK) */
+#define XIOS_SECT    0x16AC /* byte: current sector (SETSEC) */
+#define XIOS_DISK    0x16B4 /* byte: physical disk selected (SELDSK) */
+#define XIOS_DTRNTBL 0x16B5 /* byte[16]: logical -> physical disk (0FFh = none) */
+#define XIOS_DPBASE  0x16D1 /* the Disk Parameter Header table (singles.lib) */
+#define XIOS_CLOCKON 0x182A /* byte: tick flag enable (STRTCLK/STOPCLK) */
 
 /* src/kernel/ENTTAB.DEF -- one `sysent` entry's own field layout */
 #define ENT_MOD  0 /* byte */
@@ -1118,6 +974,7 @@ static inline uint16_t mem_seg_addr(uint16_t seg, uint16_t offset) {
 #define XQ_CUR_HEAD      0x100C /* byte */
 #define XQ_CUR_PSEC      0x100D /* byte */
 #define XQ_CUR_BUFOFF    0x100E /* word */
+#define XQ_OUTBYTE_TMP   0x1010 /* byte: fdc_out_byte's scratch */
 #define XQ_DTRNTBL       0x1011 /* byte[4] */
 #define XQ_SPECIFY_PARMS 0x1021 /* byte[4] */
 #define XQ_RECAL_PARMS   0x1025 /* byte[3] */

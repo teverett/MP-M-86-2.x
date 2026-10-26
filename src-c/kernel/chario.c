@@ -14,128 +14,159 @@
  * src-c/kernel/que1.c already uses for its own cross-file calls into
  * que2.c).
  *
- * Every real character-I/O call here goes through the unported
- * `xiosif` trampoline (via listf/conoutf/constf/coninf's shared
- * `xiosc`/`xiolst`/`xio1` tails) and is a boundary stub per
- * docs/src-c.md's convention. Unlike `mpmif`'s own calls elsewhere
- * (which leave a function-code constant sitting in `cx`, giving every
- * caller's own `cmp cx,0` check a well-defined "always fails" outcome),
- * `xiosif`'s call sites never pre-load a sentinel into the register
- * (`bx`) its real caller eventually reads back -- `bx` genuinely just
- * passes through this whole chain unchanged from whatever it already
- * was. That makes `constf`/`coninf`'s own "character ready"/"character
- * read" results a caller-dependent, undefined quantity under the
- * convention, the same class of issue as CPMMEM.MEM's cpmfree_entry
- * leaving its own `bx` likewise undefined on one path (see that file's
- * own header comment) -- this port makes the same choice it did there:
- * fix the undefined value at a well-defined constant (0) instead of
- * reproducing something genuinely undefined. Concretely, `constf`'s
- * and `coninf`'s own boundary-stub result is fixed at 0 here, which
- * makes `conbrk` always report "not ready" whenever no character is
- * already buffered (`c_nchar[si] == 0`), and makes `conin` always read
- * a NUL character in that same case -- both translated faithfully,
- * with the now-unreachable branches marked as such below.
- * `conoutf`/`listf`/`stdout` have no observable effect at all under
- * the convention (nothing downstream ever reads anything they'd have
- * set), so they're omitted outright -- same as QUE2.RTM's qrelease
- * (src-c/kernel/que2.c) and src-c/loader/lbdosio.c's own conoutf/listf
- * calls.
+ * Every character-I/O call goes to the XIOS through CIOIF.CIO's `xiosif`
+ * (listf/conoutf/constf/coninf and their shared xiosc/xiolst/xio1
+ * tails). Here they all go through xiosc(), which makes the call
+ * through a hook (cio_set_xios, defs.h) with the asm's AL/CL/DL and
+ * returns the XIOS's AX/BX. With no hook set, every call returns 0:
+ * nothing ready, a NUL read, output dropped -- the boundary-stub
+ * convention. The tests set a hook that scripts the input and records
+ * the calls, and compare that stream with the reference's.
  *
- * One real consequence of the fixed-at-0 choice: `chkctl`'s own
- * `control_s` handler polls `coninf` in a loop waiting for ctl-C or
- * ctl-Q, which never arrives under the convention -- translated
- * faithfully (a real loop, gotos included) but never exercised by the
- * differential test, same class of issue as QUE1.RTM's cioattach and
- * CPMMEM.MEM's cpmfree_entry (see both files' own header comments).
- * Callers of chkctl never pass it ctls in the test, for that reason.
+ * Under the no-hook convention two real loops can't end, as in the
+ * asm with a no-op XIOS: `chkctl`'s ctl-S handler waits for ctl-Q or
+ * ctl-C, and `cioattach`'s busy-console wait (console.c). The tests
+ * drive the first with scripted input.
+ *
+ * Runs against real memory (defs.h's far_ptr): `phys` is the base of
+ * real physical memory and `sysdat` the real SYSDAT segment (the CIO
+ * module's DS). CCBs, PDs and process names are SYSDAT-relative; the
+ * caller's print/read buffers (conwrite/conprint/conread's dx) are in
+ * the running process's u_wrkseg, read from its UDA. The three
+ * messages prcsmsg prints live in the CIO code segment in the asm
+ * (`push u_wrkseg ! mov u_wrkseg,cs ! call conprint_entry`); here
+ * they're C constants, printed by the same body conprint_entry runs.
  */
 #include <stdint.h>
 
 #include "defs.h"
 
-extern uint16_t getccbadr(const uint8_t *mem, uint8_t dh, uint16_t *bx_out);
-extern cio_bxcx conattach_entry(uint8_t *mem);
-extern cio_bxcx condetach_entry(uint8_t *mem);
-extern cio_bxcx mimic_entry(uint8_t *mem, uint8_t dh_in, uint8_t dl_in);
-extern cio_bxcx unmimic_entry(uint8_t *mem, uint8_t dl_in);
+extern uint16_t getccbadr(uint8_t *phys, uint16_t sysdat, uint8_t dh, uint16_t *bx_out);
+extern cio_bxcx conattach_entry(uint8_t *phys, uint16_t sysdat);
+extern cio_bxcx condetach_entry(uint8_t *phys, uint16_t sysdat);
+extern cio_bxcx mimic_entry(uint8_t *phys, uint16_t sysdat, uint8_t dh_in, uint8_t dl_in);
+extern cio_bxcx unmimic_entry(uint8_t *phys, uint16_t sysdat, uint8_t dl_in);
+extern cio_bxcx lstattach_entry(uint8_t *phys, uint16_t sysdat);
 
-/* write_cstr -- copy a NUL-terminated literal into the flat memory
- * image at a fixed scratch address, standing in for a real CS-resident
- * string CHARIO.CIO would read directly -- see header comment. */
-static void write_cstr(uint8_t *mem, uint16_t addr, const char *s) {
-    while (*s != '\0') {
-        mem[addr] = (uint8_t)*s;
-        addr = (uint16_t)(addr + 1);
-        s++;
-    }
-    mem[addr] = 0;
+/* wrkseg_ptr -- the running process's u_wrkseg, from its UDA */
+static uint8_t *wrkseg_ptr(uint8_t *phys, uint16_t sysdat) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    return far_ptr(phys, seg_r16(far_ptr(phys, rlr_uda(sd), 0), u_wrkseg), 0);
 }
+
+/* The XIOS boundary (CIOIF.CIO's xiosif, a far call through SYSDAT's
+ * xiosmod). Every character-I/O call CHARIO.CIO makes goes through
+ * xiosc() with the asm's AL (function), CL and DL; when cio_xios is
+ * set it handles the call and returns the XIOS's AX/BX, otherwise the
+ * call returns 0 (the boundary-stub convention: nothing ready, a NUL
+ * read, output dropped). See the header comment. */
+static cio_xios_fn cio_xios;
+
+void cio_set_xios(cio_xios_fn fn) {
+    cio_xios = fn;
+}
+
+static uint8_t xiosc(uint8_t func, uint8_t cl, uint8_t dl) {
+    return cio_xios ? (uint8_t)cio_xios(func, cl, dl) : 0;
+}
+
+/* the console/device number (DH) that goes with a CCB address */
+static uint8_t ccbnum(uint8_t *phys, uint16_t sysdat, uint16_t si) {
+    return (uint8_t)((uint16_t)(si - seg_r16(far_ptr(phys, sysdat, 0), SYSDAT_CCB)) / ccblen);
+}
+
+/* conoutf/listf: "mov cl,dl ! mov dl,dh ! mov dh,0" -- char in CL,
+ * device in DL; constf/coninf: "mov cl,dh" -- console in CL, the asm's
+ * DL whatever it was (not modeled; passed as 0) */
+static void conoutf(uint8_t dh, uint8_t dl) {
+    (void)xiosc(io_conout, dl, dh);
+}
+
+static void listf(uint8_t dh, uint8_t dl) {
+    (void)xiosc(io_list, dl, dh);
+}
+
+static uint8_t constf(uint8_t dh) {
+    return xiosc(io_const, dh, 0);
+}
+
+static uint8_t coninf(uint8_t dh) {
+    return xiosc(io_conin, dh, 0);
+}
+
+/* CHARIO.CIO's string constants, which live in the CIO code segment */
+static const char ptrmsg[] = "\r\nPrinter Busy\r\n";
+static const char abortmsg[] = ": Abort (Y/N)? ";
+static const char attachmsg[] = "\r\nAttach: ";
 
 /* getconnum -- get console number
  *	output:	returns console # (rlr's own p_cns)
  */
-static uint8_t getconnum(const uint8_t *mem) {
-    uint16_t rlr = mem_r16(mem, SD_RLR);
-    return mem[(uint16_t)(rlr + p_cns)];
+static uint8_t getconnum(uint8_t *phys, uint16_t sysdat) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint16_t rlr = seg_r16(sd, SYSDAT_RLR);
+    return sd[(uint16_t)(rlr + p_cns)];
 }
 
 /* coninit / rawinit -- set up for normal / raw console I/O
  *	output:	*si_out = CCB address for the calling process's console
  */
-static void coninit(uint8_t *mem, uint16_t *si_out) {
-    uint8_t dh = getconnum(mem);
-    uint16_t rlr = mem_r16(mem, SD_RLR);
-    mem_w16(mem, (uint16_t)(rlr + p_flag),
-            (uint16_t)(mem_r16(mem, (uint16_t)(rlr + p_flag)) & ~(uint16_t)pf_raw));
+static void coninit(uint8_t *phys, uint16_t sysdat, uint16_t *si_out) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t dh = getconnum(phys, sysdat);
+    uint16_t rlr = seg_r16(sd, SYSDAT_RLR);
+    seg_w16(sd, (uint16_t)(rlr + p_flag),
+            (uint16_t)(seg_r16(sd, (uint16_t)(rlr + p_flag)) & ~(uint16_t)pf_raw));
     uint16_t bx;
-    *si_out = getccbadr(mem, dh, &bx);
+    *si_out = getccbadr(phys, sysdat, dh, &bx);
 }
 
-static void rawinit(uint8_t *mem, uint16_t *si_out) {
-    uint8_t dh = getconnum(mem);
-    uint16_t rlr = mem_r16(mem, SD_RLR);
-    mem_w16(mem, (uint16_t)(rlr + p_flag),
-            (uint16_t)(mem_r16(mem, (uint16_t)(rlr + p_flag)) | pf_raw));
+static void rawinit(uint8_t *phys, uint16_t sysdat, uint16_t *si_out) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t dh = getconnum(phys, sysdat);
+    uint16_t rlr = seg_r16(sd, SYSDAT_RLR);
+    seg_w16(sd, (uint16_t)(rlr + p_flag),
+            (uint16_t)(seg_r16(sd, (uint16_t)(rlr + p_flag)) | pf_raw));
     uint16_t bx;
-    *si_out = getccbadr(mem, dh, &bx);
+    *si_out = getccbadr(phys, sysdat, dh, &bx);
 }
 
-static void prcsmsg(uint8_t *mem, uint16_t dx);
-static void prname(uint8_t *mem, uint16_t dx);
-static void conout(uint8_t *mem, uint16_t si, uint8_t dl);
-static void tabout(uint8_t *mem, uint16_t si, uint8_t dl);
-static void crlf(uint8_t *mem, uint16_t si);
-static void crlfp(uint8_t *mem, uint16_t si);
-static uint8_t conbrk(uint8_t *mem, uint16_t si);
-static uint8_t conin(uint8_t *mem, uint16_t si);
-static uint8_t chkctl(uint8_t *mem, uint16_t si, uint8_t bl);
-static void ctlout(uint8_t *mem, uint16_t si, uint8_t dl);
-static void pspace(uint8_t *mem);
-static void pbacksp(uint8_t *mem);
-static void pcr(uint8_t *mem);
-void conprint_entry(uint8_t *mem, uint16_t dx, uint8_t bh, uint8_t bl);
+static void prcsmsg(uint8_t *phys, uint16_t sysdat, const char *msg);
+static void prname(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+static void conout(uint8_t *phys, uint16_t sysdat, uint16_t si, uint8_t dl);
+static void tabout(uint8_t *phys, uint16_t sysdat, uint16_t si, uint8_t dl);
+static void crlf(uint8_t *phys, uint16_t sysdat, uint16_t si);
+static void crlfp(uint8_t *phys, uint16_t sysdat, uint16_t si);
+static uint8_t conbrk(uint8_t *phys, uint16_t sysdat, uint16_t si);
+static uint8_t conin(uint8_t *phys, uint16_t sysdat, uint16_t si);
+static uint8_t chkctl(uint8_t *phys, uint16_t sysdat, uint16_t si, uint8_t bl);
+static void ctlout(uint8_t *phys, uint16_t sysdat, uint16_t si, uint8_t dl);
+static void pspace(uint8_t *phys, uint16_t sysdat, uint16_t si);
+static void pbacksp(uint8_t *phys, uint16_t sysdat, uint16_t si);
+static void pcr(uint8_t *phys, uint16_t sysdat, uint16_t si);
+void conprint_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint8_t bh, uint8_t bl);
 
 /* attach -- attach the calling process to its default console
  *	input:	si = CCB address (from coninit/rawinit)
  */
-static void attach(uint8_t *mem, uint16_t si) {
-    uint16_t rlr = mem_r16(mem, SD_RLR);
-    if (mem_r16(mem, (uint16_t)(si + c_attach)) == rlr) {
+static void attach(uint8_t *phys, uint16_t sysdat, uint16_t si) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint16_t rlr = seg_r16(sd, SYSDAT_RLR);
+    if (seg_r16(sd, (uint16_t)(si + c_attach)) == rlr) {
         return; /* attret */
     }
-    (void)conattach_entry(mem); /* real call, for effect; its own return
+    (void)conattach_entry(phys, sysdat); /* real call, for effect; its own return
                                     value is discarded, same as the asm's
                                     own disregard of it here */
-    rlr = mem_r16(mem, SD_RLR);
-    uint16_t pflag = mem_r16(mem, (uint16_t)(rlr + p_flag));
+    rlr = seg_r16(sd, SYSDAT_RLR);
+    uint16_t pflag = seg_r16(sd, (uint16_t)(rlr + p_flag));
     if ((pflag & pf_ctld) == 0) {
         return; /* noattmsg */
     }
-    mem_w16(mem, (uint16_t)(rlr + p_flag), (uint16_t)(pflag & ~(uint16_t)pf_ctld));
-    write_cstr(mem, CHARIO_ATTACHMSG, "\r\nAttach: ");
-    prcsmsg(mem, CHARIO_ATTACHMSG);
-    prname(mem, (uint16_t)(rlr + p_name));
-    crlf(mem, si);
+    seg_w16(sd, (uint16_t)(rlr + p_flag), (uint16_t)(pflag & ~(uint16_t)pf_ctld));
+    prcsmsg(phys, sysdat, attachmsg);
+    prname(phys, sysdat, (uint16_t)(rlr + p_name));
+    crlf(phys, sysdat, si);
 }
 
 /* echoc -- is a character graphic?
@@ -152,132 +183,138 @@ static uint8_t echoc(uint8_t dl) {
  *	input:	si = CCB address
  *	output:	returns 1 if a character is ready, 0 if not
  */
-static uint8_t conbrk(uint8_t *mem, uint16_t si) {
-    if (mem[(uint16_t)(si + c_nchar)] != 0) {
+static uint8_t conbrk(uint8_t *phys, uint16_t sysdat, uint16_t si) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t dh = ccbnum(phys, sysdat, si);
+    if (sd[(uint16_t)(si + c_nchar)] != 0) {
         return 1; /* conb_y */
     }
-    /* constf's own boundary-stub result is fixed at 0 under the
-     * convention (see header comment), so "and bl,1 ! jz conb_no" is
-     * always taken here -- everything below (coninf, the raw/chkctl
-     * check, conb0's "mov c_nchar[si],bl") is unreachable */
-    return 0; /* conb_no */
+    /* char not ready, check external break */
+    if ((constf(dh) & 1) == 0) {
+        return 0; /* conb_no */
+    }
+    uint8_t bl = coninf(dh);
+    uint16_t rlr = seg_r16(sd, SYSDAT_RLR);
+    if ((seg_r16(sd, (uint16_t)(rlr + p_flag)) & pf_raw) == 0) {
+        if (chkctl(phys, sysdat, si, bl) == 0) {
+            return 0; /* conb_no */
+        }
+    }
+    sd[(uint16_t)(si + c_nchar)] = bl; /* conb0 */
+    return 1;
 }
 
 /* conin -- read next character
  *	input:	si = CCB address
  *	output:	returns the character; clears c_nchar[si]
  */
-static uint8_t conin(uint8_t *mem, uint16_t si) {
-    uint8_t dl = mem[(uint16_t)(si + c_nchar)];
-    mem[(uint16_t)(si + c_nchar)] = 0;
+static uint8_t conin(uint8_t *phys, uint16_t sysdat, uint16_t si) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t dl = sd[(uint16_t)(si + c_nchar)];
+    sd[(uint16_t)(si + c_nchar)] = 0;
     if (dl != 0) {
         return dl; /* ciout */
     }
-    /* coninf's own boundary-stub result is fixed at 0 under the
-     * convention (see header comment) -- always reads NUL here */
-    return 0;
+    return coninf(ccbnum(phys, sysdat, si));
 }
 
 /* chkctl -- check character for ctl-C/ctl-D/ctl-S
  *	input:	si = CCB address, bl = character to check
  *	output:	returns 0 if a ctl char was found (and handled), 1 if not
  */
-static uint8_t chkctl(uint8_t *mem, uint16_t si, uint8_t bl) {
+static uint8_t chkctl(uint8_t *phys, uint16_t sysdat, uint16_t si, uint8_t bl) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t dh = ccbnum(phys, sysdat, si);
     if (bl == ctld) {
-        uint16_t rlr = mem_r16(mem, SD_RLR);
-        mem_w16(mem, (uint16_t)(rlr + p_flag),
-                (uint16_t)(mem_r16(mem, (uint16_t)(rlr + p_flag)) | pf_ctld));
-        (void)condetach_entry(mem);
+        uint16_t rlr = seg_r16(sd, SYSDAT_RLR);
+        seg_w16(sd, (uint16_t)(rlr + p_flag),
+                (uint16_t)(seg_r16(sd, (uint16_t)(rlr + p_flag)) | pf_ctld));
+        (void)condetach_entry(phys, sysdat);
         return 0; /* chk0 */
     }
     if (bl == ctls) {
-        /* control_s -- see header comment: spins forever under the
-         * convention, not exercised by the differential test */
+        /* control_s: wait for ctl-Q (resume) or ctl-C, ringing the bell
+         * at anything else */
         for (;;) {
-            uint8_t cs_bl = 0; /* coninf()'s fixed artifact value */
-            if (cs_bl == ctlc) {
-                bl = cs_bl;
+            bl = coninf(dh);
+            if (bl == ctlc) {
                 goto chkc1;
             }
-            if (cs_bl == ctlq) {
+            if (bl == ctlq) {
                 return 0; /* chk0 */
             }
-            /* push dx!mov dl,bell!call conoutf!pop dx -- no-op */
+            conoutf(dh, bell);
         }
     }
     if (bl != ctlc) {
         return 1; /* chk1 */
     }
 chkc1:
-    crlf(mem, si);
-    prname(mem, (uint16_t)(mem_r16(mem, SD_RLR) + p_name));
-    write_cstr(mem, CHARIO_ABORTMSG, ": Abort (Y/N)? ");
-    prcsmsg(mem, CHARIO_ABORTMSG);
-    /* coninf's fixed artifact value, masked -- always 0 under the
-     * convention, so the "echo answer, check for Y" block below is
-     * unreachable */
-    bl = (uint8_t)(0 & 0x5F);
-    if (bl < ' ') {
-        /* ctlc_r */
-        if (bl == ctlc) {
-            goto chkc1; /* unreachable: bl is always 0 here */
-        }
-        crlf(mem, si);
-    } else {
-        /* unreachable under the convention, see above -- translated
-         * faithfully regardless */
+    /* print Abort string, get the answer */
+    crlf(phys, sysdat, si);
+    prname(phys, sysdat, (uint16_t)(seg_r16(sd, SYSDAT_RLR) + p_name));
+    prcsmsg(phys, sysdat, abortmsg);
+    bl = (uint8_t)(coninf(dh) & 0x5F);
+    if (bl >= ' ') {
+        conoutf(dh, bl);
         if (bl == 'Y') {
-            uint16_t rlr = mem_r16(mem, SD_RLR);
-            mem_w16(mem, (uint16_t)(rlr + p_flag),
-                    (uint16_t)(mem_r16(mem, (uint16_t)(rlr + p_flag)) | pf_ctlc));
+            uint16_t rlr = seg_r16(sd, SYSDAT_RLR);
+            seg_w16(sd, (uint16_t)(rlr + p_flag),
+                    (uint16_t)(seg_r16(sd, (uint16_t)(rlr + p_flag)) | pf_ctlc));
             /* mov cx,f_terminate!sub dx,dx!call mpmif -- boundary stub, no-op */
         }
-        if (bl == ctlc) {
-            goto chkc1; /* unreachable */
-        }
-        crlf(mem, si);
     }
+    /* ctlc_r */
+    if (bl == ctlc) {
+        goto chkc1;
+    }
+    crlf(phys, sysdat, si);
     return 0; /* chk0 */
 }
 
 /* control_p -- toggle list-device mimicking for the current console */
-static void control_p(uint8_t *mem, uint16_t si) {
-    uint16_t rlr = mem_r16(mem, SD_RLR);
-    if (mem[(uint16_t)(si + c_flag)] & cf_listcp) {
-        uint8_t dl = mem[(uint16_t)(si + c_mimic)];
-        cio_bxcx r = unmimic_entry(mem, dl);
+static void control_p(uint8_t *phys, uint16_t sysdat, uint16_t si) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint16_t rlr = seg_r16(sd, SYSDAT_RLR);
+    if (sd[(uint16_t)(si + c_flag)] & cf_listcp) {
+        uint8_t dl = sd[(uint16_t)(si + c_mimic)];
+        cio_bxcx r = unmimic_entry(phys, sysdat, dl);
         if (r.cx == 0) {
-            mem[(uint16_t)(si + c_flag)] ^= cf_listcp; /* mimout */
+            sd[(uint16_t)(si + c_flag)] ^= cf_listcp; /* mimout */
         }
         return; /* mimpret */
     }
-    uint8_t dh = mem[(uint16_t)(rlr + p_cns)];
-    uint8_t dl = mem[(uint16_t)(rlr + p_lst)];
-    cio_bxcx r = mimic_entry(mem, dh, dl);
+    uint8_t dh = sd[(uint16_t)(rlr + p_cns)];
+    uint8_t dl = sd[(uint16_t)(rlr + p_lst)];
+    cio_bxcx r = mimic_entry(phys, sysdat, dh, dl);
     if (r.cx == 0) {
-        mem[(uint16_t)(si + c_flag)] ^= cf_listcp; /* mimout */
+        sd[(uint16_t)(si + c_flag)] ^= cf_listcp; /* mimout */
         return;
     }
-    write_cstr(mem, CHARIO_PTRMSG, "\r\nPrinter Busy\r\n");
-    prcsmsg(mem, CHARIO_PTRMSG);
+    prcsmsg(phys, sysdat, ptrmsg);
 }
 
-/* prcsmsg -- print a NUL-terminated string at the given flat address
- * prname -- print an 8-char name, stopping early at a space
- */
-static void prcsmsg(uint8_t *mem, uint16_t dx) {
-    conprint_entry(mem, dx, 0, 0);
+static void cprint(uint8_t *phys, uint16_t sysdat, const uint8_t *src, uint16_t dx, uint8_t bh, uint8_t bl);
+
+/* prcsmsg -- print a NUL-terminated string in the CIO code segment. The
+ * asm points u_wrkseg at CS around a call to conprint_entry; this runs
+ * the same body (cprint) straight over the C string.
+ * prname -- print an 8-char name in DS (SYSDAT), stopping at a space;
+ * the asm does the same with u_wrkseg = DS. */
+static void prcsmsg(uint8_t *phys, uint16_t sysdat, const char *msg) {
+    cprint(phys, sysdat, (const uint8_t *)msg, 0, 0, 0);
 }
 
-static void prname(uint8_t *mem, uint16_t dx) {
-    conprint_entry(mem, dx, 8, ' ');
+static void prname(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    cprint(phys, sysdat, far_ptr(phys, sysdat, 0), dx, 8, ' ');
 }
 
 /* compout -- track column position for a character about to be/having
  * been written
  */
-static void compout(uint8_t *mem, uint16_t si, uint8_t dl) {
-    uint8_t al = mem[(uint16_t)(si + c_column)];
+static void compout(uint8_t *phys, uint16_t sysdat, uint16_t si, uint8_t dl) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t al = sd[(uint16_t)(si + c_column)];
     if (dl == rubout) {
         goto ccret;
     }
@@ -297,83 +334,100 @@ static void compout(uint8_t *mem, uint16_t si, uint8_t dl) {
         al = 0;
     }
 ccret:
-    mem[(uint16_t)(si + c_column)] = al;
+    sd[(uint16_t)(si + c_column)] = al;
+}
+
+/* stdout -- write to console/list device dh (the mimic forwarding) */
+static void stdout_(uint8_t *phys, uint16_t sysdat, uint8_t dh, uint8_t dl) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t ncondev = seg_r8(sd, SYSDAT_NCONDEV);
+    if ((int8_t)dh < (int8_t)ncondev) { /* jl: signed */
+        conoutf(dh, dl); /* xcout */
+        return;
+    }
+    dh = (uint8_t)(dh - ncondev);
+    if ((int8_t)dh < (int8_t)seg_r8(sd, SYSDAT_NLSTDEV)) {
+        listf(dh, dl); /* xlout */
+    }
 }
 
 /* conout -- write one character to the console, tracking column
  *	input:	si = CCB address, dl = character
  */
-static void conout(uint8_t *mem, uint16_t si, uint8_t dl) {
-    if ((mem[(uint16_t)(si + c_flag)] & cf_compc) == 0) {
-        (void)conbrk(mem, si); /* result discarded, side-effect only */
-        attach(mem, si);
-        /* call conoutf -- no-op under the convention, see header
-         * comment. The mimic-device forwarding below it in the real
-         * asm (getccbadr+stdout) is also unconditionally a no-op
-         * under the convention regardless of c_mimic[si]'s value --
-         * both getccbadr (pure computation) and stdout (its own
-         * conoutf/listf calls) have no observable effect */
+static void conout(uint8_t *phys, uint16_t sysdat, uint16_t si, uint8_t dl) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    if ((sd[(uint16_t)(si + c_flag)] & cf_compc) == 0) {
+        (void)conbrk(phys, sysdat, si); /* result discarded, side-effect only */
+        attach(phys, sysdat, si);
+        conoutf(ccbnum(phys, sysdat, si), dl);
+        /* check if mimic device */
+        uint8_t mimic = sd[(uint16_t)(si + c_mimic)];
+        if (mimic != 0xFF) {
+            stdout_(phys, sysdat, mimic, dl);
+        }
     }
-    compout(mem, si, dl);
+    compout(phys, sysdat, si, dl);
 }
 
 /* tabout -- expand tabs to the console, otherwise a direct tail-call
  * to conout
  */
-static void tabout(uint8_t *mem, uint16_t si, uint8_t dl) {
+static void tabout(uint8_t *phys, uint16_t sysdat, uint16_t si, uint8_t dl) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
     if (dl != tab) {
-        conout(mem, si, dl);
+        conout(phys, sysdat, si, dl);
         return;
     }
     do {
-        conout(mem, si, ' ');
-    } while ((mem[(uint16_t)(si + c_column)] & 0x07) != 0);
+        conout(phys, sysdat, si, ' ');
+    } while ((sd[(uint16_t)(si + c_column)] & 0x07) != 0);
 }
 
 /* ctlout -- send a (possibly control) character, with a preceding
  * up-arrow if it isn't graphic
  */
-static void ctlout(uint8_t *mem, uint16_t si, uint8_t dl) {
+static void ctlout(uint8_t *phys, uint16_t sysdat, uint16_t si, uint8_t dl) {
     if (!echoc(dl)) {
-        tabout(mem, si, dl);
+        tabout(phys, sysdat, si, dl);
         return;
     }
-    conout(mem, si, ctl);
+    conout(phys, sysdat, si, ctl);
     dl = (uint8_t)(dl | 0x40);
-    tabout(mem, si, dl);
+    tabout(phys, sysdat, si, dl);
 }
 
-/* pspace/pbacksp/pcr -- jmps conoutf with a fixed character: all three
- * are complete no-ops under the convention, see header comment */
-static void pspace(uint8_t *mem) {
-    (void)mem;
+/* pspace/pbacksp/pcr -- "jmps conoutf" with a fixed character, no
+ * column tracking */
+static void pspace(uint8_t *phys, uint16_t sysdat, uint16_t si) {
+    conoutf(ccbnum(phys, sysdat, si), ' ');
 }
 
-static void pbacksp(uint8_t *mem) {
-    (void)mem;
+static void pbacksp(uint8_t *phys, uint16_t sysdat, uint16_t si) {
+    conoutf(ccbnum(phys, sysdat, si), ctlh);
 }
 
-static void pcr(uint8_t *mem) {
-    (void)mem;
+static void pcr(uint8_t *phys, uint16_t sysdat, uint16_t si) {
+    conoutf(ccbnum(phys, sysdat, si), cr);
 }
 
 /* crlf -- carriage return / line feed */
-static void crlf(uint8_t *mem, uint16_t si) {
-    conout(mem, si, cr);
-    conout(mem, si, lf);
+static void crlf(uint8_t *phys, uint16_t sysdat, uint16_t si) {
+    conout(phys, sysdat, si, cr);
+    conout(phys, sysdat, si, lf);
 }
 
 /* crlfp -- print '#', crlf, then pad with spaces out to strtcol --
  * used by the ctl-X/ctl-U/ctl-R line-editing handlers
  */
-static void crlfp(uint8_t *mem, uint16_t si) {
-    conout(mem, si, '#');
-    crlf(mem, si);
+static void crlfp(uint8_t *phys, uint16_t sysdat, uint16_t si) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    conout(phys, sysdat, si, '#');
+    crlf(phys, sysdat, si);
     for (;;) {
-        if (mem[(uint16_t)(si + c_column)] >= mem[(uint16_t)(si + c_strtcol)]) {
+        if (sd[(uint16_t)(si + c_column)] >= sd[(uint16_t)(si + c_strtcol)]) {
             return; /* crlfp1 */
         }
-        conout(mem, si, ' ');
+        conout(phys, sysdat, si, ' ');
     }
 }
 
@@ -381,19 +435,19 @@ static void crlfp(uint8_t *mem, uint16_t si) {
  * conin_entry -- Function 1: console input
  *	output:	returns the character
  */
-uint8_t conin_entry(uint8_t *mem) {
+uint8_t conin_entry(uint8_t *phys, uint16_t sysdat) {
     for (;;) { /* je conin_entry -- retry from the top */
         uint16_t si;
-        coninit(mem, &si);
-        attach(mem, si);
-        (void)conbrk(mem, si); /* result discarded, side-effect only */
-        uint8_t dl = conin(mem, si);
-        uint8_t al = chkctl(mem, si, dl);
+        coninit(phys, sysdat, &si);
+        attach(phys, sysdat, si);
+        (void)conbrk(phys, sysdat, si); /* result discarded, side-effect only */
+        uint8_t dl = conin(phys, sysdat, si);
+        uint8_t al = chkctl(phys, sysdat, si, dl);
         if (al == 0) {
             continue;
         }
         if (!echoc(dl)) {
-            tabout(mem, si, dl);
+            tabout(phys, sysdat, si, dl);
         }
         return dl; /* ciexit */
     }
@@ -403,67 +457,59 @@ uint8_t conin_entry(uint8_t *mem) {
  * conout_entry -- Function 2: console output
  *	input:	dl = character
  */
-void conout_entry(uint8_t *mem, uint8_t dl) {
+void conout_entry(uint8_t *phys, uint16_t sysdat, uint8_t dl) {
     uint16_t si;
-    coninit(mem, &si);
-    attach(mem, si);
-    tabout(mem, si, dl);
+    coninit(phys, sysdat, &si);
+    attach(phys, sysdat, si);
+    tabout(phys, sysdat, si, dl);
 }
 
 /*
  * rconin_entry -- raw console input
  *	output:	returns the character
  */
-uint8_t rconin_entry(uint8_t *mem) {
+uint8_t rconin_entry(uint8_t *phys, uint16_t sysdat) {
     uint16_t si;
-    rawinit(mem, &si);
-    attach(mem, si);
-    return conin(mem, si);
+    rawinit(phys, sysdat, &si);
+    attach(phys, sysdat, si);
+    return conin(phys, sysdat, si);
 }
 
 /*
  * rconout_entry -- raw console output
  *	input:	dl = character
  */
-void rconout_entry(uint8_t *mem, uint8_t dl) {
+void rconout_entry(uint8_t *phys, uint16_t sysdat, uint8_t dl) {
     uint16_t si;
-    rawinit(mem, &si);
-    attach(mem, si);
-    conout(mem, si, dl);
+    rawinit(phys, sysdat, &si);
+    attach(phys, sysdat, si);
+    conout(phys, sysdat, si, dl);
 }
 
 /*
  * listout_entry -- write to the list device
  *	input:	dl = character
  */
-void listout_entry(uint8_t *mem, uint8_t dl) {
-    (void)dl; /* listf's own real use of dl/dh is a no-op under the
-                 convention, see header comment */
-    uint16_t rlr = mem_r16(mem, SD_RLR);
-    uint8_t dh = mem[(uint16_t)(rlr + p_lst)];
-    uint16_t bx;
-    (void)getccbadr(mem, dh, &bx); /* pure computation, no side effects,
-                                       result unused -- matches the asm's
-                                       own disregard of it here */
-    /* lstattach_entry is declared in console.c but not included here
-     * to keep this file's extern list to what it actually calls --
-     * include it below if a later pass needs its real side effect */
-    extern cio_bxcx lstattach_entry(uint8_t *mem);
-    (void)lstattach_entry(mem); /* real call, for its side effect; its
-                                    own return value discarded */
-    /* sub dh,ncondev!jmp listf -- no-op under the convention */
+void listout_entry(uint8_t *phys, uint16_t sysdat, uint8_t dl) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint16_t rlr = seg_r16(sd, SYSDAT_RLR);
+    uint8_t dh = sd[(uint16_t)(rlr + p_lst)];
+    (void)lstattach_entry(phys, sysdat); /* real call, for its side effect; its
+                                             own return value discarded */
+    listf((uint8_t)(dh - seg_r8(sd, SYSDAT_NCONDEV)), dl); /* sub dh,ncondev ! jmp listf */
 }
 
 /*
  * constat_entry -- check console status
  *	output:	returns status (bl)
  */
-uint8_t constat_entry(uint8_t *mem) {
+uint8_t constat_entry(uint8_t *phys, uint16_t sysdat) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
     uint16_t si;
-    coninit(mem, &si);
-    uint16_t rlr = mem_r16(mem, SD_RLR);
-    if (rlr == mem_r16(mem, (uint16_t)(si + c_attach))) {
-        return conbrk(mem, si); /* cse_cl */
+    coninit(phys, sysdat, &si);
+    uint16_t rlr = seg_r16(sd, SYSDAT_RLR);
+    if (rlr == seg_r16(sd, (uint16_t)(si + c_attach))) {
+        return conbrk(phys, sysdat, si); /* cse_cl */
     }
     /* mov cx,f_dispatch!call mpmif -- boundary stub, no-op (also the
      * real DRI "mov cl,f_dispatch" 8-bit-move typo noted in the asm's
@@ -477,22 +523,22 @@ uint8_t constat_entry(uint8_t *mem) {
  *		else a character to write
  *	output:	returns a status/character byte depending on dl
  */
-uint8_t dirio_entry(uint8_t *mem, uint8_t dl) {
+uint8_t dirio_entry(uint8_t *phys, uint16_t sysdat, uint8_t dl) {
     uint16_t si;
-    rawinit(mem, &si);
-    attach(mem, si);
+    rawinit(phys, sysdat, &si);
+    attach(phys, sysdat, si);
     if (dl == 0xFD) {
-        return conin(mem, si); /* je conin */
+        return conin(phys, sysdat, si); /* je conin */
     }
     if (dl < 0xFD) {
         /* jb rconout -- tail jump into conout (rconout is itself just
          * "jmp conout") */
-        conout(mem, si, dl);
+        conout(phys, sysdat, si, dl);
         return 0; /* conout's own tail-landing leaves no defined return
                      value here -- same class of artifact as
                      CPMMEM.MEM's cpmfree_entry bx, fixed at 0 */
     }
-    uint8_t bl = conbrk(mem, si);
+    uint8_t bl = conbrk(phys, sysdat, si);
     if (dl == 0xFE) {
         bl = (uint8_t)(bl - 1);
         bl = (uint8_t)~bl;
@@ -500,7 +546,7 @@ uint8_t dirio_entry(uint8_t *mem, uint8_t dl) {
     }
     /* diocin */
     if (bl != 0) {
-        return conin(mem, si); /* jne conin */
+        return conin(phys, sysdat, si); /* jne conin */
     }
     /* mov cx,f_dispatch!call mpmif -- boundary stub, no-op */
     return 0;
@@ -510,8 +556,8 @@ uint8_t dirio_entry(uint8_t *mem, uint8_t dl) {
  * conwrite_entry -- write line until $ encountered
  *	input:	dx = buffer addr
  */
-void conwrite_entry(uint8_t *mem, uint16_t dx) {
-    conprint_entry(mem, dx, 0, '$');
+void conwrite_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    conprint_entry(phys, sysdat, dx, 0, '$');
 }
 
 /*
@@ -519,10 +565,22 @@ void conwrite_entry(uint8_t *mem, uint16_t dx) {
  *	input:	dx = address of buffer, bh = max characters (0=no max),
  *		bl = delimiter character
  */
-void conprint_entry(uint8_t *mem, uint16_t dx, uint8_t bh, uint8_t bl) {
+void conprint_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint8_t bh, uint8_t bl) {
+    cprint(phys, sysdat, wrkseg_ptr(phys, sysdat), dx, bh, bl);
+}
+
+/* conprint_cs -- conprint_entry for a string in the caller's code
+ * segment: the asm points u_wrkseg at CS for the call (COMMAND.SUP's
+ * prcsm); here the string is a C constant */
+void conprint_cs(uint8_t *phys, uint16_t sysdat, const char *s, uint8_t bh, uint8_t bl) {
+    cprint(phys, sysdat, (const uint8_t *)s, 0, bh, bl);
+}
+
+/* cprint -- conprint_entry's body, reading the buffer at src:dx */
+static void cprint(uint8_t *phys, uint16_t sysdat, const uint8_t *src, uint16_t dx, uint8_t bh, uint8_t bl) {
     uint16_t si;
-    coninit(mem, &si);
-    attach(mem, si);
+    coninit(phys, sysdat, &si);
+    attach(phys, sysdat, si);
     uint16_t bx = dx; /* BX -> buffer */
     uint8_t ah = bh;
     uint8_t al = (uint8_t)(bl & 0x7F);
@@ -531,11 +589,11 @@ void conprint_entry(uint8_t *mem, uint16_t dx, uint8_t bh, uint8_t bl) {
         if (ah == (uint8_t)cx && ah != 0) {
             return; /* cpr_e */
         }
-        uint8_t dl = (uint8_t)(mem[bx] & 0x7F);
+        uint8_t dl = (uint8_t)(seg_r8(src, bx) & 0x7F);
         if (dl == al) {
             return; /* cpr_e */
         }
-        tabout(mem, si, dl);
+        tabout(phys, sysdat, si, dl);
         cx = (uint16_t)(cx + 1);
         bx = (uint16_t)(bx + 1);
     }
@@ -547,31 +605,33 @@ void conprint_entry(uint8_t *mem, uint16_t dx, uint8_t bh, uint8_t bl) {
  *	input:	dx = buffer address (buffer[0] = max length,
  *		buffer[1] = current length on return, buffer[2..] = data)
  */
-void conread_entry(uint8_t *mem, uint16_t dx) {
+void conread_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
     uint16_t bufaddr = dx;
+    uint8_t *buf = wrkseg_ptr(phys, sysdat); /* the buffer, in u_wrkseg */
     for (;;) { /* jmp conread_entry -- restart with the same buffer */
         uint16_t si;
         uint16_t count;
         uint8_t al, dl;
 
-        coninit(mem, &si);
-        attach(mem, si);
+        coninit(phys, sysdat, &si);
+        attach(phys, sysdat, si);
 
     read:
-        al = mem[(uint16_t)(si + c_column)];
-        mem[(uint16_t)(si + c_strtcol)] = al;
+        al = sd[(uint16_t)(si + c_column)];
+        sd[(uint16_t)(si + c_strtcol)] = al;
         count = 0;
 
     readnx:
     readn0:
-        dl = (uint8_t)(conin(mem, si) & 0x7F);
+        dl = (uint8_t)(conin(phys, sysdat, si) & 0x7F);
         if (dl == cr || dl == lf) {
             goto readen;
         }
         if (count != 0) {
             goto tryh;
         }
-        if (chkctl(mem, si, dl) == 1) {
+        if (chkctl(phys, sysdat, si, dl) == 1) {
             goto tryh;
         }
         continue; /* pop dx!jmp conread_entry */
@@ -584,9 +644,9 @@ void conread_entry(uint8_t *mem, uint16_t dx) {
             goto readnx;
         }
         count = (uint16_t)(count - 1);
-        al = mem[(uint16_t)(si + c_column)];
-        mem[(uint16_t)(mem_r16(mem, SD_RLR) + p_scratch)] = al;
-        mem[(uint16_t)(si + c_flag)] |= cf_compc;
+        al = sd[(uint16_t)(si + c_column)];
+        sd[(uint16_t)(seg_r16(sd, SYSDAT_RLR) + p_scratch)] = al;
+        sd[(uint16_t)(si + c_flag)] |= cf_compc;
         goto linelen;
 
     noth:
@@ -596,7 +656,7 @@ void conread_entry(uint8_t *mem, uint16_t dx) {
         if (count == 0) {
             goto readnx; /* readnxx -> readnx */
         }
-        dl = mem[(uint16_t)(bufaddr + 1 + count)];
+        dl = buf[(uint16_t)(bufaddr + 1 + count)];
         count = (uint16_t)(count - 1);
         goto rdech1;
 
@@ -604,19 +664,17 @@ void conread_entry(uint8_t *mem, uint16_t dx) {
         if (dl != ctle) {
             goto note;
         }
-        pcr(mem);
-        /* mov dl,lf!call conoutf -- no-op; dl is overwritten by the
-         * next conin() before anything else reads it, see header
-         * comment */
-        mem[(uint16_t)(si + c_column)] = 0;
-        mem[(uint16_t)(si + c_strtcol)] = 0;
+        pcr(phys, sysdat, si);
+        conoutf(ccbnum(phys, sysdat, si), lf);
+        sd[(uint16_t)(si + c_column)] = 0;
+        sd[(uint16_t)(si + c_strtcol)] = 0;
         goto readn0;
 
     note:
         if (dl != ctlp) {
             goto notp;
         }
-        control_p(mem, si);
+        control_p(phys, sysdat, si);
         goto readnx; /* readnxx -> readnx */
 
     notp:
@@ -624,24 +682,24 @@ void conread_entry(uint8_t *mem, uint16_t dx) {
             goto notx;
         }
     backx:
-        al = mem[(uint16_t)(si + c_strtcol)];
-        if (al < mem[(uint16_t)(si + c_column)]) {
+        al = sd[(uint16_t)(si + c_strtcol)];
+        if (al < sd[(uint16_t)(si + c_column)]) {
             goto backxxx;
         }
         count = 0;
         goto readnx; /* readnxx -> readnx */
     backxxx:
-        pbacksp(mem);
-        pspace(mem);
-        pbacksp(mem);
-        mem[(uint16_t)(si + c_column)] -= 1;
+        pbacksp(phys, sysdat, si);
+        pspace(phys, sysdat, si);
+        pbacksp(phys, sysdat, si);
+        sd[(uint16_t)(si + c_column)] -= 1;
         goto backx;
 
     notx:
         if (dl != ctlu) {
             goto notu;
         }
-        crlfp(mem, si);
+        crlfp(phys, sysdat, si);
         goto read;
 
     notu:
@@ -651,7 +709,7 @@ void conread_entry(uint8_t *mem, uint16_t dx) {
     linelen:
         {
             uint16_t cl2 = count;
-            crlfp(mem, si);
+            crlfp(phys, sysdat, si);
             uint16_t idx = 0;
         rep0:
             if (cl2 == 0) {
@@ -659,25 +717,25 @@ void conread_entry(uint8_t *mem, uint16_t dx) {
             }
             idx = (uint16_t)(idx + 1);
             cl2 = (uint16_t)(cl2 - 1);
-            dl = mem[(uint16_t)(bufaddr + 1 + idx)];
-            ctlout(mem, si, dl);
+            dl = buf[(uint16_t)(bufaddr + 1 + idx)];
+            ctlout(phys, sysdat, si, dl);
             goto rep0;
         rep1:
-            if ((mem[(uint16_t)(si + c_flag)] & cf_compc) == 0) {
+            if ((sd[(uint16_t)(si + c_flag)] & cf_compc) == 0) {
                 goto l_22;
             }
-            mem[(uint16_t)(si + c_flag)] = (uint8_t)(mem[(uint16_t)(si + c_flag)] & (uint8_t)~cf_compc);
+            sd[(uint16_t)(si + c_flag)] = (uint8_t)(sd[(uint16_t)(si + c_flag)] & (uint8_t)~cf_compc);
         backsp:
             {
-                uint16_t rlr = mem_r16(mem, SD_RLR);
-                uint8_t al2 = (uint8_t)(mem[(uint16_t)(rlr + p_scratch)] - mem[(uint16_t)(si + c_column)]);
+                uint16_t rlr = seg_r16(sd, SYSDAT_RLR);
+                uint8_t al2 = (uint8_t)(sd[(uint16_t)(rlr + p_scratch)] - sd[(uint16_t)(si + c_column)]);
                 if (al2 == 0) {
                     goto l_22;
                 }
-                pbacksp(mem);
-                pspace(mem);
-                pbacksp(mem);
-                mem[(uint16_t)(rlr + p_scratch)] -= 1;
+                pbacksp(phys, sysdat, si);
+                pspace(phys, sysdat, si);
+                pbacksp(phys, sysdat, si);
+                sd[(uint16_t)(rlr + p_scratch)] -= 1;
                 goto backsp;
             }
         }
@@ -686,18 +744,18 @@ void conread_entry(uint8_t *mem, uint16_t dx) {
 
     notr:
         count = (uint16_t)(count + 1);
-        mem[(uint16_t)(bufaddr + 1 + count)] = dl;
+        buf[(uint16_t)(bufaddr + 1 + count)] = dl;
     rdech1:
-        ctlout(mem, si, dl);
-        if (count >= mem[bufaddr]) {
+        ctlout(phys, sysdat, si, dl);
+        if (count >= buf[bufaddr]) {
             goto readen;
         }
         goto l_22;
 
     readen:
-        mem[(uint16_t)(bufaddr + 1)] = (uint8_t)count;
-        pcr(mem);
-        mem[(uint16_t)(si + c_column)] = 0;
+        buf[(uint16_t)(bufaddr + 1)] = (uint8_t)count;
+        pcr(phys, sysdat, si);
+        sd[(uint16_t)(si + c_column)] = 0;
         return;
     }
 }

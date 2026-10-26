@@ -1,281 +1,81 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/kernel/file4.c against a self-contained
-subset of src/kernel/FILE4.BDO: func24, func25, func29, func32,
-FUNC44, FUNC45, func51, func52. See file4.c's own header comment for
-why the rest of the file is deferred.
+"""Differential test for src-c/kernel/file4.c's directly-dispatched BDOS
+functions (func24/25/26/29/32/44/45/51/52 -- the ones BDOSIF's `entry`
+calls without getdiskmx) against the real BDOS module, on real memory
+layout with SYSDAT at a nonzero segment -- see tests/src-c/bdosref.py.
+
+DATA.BDO's fields (dlog, rodsk, returnseg) and the running PD are DS
+(SYSDAT)-relative; the u_* fields (u_dma_ofst/u_dma_seg/u_mult_cnt/
+u_error_mode/u_retseg) are the running process's UDA, reached through ES
+in the asm. Every case compares bx/cx and diffs the whole image.
 """
 import ctypes
 import os
-import subprocess
 import sys
-import tempfile
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(REPO_ROOT, 'tools'))
-
-from asm86 import Assembler  # noqa: E402
-from i86sim import I86Sim  # noqa: E402
-
-WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'file4_wrapper.A86')
-FILE4_C = os.path.join(REPO_ROOT, 'src-c', 'kernel', 'file4.c')
-FILE1_C = os.path.join(REPO_ROOT, 'src-c', 'kernel', 'file1.c')
-FILE2_C = os.path.join(REPO_ROOT, 'src-c', 'kernel', 'file2.c')
-FILE3_C = os.path.join(REPO_ROOT, 'src-c', 'kernel', 'file3.c')
-INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
-
-STACK_TOP = 0xFFF0
-
-# This combined bundle's own real small addresses for the UDA fields
-# these routines touch -- collide with cseg's own early code, same
-# class of gap as rlr=0x68 (see file1.c's/file4.c's own comments).
-REAL_RLR, REAL_DLOG, REAL_RODSK, REAL_RETURNSEG = 0x68, 0xC03, 0xC01, 0xCBB
-REAL_U_DMA_OFST, REAL_U_DMA_SEG = 0x2, 0x4
-REAL_U_ERROR_MODE, REAL_U_MULT_CNT, REAL_U_RETSEG = 0x10, 0x11, 0x30
-
-# src-c/kernel/defs.h's own harness-chosen scratch addresses the port
-# itself reads/writes for the same fields.
-SD_RLR = 0xA000
-UDA_DMA_OFST, UDA_DMA_SEG = 0xA060, 0xA062
-UDA_ERROR_MODE, UDA_MULT_CNT, UDA_RETSEG = 0xA064, 0xA065, 0xA014
-
-PD_ADDR = 0x4000  # harness-chosen scratch PD address, well clear of cseg/dseg
-
-# mpmif and its 9 XIOS-call helpers, plus XCRLF/XPRINT -- all real
-# BDOSIF.BDO labels this combined bundle needs to assemble, even
-# though nothing file4.c ports actually reaches them (see
-# file1_wrapper.A86's own header comment).
-# All 3 bytes lower than their own earlier values -- tools/asm86/
-# isa.py's own `_encode_alu` now emits the real 8086's dedicated,
-# shorter AL/AX,imm accumulator form instead of always the longer
-# group1 r/m,imm form (see that function's own header comment),
-# shrinking some `AND/OR/.../CMP AL,imm8`-shaped instruction earlier
-# in this same combined BDOSIF.BDO+FILE1-4.BDO bundle by a net 3
-# bytes -- every label after it shifts down by the same amount.
-STUBS = {0x488, 0x4b5, 0x4ba, 0x4bf, 0x4c4, 0x4c9, 0x4ce, 0x4d3, 0x4d8, 0x4dd, 0x406, 0x413}
-
-
-def assemble_reference():
-    asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
-    code = asm.segment_bytes('cseg')
-    names = ('func24', 'func25', 'func29', 'func32', 'func44', 'func45', 'func51', 'func52')
-    entries = {name: asm.symtab[name].value for name in names}
-    return code, entries
-
-
-def build_c_library():
-    lib_path = tempfile.mktemp(suffix='.dylib' if sys.platform == 'darwin' else '.so')
-    subprocess.run(
-        ['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC',
-         '-I', INCLUDE_DIR, FILE1_C, FILE2_C, FILE3_C, FILE4_C, '-o', lib_path],
-        check=True,
-    )
-    return lib_path
-
-
-def mem_w16(mem, addr, val):
-    mem[addr] = val & 0xFF
-    mem[addr + 1] = (val >> 8) & 0xFF
-
-
-def mem_r16(mem, addr):
-    return mem[addr] | (mem[addr + 1] << 8)
-
-
-def base_memory():
-    mem = bytearray(0x10000)
-    mem_w16(mem, SD_RLR, PD_ADDR)
-    return mem
-
-
-def run_reference(code, entry, mem, regs, stop_addrs=()):
-    # Same reasoning as test_file2.py's own run_reference: this
-    # combined bundle's own dseg would stomp code in this address
-    # range once layered, so it's dropped entirely; every field this
-    # test drives is instead force-copied explicitly below.
-    image = bytearray(0x10000)
-    image[0:len(code)] = code
-    for addr, val in enumerate(mem):
-        if val != 0:
-            image[addr] = val
-    # Force-copy every field unconditionally (same reasoning as
-    # test_file1.py's own rlr/BD_CURDSK special-casing): the port's
-    # own scratch addresses (SD_RLR etc.) never collide with code, so
-    # this only has to remap each one to its real bundle address for
-    # the reference run.
-    image[REAL_RLR:REAL_RLR + 2] = mem[SD_RLR:SD_RLR + 2]
-    image[REAL_DLOG:REAL_DLOG + 2] = mem[REAL_DLOG:REAL_DLOG + 2]
-    image[REAL_RODSK:REAL_RODSK + 2] = mem[REAL_RODSK:REAL_RODSK + 2]
-    image[REAL_RETURNSEG:REAL_RETURNSEG + 2] = mem[REAL_RETURNSEG:REAL_RETURNSEG + 2]
-    image[REAL_U_DMA_OFST:REAL_U_DMA_OFST + 2] = mem[UDA_DMA_OFST:UDA_DMA_OFST + 2]
-    image[REAL_U_DMA_SEG:REAL_U_DMA_SEG + 2] = mem[UDA_DMA_SEG:UDA_DMA_SEG + 2]
-    image[REAL_U_ERROR_MODE] = mem[UDA_ERROR_MODE]
-    image[REAL_U_MULT_CNT] = mem[UDA_MULT_CNT]
-    image[REAL_U_RETSEG:REAL_U_RETSEG + 2] = mem[UDA_RETSEG:UDA_RETSEG + 2]
-    # The running PD's own p_dsk/p_user bytes, at the PD address this
-    # test chose -- PD_ADDR is well clear of cseg/dseg, so a plain
-    # "nonzero wins" copy already carried these; nothing further
-    # needed here.
-    sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry, stop_addrs=set(stop_addrs),
-                 call_stub_addrs=STUBS)
-    sim.run()
-    return sim.regs, image
+from bdosref import (BdosRef, Checker, BDOS_C, PD_RUN, SYSDAT, UDA, build_lib, c_buffer, ds, phys, w16,
+                     r16, u8, u16, c_u8p, c_u16p)
 
 
 def main():
-    code, entries = assemble_reference()
-    lib_path = build_c_library()
+    ref = BdosRef()
+    v = ref.v
+    lib_path = build_lib(BDOS_C)
     try:
         lib = ctypes.CDLL(lib_path)
-        c_u8p = ctypes.POINTER(ctypes.c_uint8)
-        c_u16p = ctypes.POINTER(ctypes.c_uint16)
+        for name, extra, res in (('func24_entry', [], u16), ('func25_entry', [], u16), ('func29_entry', [], u16),
+                                 ('func32_entry', [u8], u16), ('func52_entry', [], u16)):
+            fn = getattr(lib, name)
+            fn.restype = res
+            fn.argtypes = [c_u8p, u16] + extra + [c_u16p]
+        for name, extra in (('func26_entry', [u16]), ('func51_entry', [u16]), ('func44_entry', [u8]),
+                            ('func45_entry', [u8])):
+            getattr(lib, name).argtypes = [c_u8p, u16] + extra + [c_u16p, c_u16p]
+        ck = Checker(ref)
 
-        lib.func24_entry.restype = ctypes.c_uint16
-        lib.func24_entry.argtypes = [c_u8p, ctypes.c_uint16, c_u16p]
-        lib.func25_entry.restype = ctypes.c_uint16
-        lib.func25_entry.argtypes = [c_u8p, c_u16p]
-        lib.func29_entry.restype = ctypes.c_uint16
-        lib.func29_entry.argtypes = [c_u8p, ctypes.c_uint16, c_u16p]
-        lib.func32_entry.restype = ctypes.c_uint16
-        lib.func32_entry.argtypes = [c_u8p, ctypes.c_uint8, c_u16p]
-        lib.func44_entry.argtypes = [c_u8p, ctypes.c_uint8, c_u16p, c_u16p]
-        lib.func45_entry.argtypes = [c_u8p, ctypes.c_uint8, c_u16p, c_u16p]
-        lib.func51_entry.argtypes = [c_u8p, ctypes.c_uint16, c_u16p, c_u16p]
-        lib.func52_entry.restype = ctypes.c_uint16
-        lib.func52_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, c_u16p]
+        def run(label, func, mem, dx=0, args=(), returns='bx', snap=lambda img: ()):
+            regs, img = ref.run(func, mem, {'dx': dx, 'bx': 0x55AA, 'cx': 0x66BB}, es_uda=True)
+            buf = c_buffer(mem)
+            bx, cx = ctypes.c_uint16(), ctypes.c_uint16()
+            fn = getattr(lib, func + '_entry')
+            if returns == 'bx':
+                got = (fn(buf, SYSDAT, *args, ctypes.byref(cx)), cx.value)
+            else:
+                fn(buf, SYSDAT, *args, ctypes.byref(bx), ctypes.byref(cx))
+                got = (bx.value, cx.value)
+            ck.compare(label, img, buf, (regs['bx'], regs['cx']), got, snap)
 
-        failures = []
+        uda = lambda f: phys(UDA, v(f))  # noqa: E731
 
-        def check(label, ref, port):
-            status = "ok" if ref == port else "FAIL"
-            print(f"[{status}] {label}: reference {ref} | port {port}")
-            if status == "FAIL":
-                failures.append(label)
-
-        def to_ctypes(mem):
-            return (ctypes.c_uint8 * 0x10000)(*mem)
-
-        # -- func24: return the login vector --
-        mem = base_memory()
-        mem_w16(mem, REAL_DLOG, 0x1234)
-        ref_regs, _ = run_reference(code, entries['func24'], mem, {})
-        buf = to_ctypes(mem)
-        cx = ctypes.c_uint16()
-        got = lib.func24_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.byref(cx))
-        check("func24: return the login vector", (ref_regs['bx'], ref_regs['cx']), (got, cx.value))
-
-        # -- func25: return selected disk number --
-        mem = base_memory()
-        mem[PD_ADDR + 0x12] = 3  # p_dsk
-        ref_regs, _ = run_reference(code, entries['func25'], mem, {})
-        buf = to_ctypes(mem)
-        cx = ctypes.c_uint16()
-        got = lib.func25_entry(ctypes.cast(buf, c_u8p), ctypes.byref(cx))
-        check("func25: return selected disk number", (ref_regs['bx'], ref_regs['cx']), (got, cx.value))
-
-        # -- func29: return r/o bit vector --
-        mem = base_memory()
-        mem_w16(mem, REAL_RODSK, 0x0005)
-        ref_regs, _ = run_reference(code, entries['func29'], mem, {})
-        buf = to_ctypes(mem)
-        cx = ctypes.c_uint16()
-        got = lib.func29_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.byref(cx))
-        check("func29: return r/o bit vector", (ref_regs['bx'], ref_regs['cx']), (got, cx.value))
-
-        # -- func32: interrogate current user code (dl == 0xFF) --
-        mem = base_memory()
-        mem[PD_ADDR + 0x13] = 7  # p_user
-        ref_regs, _ = run_reference(code, entries['func32'], mem, {'dx': 0x00FF})
-        buf = to_ctypes(mem)
-        cx = ctypes.c_uint16()
-        got = lib.func32_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0xFF), ctypes.byref(cx))
-        check("func32: interrogate current user code", (ref_regs['bx'], ref_regs['cx']), (got, cx.value))
-
-        # -- func32: set a new user code (masked to 4 bits) --
-        mem = base_memory()
-        mem[PD_ADDR + 0x13] = 7  # p_user
-        ref_regs, ref_img = run_reference(code, entries['func32'], mem, {'dx': 0x001D})
-        buf = to_ctypes(mem)
-        cx = ctypes.c_uint16()
-        got = lib.func32_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0x1D), ctypes.byref(cx))
-        ref = (ref_regs['bx'], ref_regs['cx'], ref_img[PD_ADDR + 0x13])
-        port = (got, cx.value, bytes(buf)[PD_ADDR + 0x13])
-        check("func32: set a new user code", ref, port)
-
-        # -- func44: valid multi-sector count --
-        mem = base_memory()
-        ref_regs, ref_img = run_reference(code, entries['func44'], mem, {'dx': 0x0010})
-        buf = to_ctypes(mem)
-        bx = ctypes.c_uint16()
-        cx = ctypes.c_uint16()
-        lib.func44_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0x10), ctypes.byref(bx), ctypes.byref(cx))
-        ref = (ref_regs['bx'], ref_regs['cx'], ref_img[REAL_U_MULT_CNT])
-        port = (bx.value, cx.value, bytes(buf)[UDA_MULT_CNT])
-        check("func44: valid multi-sector count", ref, port)
-
-        # -- func44: zero is out of range --
-        mem = base_memory()
-        mem[UDA_MULT_CNT] = 0x09
-        ref_regs, ref_img = run_reference(code, entries['func44'], mem, {'dx': 0x0000})
-        buf = to_ctypes(mem)
-        bx = ctypes.c_uint16()
-        cx = ctypes.c_uint16()
-        lib.func44_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0x00), ctypes.byref(bx), ctypes.byref(cx))
-        ref = (ref_regs['bx'], ref_regs['cx'], ref_img[REAL_U_MULT_CNT])
-        port = (bx.value, cx.value, bytes(buf)[UDA_MULT_CNT])
-        check("func44: zero is out of range", ref, port)
-
-        # -- func44: 17 is out of range --
-        mem = base_memory()
-        mem[UDA_MULT_CNT] = 0x09
-        ref_regs, ref_img = run_reference(code, entries['func44'], mem, {'dx': 0x0011})
-        buf = to_ctypes(mem)
-        bx = ctypes.c_uint16()
-        cx = ctypes.c_uint16()
-        lib.func44_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0x11), ctypes.byref(bx), ctypes.byref(cx))
-        ref = (ref_regs['bx'], ref_regs['cx'], ref_img[REAL_U_MULT_CNT])
-        port = (bx.value, cx.value, bytes(buf)[UDA_MULT_CNT])
-        check("func44: 17 is out of range", ref, port)
-
-        # -- func45: set bdos error mode --
-        mem = base_memory()
-        ref_regs, ref_img = run_reference(code, entries['func45'], mem, {'dx': 0x00FF})
-        buf = to_ctypes(mem)
-        bx = ctypes.c_uint16()
-        cx = ctypes.c_uint16()
-        lib.func45_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0xFF), ctypes.byref(bx), ctypes.byref(cx))
-        ref = (ref_regs['bx'], ref_regs['cx'], ref_img[REAL_U_ERROR_MODE])
-        port = (bx.value, cx.value, bytes(buf)[UDA_ERROR_MODE])
-        check("func45: set bdos error mode", ref, port)
-
-        # -- func51: set dma base --
-        mem = base_memory()
-        ref_regs, ref_img = run_reference(code, entries['func51'], mem, {'dx': 0x5678})
-        buf = to_ctypes(mem)
-        bx = ctypes.c_uint16()
-        cx = ctypes.c_uint16()
-        lib.func51_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0x5678), ctypes.byref(bx), ctypes.byref(cx))
-        ref = (ref_regs['bx'], ref_regs['cx'], mem_r16(ref_img, REAL_U_DMA_SEG))
-        port = (bx.value, cx.value, mem_r16(bytes(buf), UDA_DMA_SEG))
-        check("func51: set dma base", ref, port)
-
-        # -- func52: get dma --
-        mem = base_memory()
-        mem_w16(mem, UDA_DMA_SEG, 0x4321)
-        mem_w16(mem, UDA_DMA_OFST, 0x0099)
-        ref_regs, ref_img = run_reference(code, entries['func52'], mem, {'ds': 0x1111})
-        buf = to_ctypes(mem)
-        cx = ctypes.c_uint16()
-        got = lib.func52_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0), ctypes.c_uint16(0x1111), ctypes.byref(cx))
-        ref = (ref_regs['bx'], ref_regs['cx'], mem_r16(ref_img, REAL_U_RETSEG), mem_r16(ref_img, REAL_RETURNSEG))
-        port = (got, cx.value, mem_r16(bytes(buf), UDA_RETSEG), mem_r16(bytes(buf), REAL_RETURNSEG))
-        check("func52: get dma", ref, port)
-
-        if failures:
-            print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")
-            return 1
-        print("\nall cases match.")
-        return 0
+        mem = ref.base_memory()
+        w16(mem, ds(v('dlog')), 0x1234)
+        run("func24: return the login vector", 'func24', mem)
+        mem = ref.base_memory()
+        mem[ds(PD_RUN + v('p_dsk'))] = 3
+        run("func25: return the current disk", 'func25', mem)
+        mem = ref.base_memory()
+        w16(mem, ds(v('rodsk')), 0x4321)
+        run("func29: return the r/o vector", 'func29', mem)
+        mem = ref.base_memory()
+        mem[ds(PD_RUN + v('p_user'))] = 7
+        run("func32: interrogate the user code", 'func32', mem, 0xFF, (0xFF,))
+        run("func32: set the user code (masked to 4 bits)", 'func32', ref.base_memory(), 0x1D, (0x1D,),
+            snap=lambda i: i[ds(PD_RUN + v('p_user'))])
+        run("func26: set the dma offset", 'func26', ref.base_memory(), 0x5678, (0x5678,), 'bxcx',
+            lambda i: r16(i, uda('u_dma_ofst')))
+        run("func51: set the dma base", 'func51', ref.base_memory(), 0x9ABC, (0x9ABC,), 'bxcx',
+            lambda i: r16(i, uda('u_dma_seg')))
+        for dl in (0x10, 0x00, 0x11):
+            run(f"func44: multi-sector count {dl:#x}", 'func44', ref.base_memory(), dl, (dl,), 'bxcx',
+                lambda i: i[uda('u_mult_cnt')])
+        run("func45: set the error mode", 'func45', ref.base_memory(), 0xFE, (0xFE,), 'bxcx',
+            lambda i: i[uda('u_error_mode')])
+        mem = ref.base_memory()
+        w16(mem, uda('u_dma_ofst'), 0x0080)
+        w16(mem, uda('u_dma_seg'), 0x2345)
+        run("func52: get dma (returnseg = DS, u_retseg = u_dma_seg)", 'func52', mem,
+            snap=lambda i: (r16(i, ds(v('returnseg'))), r16(i, uda('u_retseg'))))
+        return ck.finish()
     finally:
         os.remove(lib_path)
 

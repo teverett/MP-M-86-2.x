@@ -901,8 +901,12 @@ fdc_do_read:
 
 	push	si ! push di ! push ds ! push es
 	mov	si,offset secbuf ! add si,cur_bufoff
-	push	cs ! pop ds
 	mov	di,dma_adr ! mov es,dma_seg
+					;secbuf and dma_adr/dma_seg are in DS
+					; (SYSDAT) -- this used to `push cs !
+					; pop ds` first, reading all three
+					; through the kernel's code segment
+					; (docs/bugs.md #111)
 	mov	cx,128 ! rep movsb
 	pop	es ! pop ds ! pop di ! pop si
 	xor	al,al
@@ -928,7 +932,8 @@ fdc_do_write:
 
 	push	si ! push di ! push ds ! push es
 	mov	di,offset secbuf ! add di,cur_bufoff
-	mov	si,dma_adr ! push cs ! pop es
+	mov	si,dma_adr ! push ds ! pop es	;secbuf is in DS (SYSDAT),
+					; not CS (docs/bugs.md #111)
 	mov	ds,dma_seg
 	mov	cx,128 ! rep movsb
 	pop	es ! pop ds ! pop di ! pop si
@@ -1020,7 +1025,8 @@ fdc_out_byte:   ; write AL to the FDC data FIFO once it's ready for a
 		; own CL-counted loop above *and* from fdc_pio_out's
 		; CX-counted loop below, so it keeps the byte to send
 		; in a memory scratch cell instead of a register.
-	mov	cs:outbyte_tmp,al
+	mov	outbyte_tmp,al	;DS (SYSDAT) -- not `cs:`, which wrote the
+				; kernel code segment (docs/bugs.md #111)
 	push	dx		;contract above says AL/flags only
 	mov	dx,fdc_msr
 fob_wait:
@@ -1028,7 +1034,7 @@ fob_wait:
 	and	al,msr_rqm+msr_dio
 	cmp	al,msr_rqm
 	jne	fob_wait
-	mov	al,cs:outbyte_tmp
+	mov	al,outbyte_tmp
 	mov	dx,fdc_data ! out dx,al
 	pop	dx
 	ret
@@ -1115,15 +1121,22 @@ tickint_sp	dw	0
 ax_save		dw	0
 
 tickint:
-	push	ds ! push cs ! pop ds
+	push	ds ! push cs ! pop ds		;the save cells just above are CS's
 	mov	tickint_ss,ss
 	mov	tickint_sp,sp
 	mov	ax_save,ax
-	mov	ax,cs ! mov ss,ax
-	mov	sp,offset tickint_tos
+	mov	ax,sysdat ! mov ss,ax		;the ISR stack, tick_count and
+	mov	sp,offset tickint_tos		; clockon are SYSDAT's (DSEG) -- this
+					; was `mov ax,cs`, as in the real
+					; XIOS.A86, where CS = SYSDAT; here CS
+					; is the combined kernel code segment,
+					; so the stack and the two fields
+					; landed in SUP's code (docs/bugs.md
+					; #111)
 	push	ax_save
 	push	bx ! push cx ! push dx
 	push	bp ! push si ! push di ! push es
+	mov	ds,ax
 
 	dec	tick_count ! jnz tick_1
 	    mov	tick_count,60
@@ -1148,8 +1161,8 @@ tick_2:
 
 	pop	es ! pop di ! pop si ! pop bp
 	pop	dx ! pop cx ! pop bx ! pop ax
-	mov	ss,tickint_ss
-	mov	sp,tickint_sp
+	mov	ss,cs:tickint_ss
+	mov	sp,cs:tickint_sp
 	pop	ds
 
 	jmpf	cs:dword ptr mydispatch
@@ -1307,7 +1320,10 @@ dirbuf0		rb	128		;directory-record DMA buffer -- see
 tick_count_dummy equ 0	;unused, silences "label defined but" style
 			; concerns in future edits -- harmless
 
-tickint_tos	rw	32
+		rw	32		;the tick ISR's stack
+tickint_tos	rw	0		;(its top -- this label was on the
+					; first word, so the stack grew down
+					; into dirbuf0; docs/bugs.md #111)
 init_ss_save	dw	0
 init_sp_save	dw	0
 

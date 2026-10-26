@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/kernel/rtmif.c against src/kernel/
-RTMIF.RTM's `init`. `entry` (RTMIF.RTM's own inter-module RTM
-dispatch) is now ported too -- see tests/src-c/test_rtmif_entry.py
-for its own dedicated differential test. `proc_creat` is a boundary
-stub in the reference
-wrapper (see tests/src-c/fixtures/rtmif_wrapper.A86's own header
-comment for why) -- the C port still makes the real call into
-proc.c's own already-verified `proc_creat`, so only the parts of
-`init` genuinely under test here (sysdat/supervisor copy,
-dispatcher/rtm_pdisp far pointers, tick/idle UDA setup) are checked.
+"""Differential test for src-c/kernel/rtmif.c's `rtmif_init` against
+src/kernel/RTMIF.RTM's `init`, both running against real memory layout.
+`entry` has its own test, tests/src-c/test_rtmif_entry.py.
 
-Needs tools/i86sim.py's opt-in `segmented=True` mode: `init` itself
-runs with a genuinely non-zero `DS=sysdat` throughout (per its own
-"assume DS = Sysdat Segment" precondition), and switches `ES` to a
-dynamically-computed segment for the tick/idle UDA writes."""
+rtmif_init addresses real memory (defs.h's far_ptr(): seg*16 + off at
+real SYSDAT/UDA/RTM-cseg offsets), so the reference runs with
+tools/i86sim.py's segmented=True and a real, nonzero SYSDAT segment,
+and tests/src-c/fixtures/rtmif_wrapper.A86 includes the real
+SYSDAT.FMT/UDA.FMT. Every field address below comes from the assembled
+symbol table, so a wrong offset in defs.h shows up as a mismatch at
+the real address.
+
+CS is 0: i86sim fetches instructions from the physical IP and ignores
+CS, so the code image has to sit at physical 0 for its own `cs:`
+accesses (cs:sysdat, cs:supervisor) to land on it.
+
+`init` ends with a real `call proc_creat` (PROC.RTM linked in, proc.c
+also on real memory), which drains the idle -> tick creation chain:
+the creator is the init process (rlr = initpd, its UDA as the
+reference's ES with u_wrkseg = SYSDAT, as INIT.SUP leaves it). Beyond
+the per-field checks, the two images are diffed byte for byte, outside
+the code image and the reference's own stack, so everything
+proc_creat writes is compared too.
+"""
 import ctypes
 import os
 import subprocess
@@ -27,39 +36,38 @@ from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
 WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'rtmif_wrapper.A86')
-# rtmif.c's own `entry` now calls into sysent.c/dsptch.c/flag.c/
-# que1.c/que2.c/findpd.c/abort.c too -- link all nine, even though
-# this test only exercises `init` (same build
-# tests/src-c/test_rtmif_entry.py uses for `entry` itself).
+# rtmif.c's own `entry` calls into sysent.c/dsptch.c/flag.c/que1.c/
+# que2.c/findpd.c/abort.c too -- link them all, even though this test
+# only exercises `rtmif_init`.
 RTMIF_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f)
            for f in ('rtmif.c', 'proc.c', 'sysent.c', 'dsptch.c', 'flag.c',
                      'que1.c', 'que2.c', 'findpd.c', 'abort.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 
-STACK_TOP = 0xFFF0
+SIM_MEM = 0x10000     # i86sim's segmented mode wraps at 64KB
+PHYS_MEM = 0x100000   # rtmif_init's view: the real 1MB 8086 address space
+STACK_TOP = 0xFFF0    # SS=0, so the reference's stack is physical FFxxh
 
-SYSDAT_SUPMOD, SYSDAT_DISPATCHER, SYSDAT_RTM_PDISP = 0x0000, 0x0038, 0x003C
-SYSDAT_IDLEPD, SYSDAT_TICKPD = 0x09F0, 0x0A20
-P_UDA = 0x10
-U_INITCS, U_INITSS = 0x50, 0x56
-RTMIF_SYSDAT, RTMIF_SUPERVISOR_OFF, RTMIF_SUPERVISOR_SEG = 0x0006, 0x0008, 0x000A
-
-
-def phys(seg):
-    return (seg * 16) & 0xFFFF
+CS = 0x0000
+DS_SYSDAT = 0x0400    # SYSDAT at physical 4000h-4B60h
+SUPMOD = (0x0718, 0x1000)      # module_table[SUP] entry far ptr (off, seg)
+TICK_P_UDA, IDLE_P_UDA = 0x0100, 0x0110  # SYSDAT-relative paragraphs -> UDAs at 500h/510h
+CREATOR_UDA = 0x0600  # the init process's UDA (rlr's p_uda, and ES)
+ENDSEG = 0x0F00
+TICK_SP, IDLE_SP = 0x0F00, 0x0F80  # u_stack_sp -> IRET frames on the SYSDAT segment (u_initss)
 
 
 def assemble_reference():
     asm = Assembler()
     asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
     code = asm.segment_bytes('cseg')
-    entry = asm.symtab['init'].value
-    entry_label = asm.symtab['entry'].value
-    retf_addrs = [i for i in range(entry, entry_label) if code[i] == 0xCB]
+    sym = {name: asm.symtab[name].value for name in (
+        'init', 'entry', 'fdisp', 'farpdisp', 'sysdat', 'supervisor', 'supmod',
+        'dispatcher', 'rtm_pdisp', 'tickpd', 'idlepd', 'p_uda', 'u_initcs', 'u_initss',
+        'initpd', 'rlr', 'drl', 'thrdrt', 'endseg', 'p_link', 'p_thread', 'u_wrkseg', 'u_stack_sp')}
+    retf_addrs = [i for i in range(sym['init'], sym['entry']) if code[i] == 0xCB]
     assert len(retf_addrs) == 1, f"expected exactly 1 retf, found {retf_addrs}"
-    fdisp = asm.symtab['fdisp'].value
-    farpdisp = asm.symtab['farpdisp'].value
-    return code, entry, retf_addrs[0], fdisp, farpdisp
+    return code, sym, retf_addrs[0]
 
 
 def build_c_library():
@@ -72,37 +80,63 @@ def build_c_library():
     return lib_path
 
 
-def base_memory():
-    return bytearray(0x10000)
+def phys(seg, off):
+    return seg * 16 + off
 
 
-def mem_w16(mem, addr, val):
-    mem[addr & 0xFFFF] = val & 0xFF
-    mem[(addr + 1) & 0xFFFF] = (val >> 8) & 0xFF
+def w16(mem, addr, val):
+    mem[addr] = val & 0xFF
+    mem[addr + 1] = (val >> 8) & 0xFF
 
 
-def mem_r16(mem, addr):
-    addr &= 0xFFFF
-    return mem[addr] | (mem[(addr + 1) & 0xFFFF] << 8)
+def r16(mem, addr):
+    return mem[addr] | (mem[addr + 1] << 8)
 
 
-def run_reference(code, entry, stop_addr, mem, regs):
+def initial_memory(sym):
+    mem = bytearray(SIM_MEM)
+    w16(mem, phys(DS_SYSDAT, sym['supmod']), SUPMOD[0])
+    w16(mem, phys(DS_SYSDAT, sym['supmod'] + 2), SUPMOD[1])
+    w16(mem, phys(DS_SYSDAT, sym['tickpd'] + sym['p_uda']), TICK_P_UDA)
+    w16(mem, phys(DS_SYSDAT, sym['idlepd'] + sym['p_uda']), IDLE_P_UDA)
+    # creator: the init process, as INIT.SUP leaves it before callf rtmmod
+    w16(mem, phys(DS_SYSDAT, sym['rlr']), sym['initpd'])
+    w16(mem, phys(DS_SYSDAT, sym['initpd'] + sym['p_uda']), CREATOR_UDA)
+    w16(mem, phys(CREATOR_UDA, sym['u_wrkseg']), DS_SYSDAT)
+    w16(mem, phys(DS_SYSDAT, sym['endseg']), ENDSEG)
+    # creation chain: idlepd -> tickpd
+    w16(mem, phys(DS_SYSDAT, sym['idlepd'] + sym['p_link']), sym['tickpd'])
+    w16(mem, phys(DS_SYSDAT, sym['tickpd'] + sym['p_link']), 0)
+    w16(mem, phys(DS_SYSDAT + TICK_P_UDA, sym['u_stack_sp']), TICK_SP)
+    w16(mem, phys(DS_SYSDAT + IDLE_P_UDA, sym['u_stack_sp']), IDLE_SP)
+    return mem
+
+
+def run_reference(code, sym, stop_addr, mem):
     image = bytearray(mem)
     image[0:len(code)] = code
-    sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry, stop_addrs={stop_addr}, segmented=True)
+    sim = I86Sim(image, {'cs': CS, 'ds': DS_SYSDAT, 'es': CREATOR_UDA, 'ss': 0, 'sp': STACK_TOP},
+                 sym['init'],
+                 stop_addrs={stop_addr}, segmented=True)
     sim.run()
-    return sim.regs, image
+    return image
+
+
+def run_port(lib, code, sym, mem):
+    buf = (ctypes.c_uint8 * PHYS_MEM)()
+    ctypes.memmove(buf, bytes(mem), len(mem))
+    ctypes.memmove(buf, bytes(code), len(code))
+    lib.rtmif_init(buf, ctypes.c_uint16(DS_SYSDAT), ctypes.c_uint16(CS),
+                   ctypes.c_uint16(sym['fdisp']), ctypes.c_uint16(sym['farpdisp']))
+    return bytes(buf)
 
 
 def main():
-    code, entry, stop_addr, fdisp, farpdisp = assemble_reference()
+    code, sym, stop_addr = assemble_reference()
     lib_path = build_c_library()
     try:
         lib = ctypes.CDLL(lib_path)
-        c_u8p = ctypes.POINTER(ctypes.c_uint8)
-
-        lib.rtmif_init.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16]
-
+        lib.rtmif_init.argtypes = [ctypes.POINTER(ctypes.c_uint8)] + [ctypes.c_uint16] * 4
         failures = []
 
         def check(label, ref, port):
@@ -111,49 +145,45 @@ def main():
             if status == "FAIL":
                 failures.append(label)
 
-        def to_ctypes(mem):
-            return (ctypes.c_uint8 * 0x10000)(*mem)
+        mem = initial_memory(sym)
+        ref = run_reference(code, sym, stop_addr, mem)
+        port = run_port(lib, code, sym, mem)
 
-        # DS_SYSDAT is a genuine, non-degenerate segment (its own
-        # physical base, DS_SYSDAT*16, must land clear of this
-        # wrapper's own cseg bytes -- dispatcher's own raw offset
-        # alone, 0x38, sits inside init's own body if sysdat were
-        # ever flat-0) -- phys(DS_SYSDAT) = 0x2340, comfortably past
-        # this wrapper's own ~0x300-byte cseg.
-        DS_SYSDAT = 0x1234
-        CS = 0x0000  # drives real instruction fetch under segmented=True
-        IDLE_P_UDA = 0x0010
-        TICK_P_UDA = 0x0020
+        def both16(addr):
+            return r16(ref, addr), r16(port, addr)
 
-        mem = base_memory()
-        mem_w16(mem, phys(DS_SYSDAT) + SYSDAT_SUPMOD, 0x0718)
-        mem_w16(mem, phys(DS_SYSDAT) + SYSDAT_SUPMOD + 2, 0x1000)
-        mem_w16(mem, phys(DS_SYSDAT) + SYSDAT_IDLEPD + P_UDA, IDLE_P_UDA)
-        mem_w16(mem, phys(DS_SYSDAT) + SYSDAT_TICKPD + P_UDA, TICK_P_UDA)
+        sd = lambda off: phys(DS_SYSDAT, off)  # noqa: E731
 
-        ref_regs, ref_img = run_reference(code, entry, stop_addr, mem, {'ds': DS_SYSDAT, 'cs': CS})
-        buf = to_ctypes(mem)
-        lib.rtmif_init(ctypes.cast(buf, c_u8p), ctypes.c_uint16(DS_SYSDAT), ctypes.c_uint16(CS),
-                 ctypes.c_uint16(fdisp), ctypes.c_uint16(farpdisp))
-        port = bytes(buf)
+        check("cs:sysdat", *both16(phys(CS, sym['sysdat'])))
+        check("cs:supervisor offset", *both16(phys(CS, sym['supervisor'])))
+        check("cs:supervisor segment", *both16(phys(CS, sym['supervisor'] + 2)))
+        for name in ('dispatcher', 'rtm_pdisp'):
+            check(f"{name} offset", *both16(sd(sym[name])))
+            check(f"{name} segment", *both16(sd(sym[name] + 2)))
+        for name, p_uda in (('tick', TICK_P_UDA), ('idle', IDLE_P_UDA)):
+            uda_seg = DS_SYSDAT + p_uda
+            check(f"{name} UDA u_initcs", *both16(phys(uda_seg, sym['u_initcs'])))
+            check(f"{name} UDA u_initss", *both16(phys(uda_seg, sym['u_initss'])))
+            check(f"{name} UDA u_initcs = supervisor segment", SUPMOD[1],
+                  r16(port, phys(uda_seg, sym['u_initcs'])))
+            check(f"{name} UDA u_initss = sysdat", DS_SYSDAT, r16(port, phys(uda_seg, sym['u_initss'])))
+            check(f"{name}pd p_uda (made absolute by proc_creat)", *both16(sd(sym[f'{name}pd'] + sym['p_uda'])))
+            check(f"{name}pd p_uda = its UDA segment", uda_seg, r16(port, sd(sym[f'{name}pd'] + sym['p_uda'])))
+        for name in ('drl', 'thrdrt'):
+            check(f"{name} (tick and idle created)", *both16(sd(sym[name])))
+        for name in ('idlepd', 'tickpd'):
+            links = lambda img: (r16(img, sd(sym[name] + sym['p_link'])),  # noqa: E731
+                                 r16(img, sd(sym[name] + sym['p_thread'])))
+            check(f"{name} p_link/p_thread", links(ref), links(port))
 
-        check("init: sysdat", ref_img[RTMIF_SYSDAT:RTMIF_SYSDAT + 2], port[RTMIF_SYSDAT:RTMIF_SYSDAT + 2])
-        check("init: supervisor offset", ref_img[RTMIF_SUPERVISOR_OFF:RTMIF_SUPERVISOR_OFF + 2],
-              port[RTMIF_SUPERVISOR_OFF:RTMIF_SUPERVISOR_OFF + 2])
-        check("init: supervisor segment", ref_img[RTMIF_SUPERVISOR_SEG:RTMIF_SUPERVISOR_SEG + 2],
-              port[RTMIF_SUPERVISOR_SEG:RTMIF_SUPERVISOR_SEG + 2])
-
-        disp_addr = phys(DS_SYSDAT) + SYSDAT_DISPATCHER
-        rtmp_addr = phys(DS_SYSDAT) + SYSDAT_RTM_PDISP
-        check("init: dispatcher far ptr", ref_img[disp_addr:disp_addr + 4], port[disp_addr:disp_addr + 4])
-        check("init: rtm_pdisp far ptr", ref_img[rtmp_addr:rtmp_addr + 4], port[rtmp_addr:rtmp_addr + 4])
-
-        idle_uda = (IDLE_P_UDA + DS_SYSDAT) & 0xFFFF
-        tick_uda = (TICK_P_UDA + DS_SYSDAT) & 0xFFFF
-        for name, uda in (("idle", idle_uda), ("tick", tick_uda)):
-            ref = (mem_r16(ref_img, phys(uda) + U_INITCS), mem_r16(ref_img, phys(uda) + U_INITSS))
-            got = (mem_r16(port, phys(uda) + U_INITCS), mem_r16(port, phys(uda) + U_INITSS))
-            check(f"init: {name}'s own u_initcs/u_initss", ref, got)
+        # whole-image diff, outside the code image and the reference's
+        # own stack (I86Sim's entry return sentinel, init's `push es`,
+        # proc_creat's pushes -- all just below STACK_TOP)
+        stack = set(range(0xFF00, SIM_MEM))
+        diffs = [hex(a) for a in range(len(code), SIM_MEM)
+                 if a not in stack and ref[a] != port[a]]
+        check("no other bytes differ", [], diffs[:8])
+        check("nothing written past 64KB", True, not any(port[SIM_MEM:]))
 
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")

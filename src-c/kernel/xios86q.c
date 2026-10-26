@@ -43,26 +43,20 @@
  * copies out of SYSDAT's module table (`supervisor`/`mydispatch` --
  * genuinely external state this isolated port has nothing to copy
  * to/from, same class as `src-c/kernel/init.c`'s own un-exercised
- * `mem_r16_seg`/`mem_w16_seg` writes), its real-mode interrupt-vector
+ * SYSDAT module-table reads), its real-mode interrupt-vector
  * write (`mov word ptr 0020h,offset tickint` -- writing a real IVT
  * entry has no C equivalent to model), or its final `retf` (no C
  * equivalent, same as every other real OS entry point in this port).
  *
- * The 128-byte logical-record copy `diskread_entry`/`diskwrite_entry`
- * do between `secbuf` and the caller's own `dma_seg:dma_adr` buffer
- * is a genuine segment:offset access (`mem_r8_seg`/`mem_w8_seg`),
- * same as `ldbios86q.c`'s own `read_entry`/`write_entry`. Unlike that
- * file, `secbuf`'s own physical address (what `dma_setup` arms the
- * 8237 with) is DS-relative here, not CS-relative (confirmed
- * directly against the real asm, and explained in its own comment:
- * this module's data lives in the shared, SYSDAT-based combined
- * DSEG, not its own private CSEG the way LDBIOS86Q.A86's does) -- so
- * `dma_setup` takes `ds` as a parameter, same "genuinely ambient,
- * not derivable from this file alone" class as `ldbios86q.c`'s own
- * `cs`. The real `rep movsb` copy's own brief `push cs ! pop ds`
- * swap right before it (reading `secbuf` CS-relative for that one
- * copy) is NOT modeled -- moot under this project's flat-memory host
- * model, same "DS/CS switch is moot" reasoning used throughout.
+ * Runs against real memory (defs.h's far_ptr): `phys` is the base of
+ * real physical memory and `sysdat` the XIOS's DS -- SYSDAT, whose
+ * segment this module's data follows (the XQ_* fields are real
+ * XIOS86Q.A86 offsets, from 1000h). The 128-byte logical-record copy
+ * `diskread_entry`/`diskwrite_entry` do between `secbuf` and the
+ * caller's `dma_seg:dma_adr` buffer goes through that segment, and
+ * `dma_setup` arms the 8237 with secbuf's physical address from it.
+ * (The asm's `push cs ! pop ds` around the copy reads secbuf through
+ * CS, which is the same segment as DS for this module.)
  */
 #include <stdint.h>
 #include <string.h>
@@ -200,7 +194,10 @@ uint16_t maxlist_entry(void) {
 
 /* -- FLOPPY CONTROLLER (NEC 765/8272) DRIVER -------------------------- */
 
-static void fdc_out_byte(io_in8_fn io_in8, io_out8_fn io_out8, uint8_t val) {
+/* fdc_out_byte -- the byte waits in outbyte_tmp (SYSDAT) while the
+ * FIFO isn't ready, as in the asm */
+static void fdc_out_byte(uint8_t *sd, io_in8_fn io_in8, io_out8_fn io_out8, uint8_t val) {
+    sd[XQ_OUTBYTE_TMP] = val;
     uint8_t al;
     do {
         al = io_in8(fdc_msr);
@@ -218,27 +215,27 @@ static uint8_t fdc_in_byte(io_in8_fn io_in8) {
     return io_in8(fdc_data);
 }
 
-static void fdc_send_cmd(io_in8_fn io_in8, io_out8_fn io_out8, const uint8_t *cmd) {
+static void fdc_send_cmd(uint8_t *sd, io_in8_fn io_in8, io_out8_fn io_out8, const uint8_t *cmd) {
     uint8_t count = cmd[0];
     for (uint8_t i = 1; i <= count; i++) {
-        fdc_out_byte(io_in8, io_out8, cmd[i]);
+        fdc_out_byte(sd, io_in8, io_out8, cmd[i]);
     }
 }
 
-static void fdc_sense_int(io_in8_fn io_in8, io_out8_fn io_out8) {
-    fdc_out_byte(io_in8, io_out8, cmd_sense_int);
+static void fdc_sense_int(uint8_t *sd, io_in8_fn io_in8, io_out8_fn io_out8) {
+    fdc_out_byte(sd, io_in8, io_out8, cmd_sense_int);
     (void)fdc_in_byte(io_in8); /* ST0 (ignored) */
     (void)fdc_in_byte(io_in8); /* PCN (ignored) */
 }
 
-static void fdc_wait_seek(io_in8_fn io_in8, io_out8_fn io_out8) {
+static void fdc_wait_seek(uint8_t *sd, io_in8_fn io_in8, io_out8_fn io_out8) {
     uint16_t cx = 0;
     uint8_t al;
     do {
         al = io_in8(fdc_msr);
         cx = (uint16_t)(cx - 1);
     } while ((al & msr_busy) != 0 && cx != 0);
-    fdc_sense_int(io_in8, io_out8);
+    fdc_sense_int(sd, io_in8, io_out8);
 }
 
 static void fdc_pio_in(io_in8_fn io_in8) {
@@ -270,16 +267,15 @@ static void rw_setup(io_in8_fn io_in8, io_out8_fn io_out8) {
 }
 
 /* dma_setup -- arm 8237 DMA channel 2 for one fd_secsize-byte
- * transfer into/out of secbuf. `ds` is this module's own real DS
- * segment at the time (genuinely ambient -- see this file's own
- * header comment); `mode` is dma_mode_read/dma_mode_write. */
-static void dma_setup(io_out8_fn io_out8, uint16_t ds, uint8_t mode) {
+ * transfer into/out of secbuf (SYSDAT:secbuf); `mode` is
+ * dma_mode_read/dma_mode_write. */
+static void dma_setup(io_out8_fn io_out8, uint16_t sysdat, uint8_t mode) {
     io_out8(dma_mask, dma_mask_set2);
     io_out8(dma_clrff, 0x00);
     io_out8(dma_mode, mode);
 
-    uint16_t ax = (uint16_t)(ds << 4);
-    uint16_t bx = (uint16_t)(ds >> 12);
+    uint16_t ax = (uint16_t)(sysdat << 4);
+    uint16_t bx = (uint16_t)(sysdat >> 12);
     uint32_t sum = (uint32_t)ax + (uint32_t)XQ_SECBUF;
     ax = (uint16_t)sum;
     bx = (uint16_t)(bx + (sum >> 16));
@@ -298,14 +294,15 @@ static void dma_setup(io_out8_fn io_out8, uint16_t ds, uint8_t mode) {
 /* rw_physical -- shared geometry math (trk/sect -> cur_cyl/cur_head/
  * cur_psec/cur_bufoff), 0-based logical sector -- see the real asm's
  * own comment on why this isn't 1-based. */
-static void rw_physical(uint8_t *mem) {
-    uint8_t sect = mem[XQ_SECT];
-    mem[XQ_CUR_PSEC] = (uint8_t)(sect / 4 + 1);
-    mem_w16(mem, XQ_CUR_BUFOFF, (uint16_t)((sect % 4) * 128));
+static void rw_physical(uint8_t *phys, uint16_t sysdat) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t sect = sd[XQ_SECT];
+    sd[XQ_CUR_PSEC] = (uint8_t)(sect / 4 + 1);
+    seg_w16(sd, XQ_CUR_BUFOFF, (uint16_t)((sect % 4) * 128));
 
-    uint8_t trk = mem[XQ_TRK];
-    mem[XQ_CUR_CYL] = (uint8_t)(trk / fd_heads);
-    mem[XQ_CUR_HEAD] = (uint8_t)(trk % fd_heads);
+    uint8_t trk = sd[XQ_TRK];
+    sd[XQ_CUR_CYL] = (uint8_t)(trk / fd_heads);
+    sd[XQ_CUR_HEAD] = (uint8_t)(trk % fd_heads);
 }
 
 #define cmd_read  0x46
@@ -325,46 +322,50 @@ static void rw_physical(uint8_t *mem) {
  * (length/cmd/N/SPT/GPL/DTL) need rebuilding too; same "simplified
  * without changing what's observable" precedent as
  * ldbios86q.c's own identical fix. */
-static void fdc_fill_rw_parms(uint8_t *mem) {
-    uint8_t head = mem[XQ_CUR_HEAD];
-    uint8_t cyl = mem[XQ_CUR_CYL];
-    uint8_t psec = mem[XQ_CUR_PSEC];
+static void fdc_fill_rw_parms(uint8_t *phys, uint16_t sysdat) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t head = sd[XQ_CUR_HEAD];
+    uint8_t cyl = sd[XQ_CUR_CYL];
+    uint8_t psec = sd[XQ_CUR_PSEC];
     uint8_t hds = (uint8_t)(head << 2);
     const uint8_t read_tbl[10] = {9, cmd_read, hds, cyl, head, psec,
                                    fd_secsize_n, fd_spt, fd_gap3, fd_dtl};
     const uint8_t write_tbl[10] = {9, cmd_write, hds, cyl, head, psec,
                                     fd_secsize_n, fd_spt, fd_gap3, fd_dtl};
-    memcpy(&mem[XQ_READ_PARMS], read_tbl, sizeof read_tbl);
-    memcpy(&mem[XQ_WRITE_PARMS], write_tbl, sizeof write_tbl);
+    memcpy(&sd[XQ_READ_PARMS], read_tbl, sizeof read_tbl);
+    memcpy(&sd[XQ_WRITE_PARMS], write_tbl, sizeof write_tbl);
 }
 
 /* fdc_seek_to -- seek to cur_cyl/cur_head. Same "rewrite the whole
  * table" reasoning as fdc_fill_rw_parms above. */
-static void fdc_seek_to(uint8_t *mem, io_in8_fn io_in8, io_out8_fn io_out8) {
-    uint8_t head = mem[XQ_CUR_HEAD];
-    uint8_t cyl = mem[XQ_CUR_CYL];
+static void fdc_seek_to(uint8_t *phys, uint16_t sysdat, io_in8_fn io_in8, io_out8_fn io_out8) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t head = sd[XQ_CUR_HEAD];
+    uint8_t cyl = sd[XQ_CUR_CYL];
     uint8_t hds = (uint8_t)(head << 2);
     const uint8_t seek_tbl[4] = {3, cmd_seek, hds, cyl};
-    memcpy(&mem[XQ_SEEK_PARMS], seek_tbl, sizeof seek_tbl);
-    fdc_send_cmd(io_in8, io_out8, &mem[XQ_SEEK_PARMS]);
-    fdc_wait_seek(io_in8, io_out8);
+    memcpy(&sd[XQ_SEEK_PARMS], seek_tbl, sizeof seek_tbl);
+    fdc_send_cmd(sd, io_in8, io_out8, &sd[XQ_SEEK_PARMS]);
+    fdc_wait_seek(sd, io_in8, io_out8);
 }
 
 /* -- DISK I/O ---------------------------------------------------------- */
 
 /* disk_home_entry -- Function 6: Home. Seek drive 0 back to track 0. */
-void disk_home_entry(uint8_t *mem, io_in8_fn io_in8, io_out8_fn io_out8) {
+void disk_home_entry(uint8_t *phys, uint16_t sysdat, io_in8_fn io_in8, io_out8_fn io_out8) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
     static const uint8_t recal_parms[] = {2, 0x07, 0x00};
-    mem[XQ_TRK] = 0;
-    fdc_send_cmd(io_in8, io_out8, recal_parms);
-    fdc_wait_seek(io_in8, io_out8);
+    sd[XQ_TRK] = 0;
+    fdc_send_cmd(sd, io_in8, io_out8, recal_parms);
+    fdc_wait_seek(sd, io_in8, io_out8);
 }
 
 /* seldsk_entry -- Function 7: Select Disk.
  *	input:	cl = logical disk to select
  *	output:	returns ax (0 if illegal disk, else the DPH address)
  */
-uint16_t seldsk_entry(uint8_t *mem, uint8_t cl) {
+uint16_t seldsk_entry(uint8_t *phys, uint16_t sysdat, uint8_t cl) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
     static const uint8_t dtrntbl[4] = {0x00, 0xff, 0xff, 0xff};
     uint8_t al = dtrntbl[cl & 0x03];
     if (al == 0xff) {
@@ -373,59 +374,65 @@ uint16_t seldsk_entry(uint8_t *mem, uint8_t cl) {
          * back as 0x00FF here, not a clean 0, reproduced exactly. */
         return al;
     }
-    mem[XQ_DISK] = al;
+    sd[XQ_DISK] = al;
     return XQ_DPH0;
 }
 
 /* settrk_entry -- Function 8: Set Track. */
-void settrk_entry(uint8_t *mem, uint8_t cl) {
-    mem[XQ_TRK] = cl;
+void settrk_entry(uint8_t *phys, uint16_t sysdat, uint8_t cl) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    sd[XQ_TRK] = cl;
 }
 
 /* setsec_entry -- Function 9: Set Sector (128-byte, 0-based logical). */
-void setsec_entry(uint8_t *mem, uint8_t cl) {
-    mem[XQ_SECT] = cl;
+void setsec_entry(uint8_t *phys, uint16_t sysdat, uint8_t cl) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    sd[XQ_SECT] = cl;
 }
 
 /* setdma_entry -- Function 10: Set DMA Offset. */
-void setdma_entry(uint8_t *mem, uint16_t cx) {
-    mem_w16(mem, XQ_DMA_ADR, cx);
+void setdma_entry(uint8_t *phys, uint16_t sysdat, uint16_t cx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    seg_w16(sd, XQ_DMA_ADR, cx);
 }
 
 /* setdmab_entry -- Function 15: Set DMA Base. */
-void setdmab_entry(uint8_t *mem, uint16_t cx) {
-    mem_w16(mem, XQ_DMA_SEG, cx);
+void setdmab_entry(uint8_t *phys, uint16_t sysdat, uint16_t cx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    seg_w16(sd, XQ_DMA_SEG, cx);
 }
 
 /* sectran_entry -- Function 14: Sector Translate.
  *	input:	cx = sector number, dx = translate table address (0 = none)
  *	output:	returns ax (the translated sector number)
  */
-uint16_t sectran_entry(const uint8_t *mem, uint16_t cx, uint16_t dx) {
+uint16_t sectran_entry(uint8_t *phys, uint16_t sysdat, uint16_t cx, uint16_t dx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
     if (dx == 0) {
         return cx;
     }
-    return mem[(uint16_t)(cx + dx)];
+    return sd[(uint16_t)(cx + dx)];
 }
 
 /* diskread_entry -- Function 11: Read.
  *	output:	returns al (0, always -- no error detection yet)
  */
-uint8_t diskread_entry(uint8_t *mem, io_in8_fn io_in8, io_out8_fn io_out8, uint16_t ds) {
+uint8_t diskread_entry(uint8_t *phys, uint16_t sysdat, io_in8_fn io_in8, io_out8_fn io_out8) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
     rw_setup(io_in8, io_out8);
-    rw_physical(mem);
-    fdc_seek_to(mem, io_in8, io_out8);
-    fdc_fill_rw_parms(mem);
-    dma_setup(io_out8, ds, dma_mode_read);
-    fdc_send_cmd(io_in8, io_out8, &mem[XQ_READ_PARMS]);
+    rw_physical(phys, sysdat);
+    fdc_seek_to(phys, sysdat, io_in8, io_out8);
+    fdc_fill_rw_parms(phys, sysdat);
+    dma_setup(io_out8, sysdat, dma_mode_read);
+    fdc_send_cmd(sd, io_in8, io_out8, &sd[XQ_READ_PARMS]);
     fdc_pio_in(io_in8);
 
-    uint16_t cur_bufoff = mem_r16(mem, XQ_CUR_BUFOFF);
-    uint16_t dma_adr = mem_r16(mem, XQ_DMA_ADR);
-    uint16_t dma_seg = mem_r16(mem, XQ_DMA_SEG);
+    uint16_t cur_bufoff = seg_r16(sd, XQ_CUR_BUFOFF);
+    uint16_t dma_adr = seg_r16(sd, XQ_DMA_ADR);
+    uint16_t dma_seg = seg_r16(sd, XQ_DMA_SEG);
     for (uint16_t i = 0; i < 128; i++) {
-        uint8_t b = mem[(uint16_t)(XQ_SECBUF + cur_bufoff + i)];
-        mem_w8_seg(mem, dma_seg, (uint16_t)(dma_adr + i), b);
+        uint8_t b = sd[(uint16_t)(XQ_SECBUF + cur_bufoff + i)];
+        seg_w8(far_ptr(phys, dma_seg, 0), (uint16_t)(dma_adr + i), b);
     }
     return 0;
 }
@@ -433,27 +440,28 @@ uint8_t diskread_entry(uint8_t *mem, io_in8_fn io_in8, io_out8_fn io_out8, uint1
 /* diskwrite_entry -- Function 12: Write (read/modify/write).
  *	output:	returns al (0, always -- no error detection yet)
  */
-uint8_t diskwrite_entry(uint8_t *mem, io_in8_fn io_in8, io_out8_fn io_out8, uint16_t ds) {
+uint8_t diskwrite_entry(uint8_t *phys, uint16_t sysdat, io_in8_fn io_in8, io_out8_fn io_out8) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
     rw_setup(io_in8, io_out8);
-    rw_physical(mem);
-    fdc_seek_to(mem, io_in8, io_out8);
+    rw_physical(phys, sysdat);
+    fdc_seek_to(phys, sysdat, io_in8, io_out8);
 
-    fdc_fill_rw_parms(mem);
-    dma_setup(io_out8, ds, dma_mode_read);
-    fdc_send_cmd(io_in8, io_out8, &mem[XQ_READ_PARMS]);
+    fdc_fill_rw_parms(phys, sysdat);
+    dma_setup(io_out8, sysdat, dma_mode_read);
+    fdc_send_cmd(sd, io_in8, io_out8, &sd[XQ_READ_PARMS]);
     fdc_pio_in(io_in8);
 
-    uint16_t cur_bufoff = mem_r16(mem, XQ_CUR_BUFOFF);
-    uint16_t dma_adr = mem_r16(mem, XQ_DMA_ADR);
-    uint16_t dma_seg = mem_r16(mem, XQ_DMA_SEG);
+    uint16_t cur_bufoff = seg_r16(sd, XQ_CUR_BUFOFF);
+    uint16_t dma_adr = seg_r16(sd, XQ_DMA_ADR);
+    uint16_t dma_seg = seg_r16(sd, XQ_DMA_SEG);
     for (uint16_t i = 0; i < 128; i++) {
-        uint8_t b = mem_r8_seg(mem, dma_seg, (uint16_t)(dma_adr + i));
-        mem[(uint16_t)(XQ_SECBUF + cur_bufoff + i)] = b;
+        uint8_t b = seg_r8(far_ptr(phys, dma_seg, 0), (uint16_t)(dma_adr + i));
+        sd[(uint16_t)(XQ_SECBUF + cur_bufoff + i)] = b;
     }
 
-    fdc_fill_rw_parms(mem);
-    dma_setup(io_out8, ds, dma_mode_write);
-    fdc_send_cmd(io_in8, io_out8, &mem[XQ_WRITE_PARMS]);
+    fdc_fill_rw_parms(phys, sysdat);
+    dma_setup(io_out8, sysdat, dma_mode_write);
+    fdc_send_cmd(sd, io_in8, io_out8, &sd[XQ_WRITE_PARMS]);
     fdc_pio_out(io_in8);
     return 0;
 }
@@ -475,19 +483,22 @@ uint8_t flushbuf_entry(void) {
 }
 
 /* strtclk_entry -- Function 18: Start Clock. */
-void strtclk_entry(uint8_t *mem) {
-    mem[XQ_CLOCKON] = 0xff;
+void strtclk_entry(uint8_t *phys, uint16_t sysdat) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    sd[XQ_CLOCKON] = 0xff;
 }
 
 /* stopclk_entry -- Function 19: Stop Clock. */
-void stopclk_entry(uint8_t *mem) {
-    mem[XQ_CLOCKON] = 0x00;
+void stopclk_entry(uint8_t *phys, uint16_t sysdat) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    sd[XQ_CLOCKON] = 0x00;
 }
 
 /* -- UTILITY: print a null-terminated string via CONOUT --------------- */
 
-static void pmsg(uint8_t *mem, io_in8_fn io_in8, io_out8_fn io_out8, const uint8_t *msg) {
-    (void)mem;
+static void pmsg(uint8_t *phys, uint16_t sysdat, io_in8_fn io_in8, io_out8_fn io_out8, const uint8_t *msg) {
+    (void)phys;
+    (void)sysdat;
     for (; *msg != 0; msg++) {
         xios_conout_entry(io_in8, io_out8, *msg);
     }
@@ -501,7 +512,8 @@ static void pmsg(uint8_t *mem, io_in8_fn io_in8, io_out8_fn io_out8, const uint8
  * genuinely external state this isolated port has nothing to copy
  * to/from -- and the final `retf`).
  */
-void init_entry(uint8_t *mem, io_in8_fn io_in8, io_out8_fn io_out8) {
+void init_entry(uint8_t *phys, uint16_t sysdat, io_in8_fn io_in8, io_out8_fn io_out8) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
     io_out8(0x3FB, 0x80); /* uart_lcr: set DLAB */
     io_out8(uart_rxtx, 0x0C); /* divisor low byte */
     io_out8(0x3F9, 0x00); /* uart_ier: divisor high byte */
@@ -512,7 +524,7 @@ void init_entry(uint8_t *mem, io_in8_fn io_in8, io_out8_fn io_out8) {
     io_out8(0x43, 0x36); /* pit_cmd: ch0, lo/hi, mode 3, binary */
     io_out8(0x40, 0xAE); /* pit_ch0: divisor low byte (0x4DAE) */
     io_out8(0x40, 0x4D); /* pit_ch0: divisor high byte */
-    mem[XQ_TICK_COUNT] = 60;
+    sd[XQ_TICK_COUNT] = 60;
 
     uint8_t mask = io_in8(0x21);
     io_out8(0x21, (uint8_t)(mask & 0xFE)); /* unmask IRQ0 */
@@ -523,11 +535,11 @@ void init_entry(uint8_t *mem, io_in8_fn io_in8, io_out8_fn io_out8) {
 
     io_out8(fdc_dor, dor_ndreset | dor_mota | dor_dmaen | dor_drvsel_a);
     static const uint8_t specify_parms[] = {3, 0x03, 0xDF, 0x02};
-    fdc_send_cmd(io_in8, io_out8, specify_parms);
+    fdc_send_cmd(sd, io_in8, io_out8, specify_parms);
 
-    mem[XQ_CLOCKON] = 0x00;
+    sd[XQ_CLOCKON] = 0x00;
 
-    pmsg(mem, io_in8, io_out8, &mem[XQ_SIGNON]);
+    pmsg(phys, sysdat, io_in8, io_out8, &sd[XQ_SIGNON]);
 }
 
 /* -- TICK INTERRUPT (logic only -- see this file's own header comment) - */
@@ -539,15 +551,16 @@ typedef struct {
 
 /* tickint_once -- the real ISR's own tick_count countdown and flag
  * decisions, one tick. */
-tickint_result tickint_once(uint8_t *mem) {
+tickint_result tickint_once(uint8_t *phys, uint16_t sysdat) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
     tickint_result r = {0, 0};
-    uint8_t tick_count = (uint8_t)(mem[XQ_TICK_COUNT] - 1);
-    mem[XQ_TICK_COUNT] = tick_count;
+    uint8_t tick_count = (uint8_t)(sd[XQ_TICK_COUNT] - 1);
+    sd[XQ_TICK_COUNT] = tick_count;
     if (tick_count == 0) {
-        mem[XQ_TICK_COUNT] = 60;
+        sd[XQ_TICK_COUNT] = 60;
         r.sec_flag_set = 1;
     }
-    if (mem[XQ_CLOCKON] == 0xff) {
+    if (sd[XQ_CLOCKON] == 0xff) {
         r.tick_flag_set = 1;
     }
     return r;

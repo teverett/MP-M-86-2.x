@@ -480,7 +480,7 @@ class Assembler:
         for part in split_top_commas(operand_text):
             part = part.strip()
             if len(part) >= 2 and part.startswith("'") and part.endswith("'"):
-                out.extend(part[1:-1].encode('latin-1'))
+                out.extend(part[1:-1].replace("''", "'").encode('latin-1'))  # '' = one quote
             else:
                 v = eval_text(part, self._ectx(filename, lineno, self.cur_addr() + len(out)))
                 out.append(v.n & 0xFF)

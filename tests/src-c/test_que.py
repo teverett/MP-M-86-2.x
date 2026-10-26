@@ -3,7 +3,16 @@
 src/kernel/QUE1.RTM's routines (makeq_entry, openq_entry,
 deleteq_entry, queverify, readq_entry, creadq_entry, readq,
 writeq_entry, cwriteq_entry, writeq) and 5 of src/kernel/QUE2.RTM's 6
-(rlsmx, getqdaddr, remqd, qspace, qrelease).
+(rlsmx, getqdaddr, remqd, qspace, qrelease), on real memory layout.
+
+que1.c/que2.c address real memory (defs.h's far_ptr), so the reference
+runs with tools/i86sim.py's segmented=True: tests/src-c/fixtures/
+que_wrapper.A86 includes the real SYSDAT.FMT/UDA.FMT, SYSDAT is at
+segment 100h (DS) with QDs, the qlr/qul lists and PDs at SYSDAT-relative
+offsets, the running process's UDA is the reference's ES and its PD's
+p_uda, and QPBs/caller buffers sit in that UDA's u_wrkseg. Field
+offsets come from the assembled symbol table, and every case diffs the
+whole image to catch stray writes.
 
 readq's/writeq's own real "wait forever" retry path (unconditional,
 queue empty/full) is deliberately not exercised here -- see que1.c's
@@ -26,33 +35,59 @@ QUE_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', 'que1.c'),
          os.path.join(REPO_ROOT, 'src-c', 'kernel', 'que2.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 
+SIM_MEM = 0x10000
+PHYS_MEM = 0x100000
 STACK_TOP = 0xFFF0
-SD_RLR = 0xA000
-SD_QLR, SD_QUL, SD_QMAU, SD_ENDSEG = 0xA020, 0xA022, 0xA024, 0xA026
-UDA_WRKSEG = 0xA012
 MPMIF_STUB = 0x9000
+
+SYSDAT = 0x0100     # DS; QDs/PDs below are SYSDAT offsets
+UDA = 0x0600        # running process's UDA segment (ES)
+WRKSEG = 0x0700     # its u_wrkseg; QPBs/buffers below are offsets in it
+ENDSEG = 0x0F00
+PD_RUN = 0x2800     # rlr
 
 Q_LINK, Q_FLAGS, Q_NAME, Q_MSGLEN, Q_NMSGS, Q_DQ, Q_NQ, Q_MSGCNT, Q_MSGOUT, Q_BUF = \
     0, 4, 6, 0x0E, 0x10, 0x12, 0x14, 0x16, 0x18, 0x1A
 QNAMSIZ = 8
 QPB_QADDR, QPB_BUFFPTR, QPB_NAME = 2, 6, 8
 QF_MX, QF_TABLE = 0x01, 0x10
-F_MAUALLOC = 0x309
-E_NO_QD, E_NO_QUEUE, E_Q_INUSE, E_Q_NOTACTIVE = 7, 9, 0xA, 0xB
-E_Q_EMPTY, E_Q_FULL = 0xE, 0xF
+P_STAT, P_UDA = 0x04, 0x10
 
-SYSDAT = 0x2000  # this test's chosen "cs:sysdat" value
+ENTRIES = ('makeq_entry', 'openq_entry', 'deleteq_entry', 'queverify',
+           'readq_entry', 'creadq_entry', 'writeq_entry', 'cwriteq_entry',
+           'rlsmx', 'getqdaddr', 'remqd', 'qspace', 'qrelease')
+
+
+def phys(seg, off=0):
+    return seg * 16 + off
+
+
+def sd(off):
+    return phys(SYSDAT, off)
+
+
+def w16(mem, addr, val):
+    mem[addr] = val & 0xFF
+    mem[addr + 1] = (val >> 8) & 0xFF
+
+
+def r16(mem, addr):
+    return mem[addr] | (mem[addr + 1] << 8)
+
+
+def pad(name):
+    return (name + b' ' * QNAMSIZ)[:QNAMSIZ]
 
 
 def assemble_reference():
     asm = Assembler()
     asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
     code = asm.segment_bytes('cseg')
-    entries = {name: asm.symtab[name].value for name in (
-        'makeq_entry', 'openq_entry', 'deleteq_entry', 'queverify',
-        'readq_entry', 'creadq_entry', 'writeq_entry', 'cwriteq_entry',
-        'rlsmx', 'getqdaddr', 'remqd', 'qspace', 'qrelease')}
-    return code, entries
+    sym = {name: asm.symtab[name].value for name in
+           ENTRIES + ('sysdat', 'rlr', 'qlr', 'qul', 'endseg', 'u_wrkseg')}
+    assert sym['sysdat'] == 0
+    assert len(code) < sd(0), "code must not overlap SYSDAT"
+    return code, sym
 
 
 def build_c_library():
@@ -65,414 +100,263 @@ def build_c_library():
     return lib_path
 
 
-def base_memory():
-    mem = bytearray(0x10000)
-    mem_w16(mem, SD_ENDSEG, 0x5000)
-    mem_w16(mem, UDA_WRKSEG, SYSDAT)  # by default, dx=0 maps straight into "MPM range"
-    return mem
-
-
-def mem_w16(mem, addr, val):
-    mem[addr] = val & 0xFF
-    mem[addr + 1] = (val >> 8) & 0xFF
-
-
-def mem_r16(mem, addr):
-    return mem[addr] | (mem[addr + 1] << 8)
-
-
-def put_qname(mem, addr, name):
-    padded = (name + b' ' * QNAMSIZ)[:QNAMSIZ]
-    mem[addr + Q_NAME:addr + Q_NAME + QNAMSIZ] = padded
-
-
-def run_reference(code, entry, mem, regs, sysdat_word=SYSDAT, stop_addrs=()):
-    image = bytearray(mem)
-    image[0:len(code)] = code
-    image[0] = sysdat_word & 0xFF  # `sysdat dw 0` sits at cseg offset 0, same as other wrappers
-    image[1] = (sysdat_word >> 8) & 0xFF
-    sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry,
-                 stop_addrs=set(stop_addrs), call_stub_addrs={MPMIF_STUB})
-    sim.run()
-    return sim.regs, image
-
-
 def main():
-    code, entries = assemble_reference()
+    code, sym = assemble_reference()
+    skip = set(range(len(code))) | set(range(0xFF00, SIM_MEM))  # code, harness stack (SS=0)
+    QLR, QUL = sd(sym['qlr']), sd(sym['qul'])
+
+    def base_memory(wrkseg=WRKSEG):
+        mem = bytearray(SIM_MEM)
+        w16(mem, sd(sym['endseg']), ENDSEG)
+        w16(mem, sd(sym['rlr']), PD_RUN)
+        w16(mem, sd(PD_RUN + P_UDA), UDA)
+        w16(mem, phys(UDA, sym['u_wrkseg']), wrkseg)
+        return mem
+
+    def run_reference(entry, mem, regs):
+        image = bytearray(mem)
+        image[0:len(code)] = code
+        w16(image, sym['sysdat'], SYSDAT)
+        sim = I86Sim(image, {**regs, 'ds': SYSDAT, 'es': UDA, 'ss': 0, 'sp': STACK_TOP, 'cs': 0},
+                     sym[entry], call_stub_addrs={MPMIF_STUB}, segmented=True)
+        sim.run()
+        return sim.regs, image
+
     lib_path = build_c_library()
     try:
         lib = ctypes.CDLL(lib_path)
         c_u8p = ctypes.POINTER(ctypes.c_uint8)
         c_u16p = ctypes.POINTER(ctypes.c_uint16)
+        u16 = ctypes.c_uint16
 
         class BxCx(ctypes.Structure):
             _fields_ = [('bx', ctypes.c_uint16), ('cx', ctypes.c_uint16)]
 
-        lib.makeq_entry.restype = BxCx
-        lib.makeq_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16]
-        lib.openq_entry.restype = BxCx
-        lib.openq_entry.argtypes = [c_u8p, ctypes.c_uint16]
-        lib.deleteq_entry.restype = BxCx
-        lib.deleteq_entry.argtypes = [c_u8p, ctypes.c_uint16]
-        lib.readq_entry.restype = BxCx
-        lib.readq_entry.argtypes = [c_u8p, ctypes.c_uint16]
-        lib.creadq_entry.restype = BxCx
-        lib.creadq_entry.argtypes = [c_u8p, ctypes.c_uint16]
-        lib.writeq_entry.restype = BxCx
-        lib.writeq_entry.argtypes = [c_u8p, ctypes.c_uint16]
-        lib.cwriteq_entry.restype = BxCx
-        lib.cwriteq_entry.argtypes = [c_u8p, ctypes.c_uint16]
-        lib.queverify.restype = ctypes.c_uint16
-        lib.queverify.argtypes = [c_u8p, ctypes.c_uint16]
-        lib.rlsmx.argtypes = [c_u8p, ctypes.c_uint16]
-        lib.getqdaddr.restype = ctypes.c_uint16
-        lib.getqdaddr.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, c_u16p]
-        lib.remqd.argtypes = [c_u8p, ctypes.c_uint16]
-        lib.qspace.argtypes = [c_u8p, ctypes.c_uint16, c_u16p]
-        lib.qrelease.argtypes = [c_u8p, ctypes.c_uint16]
+        for name in ('makeq_entry', 'openq_entry', 'deleteq_entry', 'readq_entry',
+                     'creadq_entry', 'writeq_entry', 'cwriteq_entry'):
+            fn = getattr(lib, name)
+            fn.restype = BxCx
+            fn.argtypes = [c_u8p, u16, u16]
+        lib.queverify.restype = u16
+        lib.queverify.argtypes = [c_u8p, u16, u16]
+        lib.rlsmx.argtypes = [c_u8p, u16, u16]
+        lib.getqdaddr.restype = u16
+        lib.getqdaddr.argtypes = [c_u8p, u16, u16, c_u16p]
+        lib.remqd.argtypes = [c_u8p, u16, u16]
+        lib.qspace.argtypes = [c_u8p, u16, u16, c_u16p]
+        lib.qrelease.argtypes = [c_u8p, u16, u16]
 
         failures = []
 
-        def fmt(v):
-            return f"{v[:24]!r}..." if isinstance(v, bytes) and len(v) > 24 else repr(v)
-
         def check(label, ref, port):
             status = "ok" if ref == port else "FAIL"
-            print(f"[{status}] {label}: reference {fmt(ref)} | port {fmt(port)}")
+            print(f"[{status}] {label}: reference {ref} | port {port}")
             if status == "FAIL":
                 failures.append(label)
 
-        def to_ctypes(mem):
-            return (ctypes.c_uint8 * 0x10000)(*mem)
+        def call_port(entry, buf, val):
+            fn = getattr(lib, entry)
+            if entry in ('getqdaddr', 'qspace'):
+                cx = ctypes.c_uint16()
+                ret = fn(buf, SYSDAT, val, ctypes.byref(cx))
+                return (ret, cx.value) if entry == 'getqdaddr' else (cx.value,)
+            r = fn(buf, SYSDAT, val)
+            if entry == 'queverify':
+                return (r,)
+            if entry in ('rlsmx', 'remqd', 'qrelease'):
+                return ()
+            return (r.bx, r.cx)
+
+        def ref_result(entry, regs):
+            if entry == 'getqdaddr':
+                return (regs['dx'], regs['cx'])
+            if entry in ('queverify', 'qspace'):
+                return (regs['cx'],)
+            if entry in ('rlsmx', 'remqd', 'qrelease'):
+                return ()
+            return (regs['bx'], regs['cx'])
+
+        def run_case(label, entry, mem, val, snap=lambda img: ()):
+            reg = 'si' if entry in ('rlsmx', 'remqd', 'qspace', 'qrelease') else 'dx'
+            ref_regs, ref = run_reference(entry, mem, {reg: val})
+            buf = (ctypes.c_uint8 * PHYS_MEM)()
+            ctypes.memmove(buf, bytes(mem), len(mem))
+            port_r = call_port(entry, buf, val)
+            port = bytes(buf)
+            check(label, (ref_result(entry, ref_regs), snap(ref)), (port_r, snap(port)))
+            diffs = [hex(a) for a in range(SIM_MEM) if a not in skip and ref[a] != port[a]]
+            check(f"{label}: no other bytes differ", [], diffs[:8])
+            check(f"{label}: nothing written past 64KB", True, not any(port[SIM_MEM:]))
+
+        def wk(off):
+            return phys(WRKSEG, off)
 
         # -- getqdaddr: already within MPM range --
-        mem = base_memory()
-        QD_SRC = 0x5000
-        mem_w16(mem, QD_SRC + Q_BUF, 5)  # nonzero, so the "add off" branch is exercised
-        ref_regs, ref_img = run_reference(code, entries['getqdaddr'], mem, {'dx': QD_SRC})
-        buf = to_ctypes(mem)
-        cx = ctypes.c_uint16()
-        si = lib.getqdaddr(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QD_SRC), ctypes.c_uint16(SYSDAT), ctypes.byref(cx))
-        ref = (ref_regs['dx'], ref_regs['cx'], mem_r16(ref_img, ref_regs['dx'] + Q_BUF))
-        port = (si, cx.value, mem_r16(bytes(buf), si + Q_BUF))
-        check("getqdaddr: already in MPM range", ref, port)
+        # u_wrkseg 180h is inside SYSDAT..endseg, so wrkseg:1800h is
+        # SYSDAT:2000h (off = (180h-100h)<<4 = 800h) and q_buf gets off added.
+        mem = base_memory(wrkseg=0x0180)
+        w16(mem, sd(0x2000 + Q_BUF), 5)
+        run_case("getqdaddr: already in MPM range", 'getqdaddr', mem, 0x1800,
+                 lambda img: r16(img, sd(0x2000 + Q_BUF)))
 
         # -- getqdaddr: outside MPM range -> grab from the qul free table --
-        mem = base_memory()
-        mem_w16(mem, UDA_WRKSEG, 0x0100)  # far below sysdat -> out of range
-        QD_SRC = 0x6000
-        put_qname(mem, QD_SRC, b'TESTQ')
-        mem_w16(mem, QD_SRC + Q_FLAGS, 0)
-        FREE_QD = 0x4000
-        mem_w16(mem, FREE_QD + Q_LINK, 0)  # last entry on the free list
-        mem_w16(mem, SD_QUL, FREE_QD)
-        ref_regs, ref_img = run_reference(code, entries['getqdaddr'], mem, {'dx': QD_SRC})
-        buf = to_ctypes(mem)
-        cx = ctypes.c_uint16()
-        di = lib.getqdaddr(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QD_SRC), ctypes.c_uint16(SYSDAT), ctypes.byref(cx))
-        port_img = bytes(buf)
-        ref = (ref_regs['dx'], ref_regs['cx'], mem_r16(ref_img, SD_QUL),
-               ref_img[ref_regs['dx'] + Q_FLAGS] if False else mem_r16(ref_img, ref_regs['dx'] + Q_FLAGS))
-        port = (di, cx.value, mem_r16(port_img, SD_QUL), mem_r16(port_img, di + Q_FLAGS))
-        check("getqdaddr: from the qul free table", ref, port)
+        mem = base_memory(wrkseg=ENDSEG)  # wrkseg >= endseg -> out of range
+        src = phys(ENDSEG, 0x100)
+        mem[src + Q_NAME:src + Q_NAME + QNAMSIZ] = pad(b'TESTQ')
+        w16(mem, src + Q_MSGLEN, 4)
+        FREE_QD = 0x2000
+        w16(mem, sd(FREE_QD + Q_LINK), 0x2100)  # next free entry
+        w16(mem, QUL, FREE_QD)
+        run_case("getqdaddr: from the qul free table", 'getqdaddr', mem, 0x100,
+                 lambda img: (r16(img, QUL), r16(img, sd(FREE_QD + Q_FLAGS)),
+                              bytes(img[sd(FREE_QD):sd(FREE_QD + 0x1C)])))
 
         # -- getqdaddr: qul exhausted -> e_no_qd --
-        mem = base_memory()
-        mem_w16(mem, UDA_WRKSEG, 0x0100)
-        mem_w16(mem, SD_QUL, 0)
-        ref_regs, ref_img = run_reference(code, entries['getqdaddr'], mem, {'dx': 0x6000})
-        buf = to_ctypes(mem)
-        cx = ctypes.c_uint16()
-        di = lib.getqdaddr(ctypes.cast(buf, c_u8p), ctypes.c_uint16(0x6000), ctypes.c_uint16(SYSDAT), ctypes.byref(cx))
-        check("getqdaddr: qul exhausted", (ref_regs['dx'], ref_regs['cx']), (di, cx.value))
+        mem = base_memory(wrkseg=ENDSEG)
+        run_case("getqdaddr: qul exhausted", 'getqdaddr', mem, 0x100)
 
-        # -- makeq_entry: name collision --
-        mem = base_memory()
-        QD_SRC = 0x5000
-        mem_w16(mem, QD_SRC + Q_BUF, 0)
-        put_qname(mem, QD_SRC, b'ECHO')
-        EXISTING = 0x4100
-        put_qname(mem, EXISTING, b'ECHO')
-        mem_w16(mem, EXISTING + Q_LINK, 0)
-        mem_w16(mem, SD_QLR, EXISTING)
-        ref_regs, _ = run_reference(code, entries['makeq_entry'], mem, {'dx': QD_SRC})
-        buf = to_ctypes(mem)
-        r = lib.makeq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QD_SRC), ctypes.c_uint16(SYSDAT))
-        check("makeq_entry: name collision", (ref_regs['bx'], ref_regs['cx']), (r.bx, r.cx))
-
-        # -- makeq_entry: success --
-        mem = base_memory()
-        QD_SRC = 0x5000
-        mem_w16(mem, QD_SRC + Q_BUF, 0)
-        put_qname(mem, QD_SRC, b'NEWQ')
-        OTHER = 0x4100
-        put_qname(mem, OTHER, b'OTHER')
-        mem_w16(mem, OTHER + Q_LINK, 0)
-        mem_w16(mem, SD_QLR, OTHER)
-        ref_regs, ref_img = run_reference(code, entries['makeq_entry'], mem, {'dx': QD_SRC})
-        buf = to_ctypes(mem)
-        r = lib.makeq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QD_SRC), ctypes.c_uint16(SYSDAT))
-        port_img = bytes(buf)
-        ref = ((ref_regs['bx'], ref_regs['cx']), mem_r16(ref_img, SD_QLR),
-               mem_r16(ref_img, QD_SRC + Q_DQ), mem_r16(ref_img, QD_SRC + Q_LINK))
-        port = ((r.bx, r.cx), mem_r16(port_img, SD_QLR),
-                mem_r16(port_img, QD_SRC + Q_DQ), mem_r16(port_img, QD_SRC + Q_LINK))
-        check("makeq_entry: success, links onto qlr", ref, port)
+        # -- makeq_entry: name collision / success --
+        # default u_wrkseg 700h is inside MPM range: off = 6000h
+        QD_DX = 0x0100
+        QD_SD = QD_DX + ((WRKSEG - SYSDAT) << 4)
+        for label, name in (("makeq_entry: name collision", b'ECHO'),
+                            ("makeq_entry: success, links onto qlr", b'NEWQ')):
+            mem = base_memory()
+            mem[sd(QD_SD + Q_NAME):sd(QD_SD + Q_NAME) + QNAMSIZ] = pad(name)
+            w16(mem, sd(QD_SD + Q_DQ), 0x1111)
+            w16(mem, sd(QD_SD + Q_MSGCNT), 0x2222)
+            EXISTING = 0x2100
+            mem[sd(EXISTING + Q_NAME):sd(EXISTING + Q_NAME) + QNAMSIZ] = pad(b'ECHO')
+            w16(mem, QLR, EXISTING)
+            run_case(label, 'makeq_entry', mem, QD_DX,
+                     lambda img: (r16(img, QLR), r16(img, sd(QD_SD + Q_LINK)), r16(img, sd(QD_SD + Q_DQ))))
 
         # -- openq_entry: found / not found --
-        for label, want_name, present in (("openq_entry: found", b'ECHO', True), ("openq_entry: not found", b'NOPE', True)):
+        for label, want in (("openq_entry: found", b'ECHO'), ("openq_entry: not found", b'NOPE')):
             mem = base_memory()
-            QD = 0x4100
-            put_qname(mem, QD, b'ECHO')
-            mem_w16(mem, QD + Q_LINK, 0)
-            mem_w16(mem, SD_QLR, QD)
-            QPB = 0x5000
-            put_qname_at = QPB + QPB_NAME
-            padded = (want_name + b' ' * QNAMSIZ)[:QNAMSIZ]
-            mem[put_qname_at:put_qname_at + QNAMSIZ] = padded
-            ref_regs, ref_img = run_reference(code, entries['openq_entry'], mem, {'dx': QPB})
-            buf = to_ctypes(mem)
-            r = lib.openq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
-            port_img = bytes(buf)
-            ref = ((ref_regs['bx'], ref_regs['cx']), mem_r16(ref_img, QPB + QPB_QADDR))
-            port = ((r.bx, r.cx), mem_r16(port_img, QPB + QPB_QADDR))
-            check(label, ref, port)
+            QD = 0x2100
+            mem[sd(QD + Q_NAME):sd(QD + Q_NAME) + QNAMSIZ] = pad(b'OTHER')
+            w16(mem, sd(QD + Q_LINK), 0x2200)
+            mem[sd(0x2200 + Q_NAME):sd(0x2200 + Q_NAME) + QNAMSIZ] = pad(b'ECHO')
+            w16(mem, QLR, QD)
+            QPB = 0x0200
+            mem[wk(QPB + QPB_NAME):wk(QPB + QPB_NAME) + QNAMSIZ] = pad(want)
+            run_case(label, 'openq_entry', mem, QPB, lambda img: r16(img, wk(QPB + QPB_QADDR)))
 
         # -- deleteq_entry: in use / not active / success --
         #
         # "not active" exercises the qd_noq path docs/bugs.md #100 fixed
         # (a real stack-corruption bug before that fix -- see que1.c's
-        # own header comment); now that it's fixed, it's safe to run
-        # against the real assembly like every other case here.
+        # own header comment).
+        QD, QPB = 0x2100, 0x0200
         mem = base_memory()
-        QD = 0x4100
-        mem_w16(mem, QD + Q_DQ, 1)
-        mem_w16(mem, QD + Q_NQ, 0)
-        QPB = 0x5000
-        mem_w16(mem, QPB + QPB_QADDR, QD)
-        ref_regs, _ = run_reference(code, entries['deleteq_entry'], mem, {'dx': QPB})
-        buf = to_ctypes(mem)
-        r = lib.deleteq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
-        check("deleteq_entry: in use", (ref_regs['bx'], ref_regs['cx']), (r.bx, r.cx))
+        w16(mem, sd(QD + Q_DQ), 1)
+        w16(mem, wk(QPB + QPB_QADDR), QD)
+        run_case("deleteq_entry: in use", 'deleteq_entry', mem, QPB)
 
         mem = base_memory()
-        QD = 0x4100
-        mem_w16(mem, QD + Q_DQ, 0)
-        mem_w16(mem, QD + Q_NQ, 0)
-        mem_w16(mem, QD + Q_FLAGS, 0)
-        mem_w16(mem, SD_QLR, 0)  # qlr is empty -- QD isn't on it
-        QPB = 0x5000
-        mem_w16(mem, QPB + QPB_QADDR, QD)
-        ref_regs, _ = run_reference(code, entries['deleteq_entry'], mem, {'dx': QPB})
-        buf = to_ctypes(mem)
-        r = lib.deleteq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
-        check("deleteq_entry: not active", (ref_regs['bx'], ref_regs['cx']), (r.bx, r.cx))
+        w16(mem, wk(QPB + QPB_QADDR), QD)  # qlr empty -- QD isn't on it
+        run_case("deleteq_entry: not active", 'deleteq_entry', mem, QPB)
 
         mem = base_memory()
-        QD = 0x4100
-        mem_w16(mem, QD + Q_DQ, 0)
-        mem_w16(mem, QD + Q_NQ, 0)
-        mem_w16(mem, QD + Q_FLAGS, QF_TABLE)
-        mem_w16(mem, QD + Q_LINK, 0)
-        mem_w16(mem, SD_QLR, QD)
-        mem_w16(mem, SD_QUL, 0x9999)
-        QPB = 0x5000
-        mem_w16(mem, QPB + QPB_QADDR, QD)
-        ref_regs, ref_img = run_reference(code, entries['deleteq_entry'], mem, {'dx': QPB})
-        buf = to_ctypes(mem)
-        r = lib.deleteq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
-        port_img = bytes(buf)
-        ref = ((ref_regs['bx'], ref_regs['cx']), mem_r16(ref_img, SD_QLR),
-               mem_r16(ref_img, QD + Q_LINK), mem_r16(ref_img, SD_QUL))
-        port = ((r.bx, r.cx), mem_r16(port_img, SD_QLR),
-                mem_r16(port_img, QD + Q_LINK), mem_r16(port_img, SD_QUL))
-        check("deleteq_entry: success (removes from qlr, calls remqd)", ref, port)
+        w16(mem, sd(QD + Q_FLAGS), QF_TABLE)
+        w16(mem, sd(0x2200 + Q_LINK), QD)
+        w16(mem, sd(QD + Q_LINK), 0x2300)
+        w16(mem, QLR, 0x2200)
+        w16(mem, QUL, 0x2400)
+        w16(mem, wk(QPB + QPB_QADDR), QD)
+        run_case("deleteq_entry: success (unlinks from qlr, remqd)", 'deleteq_entry', mem, QPB,
+                 lambda img: (r16(img, sd(0x2200 + Q_LINK)), r16(img, sd(QD + Q_LINK)), r16(img, QUL)))
 
         # -- queverify: found / not found --
-        mem = base_memory()
-        QD = 0x4100
-        mem_w16(mem, QD + Q_LINK, 0)
-        mem_w16(mem, SD_QLR, QD)
-        QPB = 0x5000
-        mem_w16(mem, QPB + QPB_QADDR, QD)
-        ref_regs, _ = run_reference(code, entries['queverify'], mem, {'dx': QPB})
-        buf = to_ctypes(mem)
-        cx = lib.queverify(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
-        check("queverify: found", ref_regs['cx'], cx)
+        for label, qaddr in (("queverify: found", 0x2200), ("queverify: not found", 0x2777)):
+            mem = base_memory()
+            w16(mem, QLR, 0x2100)
+            w16(mem, sd(0x2100 + Q_LINK), 0x2200)
+            w16(mem, wk(QPB + QPB_QADDR), qaddr)
+            run_case(label, 'queverify', mem, QPB)
 
-        mem_w16(mem, QPB + QPB_QADDR, 0x7777)  # not on the list
-        ref_regs, _ = run_reference(code, entries['queverify'], mem, {'dx': QPB})
-        buf = to_ctypes(mem)
-        cx = lib.queverify(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
-        check("queverify: not found", ref_regs['cx'], cx)
+        def queue_memory(msgcnt, msglen, nmsgs=2, msgout=0, flags=0, qbuf=0x2300):
+            mem = base_memory()
+            w16(mem, QLR, QD)
+            w16(mem, sd(QD + Q_MSGCNT), msgcnt)
+            w16(mem, sd(QD + Q_MSGLEN), msglen)
+            w16(mem, sd(QD + Q_NMSGS), nmsgs)
+            w16(mem, sd(QD + Q_MSGOUT), msgout)
+            w16(mem, sd(QD + Q_FLAGS), flags)
+            w16(mem, sd(QD + Q_BUF), qbuf)
+            w16(mem, wk(QPB + QPB_QADDR), QD)
+            w16(mem, wk(QPB + QPB_BUFFPTR), 0x0400)
+            return mem
 
         # -- readq_entry: a real message in the buffer, with wraparound --
-        mem = base_memory()
-        QD = 0x4100
-        mem_w16(mem, QD + Q_LINK, 0)
-        mem_w16(mem, SD_QLR, QD)
-        mem_w16(mem, QD + Q_MSGCNT, 1)
-        mem_w16(mem, QD + Q_MSGLEN, 4)
-        mem_w16(mem, QD + Q_NMSGS, 2)
-        mem_w16(mem, QD + Q_MSGOUT, 1)  # last slot -> wraps back to 0
-        mem_w16(mem, QD + Q_BUF, 0x4300)
-        mem[0x4300 + 4:0x4300 + 8] = b'\x11\x22\x33\x44'  # slot 1's own message
-        QPB = 0x5000
-        mem_w16(mem, QPB + QPB_QADDR, QD)
-        mem_w16(mem, QPB + QPB_BUFFPTR, 0x4400)
-        ref_regs, ref_img = run_reference(code, entries['readq_entry'], mem, {'dx': QPB})
-        buf = to_ctypes(mem)
-        r = lib.readq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
-        port_img = bytes(buf)
-        ref = ((ref_regs['bx'], ref_regs['cx']), bytes(ref_img[0x4400:0x4404]),
-               mem_r16(ref_img, QD + Q_MSGOUT), mem_r16(ref_img, QD + Q_MSGCNT))
-        port = ((r.bx, r.cx), bytes(port_img[0x4400:0x4404]),
-                mem_r16(port_img, QD + Q_MSGOUT), mem_r16(port_img, QD + Q_MSGCNT))
-        check("readq_entry: copies the message, msgout wraps to 0", ref, port)
+        mem = queue_memory(msgcnt=1, msglen=4, msgout=1)
+        mem[sd(0x2304):sd(0x2308)] = b'\x11\x22\x33\x44'  # slot 1's message
+        run_case("readq_entry: copies the message, msgout wraps to 0", 'readq_entry', mem, QPB,
+                 lambda img: (bytes(img[wk(0x400):wk(0x404)]), r16(img, sd(QD + Q_MSGOUT)),
+                              r16(img, sd(QD + Q_MSGCNT))))
 
         # -- readq_entry: msglen==0, an MX queue -> BUF becomes the reader's own PD --
-        mem = base_memory()
-        QD = 0x4100
-        mem_w16(mem, QD + Q_LINK, 0)
-        mem_w16(mem, SD_QLR, QD)
-        mem_w16(mem, QD + Q_MSGCNT, 1)
-        mem_w16(mem, QD + Q_MSGLEN, 0)
-        mem_w16(mem, QD + Q_FLAGS, QF_MX)
-        QPB = 0x5000
-        mem_w16(mem, QPB + QPB_QADDR, QD)
-        RLR_PD = 0x8000
-        mem_w16(mem, SD_RLR, RLR_PD)
-        ref_regs, ref_img = run_reference(code, entries['readq_entry'], mem, {'dx': QPB})
-        buf = to_ctypes(mem)
-        r = lib.readq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
-        port_img = bytes(buf)
-        ref = ((ref_regs['bx'], ref_regs['cx']), mem_r16(ref_img, QD + Q_BUF), mem_r16(ref_img, QD + Q_MSGCNT))
-        port = ((r.bx, r.cx), mem_r16(port_img, QD + Q_BUF), mem_r16(port_img, QD + Q_MSGCNT))
-        check("readq_entry: msglen==0, MX queue -> BUF=reader's own PD", ref, port)
+        mem = queue_memory(msgcnt=1, msglen=0, flags=QF_MX, qbuf=0)
+        run_case("readq_entry: msglen==0, MX queue -> BUF=reader's PD", 'readq_entry', mem, QPB,
+                 lambda img: (r16(img, sd(QD + Q_BUF)), r16(img, sd(QD + Q_MSGCNT))))
 
-        # -- creadq_entry: empty queue, conditional -> immediate e_q_empty, no wait --
-        mem = base_memory()
-        QD = 0x4100
-        mem_w16(mem, QD + Q_LINK, 0)
-        mem_w16(mem, SD_QLR, QD)
-        mem_w16(mem, QD + Q_MSGCNT, 0)
-        QPB = 0x5000
-        mem_w16(mem, QPB + QPB_QADDR, QD)
-        ref_regs, _ = run_reference(code, entries['creadq_entry'], mem, {'dx': QPB})
-        buf = to_ctypes(mem)
-        r = lib.creadq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
-        check("creadq_entry: empty queue -> e_q_empty, no wait", (ref_regs['bx'], ref_regs['cx']), (r.bx, r.cx))
+        # -- readq_entry: QD not on qlr -> e_no_queue --
+        mem = queue_memory(msgcnt=1, msglen=4)
+        w16(mem, QLR, 0)
+        run_case("readq_entry: unknown queue", 'readq_entry', mem, QPB)
+
+        # -- creadq_entry: empty queue, conditional -> immediate e_q_empty --
+        run_case("creadq_entry: empty queue -> e_q_empty, no wait", 'creadq_entry',
+                 queue_memory(msgcnt=0, msglen=4), QPB)
 
         # -- writeq_entry: room available, with wraparound --
-        mem = base_memory()
-        QD = 0x4100
-        mem_w16(mem, QD + Q_LINK, 0)
-        mem_w16(mem, SD_QLR, QD)
-        mem_w16(mem, QD + Q_MSGCNT, 1)
-        mem_w16(mem, QD + Q_MSGLEN, 4)
-        mem_w16(mem, QD + Q_NMSGS, 2)
-        mem_w16(mem, QD + Q_MSGOUT, 1)  # (msgout + msgcnt) == 2 == nmsgs -> wraps to slot 0
-        mem_w16(mem, QD + Q_BUF, 0x4300)
-        mem_w16(mem, QD + Q_FLAGS, 0)
-        QPB = 0x5000
-        mem_w16(mem, QPB + QPB_QADDR, QD)
-        mem_w16(mem, QPB + QPB_BUFFPTR, 0x4400)
-        mem[0x4400:0x4404] = b'\xAA\xBB\xCC\xDD'  # the caller's own message
-        ref_regs, ref_img = run_reference(code, entries['writeq_entry'], mem, {'dx': QPB})
-        buf = to_ctypes(mem)
-        r = lib.writeq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
-        port_img = bytes(buf)
-        ref = ((ref_regs['bx'], ref_regs['cx']), bytes(ref_img[0x4300:0x4304]), mem_r16(ref_img, QD + Q_MSGCNT))
-        port = ((r.bx, r.cx), bytes(port_img[0x4300:0x4304]), mem_r16(port_img, QD + Q_MSGCNT))
-        check("writeq_entry: copies into slot 0 (wrapped), msgcnt bumped", ref, port)
+        mem = queue_memory(msgcnt=1, msglen=4, msgout=1)  # slot (1+1)%2 = 0
+        mem[wk(0x400):wk(0x404)] = b'\xAA\xBB\xCC\xDD'
+        run_case("writeq_entry: copies into slot 0 (wrapped), msgcnt bumped", 'writeq_entry', mem, QPB,
+                 lambda img: (bytes(img[sd(0x2300):sd(0x2304)]), r16(img, sd(QD + Q_MSGCNT))))
 
-        # -- writeq_entry: msglen==0, an MX queue -> BUF cleared, no owner --
-        mem = base_memory()
-        QD = 0x4100
-        mem_w16(mem, QD + Q_LINK, 0)
-        mem_w16(mem, SD_QLR, QD)
-        mem_w16(mem, QD + Q_MSGCNT, 0)
-        mem_w16(mem, QD + Q_MSGLEN, 0)
-        mem_w16(mem, QD + Q_NMSGS, 1)
-        mem_w16(mem, QD + Q_FLAGS, QF_MX)
-        mem_w16(mem, QD + Q_BUF, 0x8000)  # previous owner
-        QPB = 0x5000
-        mem_w16(mem, QPB + QPB_QADDR, QD)
-        ref_regs, ref_img = run_reference(code, entries['writeq_entry'], mem, {'dx': QPB})
-        buf = to_ctypes(mem)
-        r = lib.writeq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
-        port_img = bytes(buf)
-        ref = ((ref_regs['bx'], ref_regs['cx']), mem_r16(ref_img, QD + Q_BUF), mem_r16(ref_img, QD + Q_MSGCNT))
-        port = ((r.bx, r.cx), mem_r16(port_img, QD + Q_BUF), mem_r16(port_img, QD + Q_MSGCNT))
-        check("writeq_entry: msglen==0, MX queue -> BUF cleared", ref, port)
+        # -- writeq_entry: msglen==0, an MX queue -> BUF cleared --
+        mem = queue_memory(msgcnt=0, msglen=0, nmsgs=1, flags=QF_MX, qbuf=0x2999)
+        run_case("writeq_entry: msglen==0, MX queue -> BUF cleared", 'writeq_entry', mem, QPB,
+                 lambda img: (r16(img, sd(QD + Q_BUF)), r16(img, sd(QD + Q_MSGCNT))))
 
-        # -- cwriteq_entry: full queue, conditional -> immediate e_q_full, no wait --
-        mem = base_memory()
-        QD = 0x4100
-        mem_w16(mem, QD + Q_LINK, 0)
-        mem_w16(mem, SD_QLR, QD)
-        mem_w16(mem, QD + Q_MSGCNT, 2)
-        mem_w16(mem, QD + Q_NMSGS, 2)
-        QPB = 0x5000
-        mem_w16(mem, QPB + QPB_QADDR, QD)
-        ref_regs, _ = run_reference(code, entries['cwriteq_entry'], mem, {'dx': QPB})
-        buf = to_ctypes(mem)
-        r = lib.cwriteq_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QPB))
-        check("cwriteq_entry: full queue -> e_q_full, no wait", (ref_regs['bx'], ref_regs['cx']), (r.bx, r.cx))
+        # -- cwriteq_entry: full queue, conditional -> immediate e_q_full --
+        run_case("cwriteq_entry: full queue -> e_q_full, no wait", 'cwriteq_entry',
+                 queue_memory(msgcnt=2, msglen=4), QPB)
 
-        # -- rlsmx: releases a matching MX queue, leaves a non-matching one alone --
+        # -- rlsmx: walks qlr; matching MX queue gets the (stubbed) f_cqwrite --
         mem = base_memory()
-        OWNER_PD = 0x8000
-        MX_Q, OTHER_Q = 0x4100, 0x4200
-        mem_w16(mem, MX_Q + Q_FLAGS, QF_MX)
-        mem_w16(mem, MX_Q + Q_BUF, OWNER_PD)
-        mem_w16(mem, MX_Q + Q_LINK, OTHER_Q)
-        mem_w16(mem, OTHER_Q + Q_FLAGS, QF_MX)
-        mem_w16(mem, OTHER_Q + Q_BUF, 0x9999)  # a different owner
-        mem_w16(mem, OTHER_Q + Q_LINK, 0)
-        mem_w16(mem, SD_QLR, MX_Q)
-        ref_regs, ref_img = run_reference(code, entries['rlsmx'], mem, {'si': OWNER_PD})
-        buf = to_ctypes(mem)
-        lib.rlsmx(ctypes.cast(buf, c_u8p), ctypes.c_uint16(OWNER_PD))
-        port_img = bytes(buf)
-        ref = (mem_r16(ref_img, MX_Q + Q_BUF), mem_r16(ref_img, OTHER_Q + Q_BUF))
-        port = (mem_r16(port_img, MX_Q + Q_BUF), mem_r16(port_img, OTHER_Q + Q_BUF))
-        check("rlsmx: matching MX queue stubbed-called, other untouched", ref, port)
+        OWNER = 0x2A00
+        w16(mem, sd(0x2100 + Q_FLAGS), QF_MX)
+        w16(mem, sd(0x2100 + Q_BUF), OWNER)
+        w16(mem, sd(0x2100 + Q_LINK), 0x2200)
+        w16(mem, sd(0x2200 + Q_FLAGS), QF_MX)
+        w16(mem, sd(0x2200 + Q_BUF), 0x2B00)
+        w16(mem, QLR, 0x2100)
+        run_case("rlsmx: walks qlr", 'rlsmx', mem, OWNER)
 
         # -- remqd: threads the freed QD onto qul (docs/bugs.md #99's fix) --
         mem = base_memory()
-        QD = 0x4100
-        mem_w16(mem, QD + Q_FLAGS, QF_TABLE)
-        mem_w16(mem, QD + Q_BUF, 0)
-        mem_w16(mem, SD_QUL, 0x5555)
-        ref_regs, ref_img = run_reference(code, entries['remqd'], mem, {'si': QD})
-        buf = to_ctypes(mem)
-        lib.remqd(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QD))
-        port_img = bytes(buf)
-        ref = (mem_r16(ref_img, QD + Q_LINK), mem_r16(ref_img, SD_QUL))
-        port = (mem_r16(port_img, QD + Q_LINK), mem_r16(port_img, SD_QUL))
-        check("remqd: qul updated to the freed QD", ref, port)
+        w16(mem, sd(QD + Q_FLAGS), QF_TABLE)
+        w16(mem, QUL, 0x2555)
+        run_case("remqd: qul updated to the freed QD", 'remqd', mem, QD,
+                 lambda img: (r16(img, sd(QD + Q_LINK)), r16(img, QUL)))
+
+        mem = base_memory()
+        w16(mem, QUL, 0x2555)
+        run_case("remqd: not a table QD -> untouched", 'remqd', mem, QD)
 
         # -- qspace: always reports an error under the boundary-stub convention --
         mem = base_memory()
-        QD = 0x4100
-        mem_w16(mem, QD + 0x0E, 10)  # q_msglen
-        mem_w16(mem, QD + Q_NMSGS, 3)
-        mem_w16(mem, QD + Q_BUF, 0)
-        ref_regs, ref_img = run_reference(code, entries['qspace'], mem, {'si': QD})
-        buf = to_ctypes(mem)
-        cx = ctypes.c_uint16()
-        lib.qspace(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QD), ctypes.byref(cx))
-        check("qspace: boundary-stub leaves an error code", ref_regs['cx'], cx.value)
+        w16(mem, sd(QD + Q_MSGLEN), 10)
+        w16(mem, sd(QD + Q_NMSGS), 3)
+        run_case("qspace: boundary stub leaves an error code", 'qspace', mem, QD)
 
         # -- qrelease: pure boundary stub, no observable effect --
         mem = base_memory()
-        QD = 0x4100
-        mem_w16(mem, QD + Q_BUF, 0x1234)
-        ref_regs, ref_img = run_reference(code, entries['qrelease'], mem, {'si': QD})
-        buf = to_ctypes(mem)
-        lib.qrelease(ctypes.cast(buf, c_u8p), ctypes.c_uint16(QD))
-        check("qrelease: no observable effect", bytes(ref_img[0x4000:0x4300]), bytes(buf)[0x4000:0x4300])
+        w16(mem, sd(QD + Q_BUF), 0x1234)
+        run_case("qrelease: no observable effect", 'qrelease', mem, QD)
 
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")

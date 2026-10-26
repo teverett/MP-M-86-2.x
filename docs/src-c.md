@@ -80,6 +80,11 @@ normally without needing a stub at all.
 
 ### Test-harness memory addresses aren't the real hardware offsets
 
+*(How the port started. Every `src-c/kernel` file now runs on real
+memory with real segments -- see the "Real pointers" sections below;
+the flat scratch addresses are gone from the kernel. `src-c/loader`
+still uses this model.)*
+
 `src/kernel/SYSDAT.FMT` (System Data Area) and `UDA.FMT` (one process's
 User Data Area) are each their own segment on real hardware, with small
 offsets (e.g. SYSDAT's `rlr` at `0x68`) that only make sense relative to
@@ -287,55 +292,605 @@ them. Two things worth knowing:
   interrupts, IRQ0 would land on protected-mode vector 8 (the
   double-fault slot) until the PIC is remapped and an IDT exists.
 
-Everything above the XIOS (`sup_init()` and the rest) still uses the
-simulated flat-array `mem`+offset convention and isn't called yet.
-Reworking that convention to real pointers and segments is the
-remaining step to a kernel that does real work.
+Everything above the XIOS still uses the simulated flat-array
+`mem`+offset convention, except `sup_init()` (next section), and none
+of it is called from `kernel_main.c` yet.
+
+### Real pointers: `sup_init`
+
+`sup_init()` (`init.c`, INIT.SUP's own `init`) is the first routine
+reworked off the 64KB harness array onto real memory. It takes
+`phys`, the base of the real 8086 physical address space, and reaches
+every field through its real segment at its real offset via defs.h's
+`far_ptr(phys, seg, off)` (= `phys + seg*16 + off`, 20 bits, no
+16-bit wrap) with `rd16`/`wr16` for word access:
+
+- SYSDAT.FMT fields through the `ds_sysdat` segment, at the real
+  offsets now in defs.h's `SYSDAT_*` block (`SYSDAT_RSPSEG` 42h,
+  `SYSDAT_VERSION` 78h, `SYSDAT_NCONDEV`/`NLSTDEV`/`NCIODEV` 83h-85h,
+  `SYSDAT_INITPD` 9C0h, `SYSDAT_IDLE_TOS` A7Ah, `SYSDAT_TICK_TOS`
+  AAAh, `SYSDAT_INTFLAG` B5Fh). The old init-only `SD_INIT_*`/
+  `SD_RSPSEG`/`SD_INITPD`/`SD_INITUDA` scratch addresses are gone.
+- INIT.SUP's own `sysdat`/`supervisor` cells through `cs`, and the
+  INT mpmint vector through segment 0.
+- The init UDA and each RSP through the segments the real code
+  computes or follows at run time. That means the parts the old port
+  had to collapse are now translated literally: `p_uda` is the real
+  paragraph arithmetic (`(inituda >> 4) + sysdat`), `u_wrkseg` is
+  written through that segment, and the RSP walk follows each RSP's
+  real `rsp_link`.
+
+`tests/src-c/test_init.py` now runs the reference with
+`segmented=True`, a real nonzero SYSDAT segment (400h), and a wrapper
+that includes the real `SYSDAT.FMT`/`VEC.FMT`/`UDA.FMT`, so the RSP
+loop and the `u_wrkseg` bug fix are exercised for the first time. It
+covers a no-RSP case and a two-RSP chain, takes every field address
+from the assembled symbols rather than hand-copied constants, checks
+that SYSDAT 2Eh (the old bug's target) is left alone, and diffs the
+whole image to catch stray writes. Bumping one `SYSDAT_*` offset by a
+byte makes it fail at exactly that address.
+
+Two limits:
+
+- The reference runs with CS=0, because `tools/i86sim.py` fetches
+  instructions from the physical IP and ignores CS, so the code image
+  has to sit at physical 0 for its own `cs:` accesses to land on it.
+  The `i_mpm_cs` check therefore only compares 0 against 0.
+- `kernel_main.c` calls `sup_init()` on real memory (next section),
+  but nothing has loaded the 16-bit SUP code its entry offsets point
+  into, so they're stored but never used.
+
+### `kernel_main` runs `sup_init`
+
+After handing console I/O to the XIOS, `kernel_main.c` runs
+`sup_init()` against real low memory and checks the result:
+
+- **Layout** follows the real `/src` boot: the SUP code segment at
+  `MPM_CODE_SEG` (1000h, `tools/build_mpmsys.py`), SYSDAT just past
+  the combined kernel code (1697h for the current `/src` build:
+  1000h + 26992 bytes / 16), so the init UDA lands at 1703h. The
+  physical base passed in is 0, since multiboot leaves the CPU in
+  flat 32-bit mode with base-0 segments (linear == physical). That
+  base is kept in a `volatile` so the compiler treats `far_ptr()`
+  results as real addresses instead of offsets from a known null.
+- **SYSDAT image**: nothing loads MPM.SYS here, so `kernel_main`
+  zeroes SYSDAT's 4KB and fills in the two fields `sup_init` reads:
+  module_table[SUP]'s entry segment and an empty RSP list.
+- **Entry offsets** for `notick`/`idle`/`user_entry` are the real ones
+  from `src/kernel/SUP.A86` (18Ch/178h/1ECh). `sup_init` stores them
+  in SYSDAT and the INT mpmint vector; in protected mode nothing ever
+  jumps to them.
+- **Verification**: every field `sup_init` should have written (the
+  `cs:` cells, version, tick/idle stack tops, the INT mpmint vector,
+  `p_uda`, the init UDA's `u_wrkseg`, intflag, rspseg, and SYSDAT 2Eh
+  left alone) is read back from real memory. QEMU prints
+  `sup_init: ok (sysdat 1697, init uda 1703)`, or `sup_init: FAIL
+  <field> = <got>, expected <want>` per bad field; changing one write
+  in `init.c` produces exactly that. `test_boot.py` checks for the ok
+  line.
+
+`SYSDAT_SEG` (1697h) is copied from the current `/src` build and
+won't track it automatically if the combined kernel code size
+changes. Nothing breaks if it drifts, since this image doesn't load
+the `/src` code, but it will stop matching the real layout.
+
+### Real pointers: `rtmif_init`
+
+`rtmif_init()` (`rtmif.c`, RTMIF.RTM's own `init`) is the second
+routine on real memory, converted the same way as `sup_init`: it takes
+`phys` and reaches its own `cs:sysdat`/`cs:supervisor` cells, SYSDAT's
+`supmod`/`dispatcher`/`rtm_pdisp`/`tickpd`/`idlepd`, and the tick and
+idle UDAs through `far_ptr()` at their real offsets. Each UDA's segment
+is computed as the real asm does (`p_uda + cs:sysdat`, read back from
+the cell it just wrote) and is only used to reach the UDA, never stored
+back into `p_uda`. The real `init` ends with `mov dx,offset idlepd !
+call proc_creat`, a real call into `proc.c` (also on real memory, next
+section) that creates the idle and tick processes.
+
+`tests/src-c/test_rtmif.py` follows `test_init.py`'s pattern: a wrapper
+that includes the real `SYSDAT.FMT`/`UDA.FMT`/`VEC.FMT` plus the real
+`PROC.RTM`, a segmented reference run with SYSDAT at 400h and the
+tick/idle UDAs at their computed segments (500h/510h), the init process
+as creator (rlr = initpd, its UDA as ES with `u_wrkseg` = SYSDAT), every
+field address taken from the assembled symbols, and a whole-image diff,
+so all of `proc_creat`'s effects are compared too. Shifting
+`SYSDAT_TICKPD` by two bytes makes the tick-UDA checks fail.
+
+### Real pointers: the RTM, stage 1 (`proc.c`, `dsptch.c`, `sysent.c`)
+
+The whole RTM is being moved onto real memory bottom-up, in stages
+chosen so that nothing on real memory is ever called by code still on
+the 64KB test array. The test-array addresses can't be bridged to real
+ones: they don't map onto real SYSDAT offsets by any single shift
+(`rlr` is 68h real vs A000h test, `pul` 5Ch vs A038h, and `ncondev`/
+`nlstdev` are even in opposite order). The C call graph (the asm's
+tail-jumps into `dsptch`/`pdisp` are already boundary stubs in C)
+splits into:
+
+1. `proc.c` + `dsptch.c` + `sysent.c` -- called from outside only by
+   `rtmif.c`. **Done.**
+2. `flag.c` -- called only by `rtmif_entry`. **Done** (next section).
+3. `que1.c` + `que2.c` + `findpd.c` + `abort.c` -- also called from
+   `bdosif.c` (`bdosif_init`) and `command.c`. **Done** (stage 3
+   section below), with `command.c` on a temporary bridge.
+
+Stage 1 follows the asm's own segment for every access:
+
+- PDs, the ready/dispatch/poll/delay/swap/thread/unused lists, flag
+  entries, memory descriptors, `indisp` and `mxmemowner` are
+  DS-relative: offsets within SYSDAT (new `SYSDAT_RLR`/`DRL`/`DLR`/
+  `PLR`/`SLR`/`THRDRT`/`PUL`/`ENDSEG`/`INDISP`/`MXMEMOWNER` in
+  `defs.h`, from `RTM.A86`'s symbols). PD addresses are SYSDAT
+  offsets.
+- `u_*` fields go through ES, which in the real asm always holds the
+  running process's UDA (`fdisp` loads it explicitly: `mov
+  es,p_uda[rlr]`), so the C side uses `p_uda[rlr]` (`defs.h`'s
+  `rlr_uda`). That replaces the test array's fixed `UDA_DPARAM`/
+  `UDA_RETSEG`/`UDA_WRKSEG` scratch slots, and makes the creator's
+  `u_wrkseg`/password in `proc_creat` come from its real UDA.
+- The interrupt vectors the dispatcher and `proc_creat` save/restore
+  are at segment 0.
+
+Every function in the three files now takes `(phys, sysdat, ...)`, and
+`defs.h` gained `seg_r8`/`seg_w8`/`seg_r16`/`seg_w16` (byte/word at a
+`uint16_t` offset within a segment, so `si + p_link`-style offsets wrap
+at 64KB like a real 8086 offset). `rtmif_init` calls `proc_creat` for
+real again, and `rtmif_entry`'s cases into `sysent.c` (1, 11, 14, 15,
+16, 18, 19) hand their buffer over as real memory; after stage 2 its
+flag cases (2, 3) do too, and the rest still treat it as the test
+array until stage 3.
+
+The four affected tests were rebuilt on the `test_init.py` pattern
+(wrappers including the real `SYSDAT.FMT`/`UDA.FMT`/`VEC.FMT`,
+segmented reference runs with SYSDAT at 100h or 400h, addresses from
+the symbol table, whole-image diffs), which also added coverage:
+
+- `test_proc.py`: `getpdadr`'s copy-into-the-PD-table path (an
+  out-of-range PD copied across segments, `pf_table` set, `pul`
+  advanced), and a non-default `u_initss` kept.
+- `test_dsptch.py`: a `poll_act` case. That needed the wrapper's
+  `xiosif` to be a real stub returning AL=0, matching `dsptch.c`'s
+  fixed "device not ready" (an address-only stub leaves AL =
+  `io_polldev`, which the reference read as "ready"). The image diff
+  leaves out exactly what `dsptch.c` documents as having no C
+  equivalent: the outgoing UDA's `u_ss`/`u_sp`/`u_flag_sav`, `fdisp`'s
+  `u_ds_sav`/`u_es_sav`/`es_sav`/`bx_sav`, and the dispatcher's own
+  stack below SYSDAT's `dsptchtos`.
+- `test_sysent.py`: `pd_entry`'s reference now runs with DS = SYSDAT
+  (how the asm reaches `rlr`), so `u_retseg` gets the SYSDAT segment.
+  `creat_proc_entry` still runs end to end through real `proc_creat`
+  and the dispatcher, with an image diff that leaves out the parent
+  UDA's saved `u_ax`/`u_bx`/`u_cx`/`u_si`/`u_di` (proc_creat's leftover
+  scratch on the asm side, per `sysent.c`'s header).
+- `test_rtmif.py`: real tick/idle creation by `rtmif_init`, compared
+  field by field.
+- `test_rtmif_entry.py` (mid-conversion): its reference is still the
+  flat test-array build, so for the `sysent.c` cases the C side gets
+  its own real-layout memory with the same logical contents, and each
+  case compares the fields its target writes. That uncovered a latent
+  test bug: this wrapper includes the real `UDA.FMT`, so its flat
+  reference writes `u_dparam`/`u_retseg` at bare offsets 0/30h, not at
+  the `UDA_DPARAM`/`UDA_RETSEG` scratch slots the old test assumed (it
+  never checked those fields, so it never noticed).
+
+### Real pointers: the RTM, stage 2 (`flag.c`)
+
+`flag_set_entry`/`flag_wait_entry` (+ `flag_valid`) now take
+`(phys, sysdat, dl)` like stage 1. `nflags`, the `flags` table pointer,
+the flag entries it points to, and the PDs they hold are SYSDAT-
+relative (new `SYSDAT_NFLAGS` 4Ah / `SYSDAT_FLAGS` 56h); the waiting
+process's `u_dparam` goes to its UDA (`p_uda[rlr]`).
+
+`tests/src-c/test_flag.py` follows the stage 1 pattern (wrapper with
+the real `SYSDAT.FMT`/`UDA.FMT`, segmented reference with SYSDAT at
+100h, addresses from the symbol table, a whole-image diff per case);
+shifting `SYSDAT_FLAGS` by two bytes fails 12 checks.
+`test_rtmif_entry.py`'s flag cases now use its real-layout C buffer,
+and gained one success case each (set: off -> on, wait: on ->
+consumed) besides the existing bad-flag-number rejection.
+
+### Real pointers: the RTM, stage 3 (queues, `findpd.c`, `abort.c`)
+
+Every function in `que1.c`, `que2.c`, `findpd.c` and `abort.c` now
+takes `(phys, sysdat, ...)`, which finishes the RTM: `rtmif_entry`
+hands all 21 cases real memory. QDs, `qlr`/`qul`, PDs, every process
+list, and the flag and CCB tables are SYSDAT-relative (new
+`SYSDAT_QLR` 74h, `SYSDAT_QUL` 5Eh, `SYSDAT_QMAU` 60h, `SYSDAT_CCB`
+54h). QPBs, message buffers, a QD being made, the name `findpdname_
+entry` looks up (it used to be a host pointer), and `abort_spec_entry`'s
+APB all live in the running process's `u_wrkseg`, read from its UDA,
+as the asm's `mov es,u_wrkseg` does. `getqdaddr`'s copy into the QD
+table really goes from `u_wrkseg:dx` to `sysdat:di`. `queverify` is
+now called once per read/write, and the retry loop jumps back to
+`qr_ver`/`qw_ver` the way the asm does.
+
+`bdosif_init` runs on real memory too, taking `(phys, ds_sysdat, cs)`.
+Its three `mpmif` calls (make, open and write the MX disk queue) go
+through SUPIF's `mpmif`, which sets the running process's `u_wrkseg`
+to the caller's DS (SYSDAT here) and restores it afterwards. The C
+direct calls into `que1.c` do the same thing around the calls.
+`mxdiskqd`/`mxdiskqpb` are DATA.BDO's real offsets F92h/FAEh in the
+combined data segment (`SYSDAT_MXDISKQD`/`SYSDAT_MXDISKQPB`).
+`bdosif_entry` is still on the test array (stage 6, with its file4
+targets).
+
+**Transitional bridge in `command.c`.** `command.c` (stage 7) still
+runs on the test array but calls four queue entries
+(`openq`/`cwriteq` for the CLI queue, `readq`/`writeq` for MXCli).
+It passes its 64KB array to them as physical memory with SYSDAT at
+segment 0 (`QUE_SYSDAT`), so its flat QPB/QD offsets line up with
+SYSDAT offsets. `test_command.py` mirrors the few real-offset fields
+the queue code reads (`rlr` at 68h, `qlr` at 74h, and the running UDA's
+`u_wrkseg` = 0). This goes away in stage 7.
+
+Bugs found:
+
+- `abort.c`'s `gccba` added the *address* of SYSDAT's `ccb` word
+  instead of its contents (`ccb rw 1`, so the asm's `add si,ccb` is a
+  memory operand). `abtcns` (aborting a process waiting on a console
+  or list device) therefore searched the wrong CCB. The asm was right;
+  the C is fixed.
+- `ABORT.RTM`'s `findpdq` saved a QD's DQ/NQ list root instead of the
+  QD across `find_pd`, so it only ever searched the first queue on
+  `qlr` (docs/bugs.md #104, original DRI code). The asm is fixed to
+  match the C, which already walked every QD.
+
+Tests, all on the real layout (wrappers with the real `SYSDAT.FMT`/
+`UDA.FMT`, segmented reference with DS = SYSDAT and ES = the running
+UDA, addresses from the symbol table, whole-image diff per case):
+
+- `test_que.py`: all 15 routines, now including `readq` on an unknown
+  queue, `remqd` on a non-table QD, and `getqdaddr` with a nonzero
+  wrkseg-to-SYSDAT offset. Shifting `SYSDAT_QLR` fails 19 checks.
+- `test_findpd.py`: the real `thrdrt` root, the name in `u_wrkseg`.
+- `test_abort.py`: every `abort_tab` handler (run, drl fallback,
+  poll, delay, swap, DQ, NQ, flag, console and list-device wait),
+  lookup by name+console, keep/tempkeep/sys rules, self-abort, and
+  `sysreset_entry`. The old version's `PF_KEEP` constant was
+  `pf_sys`'s value; constants now come from the symbol table.
+  Reverting the `gccba` fix fails the two console cases.
+- `test_bdosif_init.py` (restored; an earlier step of this
+  conversion had overwritten the old init test with the entry test):
+  the reference assembles the whole real BDOS module plus QUE1/QUE2,
+  and loads DATA.BDO's real initial QD/QPB from its dseg bytes. It
+  runs the real `init` and `mpmif`. `mpmif`'s `callf cs:dword ptr
+  .supervisor` is modeled with a new `tools/i86sim.py` hook,
+  `far_call_hooks`, which applies SUPIF's protocol and runs the real
+  queue entry in a nested sim on the same memory. Skipping the C's
+  `u_wrkseg` setup fails 3 checks. The hand-transcribed
+  `bdosif_wrapper.A86` is gone.
+- `test_rtmif_entry.py`: the reference is now `src/kernel/RTM.A86`
+  itself, the whole real module, with the dispatcher stubbed at its
+  real addresses. That replaces the hand-built `rtmif_entry_wrapper.A86`
+  and the old mixed flat/real setup. It also makes `terminate:`'s
+  offset genuine, so case 17 now covers a successful abort and checks
+  rtmif.c's hardcoded `RTMIF_ABORT_TERMINATE_OFFSET`. Every case
+  except 14 (creat_proc, dispatch-only as before) gets a whole-image
+  diff, and most cases gained a success path.
+
+### Real pointers: the MEM module, stage 4
+
+Every function in `util_mem.c`, `ml.c`, `mau.c`, `share.c`, `memory.c`,
+`cpmmem.c` and `memif.c` now takes `(phys, sysdat, ...)`, and
+`memif_init` takes `(phys, ds_sysdat, cs)` like the other modules'
+`init`. Each structure is reached through the segment the asm uses:
+
+- MDs, `mdul`/`mal`/`mfl` (new `SYSDAT_MDUL` 58h, `SYSDAT_MFL` 5Ah,
+  `SYSDAT_MAL` 76h), PDs and their `p_mem` lists, and `mxmemowner`/
+  `mxmemcount` are SYSDAT-relative.
+- MPBs, MCBs, SPBs, MFPBs and MAFs are in the running process's
+  `u_wrkseg` (the asm's `mov es,u_wrkseg`), read from its UDA.
+- A MAU's SAT is in the MAU's own segment, `m_start` of its MD.
+- The blocks the asm builds on its own stack and passes to `mpmif` with
+  DS = SS (getmemory's MPB, free_memory's MFPB, mfree_it's MAF) go at
+  fixed spots in the running UDA's stack area (`UDA_STK_MPB`/`MFPB`/
+  `MAF`, defs.h). During a system call SS is that UDA and SP starts at
+  `ulen` (SUPIF's `user_entry`), so that's where the real ones are too.
+  As SUPIF's `mpmif` does for DS = SS, the C points `u_wrkseg` at the
+  UDA for the call and restores it afterwards.
+
+**Transitional bridge in `load.c`.** `load.c` (stage 7) still runs on
+the test array but calls `malloc_entry`, `mfree_entry` and
+`cpmfree_entry`. It passes its 64KB array as physical memory with
+SYSDAT at segment 0 (`MEM_SYSDAT`), with `u_wrkseg` = SYSDAT around
+each call, as mpmif does for a caller whose DS is SYSDAT.
+`test_load.py` mirrors the fields the MEM code reads (`rlr`, `thrdrt`,
+`mdul`, `mal`, `mfl`) at their real offsets. This goes away in stage 7.
+
+**One reference for all eight MEM tests.** `tests/src-c/memref.py`
+assembles `src/kernel/MEM.A86` itself and runs it the way a system call
+reaches MEM: DS = SYSDAT, ES = the running UDA, SS:SP = that UDA at
+`ulen`. MEM's `mpmif` (`callf cs:dword ptr .supervisor`) is modeled
+with `far_call_hooks`. For a MEM function, the hook applies SUPIF's
+protocol and re-enters the real `entry` in a nested sim, as the real
+system does; `entry`'s own f_qread/f_qwrite/f_terminate are no-op
+stubs. So the internal calls (malloc → mlalloc/maualloc, mfree →
+maufree/mlfree, getmemory → malloc, ...) run through real asm on the
+reference side, not through per-test dispatchers. Each case diffs the
+whole image except the code and the UDA's stack area. The eight old
+`*_wrapper.A86` fixtures are gone.
+
+Bugs found:
+
+- `share_entry` leaked the MD it takes from `mdul` when sharing with
+  oneself and when the owner had no segment at the requested start
+  (docs/bugs.md #105, original DRI code; fixed in both).
+- `mau_collapse` reported a MAU empty while its last segment was still
+  allocated, so `mfree_it` handed a MAU that was still in use back to
+  the Memory Free List (docs/bugs.md #106, original DRI code; fixed in
+  both).
+- `cpmfree_entry`'s free-all walk used `and` instead of `test` on each
+  segment's flags (wiping a kept Load segment's `mf_code`/`mf_share`),
+  and retried a segment that failed to free forever (docs/bugs.md
+  #107, original DRI code; fixed in both).
+- C only: `getmemory` returned its min input as the allocated length
+  instead of reading back `mpb_min`, which MAU.MEM sets to the actual
+  length. maxmem/absmax (min 0) therefore reported length 0. The old
+  flat test never compared a min < max case.
+- C only: `mlfree_entry` was `void` while `memif.c` declared it as
+  returning `{bx, cx}`, so dispatch case 12 returned whatever was left
+  in the return registers. It now returns `{0, 0}` like the asm.
+- C only: `memif_entry`'s `freeall_entry` case returned `{0, 0}`; the
+  asm leaves BX as passed and CX = f_terminate under the boundary-stub
+  convention.
+
+The MEM changes grew the combined kernel code by 32 bytes, so SYSDAT
+moved from 1692h to 1694h; `kernel_main.c`'s copy of that layout is
+updated, and a clean `/src` rebuild still boots to `0A>` in QEMU.
+
+### Real pointers: the CIO module, stage 5
+
+Every function in `console.c`, `chario.c` and `cioif.c` now takes
+`(phys, sysdat, ...)`, and `cioif_init` takes `(phys, ds_sysdat, cs)`
+like the other modules' `init`. The CCB table (SYSDAT's `ccb` points at
+it), PDs, process names, `rlr`/`thrdrt` and the device counts (new
+`SYSDAT_NCNS` 47h, plus `SYSDAT_NCONDEV`/`NLSTDEV`) are SYSDAT-relative.
+The caller's buffers (conwrite/conprint/conread, conassign's ACB) are in
+the running process's `u_wrkseg`. CHARIO's three messages
+("Printer Busy", "Abort (Y/N)?", "Attach:") live in the CIO code segment
+in the asm; `prcsmsg` prints them by pointing `u_wrkseg` at CS around a
+`conprint_entry` call. On the C side they're C constants, printed by the
+same body (`cprint`). The old flat scratch copies (`CHARIO_*`) are gone.
+
+Two boundaries are now real calls:
+
+- **`conassign_entry`'s name search** (`mpmif(f_findpdname)`) calls
+  findpd.c's `findpdname_entry`, which has run on real memory since
+  stage 3. The old port stubbed it as "always fails", so assigning a
+  console by name could never work. The asm's retry when a found PD's
+  console doesn't match (`as_gpd` → `as_trya`, continuing the search
+  after that PD) is translated as-is.
+- **The XIOS.** Every character-I/O call (conoutf/listf/constf/coninf,
+  and `stdout`'s mimic forwarding) goes through chario.c's `xiosc()`
+  with the asm's AL/CL/DL. If a hook is set (`cio_set_xios`, defs.h),
+  it handles the call and returns the XIOS's AX/BX. Otherwise the call
+  returns 0, the old convention (nothing ready, NUL read, output
+  dropped). The old port had dropped output calls entirely and fixed
+  input at 0, so nothing CHARIO printed could be checked: a mutation of
+  the attach message went unnoticed. It also marked the real input
+  paths unreachable. Those are back: reading through `coninf`, ctl-S
+  waiting for ctl-Q, and the ctl-C prompt's answer. The kernel can
+  later wire the hook to `xios86q.c`.
+
+**Transitional bridge in `command.c`**, now covering both modules:
+`TA_SYSDAT` (formerly `QUE_SYSDAT`) for the queue and CIO calls, with
+`u_wrkseg` set to SYSDAT around each call (`ta_enter`/`ta_leave`), as
+mpmif does for SUP code. This goes away in stage 7.
+
+**One reference for all four CIO tests.** `tests/src-c/cioref.py`
+assembles `src/kernel/CIO.A86` itself and runs it like a system call
+(DS = SYSDAT, ES and SS = the running UDA). `far_call_hooks` model the
+two far calls:
+
+- `mpmif`: for f_findpdname it runs the real FINDPD.RTM, assembled
+  separately and loaded at F000h in the same memory, in a nested sim
+  under SUPIF's protocol. Other function codes are no-op stubs.
+- `xiosif`: a scripted XIOS (`Xios`: typed input in, output recorded).
+  The C side gets the same script through `cio_set_xios`.
+
+Each case compares the result, the whole stream of XIOS calls (every
+character printed, every poll and read), and the whole image. That
+covers typed input, ctl-S/ctl-Q, ctl-C answered Y or n, conread's
+editing keys with real typed lines, ctl-P, and output echoed to a
+mimicking device. The four old `*_wrapper.A86` fixtures are gone.
+
+Bug found: `mimic_entry` returned without setting BX/CX on success, so
+`control_p`'s `jcxz` could take a working ctl-P for "Printer Busy" and
+leave `cf_listcp` out of step with the CCBs (docs/bugs.md #108,
+original DRI code; fixed in both). The /src build's layout didn't move
+(CONSOLE.CIO's 4 extra bytes fit in padding), and a clean `/src` build
+still boots to `0A>`.
+
+### Real pointers: the BDOS, stage 6
+
+Every function in `file1.c`–`file4.c` now takes `(phys, ds_bdos, ...)`.
+That includes the dozen that used to take only `mem` (`move`, `seek`,
+`compare`, `setrandom`, func25/26/32/44/45/48/51, ...).
+`bdosif_entry(phys, sysdat, ...)` passes the real SYSDAT segment to its
+ten directly-dispatched targets instead of a flat 0. `ds_bdos` is the
+BDOS's DS: the combined SYSDAT+DATA.BDO segment SUPIF enters the BDOS
+with. So the `BD_*` constants (already DATA.BDO's real offsets, C00h+)
+need no change. `rlr`, the PDs and `tod` are reached through DS as well
+(`SYSDAT_RLR`, new `SYSDAT_TOD` 7Eh). Everything the BDOS works on is
+DS-relative: its own copy of the caller's FCB, directory buffers, and
+the DPB, allocation and checksum vectors. The old port read and wrote
+all of it as flat `mem[...]`, which only worked with DS = 0.
+
+The exceptions are where the asm switches segments, and four of them
+were modeled flat before:
+
+- `parsave` copies the caller's FCB from `parametersegment:info`.
+- `dirtouser` copies the directory record to `parametersegment:dmaad`.
+  `move` itself copies DS:SI → ES:DI and ES is DS for every other
+  caller, so it stays DS-to-DS.
+- `copy_dma_in`/`copy_dma_out` and func18's DMA → directory-buffer copy
+  use `DMABASE:dmaad`.
+- file4.c's `u_*` fields (func26/44/45/51/52) are the running UDA,
+  which the asm reaches through ES, instead of the flat `UDA_*`
+  scratch. func52's `returnseg = DS` is now `ds_bdos`, so its separate
+  `ds` parameter is gone.
+
+**Transitional bridge in `command.c`**: `fileopen`'s `func15` call goes
+through the same `TA_SYSDAT` (SYSDAT at segment 0) as its queue and
+console calls. (Gone in stage 7.)
+
+**Tests.**
+
+- `test_file1.py`–`test_file3.py` keep their cases and their flat
+  addresses, which are exactly the real-memory addresses with SYSDAT
+  at segment 0. They now get 1MB physical buffers and corrected
+  signatures.
+- **New `tests/src-c/bdosref.py`** runs the whole real
+  `src/kernel/BDOS.A86` with SYSDAT at 300h, loaded from the module's
+  real assembled dseg so DATA.BDO starts at its real initial values.
+  ES is the UDA or DS as each entry point expects, and BDOSIF's
+  `mpmif`/`xiosif` far calls are stubs (`xiosif` returns AX = BX = 0,
+  the values file1.c fixes for the disk calls).
+- `test_file4.py` and `test_bdosif.py` are rebuilt on it.
+- **New `test_bdos_real.py`** covers the cross-segment copies, the
+  FCB/allocation helpers through DATA.BDO's pointers, and `search` over
+  a real directory buffer. `search` had no test before because DATA.BDO
+  collided with code in the flat layout.
+
+Mutating `getfcb` to address segment 0, or `dirtouser` to copy into DS,
+fails that test. The two old fixtures it replaces,
+`bdosif_init_stubs.c` and `file4_wrapper.A86`, are gone.
+
+**Bug found (C only):** the port stored 1 for the asm's `true` in 20
+places across nine flags (`parcopfl`, `resel`, `flushed`, `dont_close`,
+`comp_fcb_cks`, `check_fcb_ret`, `lock_unlock`, `make_xfcb`,
+`return_ffff`). `true` is 0FFFFh, so the asm's byte stores are 0FFh.
+The C's own readers all test nonzero, but BDOSIF's `cmp parcopfl,true`
+is an exact compare that a stored 1 fails. test_bdos_real's
+`parsave33` case caught it.
+
+### Real pointers: the SUP, the RSPs and the XIOS, stage 7
+
+The last stage: every remaining file -- `idle.c`, `tick.c`, `rpl.c`,
+`parse.c`, `sysfunc.c`, `load.c`, `command.c`, `supif.c`, the RSPs
+`tmp.c`/`submit.c`/`echo.c`/`clock.c`, and `xios.c`/`xios86q.c` -- takes
+`(phys, sysdat, ...)` (or the RSP's own data segment), and every field is
+at its real offset: SYSDAT's `cli_*`/`load_*`/`ldtab` work areas, the
+RSPs' DSEG fields, the XIOS's fields in the SYSDAT segment. The
+TRANSITIONAL bridge (`TA_SYSDAT`, `ta_enter`/`ta_leave`) is gone, and so
+are the 87 flat `SD_*`/`UDA_*`/`CLI_*` scratch constants from `defs.h`.
+`kernel_main` calls `init_entry(phys, SYSDAT_SEG, ...)` on real memory.
+
+**Calls.** A SUP routine's `mpmif` call sets u_wrkseg = the caller's DS
+for the call (SYSDAT, or the UDA for a block built on the stack); an
+RSP's `int mpmint` sets u_wrkseg = its DS (`user_enter`, defs.h -- what
+SUPIF's `user_entry` does, minus the stack switch). Two more boundaries
+became hooks, like the CIO's XIOS hook: `load_set_readseq` (load.c's
+f_freadseq) and `cli_set_bdos` (command.c's f_fopen/f_fclose). Both go
+through the BDOS's unported getdiskmx path. `prcsm` prints the SUP's
+CS-resident strings through a new `conprint_cs` (chario.c).
+
+**Tests.** New `tests/src-c/supref.py` (`SysRef`) runs the real SUP with
+any of the real RTM, MEM, CIO and BDOS loaded beside it, each at its own
+code segment, all sharing the real SYSDAT image (SYSTEM.DAT + DATA.BDO).
+A module-table `callf` runs the target module's real `entry` in a nested
+simulator, each module's `mpmif` runs SUP's real `entry`, and `xiosif`
+goes to a hook. The dispatcher-level RTM functions (sleep, dispatch,
+terminate, create process, ...) are boundaries, and a test can route any
+(module, function) to a handler. `SysRef.user_call` models an RSP's
+`int mpmint`. `test_idle`/`tick`/`sysfunc`/`rpl`/`parse`/`load`/
+`command`/`supif`/`tmp`/`submit` are rebuilt on it. `test_clock`,
+`test_echo`, `test_xios` and `test_xios86q` run the real code
+segmented, with CS and DS as real, different segments. Every case diffs
+the whole image. `test_command` covers the RSP path, every open/retry
+branch, a full load with Base Page and argument parsing, the ctl-C
+path, and a chain that hands its UDA to the new PD. The old wrappers
+(`command_wrapper`, `load_wrapper`, `parse_wrapper`, `rpl_wrapper`,
+`sysfunc_wrapper`, `tick_wrapper`, `idle_wrapper`, `supif_wrapper`,
+`supif_test_stubs.c`) are gone.
+
+**Bugs found in /src** (all fixed, in docs/bugs.md):
+
+- #109 `LOAD.SUP`: `ld_read` reset the FCB's `nxtrec` through DS
+  (SYSDAT) instead of `u_wrkseg`. Original DRI bug.
+- #110 `SUBMIT.A86`: the bad-parse `$` scan ran over CS instead of DS.
+  Original DRI bug.
+- #111 `XIOS86Q.A86`: the sector copies, `fdc_out_byte` and the tick
+  ISR (its fields and its stack) used the shared kernel code segment
+  for SYSDAT data, so they wrote into SUP's code (LOAD.SUP's
+  `load_group` at 1000:1000h, 60 times a second). A rebuilt image still
+  boots to `0A>`, and still hangs on a command, as before.
+
+**Bugs found in the C** (C only, now matching the asm):
+
+- command.c: f_load passed bx = 0 instead of `cli_pd`, so the new PD
+  was never initialized by the load. (f_load is SUP function 10, `load`
+  itself, not `load_entry`.)
+- command.c: the pf_ctlc abort skipped `cli_cl` (no u_error_mode
+  reset, no close).
+- command.c: `acb_match` was 1, not 0FFh.
+- command.c: it overwrote `cli_cuspqpb`'s `buffptr` (SYSTEM.DAT
+  points it at `cli_ppd`), so an RSP got the command without the
+  parent PD in front.
+- command.c: `cli_pcb` was not restored after the second argument
+  parse.
+- command.c: the `cli_dma` setup before the open (dskmap copy,
+  u_dma_*) and u_error_mode = 0FEh were missing.
+- supif.c: cload_entry got 1 instead of the caller's bx as the PD.
+- load.c: no giveup on e_no_cseg, no `ldtab[0].start` on a chain, the
+  SYSDAT bookkeeping fields unwritten, the MXLoad mutex skipped, and a
+  fake disk inside the kernel code (now the hook).
+- submit.c: a 2-character command without ':' goes to try_builtin
+  without a parse; USER/PRINTER's argument parse starts at parseret,
+  not parseret+1; the readchar refill writes command_disk and mode2
+  into the FCB; fill_argtable's word store leaves a 0 after the last
+  entry; `$INCLUDE` is ported now (it was blocked on `sysdatseg`).
+- xios.c: SELDSK indexes the real in-memory `dtrntbl` with all of CL
+  (the C masked it to 4 bits).
+
+The combined `/src` kernel code grew to 26960 bytes, so SYSDAT moved
+from 1694h to 1695h; `kernel_main.c` follows. (Then 1697h: docs/bugs.md
+#112 gives each module its own paragraph-aligned code segment.)
 
 ## Status
 
 | File | Routines ported | Routines deferred (and why) |
 |---|---|---|
-| `src/kernel/FINDPD.RTM` | `findpdname_entry` | — |
-| `src/kernel/IDLE.SUP` | `idle` | — |
-| `src/kernel/INIT.SUP` | `init` (system initialization) | `entry` (inter-module BDOS-style dispatch into the Supervisor) — a genuinely different routine, not reconned this pass. `init` never returns in the normal sense (ends via `int mpmint`/`f_terminate`, an `int_stub_nums` no-op) and far-calls into 5 other modules' own `init:` entry points through `SYSDAT.FMT`'s module table (`callf dword ptr <rtm\|mem\|bdos\|cio\|xios>mod[bx]`) — each one needed `tools/i86sim.py`'s brand-new `far_call_stub_addrs` (an indirect far `CALL`'s own target is only known at runtime, so it can't be stubbed by target address like an ordinary `CALL`). Caught and fixed a real, previously-uncaught bug in `/src` along the way: `mov u_wrkseg,ds` (no `es:` prefix) landed on `SYSDAT`'s own offset 2Eh instead of the init UDA's own `u_wrkseg` field — which happens to be the back half of the module table's own XIOS entry (its "initialize" far pointer's segment word), right before the `xiosmod` `callf` a few lines later would have used it; confirmed by offset arithmetic (`MODTAB.DEF`/`UDA.FMT`), not just suspected — same bug class, same file, as two other bare-`sysdat`-write fixes `INIT.SUP` already had. The RSP-creation loop and the fixed `u_wrkseg` write are both translated correctly (`mem_r16_seg`/`mem_w16_seg`) but not independently exercised by the differential test — both need `tools/i86sim.py`'s `segmented=True` mode, which would also break every *other* field this routine touches (flat scratch addresses, not real segment-relative ones) in the same run; see `init.c`'s own header comment |
-| `src/kernel/SYSFUNC.SUP` | all 8 entries: `not_implemented`, `bad_entry`, `version_entry`, `mpmversion_entry`, `sysdat_entry`, `tod_entry`, `serial_entry`, `callbios_entry` | — (the whole file is ported; `tod_entry`/`serial_entry` copy from real `SYSDAT.FMT`/`RTMIF.RTM` data, given their own harness-chosen scratch address/inlined literal; `callbios_entry`'s two real tail-jumps into `mpmif(f_terminate)`/`xiosif` are boundary stubs, same convention as `SYSENT.RTM`'s own `poll_entry`/etc.) |
-| `src/kernel/SYSENT.RTM` | all 8 entries: `poll_entry`, `delay_entry`, `dispatch_entry`, `set_prior_entry`, `pd_entry`, `sleep_entry`, `wakeup_entry`, `creat_proc_entry` | — (the whole file is ported; `creat_proc_entry` — `call proc_creat ! jmp pdisp` — was deferred until `proc_creat`/`pdisp` existed, and now that they do it's a real internal call into both, not a boundary stub like its 7 siblings' own tail-jumps; a real quirk this surfaced: `ax`/`bx`/`cx`/`si`/`di` aren't actually preserved across the `call proc_creat` at all, see `src-c/kernel/sysent.c`'s own header comment) |
-| `src/kernel/FLAG.RTM` | `flag_set_entry`, `flag_wait_entry` (+ internal `flag_valid`/`flag_exit`/`flag_bexit`) | — |
-| `src/kernel/ABORT.RTM` | `sysreset_entry`, `terminate_entry` (+ internal `abt_chk`), `abort_spec_entry` (+ internal `find_pd`, `find_pdthrd`, `findpdnc`, `findpdq`, `fflgpd`, `snip_it`, `abt_putdrl`, `gccba`, and the whole `abort_tab` dispatch: `abtrun`/`abtpol`/`abtdly`/`abtswp`/`abtdq`/`abtnq`/`abtflg`/`abtcns`) | — (the whole file is ported; needed `tools/i86sim.py`'s new `CALL r/m16`/`JMP r/m16` for `call cs:abort_tab[di]` — see below) |
-| `src/kernel/DSPTCH.RTM` | `fdisp`, `int_disp_exit`, `farpdisp`/`pdisp`, `dsptch` (+ internal `insert_process`, `schedule`, `switch_`, and the whole `dsp_table` dispatch: `disp_act`/`poll_act`/`delay_act`/`swap_act`/`term_act`/`sleep_act`/`flag_act`) | — (the whole file is ported, but **as a reading/debugging aid for the live scheduler-hang investigation, #83-#98, not a kernel-build component** — see the file's own header comment; a real interrupt return and a real context switch's register/stack resumption have no C equivalent, modeled as explicit output parameters instead; needed two more `tools/i86sim.py` fixes, `SS`-aware `PUSH`/`POP` and a `CS`-base fix for near indirect `CALL r/m16`/`JMP r/m16` — see #103) |
-| `src/kernel/PARSE.SUP` | `parse_entry` (+ internal `setfld`/`delim`/`deblank`/`fcbinit`) | — |
-| `src/kernel/RPL.SUP` | `rpl_entry` | — (the file's one routine is ported, but collapses to its single deterministic `rpl_err` outcome under the boundary-stub convention — `mpmif(f_qopen)`'s own function code, MODFUNC.DEF's `(user*0100h)+135`, is never 0, so `cmp cx,0 ! jne rpl_err` is always taken; the real success path — a hand-built fake far-return stack frame and a `retf` transferring control into a queue-delivered RSP entry point, with no C equivalent at all — is provably unreachable, same reasoning as `CONSOLE.CIO`'s/`CPMMEM.MEM`'s own unreachable branches, see `src-c/kernel/rpl.c`'s own header comment) |
-| `src/rsp/ECHO.A86` | `main`/`loop` (one full pass — see below) | — |
-| `src/rsp/CLOCK.A86` | `clockloop` (one full pass — see below) | — (`clock`'s own one-time setup, `mov ds,sysdat`/`mov bx,tod_offset`, is moot under the flat memory model, same as the DS/ES-switch convention elsewhere — the test starts directly at `clockloop` with `bx` preset instead) |
-| `src/rsp/TMP.A86` | `nextcommand_once` (one full pass through `nextcommand:`/`clicall:`/`goodparse:`/`try_builtin:`/`not_builtin:`/`clierror:` — see below), `a_to_b` | `tmp:`'s own one-time setup — moot, every operation in it is a boundary-stub call or a register load feeding one; `setuser`/`setlist` — never identified, moot regardless (see below) |
-| `src/rsp/SUBMIT.A86` | `deblank`+`fill_argtable` (unlabeled code after `submit:`'s own `call openfile`), `expand_command`, `readbuffer`, `readchar`, `topofcmdloop_once` (one full pass through `topofcmdloop:`/`notdrive:`/`goodparse:`/`try_builtin:`/`notbuiltin:`/`clierror:` — see below), `a_to_b` | `submit:`'s own one-time version-check/priority/FCB-open preamble — no observable effect under the boundary-stub convention beyond what `deblank`/`fill_argtable` already cover; `$INCLUDE`'s own real body — needs `sysdatseg`, a real segment value only `submit:`'s own un-ported one-time setup captures, not available in this reduced scope (the comparison against it still runs for real, so this only matters if a real `$INCLUDE` command is typed); `setuser`/`setlist` — never identified, moot regardless (see below) |
-| `src/kernel/CIOIF.CIO` | `init` and `entry` (inter-module CIO dispatch -- `src-c/kernel/cioif.c`; `tests/src-c/test_cioif_entry.py`'s own `cioif_entry_wrapper.A86` links in the real `CONSOLE.CIO`/`CHARIO.CIO` too, same combination `CIO.A86` itself assembles, so `entry`'s dispatch is checked against real targets, not stubs) | — (the whole file is ported now; `entry`'s own `mpmif`/`xiosif` boundary-stub far calls are unreachable by any of its 23 cases themselves, but wired up for any real caller that needs them) |
-| `src/kernel/RTMIF.RTM` | `init` and `entry` (21-way inter-module RTM dispatch -- `src-c/kernel/rtmif.c`; `tests/src-c/test_rtmif_entry.py`'s own `rtmif_entry_wrapper.A86` links in the real `SYSENT.RTM`/`FLAG.RTM`/`QUE1.RTM`/`QUE2.RTM`/`FINDPD.RTM`/`ABORT.RTM` too) | — (the whole file is ported now; 20 of the 21 dispatched targets' own `bx`/`cx`/etc. are independently verified through this dispatcher. `creat_proc_entry` (case 14) is not: its own real tail (`call proc_creat ! jmp pdisp`) and `ABORT.RTM`'s own `terminate_entry` tail (`jmp dsptch`) share the one `dsptch` label once this module is linked for real, and letting one run for real (as the C port's own `creat_proc_entry` already does, via `proc.c`/`dsptch.c`) forces the other to run for real too, with no PD-list setup this generic dispatcher test is built to survive — same "known, documented gap" class as `MEMIF.MEM`'s own `entry` row above; see `rtmif_entry_wrapper.A86`'s/`test_rtmif_entry.py`'s own header comments) |
-| `src/kernel/MEMIF.MEM` | `init` and `entry` (inter-module MEM dispatch, wrapped in a real binary-semaphore acquire/release -- `src-c/kernel/memif.c`; `tests/src-c/test_memif_entry.py`'s own `memif_entry_wrapper.A86` links in the real `CPMMEM.MEM`/`MEMORY.MEM`/`SHARE.MEM`/`MAU.MEM`/`ML.MEM`/`UTIL.MEM` too, same combination `MEM.A86` itself assembles) | — (the whole file is ported now; the mutex acquire/release logic is fully verified for every case, but 9 of the 13 dispatched targets' own `bx`/`cx` results aren't independently re-checked through this dispatcher -- `CPMMEM.MEM`'s own 5 functions + `freeall_entry` are thin `mpmif`-passthrough wrappers that `tools/i86sim.py` has no way to give a real dispatch target (`mpmif` is one real, shared symbol once `MEMIF.MEM` is linked in, and a real `CALL FAR [mem]` can only be stubbed at a fixed address, never redirected to a computed one), and `MAU.MEM`/`ML.MEM`'s own 3 functions need `segmented=True` plus a real `u_wrkseg` that this generic dispatcher test doesn't replicate (already handled by `test_mau.py`/`test_ml.py`'s own dedicated setup) — see `test_memif_entry.py`'s own header comment) |
-| `src/kernel/SUPIF.SUP` | `func1` (`src-c/kernel/supif.c`), now including its real `mod==sup` dispatch-through into the 15-entry `supfunc` table | `user_entry` -- the real `INT 224` entry prologue/epilogue, no C equivalent, same class as `lbdosent.c`'s own `bdose`; `func` -- a one-line `mov u_func,cl ! call func1` wrapper whose own write has no observable effect anywhere this port can see (`user_entry`/`mpmif` are both deferred), same "collapses to nothing observable" reasoning as `CHARIO.CIO`'s own `stdout`; `entry`/`mpmif`/`xiosif` -- far-call trampolines, same convention as every other module's own `entry`/`mpmif`/`xiosif`. `mod==sup`'s own near dispatch is wired up for real (`load_entry`/`cload_entry` collapsed in as direct forced-`bx` calls into `load()`/`cload_entry()`, matching real `LOAD.SUP`'s own `load_entry:`/`cload_entry:` aliasing of `load:`); `mod!=sup`'s real cross-module far call through `module_table` still has no C target, same far-call gap as `init.c`'s own module-table dispatch. `tests/src-c/test_supif.py` verifies the dispatch logic itself (which slot each (mod,func) lands on, and that `bx` arrives forced or ambient exactly as claimed) against marker-stub doubles on both sides, not each target's own full behavior -- already independently covered by `test_sysfunc.py`/`test_load.py`/`test_command.py`/`test_rpl.py`/`test_parse.py`; see `supif.c`'s own header comment for the full reasoning, including why the real network-intercept path is provably unreachable in this project |
-| `src/kernel/XIOS.A86` | `SETTRK`/`SETSEC`/`SETDMA`/`SETDMAB`/`SECTRAN`/`SELDSK`, `maxconsole`/`maxlist`/`getsegt`/`selmemory`/`flushbuf`/`strtclk`/`stopclk` (`src-c/kernel/xios.c`) | `entry`/`supif` — far-call trampolines, same convention as every other module's `entry`/`mpmif`/`xiosif`; `const`/`conin`/`conout`/`plist`/`punch`/`reader`/`listst`/`polldev`/`rtm_poll` — real `in`/`out` port I/O, no C equivalent under this project's flat-memory host model; `HOME`/`READ`/`WRITE`/`execute`/`send_com`/`flpy_*` — real 8271 floppy controller command sequences (every `dskhomtbl`/`dskrdtbl`/`dskwrttbl` entry is a `flpy_*` routine, no non-hardware path exists); `init`/`intdisp`/`int_trap`/`tickint`/`pmsg` — real hardware initialization (DMA controller, 8259 PIC, 8271) and interrupt service, no C equivalent; `idle` — a pure `mov cl,f_dispatch ! call supif ! jmp idle` passthrough with zero data transformation of its own (the call is a boundary stub), so porting it would add no real logic — see `xios.c`'s own header comment for the full list and reasoning |
-| `src/kernel/XIOS86Q.A86` | not DRI source (a from-scratch QEMU driver this project wrote — see `xios86q.c`'s own header comment), but the file actually combined into the real bootable `MPM.bin`: nearly the whole file is ported (all 25 XIOS functions, `init`, and `tickint`'s own tick_count/flag logic — `src-c/kernel/xios86q.c`, following `ldbios86q.c`'s own `io_in8`/`io_out8` callback architecture for the identical NEC 765/8272 FDC + 8237 DMA + 8250 UART hardware) | `entry`/`supif` — far-call trampolines, same convention as every other module's own; `idle` — zero-transformation passthrough, same as `xios.c`'s own `idle`; `tickint`'s own real ISR shell (stack switch, register save/restore, PIC EOI, final `jmpf cs:dword ptr mydispatch` tail-dispatch) — no C equivalent, same class as every other real interrupt entry/exit point in this port (its own tick_count/flag logic IS ported, as `tickint_once`); `rtm_poll`'s own "yield via the Supervisor's f_polldev" tail — a boundary-stub tail jump, modeled as an immediate return since neither of its two real callers ever inspects its return value; `init`'s own far-pointer copies out of SYSDAT's module table, its real-mode interrupt-vector write, and its final `retf` — no C equivalent or nothing for this isolated port to copy to/from |
-| `src/kernel/TICK.SUP` | `notick_once`, `tick_once` | — (both of this file's real labels are ported) |
-| `src/kernel/QUE1.RTM` | all 10 routines: `makeq_entry`, `openq_entry`, `deleteq_entry`, `queverify`, `readq_entry`/`creadq_entry`/`readq`, `writeq_entry`/`cwriteq_entry`/`writeq` | — (the whole file is ported; `readq`'s/`writeq`'s own real "wait forever" retry — unconditional call, queue empty/full — is translated faithfully but not exercised by the test, same unexercisable-but-real shape as `cioattach` below/`CPMMEM.MEM`'s `cpmfree_entry`; every other path, including the conditional-and-empty/full immediate-error case, is fully portable and exercised) |
-| `src/kernel/QUE2.RTM` | `rlsmx`, `getqdaddr`, `remqd`, `qspace`, `qrelease` | — (all 5 of this file's routines are ported) |
-| `src/kernel/PROC.RTM` | `freepd`, `proc_creat` (+ internal `getpdadr`) | — (all 3 of this file's routines are ported, using `tools/i86sim.py`'s `segmented=True` mode plus a CSEG_BASE-shifted reference run — see below) |
-| `src/kernel/CONSOLE.CIO` | all 15 routines (`lstattach_entry`, `clstattch_entry`, `cconattch_entry`, `conattach_entry`, `cioattach`, `lstdetach_entry`, `condetach_entry`, `ciodetach`, `conassign_entry`, `getdefcon_entry`, `getdeflst_entry`, `setdefcon_entry`, `setdeflst_entry`, `mimic_entry`, `unmimic_entry`) + `CHARIO.CIO`'s `getccbadr` (a small dependency, pulled in on its own) | — |
-| `src/kernel/CHARIO.CIO` | all 9 entry points (`conin_entry`, `conout_entry`, `rconin_entry`, `rconout_entry`, `listout_entry`, `constat_entry`, `dirio_entry`, `conwrite_entry`, `conprint_entry`, `conread_entry`) + 20 internal routines (`rawinit`, `coninit`, `getconnum`, `attach`, `echoc`, `conbrk`, `chkctl`, `control_p`, `prcsmsg`, `prname`, `conout`, `compout`, `ctlout`, `tabout`, `pspace`, `pbacksp`, `pcr`, `crlf`, `crlfp`, `conin`) | `stdout` — its own `conoutf`/`listf` calls are both no-ops under the boundary-stub convention regardless of which branch is taken, so it collapses to nothing observable; inlined as a comment in `conout`'s own mimic-forwarding branch instead of a separate function, see that file's own header comment |
-| `src/kernel/COMMAND.SUP` | `shifttail`, `fileopen` (a real call into `FILE4.BDO`'s own `func15`), `user_retf`, `chain_entry` (now ported too, a thin wrapper), `clicmd_entry` (both the ordinary and chain-mode paths — + internal `cli_pfn`, `cli_checkque`, `cli_fload`, `cli_gopen` (a real call into `load.c`'s `load` plus the whole Base Page cmdtail/default-FCB/argument-parse setup, see below), `cli_rmpd`, `clicmd_exit`, `prchar`/`crlf`/`prnum`/`prtime`/`prdisk`/`write_cstr`/`prcsm`/`prnam`/`prtyp`/`pruser`/`prcusp`/`prfilnam`/`conasn`) — see below | `f_createproc`/`f_setprior` stay plain boundary stubs (their own results are never read by anything downstream, so this doesn't truncate anything, see `command.c`'s own header comment); `cli_gopen`'s own chain-mode `cli_ld1` UDA hand-off block (real segment-relative addressing, resolved the same way as `PROC.RTM`/`ML.MEM`/`MAU.MEM`/`SHARE.MEM`) has no differential test, same reason as its own non-chain continuation past `prfilnam` — both need a real, matching directory entry `fileopen` can't be made to produce in any test in this project |
-| `src/kernel/FILE1.BDO` | `pererror`/`roderror`/`roferror`/`selerror` (+ internal `goerr`), `move`, `selectdisk`, `home`, `PASS_ARECORD`, `rdbuff`, `wrbuff`/`wrbufflg` (+ internal `diocomp`), `seekdir`/`seek`, `dmposition`, `GET_DMA`, `getdm`, `bdos_index`, `alloct`, `atran`, `GET_ATTS`, `GET_S1`, `GET_RRA`, `GET_RCNTA`, `getexta`, `gtfcba`, `getfcb`, `setfcb`, `cmpecs`/`CMPEC0`, `CHKSUM_FCB`, `SET_CHKSUM_FCB`, `RESET_CHECKSUM_FCB`, `CHEK_FCB`, `setcdisk`, `nowrite`, `setro`, `ckrodir`/`ckrofile`/`RO_TEST`, `checkwrite`, `getdptra`, `getmodnum`, `clrmodnum`, `CLR_EXT`, `setfwf`, `compcdr`, `setcdr`, `rddirbuf`, `setdata`/`setdir`/`setdma`, `dirtouser`, `MAKE_FCB_INV`, `CHK_INV_FCB`, `TST_INV_FCB`, `endofdir`, `setenddir`, `getallocbit`, `setallocbit`, `checksum`/`newchecksum`, `rddir`/`rddir0`, `wrdir` (the last 3 were blocked on `FILE3.BDO`'s own `FLUSH_FILE0`/`FLUSH_FILES`, now resolved — see that file's own status-table row; `subdh`, `checksum`'s own size check, folds directly into an `if` there instead of a standalone function), `check_fcb1`/`check_fcb` (`CHECK_FCB1`/`CHECK_FCB` — `CLOSE1` is ported now too, `src-c/kernel/file2.c`; `CHECK_FCB1`'s own `POP BX ;DISCARD RETURN ADDRESS` trick, same category as `PARSE.SUP`'s own `delim`, is translated as a plain boolean return instead — see `check_fcb1`'s own header comment for the full calling-convention writeup; `CHECK_FCB` is NOT dead, contrary to an earlier revision of this comment — `FILE4.BDO`'s own `func20`/`func21` are its own two real callers, both ported now too), non-`static` `dmposition`/`getdm`/`diocomp` (cross-file calls from `file3.c`'s own `diskwrite`/`func48`), and now `set_cdisk1`/`test_vector1` (split out of `setcdisk`/`test_vector` to take an explicit bit-position/shift-amount instead of always reading `BD_SELDSK`, for `file3.c`'s own `diskreset`) | — (every routine in this file is now ported) |
-| `src/kernel/FILE2.BDO` | `GET_NALBS`, `getblock` (+ internal `lefttst`/`righttst`/`rblok`/`rblok0`), `SEARCH`/`SEARCHN` (`search`/`search1`/`searchn`, + internal `searchi`/`searchi1`/`compext`/`swap_sdcnt`), `CLOSE`/`CLOSE1` (`close`/`close1`/`close_fcb`/`seekcopy`, + internal `get_dir_ext`/`restore_rc`/`set_rc`/`merge_word`/`merge_byte`, the last 3 now non-`static` for `FILE3.BDO`'s own `rseek`) — **the underlying DATA.BDO cseg/dseg collision is now resolved for real** (`file1.c`/`file2.c`/`file3.c`/`file4.c` all threaded a new `ds_bdos` parameter through every function touching a `BD_*` field, converting every such access to `mem_*_seg`/`mem_seg_addr` against it -- `defs.h`'s own new `mem_seg_addr` helper, zero behavior change for every existing caller since they all pass `ds_bdos=0`, which degenerates back to the exact flat addresses this project used before). `swap_sdcnt` (the real asm's own `SWAP`, previously the simplest routine in this exact collision range) now has a real differential test proving it (`test_file2.py`'s own `DS_BDOS`/`run_reference_segmented`, `segmented=True` with a genuine non-degenerate `DS`). `close`/`close1`/`search`/`searchn`/`open`/`open1`/`opencopy`/`copy_dir0`-`2` are unblocked the exact same way but don't have their own new differential tests yet -- "resolved in principle, not yet written," same category as several other clusters below. Previously, this gap read: their own real cseg footprint, in the combined FILE1-4.BDO wrapper, runs well past 0xc00, directly overlapping where DATA.BDO's own dseg-relative fields (`BD_INFO`/`BD_SRCHA`/etc, the very fields these routines read/write) resolve to — code and the data it operates on colliding at the same flat address, not fixable by relocating just one side the way every earlier SD_RLR-style gap was; `initialize` (+ internal `scndm`/`test_dir`), `MAKE` (`make`, + internal `set_dcnt_dblk`/`copy_dir0`/`copy_dir2`), `DELETE` (`delet`, + internal `cpydirloc`/`init_xfcb_search`/`init_xfcb_search1`/`chk_wild`/`does_xfcb_exist`/`delete1_entry`/`delete2_entry`), `RENAME` (`rename_`, + internal `check_wild`/`check_wild0`/`copy_user_no`/`copy_dir`), `OPEN`/`OPEN1`/`opencopy` (its real top-level entry point is `FILE4.BDO`'s own `func15`, see that file's own row below), `openreel` (+ internal `sdcnt_eq_xdcnt`, non-`static` for `FILE3.BDO`'s own `fix_olist_item`), `delet0` (non-`static` for `FILE4.BDO`'s own `func22`/MAKE), and now `indicators` (non-`static` for `FILE4.BDO`'s own `func30`) — `initialize`/`make`/`set_dcnt_dblk`/`openreel`/`sdcnt_eq_xdcnt` confirmed clear of the DATA.BDO collision via `--symbols` (0x0a8a-0x0b74, 0x10b8-0x112c, 0x114d-0x11ed, and 0x10ce respectively, all outside dseg's own 0-0x1000 span), but `copy_dir0`/`copy_dir1`/`copy_dir2` (0xe50-0xe6d) and `open`/`OPEN1`/`opencopy` (0xf34-0xf3d) and `SWAP` (0xd1d) land inside it, same as `CLOSE1`'s own cluster, and `delet`/`rename_` weren't checked either way; no differential tests written for any of these yet either way (time, not always a technical blocker). `delet`'s own single-pass branch does `jmps delet0` right after `ckrodir`, relying on `ckrodir`'s own real ZF there being an incidental side effect of `RO_TEST`'s own `ADD BX,ROFILE` (always leaves ZF clear in practice) rather than a real not-found check -- not modeled as a flag, this port just always takes that branch's own fixed destination directly, see `delet`'s own header comment. `delet`'s own `DELETE1` label became its own function, `delete1_entry` (+ `DELETE2`'s own `delete2_entry`), since `rename_`'s own real asm calls straight into the middle of `DELETE`'s body as an ordinary subroutine. `searchi`/`SET_DCNT_DBLK`/`CHECK_WILD`/`SWAP`/`sdcnt_eq_xdcnt`/`COMPEXT`/`GET_DIR_EXT`/`RESTORE_RC`/`SET_RC` all made non-`static` for cross-file calls into them (the last 4 for `FILE3.BDO`'s own `rseek`). `openreel`'s own real `call make` is followed by a `jz openerr` that tests a flag `make`'s own tail (`setfwf`'s `or al,fwfmsk`) can never leave clear -- not modeled, same "unreachable" precedent as `cli_gopen`. **`FILE2.BDO` is now ported in full** -- the "30+ remaining labels" this row's own "missing" column used to list were re-audited label by label against every real one in the file (111 total) and every single one turned out to already map onto an already-ported cluster above (`DRV_LBL`/`INITIAL3`/`TEST_DIR*`/`scndm*` into `initialize`; `GET_DE1`-`3` into `GET_DIR_EXT`; `SAVE_DCNT_POS*`/`SWAP`/`SRCHN1`/`SEARCHNM`/`srch*` into `search`/`searchn` -- `srch`/`srchn` are literally the real-asm names already-ported `search`/`searchn` use; `dmset`/`DMSET1`/`fcbnzero`/`buffnzero`/`merge*` into `close_fcb`'s own merge logic; `openr0`-`2`/`OPENR3`/`openmod`/`openerr` into `openreel`'s own body; `RET8A`/`ret8b`-`ret13`/`LRET_EQ_FF`/`DONT_SAVE` are trivial internal return labels inside `DELETE`/`SEARCHN`) -- the count was simply never recomputed as each incremental pass (`initialize`, `MAKE`, `DELETE`, `RENAME`, `openreel`, `indicators`) chipped away at the original tally | — (every real routine in this file is ported; the DATA.BDO collision above is a *test-harness* gap, not missing C code) |
-| `src/kernel/FILE3.BDO` | `PACK_SDCNT`, `COMPARE`, `SEARCH_OLIST`/`SEARCH_LLIST`/`SEARCHN_LIST` (+ internal `search_listo`), `DELETE_ITEM`, `CREATE_ITEM`, `SET_OLIST_ITEM`, `TST_TBL_LMT`, `REMOVE_LOCKS`, `FLUSH_FILES`/`FLUSH_FILE0`, `INC_PDCNT`, `CURSELECT` (+ internal `select_`), `TST_OLIST`/`CHK_OLIST` (+ internal `chk_olist0`), `COMPARE_PDS`, `CHK_PASSWORD`/`CHK_PWS` (+ internal `get_dir_mode`/`cmp_pw`/`get_xfcb`/`get_xfcb0`/`chk_pw`), and now `OPEN`'s own remaining dependencies: `SET_SELDSK`, `reselect`, `parsave`/`parsave33`/`parsave33r` (the first two really BDOSIF.BDO's own, ported here for lack of a `bdosif.c`), `COPY_DMA_IN`/`COPY_DMA_OUT`, `STAMP1`/`STAMP2` (+ internal `stamp3`), `COUNT_OPENS`, `CREATE_OLIST_ITEM`, `FIX_OLIST_ITEM` (`MAKE`'s own `openreel`, `file2.c`), and now `diskread`/`sqread`, `diskwrite`/`sqwrite` (+ internal `test_disk_fcb`/`test_lock`/`move_arecord`/`reset_fwf`), `chk_xfcb_password1`, `init_xfcb`/`init_xfcb0`, and `set_pw` (`FILE4.BDO`'s own `func19`-`func23`, see that file's own row below), `diskreset` (`func13`/`func14`/`func37`), `rseek`/`rseek1` (the latter now split out for `FILE4.BDO`'s own `func40`), `parsave36`/`parsave36r`, `rdread`, `rdwrite` (`FILE4.BDO`'s own `func33`/`func34`), `getfilesize`/`setrandom` (+ internal `cmperr`, `FILE4.BDO`'s own `func35`/`func36`), `tmp_select` (`FILE4.BDO`'s own `func46`), and now `lock_` (+ internal `incr_rr`/`save_rr`/`reset_rr`, `count_locks`, `check_free`, `get_lockadd`, `lock_err_apply`, `free_lock`, `set_lock`, `FILE4.BDO`'s own `func42`/`func43`) — `CURSELECT` checked clear of the DATA.BDO collision (resolves to 0x15e3+, past dseg's own 0x1000-byte length entirely), and so is this pass's entire new cluster (`func15`'s own row below has the detail), but none of these have a differential test yet. An earlier revision of this comment claimed `CHK_OLIST` "relies on its own caller having pushed a word for it to pop partway through" -- re-reading it closely this pass, that's wrong: the `pop dx`/`push dx` pair around its own `compare_pds` call is just ordinary register-save plumbing (freeing a register across a call, then restoring it before any real `ret`), not an implicit-caller convention; `openx06` (`FILE4.BDO`) and `compare_pds` are both ported now; `chk_pw`'s own `CHK_PW1` tail never returns normally (same as `openx06`), so `chk_pw`/`chk_password`/`chk_pws` all return a plain boolean instead of literally discarding anything, same convention `check_fcb1` established; `get_dir_mode`/`get_xfcb`/`cmp_pw` all made non-`static` for `func15`'s own cross-file calls into them; and now `PR_TERM` (ported as `pr_term`; its own `call func48` resolves fine — `func48` is a real label, `FILE4.BDO`'s own `FUNC48`, uppercase; a first, case-sensitive grep for lowercase `func48` across `/src` turned up nothing and briefly looked like a genuine DRI-source bug before rechecking case), `XCURSELECT` (`xcurselect`, genuinely reaches `selerror`/`goerr` for real — unlike `select_`'s own always-unreachable-past-`selectdisk` tail, `CURSELECT`'s `TEST_FF_DISK` branch calls `selerror` directly whenever `BD_SELDSK+1==0`, independent of any boundary-stub artifact), and `RESELECTX` (`reselectx`, a second entry point into `reselect`'s own body via a shared `reselect_tail` helper both now call — see `cmp_pw`'s own `std` note below, which this row's own earlier "not identified by name" caveat was about: `cmp_pw` was already ported in an earlier pass, this was just a stale doc note) | `TMP_SELECT` was already ported (`tmp_select`, `FILE4.BDO`'s own `func46`, see that file's own row); — (every routine in this file is now ported, confirmed by a fresh full recon rather than assumed; see the deferred-items list's own note on this row) |
-| `src/kernel/FILE4.BDO` | `func24`, `func25`, `func26`, `func29`, `func32`, `FUNC44`, `FUNC45`, `func51`, `func52`, `SET_ARET`/`openx06`, `func15` (BDOS OPEN) + its own `OPENX`/`OPENX0`-`OPENX09` cascade, `func16` (BDOS CLOSE) + `FUNC48` (flush buffers), `func17`/`func18` (search for first/next occurrence of a file, + internal `csearch`/`reselectx`), and now `func19` (delete), `func20`/`func21` (sequential read/write), `func22` (MAKE), `func23` (RENAME) — `func16` replicates `CHECK_FCB1`'s own push/pop convention by hand too, mapping straight onto `check_fcb1`'s boolean return since its own fallback target (`CLOSE00`) is a trivial `set_aret`-and-return; `func17`/`func18`'s own shared `CSEARCH` always runs `dirtouser` after `search`/`searchn` via a manual stack trick (unconditional, unlike every other such trick in this port); `func20`/`func21` are `CHECK_FCB`'s own two real callers (an earlier revision of this comment wrongly called `CHECK_FCB` dead, see `check_fcb1`'s own header comment, `file1.c`); `func22` reuses `func15`'s own `OPENX1`/`OPENX03`/`OPENX08` cascade directly (refactored into their own functions for this); each of `func19`-`func23` calls into `file2.c`'s own colliding `close`/`close1`/`search`/`searchn`/`delet`/`rename_`/`open` clusters somewhere in its chain, so none of them get a new differential test either, same as `func15`; and now `func13`/`func14` (reset disk system/select disk info) + `func37` (reset drive, + internal `reset_37`) — reuse `FILE3.BDO`'s own new `diskreset` and `file1.c`'s own `TEST_VECTOR1`/`SET_CDISK1`, both split out of `test_vector`/`setcdisk` to take an explicit shift-amount/bit-position instead of always reading `BD_SELDSK`; `func13` calls `RESET_37` directly (`func37`'s own real continuation, same "call into the middle" pattern as `rename_`'s own `CALL DELETE1`); `TEST_VECTOR1`/`SET_CDISK1` land inside the DATA.BDO collision range, so this cluster gets no new differential test either, despite `diskreset`/`func13`/`func14`/`func37` themselves being individually clear of it. `func38`/`func39`/`FUNC41`/`FUNC47`/`FUNC49`/`FUNC50` have no body of their own at all (`EQU FUNCRET`, a dispatch-table alias onto `BDOSIF.BDO`'s own empty `funcret`), nothing to port; and now `func33`/`func34` (random read/write) — thin wrappers (`parsave36r` + `CHECK_FCB`, one of its own real callers too, same as `func20`/`func21`, + a tail call into `FILE3.BDO`'s own `rseek`-based `rdread`/`rdwrite`); clear of the collision themselves, but `parsave36` (lands inside it, same as `parsave`/`parsave33`) doesn't, so no new differential test; and now `func30` (set file indicators) — another thin wrapper (`parsave33`/`copy_dma_in`/`CHECK_WILD`/`RESELECTX`/`CHK_PASSWORD` + a tail call into `FILE2.BDO`'s own `indicators`), clear of the collision itself but `indicators` isn't; and now `func35`/`func36` (file size, set random record) — thin wrappers around `FILE3.BDO`'s own `getfilesize`/`setrandom`; `func35` calls into `file2.c`'s own colliding `search`/`searchn` transitively, but `func36`/`setrandom`/`cmperr` don't touch that cluster at all, a legitimate (if not yet written) differential-test candidate; and now `func40` (write random with zero fill) + `FUNC46` (get disk free space) — `func40` calls `rseek1`/`diskwrite` directly (not `rseek`/`rdwrite`, which would re-zero `BD_SEQIO`); `FUNC46` counts zero bits in the disk's own allocation vector via `FILE2.BDO`'s own `GET_NALBS`, converting block count to record count in a wider type instead of chasing the real asm's own split 16+8-bit shift; both land clear of the collision, but `diskwrite`/`GET_NALBS` don't, so no new differential tests; and now `func42`/`func43` (lock/unlock record) — thin wrappers into `FILE3.BDO`'s own `lock_`; `LOCK_PERR` (the real asm's own `MOV SP,LOCK_SP` stack-unwind entry) turned out to be provably dead code, nothing anywhere calls it, so the whole cluster's own manual-stack trick reduces to the ordinary `POP`/`POP`-discard category already modeled elsewhere, no real stack manipulation needed. **`FILE4.BDO` is now ported in full** — every real BDOS dispatch function has a C counterpart; `func38`/`func39`/`FUNC41`/`FUNC47`/`FUNC49`/`FUNC50` are bare `EQU FUNCRET` dispatch-table aliases with no body of their own (straight onto `BDOSIF.BDO`'s own empty `funcret: ret`), and `GOBACK` is a 2-instruction tail jump into `BDOSIF.BDO`'s own module-dispatch epilogue (`BDOS_RETURN`) — both out of scope by definition, not "remaining work" | — (every routine in this file is now ported) |
+| `src/kernel/FINDPD.RTM` | `findpdname_entry` | — Runs on real memory, see "Real pointers: the RTM, stage 3" |
+| `src/kernel/IDLE.SUP` | `idle` | — Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
+| `src/kernel/INIT.SUP` | `init` (system initialization) | `entry` (inter-module BDOS-style dispatch into the Supervisor) — a genuinely different routine, not reconned this pass. `init` never returns in the normal sense (ends via `int mpmint`/`f_terminate`, an `int_stub_nums` no-op) and far-calls into 5 other modules' own `init:` entry points through `SYSDAT.FMT`'s module table (`callf dword ptr <rtm\|mem\|bdos\|cio\|xios>mod[bx]`) — each one needed `tools/i86sim.py`'s brand-new `far_call_stub_addrs` (an indirect far `CALL`'s own target is only known at runtime, so it can't be stubbed by target address like an ordinary `CALL`). Caught and fixed a real, previously-uncaught bug in `/src` along the way: `mov u_wrkseg,ds` (no `es:` prefix) landed on `SYSDAT`'s own offset 2Eh instead of the init UDA's own `u_wrkseg` field — which happens to be the back half of the module table's own XIOS entry (its "initialize" far pointer's segment word), right before the `xiosmod` `callf` a few lines later would have used it; confirmed by offset arithmetic (`MODTAB.DEF`/`UDA.FMT`), not just suspected — same bug class, same file, as two other bare-`sysdat`-write fixes `INIT.SUP` already had. `sup_init` is the first routine reworked to run against real memory (see "Real pointers: `sup_init`" above), so the real `p_uda` paragraph arithmetic, the fixed `u_wrkseg` write, and the RSP-creation loop are all translated as the real asm does them and all exercised by `test_init.py` (segmented reference run, real SYSDAT layout); see `init.c`'s own header comment |
+| `src/kernel/SYSFUNC.SUP` | all 8 entries: `not_implemented`, `bad_entry`, `version_entry`, `mpmversion_entry`, `sysdat_entry`, `tod_entry`, `serial_entry`, `callbios_entry` | — (the whole file is ported; `callbios_entry`'s two real tail-jumps into `mpmif(f_terminate)`/`xiosif` are boundary stubs, same convention as `SYSENT.RTM`'s own `poll_entry`/etc.) Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
+| `src/kernel/SYSENT.RTM` | all 8 entries: `poll_entry`, `delay_entry`, `dispatch_entry`, `set_prior_entry`, `pd_entry`, `sleep_entry`, `wakeup_entry`, `creat_proc_entry` | — (the whole file is ported; `creat_proc_entry` — `call proc_creat ! jmp pdisp` — was deferred until `proc_creat`/`pdisp` existed, and now that they do it's a real internal call into both, not a boundary stub like its 7 siblings' own tail-jumps; a real quirk this surfaced: `ax`/`bx`/`cx`/`si`/`di` aren't actually preserved across the `call proc_creat` at all, see `src-c/kernel/sysent.c`'s own header comment) Runs on real memory, see "Real pointers: the RTM, stage 1" |
+| `src/kernel/FLAG.RTM` | `flag_set_entry`, `flag_wait_entry` (+ internal `flag_valid`/`flag_exit`/`flag_bexit`) | — Runs on real memory, see "Real pointers: the RTM, stage 2" |
+| `src/kernel/ABORT.RTM` | `sysreset_entry`, `terminate_entry` (+ internal `abt_chk`), `abort_spec_entry` (+ internal `find_pd`, `find_pdthrd`, `findpdnc`, `findpdq`, `fflgpd`, `snip_it`, `abt_putdrl`, `gccba`, and the whole `abort_tab` dispatch: `abtrun`/`abtpol`/`abtdly`/`abtswp`/`abtdq`/`abtnq`/`abtflg`/`abtcns`) | — (the whole file is ported; needed `tools/i86sim.py`'s new `CALL r/m16`/`JMP r/m16` for `call cs:abort_tab[di]` — see below) Runs on real memory, see "Real pointers: the RTM, stage 3"; `findpdq` bug fixed in the asm, docs/bugs.md #104 |
+| `src/kernel/DSPTCH.RTM` | `fdisp`, `int_disp_exit`, `farpdisp`/`pdisp`, `dsptch` (+ internal `insert_process`, `schedule`, `switch_`, and the whole `dsp_table` dispatch: `disp_act`/`poll_act`/`delay_act`/`swap_act`/`term_act`/`sleep_act`/`flag_act`) | — (the whole file is ported, but **as a reading/debugging aid for the live scheduler-hang investigation, #83-#98, not a kernel-build component** — see the file's own header comment; a real interrupt return and a real context switch's register/stack resumption have no C equivalent, modeled as explicit output parameters instead; needed two more `tools/i86sim.py` fixes, `SS`-aware `PUSH`/`POP` and a `CS`-base fix for near indirect `CALL r/m16`/`JMP r/m16` — see #103) Runs on real memory, see "Real pointers: the RTM, stage 1" |
+| `src/kernel/PARSE.SUP` | `parse_entry` (+ internal `setfld`/`delim`/`deblank`/`fcbinit`) | — Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
+| `src/kernel/RPL.SUP` | `rpl_entry` | — (the file's one routine is ported, but collapses to its single deterministic `rpl_err` outcome under the boundary-stub convention — `mpmif(f_qopen)`'s own function code, MODFUNC.DEF's `(user*0100h)+135`, is never 0, so `cmp cx,0 ! jne rpl_err` is always taken; the real success path — a hand-built fake far-return stack frame and a `retf` transferring control into a queue-delivered RSP entry point, with no C equivalent at all — is provably unreachable, same reasoning as `CONSOLE.CIO`'s/`CPMMEM.MEM`'s own unreachable branches, see `src-c/kernel/rpl.c`'s own header comment) Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
+| `src/rsp/ECHO.A86` | `main`/`loop` (one full pass — see below) | — Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
+| `src/rsp/CLOCK.A86` | `clockloop` (one full pass — see below) | — (`clock`'s one-time setup, `mov ds,sysdat ! mov bx,tod_offset`, is the state `clockloop` runs under: DS = SYSDAT, BX -> tod) Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
+| `src/rsp/TMP.A86` | `nextcommand_once` (one full pass through `nextcommand:`/`clicall:`/`goodparse:`/`try_builtin:`/`not_builtin:`/`clierror:`) | `tmp:`'s one-time setup — console/disk/user calls and the banner, no memory effect; the console/disk/user/list calls inside the loop are boundaries (f_parsefilename and the CLI call are real) Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
+| `src/rsp/SUBMIT.A86` | `deblank`+`fill_argtable` (unlabeled code after `submit:`'s own `call openfile`), `expand_command`, `readbuffer`, `readchar`, `topofcmdloop_once` (one full pass through `topofcmdloop:` to `getnxtcmd`/`submitexit`, including the USER/PRINTER/`$INCLUDE` builtins and the CLI call) | `submit:`'s one-time version-check/PD/priority/DMA/FCB-open setup — system calls whose results the tests preset; conin/getdefdisk/get user code and the SUB file's open/read are boundaries whose results are parameters. Bad-parse scan bug fixed in the asm, docs/bugs.md #110 Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
+| `src/kernel/CIOIF.CIO` | `init` and `entry` (inter-module CIO dispatch -- `src-c/kernel/cioif.c`; `tests/src-c/test_cioif_entry.py` runs it against the whole real `src/kernel/CIO.A86`) | — (the whole file is ported) Runs on real memory, see "Real pointers: the CIO module, stage 5" |
+| `src/kernel/RTMIF.RTM` | `init` and `entry` (21-way inter-module RTM dispatch -- `src-c/kernel/rtmif.c`; `tests/src-c/test_rtmif_entry.py` runs it against the whole real `src/kernel/RTM.A86`) | — (the whole file is ported now; 20 of the 21 dispatched targets' own `bx`/`cx`/etc. and memory effects are independently verified through this dispatcher, with the dispatcher (`dsptch`/`pdisp`) and `proc_creat` stubbed at their real addresses. `creat_proc_entry` (case 14) is dispatch-only: the C port's own `creat_proc_entry` runs the real `proc.c`/`dsptch.c`, which a stubbed reference can't match — same "known, documented gap" class as `MEMIF.MEM`'s own `entry` row above; see `test_rtmif_entry.py`'s header comment). `init` and `entry` both run on real memory, see "Real pointers: `rtmif_init`" and "Real pointers: the RTM, stage 3" |
+| `src/kernel/MEMIF.MEM` | `init` and `entry` (inter-module MEM dispatch, wrapped in a real binary-semaphore acquire/release -- `src-c/kernel/memif.c`; `tests/src-c/test_memif_entry.py` runs it against the whole real `src/kernel/MEM.A86`, with the targets' own nested `mpmif` calls re-entering the real `entry`) | — (the whole file is ported; all 13 dispatched functions are checked end to end through this dispatcher, along with the mutex state and the reference's boundary calls) Runs on real memory, see "Real pointers: the MEM module, stage 4" |
+| `src/kernel/SUPIF.SUP` | `func1` (`src-c/kernel/supif.c`), including its `mod==sup` dispatch into the 15-entry `supfunc` table (`load_entry` forces bx = 0; `load` and `cload_entry` take the caller's bx as the PD) | `user_entry` -- the `INT 224` entry prologue/epilogue (its u_wrkseg = caller's DS is `user_enter`, defs.h; the stack switch has no C equivalent); `func` -- `mov u_func,cl ! call func1`, restored by `mpmif` before anything reads it; `entry`/`mpmif`/`xiosif` -- far-call trampolines; `mod!=sup` -- the cross-module far call through `module_table`, which `func1` reports as (mod, func). `test_supif.py` runs dispatched SUP functions for real against the real SUP/RTM/MEM/BDOS Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
+| `src/kernel/XIOS.A86` | `SETTRK`/`SETSEC`/`SETDMA`/`SETDMAB`/`SECTRAN`/`SELDSK`, `maxconsole`/`maxlist`/`getsegt`/`selmemory`/`flushbuf`/`strtclk`/`stopclk` (`src-c/kernel/xios.c`) | `entry`/`supif` — far-call trampolines, same convention as every other module's `entry`/`mpmif`/`xiosif`; `const`/`conin`/`conout`/`plist`/`punch`/`reader`/`listst`/`polldev`/`rtm_poll` — real `in`/`out` port I/O, no C equivalent under this project's flat-memory host model; `HOME`/`READ`/`WRITE`/`execute`/`send_com`/`flpy_*` — real 8271 floppy controller command sequences (every `dskhomtbl`/`dskrdtbl`/`dskwrttbl` entry is a `flpy_*` routine, no non-hardware path exists); `init`/`intdisp`/`int_trap`/`tickint`/`pmsg` — real hardware initialization (DMA controller, 8259 PIC, 8271) and interrupt service, no C equivalent; `idle` — a pure `mov cl,f_dispatch ! call supif ! jmp idle` passthrough with zero data transformation of its own (the call is a boundary stub), so porting it would add no real logic — see `xios.c`'s own header comment for the full list and reasoning Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
+| `src/kernel/XIOS86Q.A86` | not DRI source (a from-scratch QEMU driver this project wrote — see `xios86q.c`'s own header comment), but the file actually combined into the real bootable `MPM.bin`: nearly the whole file is ported (all 25 XIOS functions, `init`, and `tickint`'s tick_count/flag logic — `src-c/kernel/xios86q.c`, following `ldbios86q.c`'s `io_in8`/`io_out8` callback architecture) | `entry`/`supif` — far-call trampolines; `idle` — zero-transformation passthrough; `tickint`'s ISR shell (stack switch, register save/restore, PIC EOI, the `jmpf` to the dispatcher) — no C equivalent, but `test_xios86q.py` runs the whole real ISR; `rtm_poll`'s f_polldev tail — a boundary, modeled as an immediate return; `init`'s far-pointer copies out of SYSDAT's module table, its IVT write and its `retf`. CS-for-SYSDAT bugs fixed in the asm, docs/bugs.md #111 Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
+| `src/kernel/TICK.SUP` | `notick_once`, `tick_once` | — (both of this file's real labels are ported) Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
+| `src/kernel/QUE1.RTM` | all 10 routines: `makeq_entry`, `openq_entry`, `deleteq_entry`, `queverify`, `readq_entry`/`creadq_entry`/`readq`, `writeq_entry`/`cwriteq_entry`/`writeq` | — (the whole file is ported; `readq`'s/`writeq`'s own real "wait forever" retry — unconditional call, queue empty/full — is translated faithfully but not exercised by the test, same unexercisable-but-real shape as `cioattach` below/`CPMMEM.MEM`'s `cpmfree_entry`; every other path, including the conditional-and-empty/full immediate-error case, is fully portable and exercised) Runs on real memory, see "Real pointers: the RTM, stage 3" |
+| `src/kernel/QUE2.RTM` | `rlsmx`, `getqdaddr`, `remqd`, `qspace`, `qrelease` | — (all 5 of this file's routines are ported) Runs on real memory, see "Real pointers: the RTM, stage 3" |
+| `src/kernel/PROC.RTM` | `freepd`, `proc_creat` (+ internal `getpdadr`) | — (all 3 of this file's routines are ported, using `tools/i86sim.py`'s `segmented=True` mode plus a CSEG_BASE-shifted reference run — see below) Runs on real memory, see "Real pointers: the RTM, stage 1" |
+| `src/kernel/CONSOLE.CIO` | all 15 routines (`lstattach_entry`, `clstattch_entry`, `cconattch_entry`, `conattach_entry`, `cioattach`, `lstdetach_entry`, `condetach_entry`, `ciodetach`, `conassign_entry`, `getdefcon_entry`, `getdeflst_entry`, `setdefcon_entry`, `setdeflst_entry`, `mimic_entry`, `unmimic_entry`) + `CHARIO.CIO`'s `getccbadr` (a small dependency, pulled in on its own) | — Runs on real memory, see "Real pointers: the CIO module, stage 5" |
+| `src/kernel/CHARIO.CIO` | all 9 entry points (`conin_entry`, `conout_entry`, `rconin_entry`, `rconout_entry`, `listout_entry`, `constat_entry`, `dirio_entry`, `conwrite_entry`, `conprint_entry`, `conread_entry`) + 20 internal routines (`rawinit`, `coninit`, `getconnum`, `attach`, `echoc`, `conbrk`, `chkctl`, `control_p`, `prcsmsg`, `prname`, `conout`, `compout`, `ctlout`, `tabout`, `pspace`, `pbacksp`, `pcr`, `crlf`, `crlfp`, `conin`) | — (`stdout` too now: every XIOS call goes through chario.c's `xiosc` and an optional hook, see stage 5) Runs on real memory, see "Real pointers: the CIO module, stage 5" |
+| `src/kernel/COMMAND.SUP` | the whole file: `chain_entry`/`clicmd_entry` (both paths), `cli_checkque`, `cli_fload`, `cli_gopen` (load, Base Page, argument parse, process creation, console assignment), `cli_rmpd`, the `cli_exit` tail, `shifttail`, `fileopen`/`fileclose`, the print helpers, `user_retf` | f_createproc/f_terminate (and `user_retf`'s `int mpmint`) are dispatcher boundaries; f_fopen/f_fclose go through the BDOS's unported getdiskmx, so they are a hook (`cli_set_bdos`); a chain's `mov ss` onto the inituda block has no C equivalent Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
+| `src/kernel/FILE1.BDO` | `pererror`/`roderror`/`roferror`/`selerror` (+ internal `goerr`), `move`, `selectdisk`, `home`, `PASS_ARECORD`, `rdbuff`, `wrbuff`/`wrbufflg` (+ internal `diocomp`), `seekdir`/`seek`, `dmposition`, `GET_DMA`, `getdm`, `bdos_index`, `alloct`, `atran`, `GET_ATTS`, `GET_S1`, `GET_RRA`, `GET_RCNTA`, `getexta`, `gtfcba`, `getfcb`, `setfcb`, `cmpecs`/`CMPEC0`, `CHKSUM_FCB`, `SET_CHKSUM_FCB`, `RESET_CHECKSUM_FCB`, `CHEK_FCB`, `setcdisk`, `nowrite`, `setro`, `ckrodir`/`ckrofile`/`RO_TEST`, `checkwrite`, `getdptra`, `getmodnum`, `clrmodnum`, `CLR_EXT`, `setfwf`, `compcdr`, `setcdr`, `rddirbuf`, `setdata`/`setdir`/`setdma`, `dirtouser`, `MAKE_FCB_INV`, `CHK_INV_FCB`, `TST_INV_FCB`, `endofdir`, `setenddir`, `getallocbit`, `setallocbit`, `checksum`/`newchecksum`, `rddir`/`rddir0`, `wrdir` (the last 3 were blocked on `FILE3.BDO`'s own `FLUSH_FILE0`/`FLUSH_FILES`, now resolved — see that file's own status-table row; `subdh`, `checksum`'s own size check, folds directly into an `if` there instead of a standalone function), `check_fcb1`/`check_fcb` (`CHECK_FCB1`/`CHECK_FCB` — `CLOSE1` is ported now too, `src-c/kernel/file2.c`; `CHECK_FCB1`'s own `POP BX ;DISCARD RETURN ADDRESS` trick, same category as `PARSE.SUP`'s own `delim`, is translated as a plain boolean return instead — see `check_fcb1`'s own header comment for the full calling-convention writeup; `CHECK_FCB` is NOT dead, contrary to an earlier revision of this comment — `FILE4.BDO`'s own `func20`/`func21` are its own two real callers, both ported now too), non-`static` `dmposition`/`getdm`/`diocomp` (cross-file calls from `file3.c`'s own `diskwrite`/`func48`), and now `set_cdisk1`/`test_vector1` (split out of `setcdisk`/`test_vector` to take an explicit bit-position/shift-amount instead of always reading `BD_SELDSK`, for `file3.c`'s own `diskreset`) | — (every routine in this file is now ported) Runs on real memory, see "Real pointers: the BDOS, stage 6" |
+| `src/kernel/FILE2.BDO` | `GET_NALBS`, `getblock` (+ internal `lefttst`/`righttst`/`rblok`/`rblok0`), `SEARCH`/`SEARCHN` (`search`/`search1`/`searchn`, + internal `searchi`/`searchi1`/`compext`/`swap_sdcnt`), `CLOSE`/`CLOSE1` (`close`/`close1`/`close_fcb`/`seekcopy`, + internal `get_dir_ext`/`restore_rc`/`set_rc`/`merge_word`/`merge_byte`, the last 3 now non-`static` for `FILE3.BDO`'s own `rseek`) — **the underlying DATA.BDO cseg/dseg collision is now resolved for real** (`file1.c`/`file2.c`/`file3.c`/`file4.c` all threaded a new `ds_bdos` parameter through every function touching a `BD_*` field, converting every such access to `mem_*_seg`/`mem_seg_addr` against it -- `defs.h`'s own new `mem_seg_addr` helper, zero behavior change for every existing caller since they all pass `ds_bdos=0`, which degenerates back to the exact flat addresses this project used before). `swap_sdcnt` (the real asm's own `SWAP`, previously the simplest routine in this exact collision range) now has a real differential test proving it (`test_file2.py`'s own `DS_BDOS`/`run_reference_segmented`, `segmented=True` with a genuine non-degenerate `DS`). `close`/`close1`/`search`/`searchn`/`open`/`open1`/`opencopy`/`copy_dir0`-`2` are unblocked the exact same way but don't have their own new differential tests yet -- "resolved in principle, not yet written," same category as several other clusters below. Previously, this gap read: their own real cseg footprint, in the combined FILE1-4.BDO wrapper, runs well past 0xc00, directly overlapping where DATA.BDO's own dseg-relative fields (`BD_INFO`/`BD_SRCHA`/etc, the very fields these routines read/write) resolve to — code and the data it operates on colliding at the same flat address, not fixable by relocating just one side the way every earlier SD_RLR-style gap was; `initialize` (+ internal `scndm`/`test_dir`), `MAKE` (`make`, + internal `set_dcnt_dblk`/`copy_dir0`/`copy_dir2`), `DELETE` (`delet`, + internal `cpydirloc`/`init_xfcb_search`/`init_xfcb_search1`/`chk_wild`/`does_xfcb_exist`/`delete1_entry`/`delete2_entry`), `RENAME` (`rename_`, + internal `check_wild`/`check_wild0`/`copy_user_no`/`copy_dir`), `OPEN`/`OPEN1`/`opencopy` (its real top-level entry point is `FILE4.BDO`'s own `func15`, see that file's own row below), `openreel` (+ internal `sdcnt_eq_xdcnt`, non-`static` for `FILE3.BDO`'s own `fix_olist_item`), `delet0` (non-`static` for `FILE4.BDO`'s own `func22`/MAKE), and now `indicators` (non-`static` for `FILE4.BDO`'s own `func30`) — `initialize`/`make`/`set_dcnt_dblk`/`openreel`/`sdcnt_eq_xdcnt` confirmed clear of the DATA.BDO collision via `--symbols` (0x0a8a-0x0b74, 0x10b8-0x112c, 0x114d-0x11ed, and 0x10ce respectively, all outside dseg's own 0-0x1000 span), but `copy_dir0`/`copy_dir1`/`copy_dir2` (0xe50-0xe6d) and `open`/`OPEN1`/`opencopy` (0xf34-0xf3d) and `SWAP` (0xd1d) land inside it, same as `CLOSE1`'s own cluster, and `delet`/`rename_` weren't checked either way; no differential tests written for any of these yet either way (time, not always a technical blocker). `delet`'s own single-pass branch does `jmps delet0` right after `ckrodir`, relying on `ckrodir`'s own real ZF there being an incidental side effect of `RO_TEST`'s own `ADD BX,ROFILE` (always leaves ZF clear in practice) rather than a real not-found check -- not modeled as a flag, this port just always takes that branch's own fixed destination directly, see `delet`'s own header comment. `delet`'s own `DELETE1` label became its own function, `delete1_entry` (+ `DELETE2`'s own `delete2_entry`), since `rename_`'s own real asm calls straight into the middle of `DELETE`'s body as an ordinary subroutine. `searchi`/`SET_DCNT_DBLK`/`CHECK_WILD`/`SWAP`/`sdcnt_eq_xdcnt`/`COMPEXT`/`GET_DIR_EXT`/`RESTORE_RC`/`SET_RC` all made non-`static` for cross-file calls into them (the last 4 for `FILE3.BDO`'s own `rseek`). `openreel`'s own real `call make` is followed by a `jz openerr` that tests a flag `make`'s own tail (`setfwf`'s `or al,fwfmsk`) can never leave clear -- not modeled, same "unreachable" precedent as `cli_gopen`. **`FILE2.BDO` is now ported in full** -- the "30+ remaining labels" this row's own "missing" column used to list were re-audited label by label against every real one in the file (111 total) and every single one turned out to already map onto an already-ported cluster above (`DRV_LBL`/`INITIAL3`/`TEST_DIR*`/`scndm*` into `initialize`; `GET_DE1`-`3` into `GET_DIR_EXT`; `SAVE_DCNT_POS*`/`SWAP`/`SRCHN1`/`SEARCHNM`/`srch*` into `search`/`searchn` -- `srch`/`srchn` are literally the real-asm names already-ported `search`/`searchn` use; `dmset`/`DMSET1`/`fcbnzero`/`buffnzero`/`merge*` into `close_fcb`'s own merge logic; `openr0`-`2`/`OPENR3`/`openmod`/`openerr` into `openreel`'s own body; `RET8A`/`ret8b`-`ret13`/`LRET_EQ_FF`/`DONT_SAVE` are trivial internal return labels inside `DELETE`/`SEARCHN`) -- the count was simply never recomputed as each incremental pass (`initialize`, `MAKE`, `DELETE`, `RENAME`, `openreel`, `indicators`) chipped away at the original tally | — (every real routine in this file is ported; the DATA.BDO collision above is a *test-harness* gap, not missing C code) Runs on real memory, see "Real pointers: the BDOS, stage 6" |
+| `src/kernel/FILE3.BDO` | `PACK_SDCNT`, `COMPARE`, `SEARCH_OLIST`/`SEARCH_LLIST`/`SEARCHN_LIST` (+ internal `search_listo`), `DELETE_ITEM`, `CREATE_ITEM`, `SET_OLIST_ITEM`, `TST_TBL_LMT`, `REMOVE_LOCKS`, `FLUSH_FILES`/`FLUSH_FILE0`, `INC_PDCNT`, `CURSELECT` (+ internal `select_`), `TST_OLIST`/`CHK_OLIST` (+ internal `chk_olist0`), `COMPARE_PDS`, `CHK_PASSWORD`/`CHK_PWS` (+ internal `get_dir_mode`/`cmp_pw`/`get_xfcb`/`get_xfcb0`/`chk_pw`), and now `OPEN`'s own remaining dependencies: `SET_SELDSK`, `reselect`, `parsave`/`parsave33`/`parsave33r` (the first two really BDOSIF.BDO's own, ported here for lack of a `bdosif.c`), `COPY_DMA_IN`/`COPY_DMA_OUT`, `STAMP1`/`STAMP2` (+ internal `stamp3`), `COUNT_OPENS`, `CREATE_OLIST_ITEM`, `FIX_OLIST_ITEM` (`MAKE`'s own `openreel`, `file2.c`), and now `diskread`/`sqread`, `diskwrite`/`sqwrite` (+ internal `test_disk_fcb`/`test_lock`/`move_arecord`/`reset_fwf`), `chk_xfcb_password1`, `init_xfcb`/`init_xfcb0`, and `set_pw` (`FILE4.BDO`'s own `func19`-`func23`, see that file's own row below), `diskreset` (`func13`/`func14`/`func37`), `rseek`/`rseek1` (the latter now split out for `FILE4.BDO`'s own `func40`), `parsave36`/`parsave36r`, `rdread`, `rdwrite` (`FILE4.BDO`'s own `func33`/`func34`), `getfilesize`/`setrandom` (+ internal `cmperr`, `FILE4.BDO`'s own `func35`/`func36`), `tmp_select` (`FILE4.BDO`'s own `func46`), and now `lock_` (+ internal `incr_rr`/`save_rr`/`reset_rr`, `count_locks`, `check_free`, `get_lockadd`, `lock_err_apply`, `free_lock`, `set_lock`, `FILE4.BDO`'s own `func42`/`func43`) — `CURSELECT` checked clear of the DATA.BDO collision (resolves to 0x15e3+, past dseg's own 0x1000-byte length entirely), and so is this pass's entire new cluster (`func15`'s own row below has the detail), but none of these have a differential test yet. An earlier revision of this comment claimed `CHK_OLIST` "relies on its own caller having pushed a word for it to pop partway through" -- re-reading it closely this pass, that's wrong: the `pop dx`/`push dx` pair around its own `compare_pds` call is just ordinary register-save plumbing (freeing a register across a call, then restoring it before any real `ret`), not an implicit-caller convention; `openx06` (`FILE4.BDO`) and `compare_pds` are both ported now; `chk_pw`'s own `CHK_PW1` tail never returns normally (same as `openx06`), so `chk_pw`/`chk_password`/`chk_pws` all return a plain boolean instead of literally discarding anything, same convention `check_fcb1` established; `get_dir_mode`/`get_xfcb`/`cmp_pw` all made non-`static` for `func15`'s own cross-file calls into them; and now `PR_TERM` (ported as `pr_term`; its own `call func48` resolves fine — `func48` is a real label, `FILE4.BDO`'s own `FUNC48`, uppercase; a first, case-sensitive grep for lowercase `func48` across `/src` turned up nothing and briefly looked like a genuine DRI-source bug before rechecking case), `XCURSELECT` (`xcurselect`, genuinely reaches `selerror`/`goerr` for real — unlike `select_`'s own always-unreachable-past-`selectdisk` tail, `CURSELECT`'s `TEST_FF_DISK` branch calls `selerror` directly whenever `BD_SELDSK+1==0`, independent of any boundary-stub artifact), and `RESELECTX` (`reselectx`, a second entry point into `reselect`'s own body via a shared `reselect_tail` helper both now call — see `cmp_pw`'s own `std` note below, which this row's own earlier "not identified by name" caveat was about: `cmp_pw` was already ported in an earlier pass, this was just a stale doc note) | `TMP_SELECT` was already ported (`tmp_select`, `FILE4.BDO`'s own `func46`, see that file's own row); — (every routine in this file is now ported, confirmed by a fresh full recon rather than assumed; see the deferred-items list's own note on this row) Runs on real memory, see "Real pointers: the BDOS, stage 6" |
+| `src/kernel/FILE4.BDO` | `func24`, `func25`, `func26`, `func29`, `func32`, `FUNC44`, `FUNC45`, `func51`, `func52`, `SET_ARET`/`openx06`, `func15` (BDOS OPEN) + its own `OPENX`/`OPENX0`-`OPENX09` cascade, `func16` (BDOS CLOSE) + `FUNC48` (flush buffers), `func17`/`func18` (search for first/next occurrence of a file, + internal `csearch`/`reselectx`), and now `func19` (delete), `func20`/`func21` (sequential read/write), `func22` (MAKE), `func23` (RENAME) — `func16` replicates `CHECK_FCB1`'s own push/pop convention by hand too, mapping straight onto `check_fcb1`'s boolean return since its own fallback target (`CLOSE00`) is a trivial `set_aret`-and-return; `func17`/`func18`'s own shared `CSEARCH` always runs `dirtouser` after `search`/`searchn` via a manual stack trick (unconditional, unlike every other such trick in this port); `func20`/`func21` are `CHECK_FCB`'s own two real callers (an earlier revision of this comment wrongly called `CHECK_FCB` dead, see `check_fcb1`'s own header comment, `file1.c`); `func22` reuses `func15`'s own `OPENX1`/`OPENX03`/`OPENX08` cascade directly (refactored into their own functions for this); each of `func19`-`func23` calls into `file2.c`'s own colliding `close`/`close1`/`search`/`searchn`/`delet`/`rename_`/`open` clusters somewhere in its chain, so none of them get a new differential test either, same as `func15`; and now `func13`/`func14` (reset disk system/select disk info) + `func37` (reset drive, + internal `reset_37`) — reuse `FILE3.BDO`'s own new `diskreset` and `file1.c`'s own `TEST_VECTOR1`/`SET_CDISK1`, both split out of `test_vector`/`setcdisk` to take an explicit shift-amount/bit-position instead of always reading `BD_SELDSK`; `func13` calls `RESET_37` directly (`func37`'s own real continuation, same "call into the middle" pattern as `rename_`'s own `CALL DELETE1`); `TEST_VECTOR1`/`SET_CDISK1` land inside the DATA.BDO collision range, so this cluster gets no new differential test either, despite `diskreset`/`func13`/`func14`/`func37` themselves being individually clear of it. `func38`/`func39`/`FUNC41`/`FUNC47`/`FUNC49`/`FUNC50` have no body of their own at all (`EQU FUNCRET`, a dispatch-table alias onto `BDOSIF.BDO`'s own empty `funcret`), nothing to port; and now `func33`/`func34` (random read/write) — thin wrappers (`parsave36r` + `CHECK_FCB`, one of its own real callers too, same as `func20`/`func21`, + a tail call into `FILE3.BDO`'s own `rseek`-based `rdread`/`rdwrite`); clear of the collision themselves, but `parsave36` (lands inside it, same as `parsave`/`parsave33`) doesn't, so no new differential test; and now `func30` (set file indicators) — another thin wrapper (`parsave33`/`copy_dma_in`/`CHECK_WILD`/`RESELECTX`/`CHK_PASSWORD` + a tail call into `FILE2.BDO`'s own `indicators`), clear of the collision itself but `indicators` isn't; and now `func35`/`func36` (file size, set random record) — thin wrappers around `FILE3.BDO`'s own `getfilesize`/`setrandom`; `func35` calls into `file2.c`'s own colliding `search`/`searchn` transitively, but `func36`/`setrandom`/`cmperr` don't touch that cluster at all, a legitimate (if not yet written) differential-test candidate; and now `func40` (write random with zero fill) + `FUNC46` (get disk free space) — `func40` calls `rseek1`/`diskwrite` directly (not `rseek`/`rdwrite`, which would re-zero `BD_SEQIO`); `FUNC46` counts zero bits in the disk's own allocation vector via `FILE2.BDO`'s own `GET_NALBS`, converting block count to record count in a wider type instead of chasing the real asm's own split 16+8-bit shift; both land clear of the collision, but `diskwrite`/`GET_NALBS` don't, so no new differential tests; and now `func42`/`func43` (lock/unlock record) — thin wrappers into `FILE3.BDO`'s own `lock_`; `LOCK_PERR` (the real asm's own `MOV SP,LOCK_SP` stack-unwind entry) turned out to be provably dead code, nothing anywhere calls it, so the whole cluster's own manual-stack trick reduces to the ordinary `POP`/`POP`-discard category already modeled elsewhere, no real stack manipulation needed. **`FILE4.BDO` is now ported in full** — every real BDOS dispatch function has a C counterpart; `func38`/`func39`/`FUNC41`/`FUNC47`/`FUNC49`/`FUNC50` are bare `EQU FUNCRET` dispatch-table aliases with no body of their own (straight onto `BDOSIF.BDO`'s own empty `funcret: ret`), and `GOBACK` is a 2-instruction tail jump into `BDOSIF.BDO`'s own module-dispatch epilogue (`BDOS_RETURN`) — both out of scope by definition, not "remaining work" | — (every routine in this file is now ported) Runs on real memory, see "Real pointers: the BDOS, stage 6" |
 | `src/kernel/DATA.BDO` | — | pure data (BDOS-wide scratch fields + the `XERR_LIST` error-message table) — zero real code, nothing to port |
-| `src/kernel/BDOSIF.BDO` | `init`, `entry` (`src-c/kernel/bdosif.c`) | `entry` resolves `cl` (BDOS function #, 0-46) into `functab` the same way the real asm does, then dispatches for real into the 10 functions whose own `btab_flag` is 0 (`func24`/`func25`/`func26`/`func29`/`func32`/`FUNC44`/`FUNC45`/`func51`/`func52`/`FUNC107`, function #s 11/12/13/16/19/31/32/36/37/45) -- real asm's own `nomx: call cs:btab_addr[si]`, an ordinary near indirect call, no far-call gap involved. `func26` was found genuinely missing (not merely deferred) while wiring this up and is now ported too (`file4.c`). The other 37 functions all have `bf_getmx` set, meaning the real dispatch goes through `getdiskmx` first — a genuinely large piece of real OS plumbing (acquire the mx disk queue, a critical-section stack switch, copy the UDA's own BDOS-relevant fields into this module's own local area, and — for functions whose own `btab_flag` also sets `BF_CSHELL`/`BF_TANDW` — the SHELL multi-sector-I/O wrapper around `CALL_BDOS` itself: `SHELL`/`CBDOS`/`SHELL_ERR`/`SHELL_RTN`/`INCR_RR`/`SAVE_RR`/`RESET_RR`/`TST_WRT`/`MULT_IO`/`COMPARE_RECS`/`BDOS_RETURN`) that has no C port here at all; `entry` reports reaching it (`reached_getdiskmx`) instead of silently wrong-answering those 37. `init` itself (the module's own `jmp init`/`jmp entry` header's first target) does the same `sysdat`/`supervisor` copy as `CIOIF.CIO`/`MEMIF.MEM`'s own `init`, then creates/opens/writes the MX disk queue via three real `mpmif` calls, traced to `QUE1.RTM`'s own already-ported `makeq_entry`/`openq_entry`/`writeq_entry` (`que1.c`). `parsave`/`parsave33`/`parsave36` are ported too (`src-c/kernel/file3.c`, for `FILE4.BDO`'s own `func15`/`func33`/`func34` etc.), leaving `XCRLF`/`XPRINT`/`staret`/`funcret`/`setlret1`/`parunsave`/`entryzero`/`mpmif`/`xiosif`/the `bootf`-family boundary stubs (`homef`/`seldskf`/.../`flush`)/the whole `getdiskmx`+SHELL mechanism above — that's the module's own real remaining scope |
-| `src/kernel/UTIL.MEM` | `getmd`, `freemd` | — (both of this file's routines are ported) |
-| `src/kernel/ML.MEM` | `mlalloc_entry` (+ internal `mla_value`, `mla_makemau`, `mla_initmau`), `mlfree_entry` (+ internal `ml_insert`) | — (all of this file's routines are ported, using `tools/i86sim.py`'s new `segmented=True` mode — see below) |
-| `src/kernel/MAU.MEM` | `maualloc_entry`, `maufree_entry` (+ internal `mau_split`, `mau_insert`, `mau_release`, `mau_collapse`) | — (all 6 of this file's routines are ported; see below for 2 real bugs found and fixed in `/src`, and 2 `tools/i86sim.py` gaps fixed along the way: a `LEA`-under-`segmented=True` bug and missing `STD`/`CLD` support) |
-| `src/kernel/SHARE.MEM` | `share_entry` | — (this file's one routine is ported) |
-| `src/kernel/LOAD.SUP` | `load_finish`, `diskread`, `load_group`, `get_ch_info`, `load`/`load_entry`/`cload_entry` — see below | — (every real routine in this file is ported) |
-| `src/kernel/MEMORY.MEM` | `malloc_entry`, `mfree_entry` (+ internal `mall_try_mau`, `mfree_it`) | — (the whole file is ported; `malloc_entry`'s own `mpmif(f_maualloc)`/`mpmif(f_mlalloc)` and `mfree_entry`'s own `mpmif(f_maufree)`/`mpmif(f_mlfree)` are all now real internal calls into `mau.c`'s `maualloc_entry`/`maufree_entry` and `ml.c`'s `mlalloc_entry`/`mlfree_entry` — see below) |
-| `src/kernel/CPMMEM.MEM` | `maxmem_entry`, `absmax_entry`, `cpmalloc_entry`, `cpmabsa_entry`, `cpmfree_entry` (+ internal `getmemory`/`free_memory`, both now real calls into `memory.c`'s `malloc_entry`/`mfree_entry` — see below) | `freeall_entry` — one line (`mov cx,f_terminate ! sub dx,dx ! jmp mpmif`), same as `SYSENT.RTM`'s `creat_proc_entry`: nothing to port |
+| `src/kernel/BDOSIF.BDO` | `init`, `entry` (`src-c/kernel/bdosif.c`) | `entry` resolves `cl` (BDOS function #, 0-46) into `functab` the same way the real asm does, then dispatches for real into the 10 functions whose own `btab_flag` is 0 (`func24`/`func25`/`func26`/`func29`/`func32`/`FUNC44`/`FUNC45`/`func51`/`func52`/`FUNC107`, function #s 11/12/13/16/19/31/32/36/37/45) -- real asm's own `nomx: call cs:btab_addr[si]`, an ordinary near indirect call, no far-call gap involved. `func26` was found genuinely missing (not merely deferred) while wiring this up and is now ported too (`file4.c`). The other 37 functions all have `bf_getmx` set, meaning the real dispatch goes through `getdiskmx` first — a genuinely large piece of real OS plumbing (acquire the mx disk queue, a critical-section stack switch, copy the UDA's own BDOS-relevant fields into this module's own local area, and — for functions whose own `btab_flag` also sets `BF_CSHELL`/`BF_TANDW` — the SHELL multi-sector-I/O wrapper around `CALL_BDOS` itself: `SHELL`/`CBDOS`/`SHELL_ERR`/`SHELL_RTN`/`INCR_RR`/`SAVE_RR`/`RESET_RR`/`TST_WRT`/`MULT_IO`/`COMPARE_RECS`/`BDOS_RETURN`) that has no C port here at all; `entry` reports reaching it (`reached_getdiskmx`) instead of silently wrong-answering those 37. `init` itself (the module's own `jmp init`/`jmp entry` header's first target) does the same `sysdat`/`supervisor` copy as `CIOIF.CIO`/`MEMIF.MEM`'s own `init`, then creates/opens/writes the MX disk queue via three real `mpmif` calls, traced to `QUE1.RTM`'s own already-ported `makeq_entry`/`openq_entry`/`writeq_entry` (`que1.c`); `init` and `entry` run on real memory, see "Real pointers: the RTM, stage 3" and "Real pointers: the BDOS, stage 6". `parsave`/`parsave33`/`parsave36` are ported too (`src-c/kernel/file3.c`, for `FILE4.BDO`'s own `func15`/`func33`/`func34` etc.), leaving `XCRLF`/`XPRINT`/`staret`/`funcret`/`setlret1`/`parunsave`/`entryzero`/`mpmif`/`xiosif`/the `bootf`-family boundary stubs (`homef`/`seldskf`/.../`flush`)/the whole `getdiskmx`+SHELL mechanism above — that's the module's own real remaining scope |
+| `src/kernel/UTIL.MEM` | `getmd`, `freemd` | — (both of this file's routines are ported) Runs on real memory, see "Real pointers: the MEM module, stage 4" |
+| `src/kernel/ML.MEM` | `mlalloc_entry` (+ internal `mla_value`, `mla_makemau`, `mla_initmau`), `mlfree_entry` (+ internal `ml_insert`) | — (all of this file's routines are ported, using `tools/i86sim.py`'s new `segmented=True` mode — see below) Runs on real memory, see "Real pointers: the MEM module, stage 4" |
+| `src/kernel/MAU.MEM` | `maualloc_entry`, `maufree_entry` (+ internal `mau_split`, `mau_insert`, `mau_release`, `mau_collapse`) | — (all 6 of this file's routines are ported; see below for 2 real bugs found and fixed in `/src`, and 2 `tools/i86sim.py` gaps fixed along the way: a `LEA`-under-`segmented=True` bug and missing `STD`/`CLD` support) Runs on real memory, see "Real pointers: the MEM module, stage 4" |
+| `src/kernel/SHARE.MEM` | `share_entry` | — (this file's one routine is ported) Runs on real memory, see "Real pointers: the MEM module, stage 4" |
+| `src/kernel/LOAD.SUP` | `load_finish`, `diskread`, `load_group`, `get_ch_info`, `load`/`load_entry`/`cload_entry` — see below | — (every real routine in this file is ported) Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
+| `src/kernel/MEMORY.MEM` | `malloc_entry`, `mfree_entry` (+ internal `mall_try_mau`, `mfree_it`) | — (the whole file is ported; `malloc_entry`'s own `mpmif(f_maualloc)`/`mpmif(f_mlalloc)` and `mfree_entry`'s own `mpmif(f_maufree)`/`mpmif(f_mlfree)` are all now real internal calls into `mau.c`'s `maualloc_entry`/`maufree_entry` and `ml.c`'s `mlalloc_entry`/`mlfree_entry` — see below) Runs on real memory, see "Real pointers: the MEM module, stage 4" |
+| `src/kernel/CPMMEM.MEM` | `maxmem_entry`, `absmax_entry`, `cpmalloc_entry`, `cpmabsa_entry`, `cpmfree_entry` (+ internal `getmemory`/`free_memory`, both now real calls into `memory.c`'s `malloc_entry`/`mfree_entry` — see below) | `freeall_entry` — one line (`mov cx,f_terminate ! sub dx,dx ! jmp mpmif`), same as `SYSENT.RTM`'s `creat_proc_entry`: nothing to port Runs on real memory, see "Real pointers: the MEM module, stage 4" |
 | `src/loader/LBDOSIO.A86` | `conbrk`, `conout`, `tabout`, `crlf`, `print`, `func9`, `staret`, `funcret`, `setlret1` | `func1`/`func3`/`func6`/`func7`/`func8`/`func10`/`func11` — each just an `EQU` alias for the bare `return:` label: nothing to port. `func2` is likewise just an alias for `tabout` itself, already ported under its own name |
 | `src/loader/LBDOSNEW.A86` | `func51` (set segment base for disk I/O) | `func50`/`func52`/`func53`/`func54`/`func55`/`func56`/`func57` — each just a separate entry point into the same bare `ret` at the end of this file (`func51`'s own tail falls through all of them), nothing to port |
 | `src/loader/LBDOSDAT.A86` | — | pure data declarations (`DB`/`DW`/`RB`), zero real code — nothing to port, same as `DATA.BDO` |
@@ -3791,6 +4346,11 @@ authoritative for what is ported and deferred now.
   to the same ambient value in the real system anyway. Full existing
   suite stays green; `make clean && make build` stays green (45
   files now, up from 44).
+  (Superseded in stage 3 of the real-memory conversion: the whole
+  BDOS module assembles now, and `tools/i86sim.py` gained
+  `far_call_hooks`, so `test_bdosif_init.py` runs the real `init` and
+  `mpmif` and the hand-transcribed wrapper is gone -- see "Real
+  pointers: the RTM, stage 3".)
 
 - **`COMMAND.SUP`'s `chain_entry`/chain-mode `clicmd_entry`, closing
   out the real segment-relative-addressing gap flagged for this file

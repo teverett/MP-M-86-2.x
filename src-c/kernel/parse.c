@@ -13,6 +13,11 @@
  * uses an ordinary tri-state return instead (see `delim` below) and lets
  * every caller propagate it with a normal early return; the observable
  * result (bx/cx and the FCB bytes written) is identical.
+ *
+ * Runs against real memory: the PCB, the string and the FCB are all in
+ * the running process's u_wrkseg (the asm's `mov ds,u_wrkseg ! mov
+ * es,u_wrkseg`), read from its UDA; the internal helpers take that
+ * segment (`w`).
  */
 #include <stdint.h>
 
@@ -47,9 +52,9 @@ static parse_bxcx pfn_out(uint16_t bx) {
  *		return pfn_err(e_badfname) immediately on -1, same as the
  *		real routine's own direct jump there
  */
-static int delim(const uint8_t *mem, uint16_t si, uint8_t *al_out) {
+static int delim(const uint8_t *w, uint16_t si, uint8_t *al_out) {
     static const uint8_t delims[] = {0, tab, cr, '.', ':', ';', '=', ',', '/', '[', ']', '<', '>', ' '};
-    uint8_t al = mem[si];
+    uint8_t al = w[si];
 
     for (unsigned i = 0; i < sizeof(delims); i++) {
         if (delims[i] == al) {
@@ -77,10 +82,10 @@ static int delim(const uint8_t *mem, uint16_t si, uint8_t *al_out) {
  *		0 otherwise (caller checks *ch_io: 0 means the field filled
  *		completely without hitting a delimiter)
  */
-static int setfld(uint8_t *mem, uint16_t *bx_io, uint8_t *ch_io, uint16_t *si_io, uint8_t *al_out) {
+static int setfld(uint8_t *w, uint16_t *bx_io, uint8_t *ch_io, uint16_t *si_io, uint8_t *al_out) {
     for (;;) {
         uint8_t al;
-        int d = delim(mem, *si_io, &al);
+        int d = delim(w, *si_io, &al);
         if (d < 0) return -1;
         if (d != 0) { /* setret */
             *al_out = al;
@@ -88,7 +93,7 @@ static int setfld(uint8_t *mem, uint16_t *bx_io, uint8_t *ch_io, uint16_t *si_io
         }
         if (al == '*') {
             do {
-                mem[*bx_io] = '?';
+                w[*bx_io] = '?';
                 (*bx_io)++;
                 (*ch_io)--;
             } while (*ch_io != 0);
@@ -96,7 +101,7 @@ static int setfld(uint8_t *mem, uint16_t *bx_io, uint8_t *ch_io, uint16_t *si_io
             *al_out = al; /* AL is never overwritten by the '?' fill -- see FS_SET's comment */
             return 0;
         }
-        mem[*bx_io] = al;
+        w[*bx_io] = al;
         (*bx_io)++;
         (*ch_io)--;
         (*si_io)++;
@@ -106,19 +111,19 @@ static int setfld(uint8_t *mem, uint16_t *bx_io, uint8_t *ch_io, uint16_t *si_io
 }
 
 /* deblank -- strip leading blanks */
-static uint16_t deblank(const uint8_t *mem, uint16_t si) {
-    while (mem[si] == ' ' || mem[si] == tab) si++;
+static uint16_t deblank(const uint8_t *w, uint16_t si) {
+    while (w[si] == ' ' || w[si] == tab) si++;
     return si;
 }
 
 /* fcbinit -- Initialize FCB */
-static void fcbinit(uint8_t *mem, uint16_t bx) {
+static void fcbinit(uint8_t *w, uint16_t bx) {
     uint16_t di = bx;
-    mem[di++] = 0;                                   /* 0    = 0 */
-    for (int i = 0; i < 11; i++) mem[di++] = ' ';     /* 1-11 = ' ' */
-    for (int i = 0; i < 2; i++) { mem_w16(mem, di, 0); di += 2; } /* 12-15 = 0 */
-    for (int i = 0; i < 8; i++) mem[di++] = ' ';      /* 16-23 = ' ' */
-    for (int i = 0; i < 3; i++) mem[di++] = 0;         /* 24-26 = 0 */
+    w[di++] = 0;                                   /* 0    = 0 */
+    for (int i = 0; i < 11; i++) w[di++] = ' ';     /* 1-11 = ' ' */
+    for (int i = 0; i < 2; i++) { seg_w16(w, di, 0); di += 2; } /* 12-15 = 0 */
+    for (int i = 0; i < 8; i++) w[di++] = ' ';      /* 16-23 = ' ' */
+    for (int i = 0; i < 3; i++) w[di++] = 0;         /* 24-26 = 0 */
 }
 
 /*
@@ -129,34 +134,35 @@ static void fcbinit(uint8_t *mem, uint16_t bx) {
  *		   = offset of delimiter following name
  *		cx = error code
  */
-parse_bxcx parse_entry(uint8_t *mem, uint16_t dx) {
+parse_bxcx parse_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    uint8_t *w = far_ptr(phys, seg_r16(far_ptr(phys, rlr_uda(far_ptr(phys, sysdat, 0)), 0), u_wrkseg), 0);
     uint16_t pcb = dx;
-    uint16_t si = mem_r16(mem, (uint16_t)(pcb + pcb_flnmptr));
-    uint16_t fcb = mem_r16(mem, (uint16_t)(pcb + pcb_fcbptr));
+    uint16_t si = seg_r16(w, (uint16_t)(pcb + pcb_flnmptr));
+    uint16_t fcb = seg_r16(w, (uint16_t)(pcb + pcb_fcbptr));
     uint16_t bx = fcb;
 
-    fcbinit(mem, bx);
-    si = deblank(mem, si);
+    fcbinit(w, bx);
+    si = deblank(w, si);
 
     uint16_t bp = e_badfname;
     uint8_t al;
-    int d = delim(mem, si, &al);
+    int d = delim(w, si, &al);
     if (d < 0) return pfn_err(bp);
     if (d != 0) return pfn_endp(); /* the very first char is itself a delimiter */
 
     /* parse1 */
     uint8_t ch_saved = al;
     si++;
-    al = mem[si];
+    al = w[si];
     if (al == ':') {
         bp = e_illdisk;
         if (ch_saved < 'A') return pfn_err(bp); /* sub al,'A' ! jc */
         uint8_t drv = (uint8_t)(ch_saved - 'A');
         if (drv >= 16) return pfn_err(bp); /* cmp al,16 ! jge */
-        mem[(uint16_t)(fcb + fcb_dr)] = (uint8_t)(drv + 1);
+        w[(uint16_t)(fcb + fcb_dr)] = (uint8_t)(drv + 1);
         bp = e_badfname;
         si++;
-        d = delim(mem, si, &al);
+        d = delim(w, si, &al);
         if (d < 0) return pfn_err(bp);
         if (d != 0 && (al == '.' || al == ':' || al == ';')) return pfn_err(bp);
         /* else: parse3, whether or not a (different) delimiter was found */
@@ -167,9 +173,9 @@ parse_bxcx parse_entry(uint8_t *mem, uint16_t dx) {
     /* parse3: name field */
     uint8_t ch = 8;
     bx = (uint16_t)(fcb + fcb_name);
-    if (setfld(mem, &bx, &ch, &si, &al) < 0) return pfn_err(bp);
+    if (setfld(w, &bx, &ch, &si, &al) < 0) return pfn_err(bp);
     if (ch == 0) {
-        d = delim(mem, si, &al);
+        d = delim(w, si, &al);
         if (d < 0) return pfn_err(bp);
         if (d == 0) return pfn_err(bp); /* more than 8 chars */
     }
@@ -180,9 +186,9 @@ parse_bxcx parse_entry(uint8_t *mem, uint16_t dx) {
         ch = 3;
         bx = (uint16_t)(fcb + fcb_type);
         si++;
-        if (setfld(mem, &bx, &ch, &si, &al) < 0) return pfn_err(bp);
+        if (setfld(w, &bx, &ch, &si, &al) < 0) return pfn_err(bp);
         if (ch == 0) {
-            d = delim(mem, si, &al);
+            d = delim(w, si, &al);
             if (d < 0) return pfn_err(bp);
             if (d == 0) return pfn_err(bp);
         }
@@ -194,10 +200,10 @@ parse_bxcx parse_entry(uint8_t *mem, uint16_t dx) {
         ch = 8;
         bx = (uint16_t)(fcb + fcb_passwd);
         si++;
-        if (setfld(mem, &bx, &ch, &si, &al) < 0) return pfn_err(bp);
-        mem[(uint16_t)(fcb + fcb_plen)] = (uint8_t)(8 - ch);
+        if (setfld(w, &bx, &ch, &si, &al) < 0) return pfn_err(bp);
+        w[(uint16_t)(fcb + fcb_plen)] = (uint8_t)(8 - ch);
         if (ch == 0) {
-            d = delim(mem, si, &al);
+            d = delim(w, si, &al);
             if (d < 0) return pfn_err(bp);
             if (d == 0) return pfn_err(bp);
         }
@@ -205,8 +211,8 @@ parse_bxcx parse_entry(uint8_t *mem, uint16_t dx) {
 
     /* parse8: see if more to parse */
     bx = si; /* the offset pfn_out returns, if this is the last name in the string */
-    si = deblank(mem, si);
-    d = delim(mem, si, &al);
+    si = deblank(w, si);
+    d = delim(w, si, &al);
     if (d < 0) return pfn_err(bp);
     if (d == 0) return pfn_out(bx);
     bx = si;

@@ -9404,3 +9404,480 @@ bug: `test_dsptch.py`'s own `call_stub_addrs` just has to name the
 shifted absolute addresses (`CSEG_BASE + 0x9000`, `CSEG_BASE +
 0x9001`), which it now does.
 `_string_op_once`'s own SI/DI step negative when `self.df` is set.
+
+## 104. `src/kernel/ABORT.RTM` — `findpdq` loses its place after the first queue — FIXED
+
+Found while moving `tests/src-c/test_abort.py` onto real memory layout
+(`/src-c` real-memory conversion, stage 3) and adding cases for every
+`abort_tab` handler: aborting a process waiting on the DQ/NQ list of any
+QD *other than the first one on `qlr`* failed in the reference run with
+`e_no_pdname`, while `src-c/kernel/abort.c` found and snipped it.
+
+`findpdq` walks `qlr`, and for each QD searches its DQ (or NQ) list with
+`find_pd`, keeping the current QD on the stack across the call:
+
+```
+fpdq_nxtq:
+	pop di			; Recall QD adr
+	mov di,q_link[di]	; Next QD adr
+	test di,di ! jz fpdq_no_pd
+	test al,al ! jz fpdq_dq_lst
+	lea di,(q_nq-p_link)[di]
+	jmps fpdq_nxt_pd
+fpdq_dq_lst:
+	lea di,(q_dq-p_link)[di]	; root address of list to search
+fpdq_nxt_pd:
+	push di			; Save QD adr
+	call find_pd
+	jcxz fpdq_nxtq
+```
+
+The `push di` sits *after* the `lea`, so what it saves isn't the QD but
+that QD's list root (`QD + q_dq - p_link`). When `find_pd` misses, `pop
+di ! mov di,q_link[di]` then reads the word at the list root -- the
+first PD waiting on that QD (or 0) -- and carries on treating it as the
+next QD. With an empty list the walk just stops after the first QD; with
+waiters it wanders through PD memory. Either way only the first QD is
+ever really searched, so `abort_spec_entry` can't abort a process
+blocked reading or writing any other queue. The original DRI source
+(`orig/mpm862sr/02/ABORT.RTM`) has the same ordering, so this is an
+original bug, not one introduced here.
+
+**Patched**: moved `push di` up to just after the end-of-list test,
+before the `lea`, so it saves the QD address the comment says it does.
+The success path's `pop dx` and the miss path's `pop di` both still
+balance it. abort.c's `findpdq` already walked the QDs correctly; now
+the asm does too, and test_abort.py's `abtdq`/`abtnq` cases put the
+target on the second QD to cover it.
+
+## 105. `src/kernel/SHARE.MEM` — `share_entry` leaks its new MD on two paths — FIXED
+
+Found while moving `tests/src-c/test_share.py` onto real memory layout
+(`/src-c` real-memory conversion, stage 4). Present in the original DRI
+source (`orig/mpm862sr/02/SHARE.MEM` is identical).
+
+`share_entry` starts by taking an MD off `mdul` with `getmd` (kept in
+`BP`) for the requestor's new memory-segment entry. Two exits never give
+it back:
+
+- **Sharing with oneself.** When the owner and requestor PDs are the
+  same (both default to `rlr` when 0), `cmp si,bx ! je se_ge` jumps
+  straight to the success exit. There's nothing to do, but the MD is
+  kept.
+- **No owner segment at that start.** When the owner's `p_mem` list
+  has no entry at the requested paragraph, `je se_err` skips the
+  `freemd` that the neighbouring `se_err1` path (no matching SAT
+  entry) does right before it.
+
+Each failed or self-share call loses one MD for good. MDs come from a
+fixed pool, and `malloc_entry` needs one per allocation, so once enough
+have leaked the whole system fails allocations with `e_no_umd`.
+
+**Patched**: both paths now free the MD. Sharing with oneself goes
+through a new `se_self: mov bx,bp ! call freemd` before `se_ge`, and the
+no-owner-segment path jumps to a new `se_free` label, shared with
+`se_err1`, that frees it before `se_err`. `src-c/kernel/share.c` matches.
+`test_share.py` checks that `mdul` gets the MD back on both paths.
+
+## 106. `src/kernel/MAU.MEM` — `mau_collapse` reports a MAU empty while its last segment is still allocated — FIXED
+
+Found while moving `tests/src-c/test_mau.py` onto real memory layout
+(stage 4): freeing the first of two allocated SAT entries made
+`maufree_entry` return "MAU empty" (BX=0FFFFh). Present in the
+original DRI source.
+
+`mau_collapse` walks the SAT judging each entry `BX` by looking at the
+next one, `DI`. It starts with `BP = 0FFFFh` ("assume empty") and only
+clears `BP` when it reaches an allocated entry (`mauc_notfree`). Both
+ways out of the loop skip that check for the last entry in use:
+
+```
+mauc_nsat:
+	inc cx
+	cmp cx,.0 ! jb mauc_notend
+mauc_done:  sub cx,cx ! mov bx,bp ! ret		; table end: last slot unjudged
+mauc_notend:
+	add bx,satlen ! lea di,satlen[bx]
+	cmp sat_start[bx],0 ! je mauc_done
+	cmp sat_start[di],0 ! je mauc_done	; BX is the last entry in use:
+						; leaves before checking BX's nall
+```
+
+So a table like [free, allocated] (or a full table whose last slot is
+allocated) comes back "empty". `MEMORY.MEM`'s `mfree_it` acts on that:
+after freeing a segment from a MAU it takes an "empty" MAU off `mal` and
+returns it to the Memory Free List with `f_mlfree`. If the freed segment
+wasn't the MAU's last allocation, the rest of the MAU goes back to the
+free list while another segment in it is still in use, and the next
+allocation can hand the same memory out again. That takes nothing
+unusual: allocate A then B out of one fresh MAU, then free A.
+
+**Patched**: both exits now go through a new `mauc_last`. It checks the
+last entry in use (`BX`; at the table end, the table's final slot) and
+clears `BP` if that entry is allocated. `src-c/kernel/mau.c` matches.
+Covered by `test_mau.py` (both exits) and `test_memory.py` ("last SAT
+still allocated -> MAU kept").
+
+## 107. `src/kernel/CPMMEM.MEM` — `cpmfree_entry`'s free-all walk wipes Load segments' flags, and hangs on a segment it can't free — FIXED
+
+Found while moving `tests/src-c/test_cpmmem.py` onto real memory layout
+(stage 4). Present in the original DRI source.
+
+`cpmfree_entry` with `mcb_ext = 0FFh` (free everything but Load memory)
+walks the caller's `p_mem` list:
+
+```
+try_seg:    and ms_flags[si],mf_load ! jz free_seg
+		mov bx,si ! jmps cpmf_next
+free_seg:   mov dx,ms_start[si]
+	    push si ! call free_memory ! pop si
+	    jcxz cpmf_root
+		jmps cpmf_next
+```
+
+- **`and` where a `test` was meant.** The `and` writes its result
+  back, so every segment it looks at loses all its flag bits except
+  `mf_load`. That doesn't matter for segments about to be freed, but
+  the Load segments it keeps lose `mf_code`/`mf_share`, and
+  `share_entry` copies those flags to anyone who later shares the
+  segment.
+- **No progress on a failed free.** If `free_memory` fails,
+  `jmps cpmf_next` re-reads the same `ms_link[bx]` (BX unchanged), so
+  it tries the same segment again forever while holding the MEM mutex.
+
+**Patched**: `and` → `test`, and the failure path now does `mov bx,si`
+before `jmps cpmf_next`, stepping past the segment it couldn't free.
+`src-c/kernel/cpmmem.c` matches. `test_cpmmem.py` checks that a kept
+Load segment's flags survive, and that the walk frees the next segment
+after one whose SAT entry is missing.
+
+## 108. `src/kernel/CONSOLE.CIO` — `mimic_entry` doesn't set BX/CX on success, so ctl-P can report "Printer Busy" after it worked — FIXED
+
+Found while moving `tests/src-c/test_cioif_entry.py` onto real memory
+layout (`/src-c` real-memory conversion, stage 5): dispatched through
+CIOIF's `entry`, a successful `mimic_entry` came back with CX = 2Ah.
+Present in the original DRI source (`orig/mpm862sr/03/CONSOLE.CIO`).
+
+`mimic_entry`'s header says "BX = 0 if successful, 0ffffh on error;
+CX = Error Code", and the error exit sets both. The success exit
+doesn't touch either:
+
+```
+			mov c_attach[si],0ffffh
+			mov c_msource[si],dh
+			mov c_mimic[di],dl ! popf ! ret
+```
+
+BX is left holding `rlr` (from `getccbadr`) and CX is whatever the
+caller had. Through `entry` that's twice the function number, since
+entry does `shl cx,1` to index its table. Inside the CIO module it's
+whatever the call chain left, including what the XIOS returned in CX.
+
+The one internal caller depends on it. `control_p` (ctl-P while
+`conread_entry` is reading a line) does `call mimic_entry ! jcxz
+mimout`. With CX nonzero it prints "Printer Busy" and skips toggling
+the console's `cf_listcp`, even though the list device is now mimicking
+the console. The flag and the CCBs then disagree. The next ctl-P tries
+`mimic_entry` again, which fails because `c_mimic` is no longer 0FFh,
+so printer echo can't be turned off either.
+
+**Patched**: `sub bx,bx ! mov cx,bx` before the success exit's `popf !
+ret`. `src-c/kernel/console.c` matches (it used to return BX = rlr, as
+the asm did). `test_cioif_entry.py` runs ctl-P through `entry` and
+checks that `cf_listcp` gets set; with the original code the reference
+leaves it clear.
+
+## 109. `src/kernel/LOAD.SUP` — `ld_read` resets the FCB's `nxtrec` through DS instead of `u_wrkseg` — FIXED
+
+Found while moving `tests/src-c/test_load.py` onto real memory layout
+(`/src-c` real-memory conversion, stage 7). Present in the original DRI
+source (`orig/mpm862sr/02/LOAD.SUP`, `orig/lastdri/19/LOAD.SUP`).
+
+`load:`'s header says the FCB is "addr of open FCB in u_wrkseg", and
+every BDOS call `load` makes on it goes through `mpmif`, which hands the
+BDOS `u_wrkseg`. But the one direct store into the FCB, the record reset
+before the header read, used DS:
+
+```
+ld_read:
+	mov bx,load_fcb
+	mov fcb_nxtrec[bx],0
+```
+
+DS is SYSDAT throughout the SUP, so this cleared a byte in SYSDAT at the
+FCB's offset + 20h and left the FCB's own `nxtrec` alone. It only worked
+when `u_wrkseg` happened to be SYSDAT -- true for the CLI (COMMAND.SUP
+calls f_load from SYSDAT's `cli_fcb`), not for a program calling
+f_load (59) on its own FCB. For that caller the header read started at
+whatever record the FCB was left at, and an unrelated SYSDAT byte got
+zeroed.
+
+**Patched**: `push es ! mov es,u_wrkseg ! mov es:fcb_nxtrec[bx],0 !
+pop es`. `src-c/kernel/load.c` resets the FCB in u_wrkseg too. With the
+original line, 10 of `test_load.py`'s cases fail (its FCB is in a
+u_wrkseg that isn't SYSDAT).
+
+## 110. `src/rsp/SUBMIT.A86` — the bad-parse `$` scan reads the code segment — FIXED
+
+Found while moving `tests/src-c/test_submit.py` onto real memory layout
+(`/src-c` real-memory conversion, stage 7). Present in the original DRI
+source (`orig/mpm862sr/05/SUBMIT.A86`, `orig/lastdri/16/SUBMIT.A86`).
+
+When `notdrive`'s parse of a command fails, SUBMIT puts a `$` after the
+command's first word in `clicmd` before reporting the error:
+
+```
+			mov cl,126
+			mov di,offset clicmd
+			mov al, ' '
+			push cs ! pop es
+			repne scasb
+			mov byte ptr[di], '$'
+```
+
+`clicmd` is in SUBMIT's data segment (DS), but the scan runs over ES =
+CS, so it looks for the space in SUBMIT's code at `clicmd`'s offset. The
+`$` (stored through DS) lands wherever that code happens to have a 20h
+byte, or 126 bytes in. TMP.A86, which this code is evidently copied
+from, keeps its constants in the code segment and its buffers in DS
+too, but scans `clicb_cmd` with ES = DS; SUBMIT moved its constants to
+DS and kept a `push cs` here. (The `$` is never printed afterwards --
+`clierror` prints only the message -- so the visible effect is a stray
+byte in `clicmd`.)
+
+**Patched**: `push ds ! pop es`. `src-c/kernel/submit.c` scans DS, as
+it always did.
+
+## 111. `src/kernel/XIOS86Q.A86` — the sector copies, the tick ISR and `fdc_out_byte` use the kernel code segment for SYSDAT data — FIXED
+
+Found while moving `tests/src-c/test_xios86q.py` onto real memory layout
+(`/src-c` real-memory conversion, stage 7). XIOS86Q is this project's
+own QEMU XIOS, not DRI source.
+
+XIOS86Q's fields (`tick_count` at 1000h onward: `clockon`, `dma_adr`/
+`dma_seg`, `outbyte_tmp`, `secbuf`, the tick ISR's stack) are in its
+DSEG, which `tools/build_mpmsys.py` appends to SYSDAT's: they are
+SYSDAT-segment data, reached through DS. Its code is in the combined
+kernel code segment (`MPM_CODE_SEG`, 1000h), which every module shares
+at its own offset -- so CS:x for one of those offsets is SUP's code, not
+the XIOS's data. Five places used CS anyway:
+
+- **fdc_do_read**'s copy out of `secbuf`: `push cs ! pop ds` before
+  `mov di,dma_adr ! mov es,dma_seg`, so the DMA address *and* the source
+  were read from SUP's code at 1007h/1009h/1040h+. Every disk read
+  copied 128 bytes of SUP code to whatever address those bytes formed.
+- **fdc_do_write**'s copy into `secbuf`: `push cs ! pop es`, so the
+  caller's record overwrote SUP's code at 1040h+ (and the sector went
+  to disk without it).
+- **fdc_out_byte** kept its byte in `cs:outbyte_tmp` -- a write into
+  SUP's code at 1010h for every FDC command byte.
+- **tickint**, 60 times a second: after `push cs ! pop ds` (right for
+  its CSEG save cells) it ran `dec tick_count` and `cmp clockon,true`
+  through CS, so it decremented a byte of SUP's code at 1000h on every
+  tick and stored 60 there every second. 1000:1000h is inside LOAD.SUP's
+  `load_group`.
+- **tickint**'s stack: `mov ax,cs ! mov ss,ax ! mov sp,offset
+  tickint_tos` -- copied from the DRI XIOS.A86, where CS = SYSDAT (that
+  XIOS lives in the SYSDAT segment). Here it put the ISR's pushes, and
+  the f_flagset call it makes, into SUP's code below 1306h. The label was
+  also on the first word of its 32-word area (`tickint_tos rw 32`), so
+  even in the right segment the stack would have grown down into
+  `dirbuf0`.
+
+**Patched**: the copies use DS for `secbuf`/`dma_adr`/`dma_seg` (and DS
+as the write copy's ES); `fdc_out_byte` uses DS; `tickint` saves the
+interrupted SS/SP/AX in its CS cells as before, then switches SS and DS
+to SYSDAT (`mov ax,sysdat`) and restores SS/SP through `cs:`
+overrides; `tickint_tos` is now the end of its area (`rw 32` then
+`tickint_tos rw 0`).
+
+`test_xios86q.py` now runs the reference with CS (the code) and DS
+(SYSDAT) as different segments, checks the whole image after the disk
+reads/writes, and runs the whole tick ISR (from `tickint` to its
+dispatcher `jmpf`) checking for stray writes. With the original file,
+DISKREAD/DISKWRITE and all four tick cases fail.
+
+Since 1000h-1306h of SUP is LOAD.SUP and RPL/PARSE code, this looked
+like it could be "Bug B" (#83-98: running a command crashes). It isn't
+the whole story: a rebuilt image with this fix still boots to `0A>` and
+still hangs on `DIR` (no LF echo after the command's CR), the same as
+before the fix. (The hang's actual cause is #112.)
+
+## 112. `tools/build_mpmsys.py` — module code shared one segment, and only some code offsets were relocated: Bug B's cause — FIXED
+
+Found with a scripted QEMU session: boot, type `DIR`, and log every
+executed instruction from the CR on (QEMU monitor `log exec,nochain,cpu`
+with `-accel tcg,one-insn-per-tb=on`), then map each address back to its
+module and label. This is the real cause of "Bug B" (#83-98): typing a
+command at `0A>` wrecks the system.
+
+`build_mpmsys.py` put every kernel module in one code segment
+(`MPM_CODE_SEG`, 1000h) at a byte offset, `module_base`. But each module
+is assembled on its own, at origin 0, so every code address it contains
+is wrong by `module_base`. The script relocated what it knew about:
+- the module table
+- each module's `entry` function table, and the instruction that
+  indexes it
+- RTM's `dsp_table`
+- RTMIF's `offset fdisp`/`offset farpdisp`
+- XIOS86Q's `offset tickint`
+
+Two gaps were hit typing `DIR`:
+
+- **CIO's `functab` count was 16; the table has 23 entries.** Entries
+  16-22 (`lstdetach` .. `unmimic`) kept their standalone offsets. The
+  CLI's first call, `f_cconattch` (the dayfile check, CIO function 19),
+  jumped to 1000:00ADh, the middle of SUP's `init`. That code wrote over
+  ES and the stack, and the CLI's own `ret` then went to garbage
+  (1000:F216h), through SYSDAT, to a `hlt` with interrupts on. That is
+  the "hang" after `DIR`.
+- **Code-label immediates nobody relocated.** With CIO's count fixed,
+  the open and load got further, and FILE4.BDO's `func16`, on the way to
+  the close, did `mov bx,offset close00 ! push bx`. That `offset` was
+  BDOS's standalone 1FF2h, so `check_fcb1`'s `ret` landed in RTM's
+  `terminate` (`nchld`), running on the BDOS's internal stack, and the
+  BDOS's final `retf` went to 3000:1130h. Others of the same kind:
+  - BDOSIF's `offset shell_rtn`/`rdran_off`/`wrran_off`
+  - FILE3's `offset lock9`
+  - FILE4's `offset open_file`/`dirtouser`
+  - ABORT's `offset terminate`
+  - CHARIO's message offsets
+  - ABORT's `abort_tab`
+
+**Patched**: each module now gets its own code segment, starting on a
+paragraph boundary in the combined image (SUP 1000h, RTM 1138h, MEM
+1231h, CIO 12DDh, BDOS 136Dh, XIOS 15D6h), so the offsets it was
+assembled with are right as is. The module table, `dispatcher` and the
+IVT entries are far pointers built as (offset, cs), so nothing else
+needs changing. All the per-site relocations (and the FUNCTION_TABLES/
+DISPATCH_PATCHES tables) are gone. The combined code grew by alignment
+padding, to 26992 bytes, so SYSDAT is now at 1697h.
+
+## 113. `tools/build_mpmsys.py` — no Lock List and no free memory (GENSYS answers never set) — FIXED
+
+Next, `DIR` reached the BDOS and got `Bdos Err On A: No Room in System
+Lock List` on its open (function 15). DATA.BDO says "FREE_ROOT,
+LOCK_MAX, OPEN_MAX INITIALIZED BY SYSGEN"; build_mpmsys.py, which
+stands in for GENSYS, left `free_root` 0 and both limits 0. With that
+fixed, the load failed with `?Not Enough Memory`: `mdul` (unused memory
+descriptors) and `mfl` (the memory free list) were empty too, so
+MEM's `getmd` had nothing to give `f_malloc`.
+
+**Patched**:
+- **Lock List:** 16 ten-byte items linked from `free_root`, with
+  `lock_max`/`open_max` and the three totals at 16.
+- **Memory:** 23 free MDs on `mdul`, plus one MD on `mfl` describing
+  the free memory from the paragraph after the system data (17DFh) to
+  9000h. The MD pool follows the XIOS's dseg tail, since SYSDAT's own
+  4096 bytes are full.
+
+Now `SUBMIT FOO` loads, runs, prints `No 'SUB' File Present` and
+terminates, repeatedly; an unknown command gets `?Can't Find Command`;
+`DIR` loads and starts, and terminates at once (#115).
+
+## 114. `tools/asm86` — `''` inside a `db` string wasn't collapsed to one quote — FIXED
+
+`db 'Can''t'` assembled as `Can''t`, so TMP printed `?Can''t Find
+Command` and SUBMIT `No ''SUB'' File Present`. ASM-86 treats a doubled
+quote inside a string as one quote. **Patched** in `_do_db`.
+
+## 115. `tools/plmc.py` — compiled PL/M utilities can't run — FIXED (DIR)
+
+With the kernel fixed (#112, #113), `DIR` loads, its process is
+created and dispatched, and it immediately does system call 0 and
+terminates, printing nothing. That's DIR.CMD, not the kernel. The
+PL/M compiler's output has at least four problems, in the generated
+`DIR.gen.A86`:
+
+- **No startup code.** The real build links DRI's `MCD.A86` first
+  (VAXCMD.LIT; `orig/mpm862sr/07/MCD.A86`), which sets up the stack and
+  calls `plmstart`. `tools/plm/runtime_stub.A86` has only the `mon1`-
+  `mon4` wrappers, so a .CMD starts at whatever procedure comes first
+  in the module (DIR: `read$console`).
+- **Argument order.** Calls push their arguments right to left
+  (`mon2(1,0)` pushes 0, then 1), but the stub, like PL/M-86, takes
+  the first argument from the deeper slot (`mov cx,[bp+6]`), so the
+  function number and the parameter swap. `read$console`'s `mon2(1,0)`
+  becomes system call 0, which is what DIR does first.
+- **Parameters.** A procedure's parameters are read from locals:
+  `write$console` does `sub sp,2 ! mov ax,[bp-2]` for `char`,
+  instead of `[bp+4]`.
+- **`plmstart` is emitted twice** (`pl_plmstart` at two places).
+
+Every PL/M utility on the disk (DIR, TYPE, PIP, ERA, ...) goes through
+this compiler, so none of them can work until it's fixed. A separate
+piece of work.
+
+**Fixed** (`tools/plm/codegen.py`), in the order DIR hit them:
+
+- **Startup:** a module with PLMSTART now begins with MCD.A86's
+  startup (SS = DS, SP = a 256-byte stack at the end of its data,
+  `jmp plmstart`).
+- **Argument order:** arguments are pushed left to right, with the
+  parameter offsets to match, so DRI's verbatim `xdos` stub works.
+- **Parameters:** a `DECLARE` of a parameter's own name types the
+  parameter instead of making a new local.
+- **Duplicate `plmstart`:** gone.
+- **Base page:** EXTERNAL base-page variables (`fcb`, `tbuff`, ...)
+  map onto MCD's base-page layout (fcb at 5Ch, buff at 80h), not 1-byte
+  globals at DS:0; module data starts at 100h.
+- **DO loops:** `DO i = a TO b` compared `b` against `i`, so a loop ran
+  once at most (DIR's "fill the FCB with `?`" loop never ran, so it
+  searched for blanks).
+- **BYTE/ADDRESS typing:** a constant below 256 is a BYTE, byte-op-byte
+  is 8-bit, and BYTE results, BYTE procedure results (`mon2`'s AL) and
+  BYTE parameters/locals are truncated. DIR's `if cnt = -1` (BYTE
+  `cnt`) never matched, so "File not found." never printed.
+- **ROL/ROR/SHL/SHR:** they shifted the count by the value instead of
+  the value by the count, in 16 bits; now value by count, 8-bit on a
+  BYTE. DIR's `ror(dcnt,3)` gave 0 for the second entry of each
+  directory record, so it printed the first entry twice and never
+  showed the second.
+- **IF/WHILE:** they now test the low bit, as PL/M does (`not 1` is
+  0FEh: FALSE).
+
+Also `tools/i86sim.py` gained `RET imm16` (compiled PL/M uses it
+everywhere). `src/Makefile` now rebuilds the utilities when
+`tools/plm/*.py` changes.
+
+**Verified**: in QEMU, `DIR` lists the disk four to a line, `DIR *.RSP`
+and `DIR [S]` work, `DIR NONE.X` prints "File not found.", and DIR runs
+repeatedly. New `tests/plm/test_plmc.py`: the semantics above, checked
+on small compiled programs, plus the real DIR.PLM against a scripted
+BDOS. Putting back the old rotate, argument order or IF test fails it.
+The other utilities compile and assemble; they haven't been run.
+
+## 116. `tools/plmc.py` — POINTERs were 16-bit, so TOD read the time from page 0 — FIXED
+
+`TOD` printed `Mon 01/00/78 00:00:4?`. TOD (like ATTACH, ERA, REN, SET,
+SHOW, SPOOL, STSCMD, STSCOM, STSRSP) is compiled `$COMPACT`: it gets
+SYSDAT's address as a POINTER from `mon4(154)` (ES:BX), sets its offset to
+7Eh through an `AT(@tod$pointer)` overlay, and copies the TOD structure
+BASED on it with `MOVB(@extrnl$tod.date, @lcltod.date, 5)`. The compiler
+treated POINTER as a 16-bit ADDRESS: the segment was never kept, the
+overlay's `segment` field sat on the next variable, and every BASED
+access went through DS -- so TOD read 0000:007Eh, the interrupt vector
+table, and a time it set landed there too.
+
+**Patched** (`tools/plm/codegen.py`, `parser.py`):
+- **Storage:** a POINTER is 4 bytes (offset, segment), as a global,
+  local or structure field.
+- **Values:** a POINTER value is DX:AX. `@x` (the parser now tells `@`
+  from `.`) is DS:x, or the base pointer's segment for BASED data.
+- **BASED data:** data BASED on a POINTER, scalars, fields and array
+  elements, is accessed through ES.
+- **`mon4`:** a POINTER-returning EXTERNAL comes back in ES:BX.
+- **Moves:** MOVE/MOVB/MOVW copy between the operands' own segments.
+
+Also, `src/Makefile`'s disk image didn't depend on the utility and RSP
+binaries, so a rebuilt utility never reached `mpm86q.img`. That cost a
+debugging detour here: QEMU kept running the old TOD.
+
+**Verified**: in QEMU, `TOD` shows `Fri 09/25/81 12:00:00` (SYSDAT's
+SYSTEM.DAT value), `TOD 03/19/86 12:05:30` + a key sets it, and the next
+`TOD` -- and the CLI's dayfile stamp -- show the new time. (It doesn't
+advance: the CLOCK RSP isn't loaded in this build. Years before 78 are
+rejected by TOD itself, by design.) `tests/plm/test_plmc.py` adds
+POINTER cases and TOD's display (leap years included), set, and Feb 29
+of a non-leap year; the pre-fix compiler fails 7 of its checks.
+

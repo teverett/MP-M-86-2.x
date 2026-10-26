@@ -1,82 +1,30 @@
-; Standalone wrapper for src/kernel/RTMIF.RTM's `init`. `entry`
-; (RTMIF.RTM's own inter-module RTM dispatch) is not executed by this
-; test at all (same as cioif_wrapper.A86/memif_wrapper.A86's own
-; `entry`) -- its own function-table targets are bare markers purely
-; so this file assembles as the real, complete module it actually is.
+; Standalone wrapper for src/kernel/RTMIF.RTM's `init`, laid out like
+; the real RTM module: RTMIF.RTM at the start of the code segment (org
+; 0, so `sysdat`/`supervisor` sit at their real offsets 6/8), and the
+; real UDA.FMT/VEC.FMT/SYSDAT.FMT included so `supmod`/`dispatcher`/
+; `rtm_pdisp`/`tickpd`/`idlepd`/`u_initcs`/`u_initss` resolve to their
+; genuine offsets, the same ones src-c/kernel/rtmif.c uses.
+; tests/src-c/test_rtmif.py runs this with tools/i86sim.py's
+; segmented=True and a real nonzero SYSDAT segment.
 ;
-; `init` itself has no `callf`/far CALL of any kind (confirmed
-; directly, see rtmif.c's own header comment), only one ordinary near
-; `call proc_creat` -- but its own real asm never resets `DS` back to
-; flat before that call (it stays the real, non-zero `sysdat` segment
-; the whole way through, per `init`'s own "assume DS = Sysdat
-; Segment" precondition), so `proc_creat`'s *own* real body would, in
-; this exact calling context, read `rlr`/`pul`/etc as genuinely
-; `sysdat`-relative fields too -- not the flat scratch addresses
-; `tests/src-c/fixtures/proc_wrapper.A86`'s own (already-verified,
-; separately-tested) convention places them at for *its own*
-; standalone test, which runs with `DS=0`. Combining the two
-; conventions in one reference run isn't sound, so `proc_creat` is a
-; boundary stub here (a bare marker, same as `fdisp`/`farpdisp`) --
-; the real asm's own `call proc_creat ! retf` discards its own result
-; immediately anyway (see rtmif.c's own header comment), so nothing
-; downstream needs it to be real for this test to mean anything;
-; `src-c/kernel/rtmif.c` still makes the real call, since `proc.c`'s
-; own `proc_creat` is correct and already independently verified by
-; `tests/src-c/test_proc.py`.
+; `entry` (RTMIF.RTM's own inter-module dispatch) isn't executed by
+; this test; its function-table targets are bare markers so the file
+; assembles as the complete module. `fdisp`/`farpdisp` are only taken
+; by offset.
 ;
-; `supmod`/`dispatcher`/`rtm_pdisp`/`idlepd`/`tickpd` are declared at
-; their own *real* `SYSDAT.FMT` byte offsets (probed directly: 0,
-; 0x38, 0x3c, 0x9f0, 0xa20) -- not the flat `SD_SUPMOD_OFF`-style
-; scratch addresses `cioif_wrapper.A86`/`memif_wrapper.A86` use, which
-; only work there because those two are tested non-segmented (where
-; the segment register is ignored and only the offset matters). This
-; test needs `segmented=True` for real (`init`'s own tick/idle UDA
-; writes genuinely switch `ES` to a dynamically-computed segment), so
-; a plain `mov ax,dispatcher`-shaped reference really is `DS`-relative
-; here, and `DS` really is a non-zero `sysdat` segment -- confirmed
-; `dispatcher`'s own raw offset (0x38) sits *inside* `init`'s own body
-; if `sysdat` were ever treated as flat 0, so it can't be flattened
-; the way `SD_SUPMOD_OFF` is. `tests/src-c/test_rtmif.py` computes the
-; real physical address for each of these the same way
-; `tests/src-c/test_mau.py`'s own `phys(seg)+offset` does.
-;
-; `u_initcs`/`u_initss` are declared as a real eseg/org 0 block at
-; their own real UDA.FMT offsets (0x50/0x56) -- the only two fields
-; `init` itself touches, same subset convention as every other such
-; wrapper in this tree.
+; The real PROC.RTM is linked in, so `init`'s closing `call
+; proc_creat` really creates the tick and idle processes on both sides
+; (proc.c runs on real memory too).
 	include system.def
 	include pd.def
+	include err.def
+	include mem.def
 	include modfunc.def
-	eseg
-	org	50h
-u_initcs	dw	0
-	org	56h
-u_initss	dw	0
-	dseg
-	org	0
-supmod		rw	2
-	org	38h
-dispatcher	rw	2
-	org	3Ch
-rtm_pdisp	rw	2
-	org	9F0h
-idlepd		rb	48
-	org	0A20h
-tickpd		rb	48
-	org	0E00h
-xiosmod		rw	2		; unused here, just needs to exist to assemble
+	include modtab.def
+
 	cseg
-; `include rtmif.rtm` has to come FIRST: it starts with its own
-; `org 0`, which would silently reset the cseg cursor back to 0 and
-; overwrite anything declared before it in this same cseg block (same
-; bug/fix as LBDOSENT.A86's own include-order gotcha, tests/src-c/
-; fixtures/lbdosent_wrapper.A86's own header comment) -- confirmed
-; directly: placing the stub labels below first corrupted `init`'s
-; own real bytes, caught via a bogus `OUT` instruction where `ret`
-; should have been. The assembler resolves these as ordinary forward
-; references regardless of where they land after `init`'s own body.
 	include rtmif.rtm
-proc_creat:		ret	; boundary stub -- see this file's own header comment
+	include proc.rtm
 fdisp:			ret
 farpdisp:		ret
 sysreset_entry:		ret
@@ -101,4 +49,8 @@ sleep_entry:		ret
 wakeup_entry:		ret
 findpdname_entry:	ret
 mod_entry:		ret
+
+	include uda.fmt
+	include vec.fmt
+	include sysdat.fmt
 	end

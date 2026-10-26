@@ -1,105 +1,26 @@
-; Standalone wrapper for src/kernel/PROC.RTM: freepd, proc_creat (+
-; internal getpdadr). Needs tools/i86sim.py's opt-in `segmented=True`
-; mode (see src-c/kernel/ml.c's own header comment): `proc_creat`
-; dynamically switches DS/ES to a brand-new child process's own UDA
-; segment (`p_uda[si]`, computed fresh each call) and writes fixed
-; UDA.FMT offsets relative to it, then switches again to that same
-; child's own user-stack segment (`ds:u_ss`) to build its IRET frame.
+; Standalone wrapper for src/kernel/PROC.RTM's freepd/proc_creat (+
+; internal getpdadr). The real UDA.FMT/VEC.FMT/SYSDAT.FMT are included,
+; so every field resolves to its genuine offset -- the same ones
+; src-c/kernel/proc.c uses on real memory. tests/src-c/test_proc.py
+; runs this with tools/i86sim.py's segmented=True, a real SYSDAT
+; segment, and the code relocated off segment 0 (proc_creat reads the
+; real interrupt vectors there).
 ;
-; `rlr`/`drl`/`thrdrt`/`pul`/`u_wrkseg`/`endseg`/`nlstdev`/`ncondev`
-; are DSEG labels at the scratch addresses src-c/kernel/defs.h and
-; tests/src-c/test_proc.py both use (see idle_wrapper.A86's comment
-; for why a plain EQU would be wrong for any of these -- they're all
-; read as memory, not used as jump targets).
-;
-; `i_mpm_ip` is normally a VEC.FMT label overlaying the real, absolute
-; interrupt vector table (segment 0) at a fixed offset resolved from
-; `mpmint*4` (src/kernel/SYSTEM.DEF: mpmint equ 224) -- see src-c/
-; kernel/defs.h's own header comment on it. Declared here as a plain
-; EQU at that already-resolved value (380h) rather than including the
-; whole of VEC.FMT (which would need its own `org 0` DSEG, colliding
-; with this wrapper's own scratch layout) -- safe because it's always
-; used as `offset i_mpm_ip`, a 2-operand MOV source we can feed either
-; a label or a raw EQU value interchangeably.
+; `sysdat` is normally RTMIF.RTM's own cs cell (`cs:sysdat`); declared
+; here at cseg offset 0. `mpmif` is an unported external call target
+; (proc_creat's f_share call), stubbed by address.
 	include system.def
 	include pd.def
 	include err.def
 	include mem.def
 	include modfunc.def
-i_mpm_ip	equ	380h
-; src/kernel/UDA.FMT -- redeclared directly here as a real `eseg`/`org
-; 0` block (an EQU won't do: a bare "cmp ds:EQUconst,dx" mis-assembles
-; here as an unsupported mem,mem combo -- confirmed directly, an EQU
-; carries no operand size the way a true label does), rather than
-; `include uda.fmt` (which would also declare system init fields this
-; wrapper has no use for). This gives every field below the exact
-; same eseg-relative offset the real UDA.FMT equ chain resolves to
-; (confirmed against `--symbols`), which is what matters here: every
-; use is through a dynamically-computed ES/DS, never a fixed home
-; segment, so only the *offset* has to match, not any absolute
-; address -- same reasoning as ml_wrapper.A86 redeclaring MAU.MEM's
-; satlen/sat_start/sat_length/sat_nall.
-	eseg
-	org	0
-u_dparam	dw	0
-u_dma_ofst	dw	0
-u_dma_seg	dw	0
-u_func		db	0
-u_searchl	db	0
-u_searcha	dw	0
-u_searchabase	dw	0
-u_dcnt		dw	0
-u_dblk		dw	0
-u_error_mode	db	0
-u_mult_cnt	db	0
-u_df_password	rb	8
-u_pd_cnt	db	0
-u_in_int	db	0
-u_sp		dw	0
-u_ss		dw	0
-u_ax		dw	0
-u_bx		dw	0
-u_cx		dw	0
-u_dx		dw	0
-u_di		dw	0
-u_si		dw	0
-u_bp		dw	0
-u_wrkseg_f	dw	0
-u_retseg	dw	0
-u_ds_sav	dw	0
-u_stack_sp	dw	0
-u_stack_ss	dw	0
-u_ivectors	rw	10
-u_es_sav	dw	0
-u_flag_sav	dw	0
-u_initcs	dw	0
-u_initds	dw	0
-u_inites	dw	0
-u_initss	dw	0
-u_mpm_ip	dw	0
-u_mpm_cs	dw	0
-u_debug_ip	dw	0
-u_debug_cs	dw	0
-u_insys		db	0
-u_stat_sav	db	0
-	dseg
-	org	0A000h
-rlr		dw	0
-	org	0A002h
-drl		dw	0
-	org	0A012h
-u_wrkseg	dw	0
-	org	0A026h
-endseg		dw	0
-	org	0A032h
-thrdrt		dw	0
-	org	0A035h
-nlstdev		db	0
-ncondev		db	0
-	org	0A038h
-pul		dw	0
+
 	cseg
-sysdat	dw	0		; normally supplied by RTMIF.RTM's own init
-mpmif	equ	9000h		; unported external call target (stub)
+sysdat	dw	0
+mpmif	equ	9000h
 	include proc.rtm
+
+	include uda.fmt
+	include vec.fmt
+	include sysdat.fmt
 	end

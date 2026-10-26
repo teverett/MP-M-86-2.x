@@ -25,85 +25,94 @@
  * other path -- conditional-and-empty/full (returns an error
  * immediately, no retry), and any call where a message/buffer slot
  * is already available -- is fully portable and exercised.
+ *
+ * Runs against real memory (defs.h's far_ptr), like the rest of the
+ * RTM: `phys` is the base of real physical memory and `sysdat` the real
+ * SYSDAT segment (the real asm's DS and cs:sysdat). QDs, their message
+ * buffers (q_buf) and the qlr list are SYSDAT-relative; every QPB and
+ * the caller's own message buffer (qpb_buffptr) are in the running
+ * process's u_wrkseg, read from its UDA (the real asm's ambient ES,
+ * p_uda[rlr]) -- so readq/writeq copy messages between segments, as the
+ * real asm's segment-override `rep movsb` does. Like the real asm,
+ * readq/writeq call queverify once and their wait-and-retry loops jump
+ * back past it (to qr_ver/qw_ver).
  */
 #include <stdint.h>
 
 #include "defs.h"
 
-uint16_t getqdaddr(uint8_t *mem, uint16_t dx, uint16_t sysdat, uint16_t *cx_out);
-void remqd(uint8_t *mem, uint16_t si);
+uint16_t getqdaddr(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t *cx_out);
+void remqd(uint8_t *phys, uint16_t sysdat, uint16_t si);
 
 typedef struct {
     uint16_t bx, cx;
 } que_bxcx;
 
+/* the running process's u_wrkseg segment (QPBs live there) */
+static uint8_t *wrkseg_ptr(uint8_t *phys, const uint8_t *sd) {
+    return far_ptr(phys, seg_r16(far_ptr(phys, rlr_uda(sd), 0), u_wrkseg), 0);
+}
+
+static int names_equal(const uint8_t *a, uint16_t a_off, const uint8_t *b, uint16_t b_off) {
+    for (unsigned i = 0; i < qnamsiz; i++) {
+        if (seg_r8(a, (uint16_t)(a_off + i)) != seg_r8(b, (uint16_t)(b_off + i))) return 0;
+    }
+    return 1;
+}
+
 /*
  * makeq_entry -- Create a System Queue
  *	input:	dx = address of QD in u_wrkseg
- *		sysdat = this module's own copy of the SYSDAT segment
- *		(real asm: `cs:sysdat`)
  *	output:	bx = 0 if okay, 0xFFFF if error
  *		cx = error code
  */
-que_bxcx makeq_entry(uint8_t *mem, uint16_t dx, uint16_t sysdat) {
+que_bxcx makeq_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
     uint16_t cx;
-    uint16_t di = getqdaddr(mem, dx, sysdat, &cx);
+    uint16_t di = getqdaddr(phys, sysdat, dx, &cx);
     if (cx != 0) {
         que_bxcx r = {0xFFFF, cx};
         return r;
     }
 
-    uint16_t si = SD_QLR;
+    uint16_t si = (uint16_t)(SYSDAT_QLR - q_link);
     for (;;) {
-        si = mem_r16(mem, (uint16_t)(si + q_link));
+        si = seg_r16(sd, (uint16_t)(si + q_link));
         if (si == 0) break;
-        int eq = 1;
-        for (unsigned i = 0; i < qnamsiz; i++) {
-            if (mem[(uint16_t)(di + q_name + i)] != mem[(uint16_t)(si + q_name + i)]) {
-                eq = 0;
-                break;
-            }
-        }
-        if (eq) {
+        if (names_equal(sd, (uint16_t)(di + q_name), sd, (uint16_t)(si + q_name))) {
             que_bxcx r = {0xFFFF, e_q_inuse};
             return r;
         }
     }
 
-    mem_w16(mem, (uint16_t)(di + q_dq), 0);
-    mem_w16(mem, (uint16_t)(di + q_nq), 0);
-    mem_w16(mem, (uint16_t)(di + q_msgcnt), 0);
-    mem_w16(mem, (uint16_t)(di + q_msgout), 0);
-    mem_w16(mem, (uint16_t)(di + q_link), mem_r16(mem, SD_QLR));
-    mem_w16(mem, SD_QLR, di);
+    seg_w16(sd, (uint16_t)(di + q_dq), 0);
+    seg_w16(sd, (uint16_t)(di + q_nq), 0);
+    seg_w16(sd, (uint16_t)(di + q_msgcnt), 0);
+    seg_w16(sd, (uint16_t)(di + q_msgout), 0);
+    seg_w16(sd, (uint16_t)(di + q_link), seg_r16(sd, SYSDAT_QLR));
+    seg_w16(sd, SYSDAT_QLR, di);
     que_bxcx r = {0, 0};
     return r;
 }
 
 /*
  * openq_entry -- Find an active Queue
- *	input:	dx = address of QPB (segment is u_wrkseg)
+ *	input:	dx = address of QPB in u_wrkseg
  *	output:	fills in the QPB's qpb_qaddr field
  *		bx = 0 if okay, 0xFFFF if not; cx = error code
  */
-que_bxcx openq_entry(uint8_t *mem, uint16_t dx) {
-    uint16_t di = dx;
-    uint16_t si = SD_QLR;
+que_bxcx openq_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint8_t *qpb = wrkseg_ptr(phys, sd);
+    uint16_t si = (uint16_t)(SYSDAT_QLR - q_link);
     for (;;) {
-        si = mem_r16(mem, (uint16_t)(si + q_link));
+        si = seg_r16(sd, (uint16_t)(si + q_link));
         if (si == 0) {
             que_bxcx r = {0xFFFF, e_no_queue};
             return r;
         }
-        int eq = 1;
-        for (unsigned i = 0; i < qnamsiz; i++) {
-            if (mem[(uint16_t)(si + q_name + i)] != mem[(uint16_t)(di + qpb_name + i)]) {
-                eq = 0;
-                break;
-            }
-        }
-        if (eq) {
-            mem_w16(mem, (uint16_t)(di + qpb_qaddr), si);
+        if (names_equal(sd, (uint16_t)(si + q_name), qpb, (uint16_t)(dx + qpb_name))) {
+            seg_w16(qpb, (uint16_t)(dx + qpb_qaddr), si);
             que_bxcx r = {0, 0};
             return r;
         }
@@ -116,25 +125,26 @@ que_bxcx openq_entry(uint8_t *mem, uint16_t dx) {
  *	input:	dx = offset of QPB in u_wrkseg
  *	output:	bx = 0 if ok, 0xFFFF if bad; cx = error code
  */
-que_bxcx deleteq_entry(uint8_t *mem, uint16_t dx) {
-    uint16_t di = mem_r16(mem, (uint16_t)(dx + qpb_qaddr));
-    uint16_t dq = mem_r16(mem, (uint16_t)(di + q_dq));
-    uint16_t nq = mem_r16(mem, (uint16_t)(di + q_nq));
+que_bxcx deleteq_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint16_t di = seg_r16(wrkseg_ptr(phys, sd), (uint16_t)(dx + qpb_qaddr));
+    uint16_t dq = seg_r16(sd, (uint16_t)(di + q_dq));
+    uint16_t nq = seg_r16(sd, (uint16_t)(di + q_nq));
     if ((uint16_t)(dq + nq) != 0) {
         que_bxcx r = {0xFFFF, e_q_inuse};
         return r;
     }
 
-    uint16_t bx = SD_QLR;
+    uint16_t bx = (uint16_t)(SYSDAT_QLR - q_link);
     for (;;) {
-        uint16_t si = mem_r16(mem, (uint16_t)(bx + q_link));
+        uint16_t si = seg_r16(sd, (uint16_t)(bx + q_link));
         if (si == 0) {
             que_bxcx r = {0xFFFF, e_q_notactive};
             return r;
         }
         if (si == di) {
-            mem_w16(mem, (uint16_t)(bx + q_link), mem_r16(mem, (uint16_t)(si + q_link)));
-            remqd(mem, si);
+            seg_w16(sd, (uint16_t)(bx + q_link), seg_r16(sd, (uint16_t)(si + q_link)));
+            remqd(phys, sysdat, si);
             que_bxcx r = {0, 0};
             return r;
         }
@@ -144,14 +154,15 @@ que_bxcx deleteq_entry(uint8_t *mem, uint16_t dx) {
 
 /*
  * queverify -- check QLR for existence of QD address
- *	input:	dx = offset of QPB
+ *	input:	dx = offset of QPB in u_wrkseg
  *	output:	returns error code (0 or e_no_queue)
  */
-uint16_t queverify(const uint8_t *mem, uint16_t dx) {
-    uint16_t target = mem_r16(mem, (uint16_t)(dx + qpb_qaddr));
-    uint16_t bx = SD_QLR;
+uint16_t queverify(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    const uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint16_t target = seg_r16(wrkseg_ptr(phys, sd), (uint16_t)(dx + qpb_qaddr));
+    uint16_t bx = SYSDAT_QLR;
     for (;;) {
-        bx = mem_r16(mem, (uint16_t)(bx + q_link));
+        bx = seg_r16(sd, (uint16_t)(bx + q_link));
         if (bx == 0) return e_no_queue;
         if (bx == target) return 0;
     }
@@ -161,112 +172,109 @@ uint16_t queverify(const uint8_t *mem, uint16_t dx) {
  * readq -- shared body of readq_entry (ax=0, unconditional) and
  * creadq_entry (ax=0xFFFF, conditional): read one message off a
  * queue, or wait for one.
- *	input:	dx = address of QPB in u_wrkseg (treated as already
- *		flat, same simplification openq_entry/deleteq_entry/
- *		queverify above already use in this file)
+ *	input:	dx = address of QPB in u_wrkseg
  *		ax = 0xFFFF if conditional, 0 if not
  *	output:	bx = 0 if okay, 0xFFFF if error; cx = error code
  */
-que_bxcx readq(uint8_t *mem, uint16_t dx, uint16_t ax) {
-    for (;;) {
-        uint16_t cx = queverify(mem, dx);
-        if (cx != 0) {
-            que_bxcx r = {0xFFFF, cx};
-            return r;
-        }
-        uint16_t qpb = dx;                                       /* es:[si]->QPB */
-        uint16_t bx = mem_r16(mem, (uint16_t)(qpb + qpb_qaddr));   /* bx->QD */
-        uint16_t di = mem_r16(mem, (uint16_t)(qpb + qpb_buffptr)); /* es:[di]->buff */
-        uint16_t msgcnt = mem_r16(mem, (uint16_t)(bx + q_msgcnt));
+que_bxcx readq(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t ax) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint16_t cx = queverify(phys, sysdat, dx);
+    if (cx != 0) {
+        que_bxcx r = {0xFFFF, cx};
+        return r;
+    }
+    for (;;) {                                                     /* qr_ver */
+        uint8_t *wseg = wrkseg_ptr(phys, sd);
+        uint16_t bx = seg_r16(wseg, (uint16_t)(dx + qpb_qaddr));    /* bx->QD */
+        uint16_t di = seg_r16(wseg, (uint16_t)(dx + qpb_buffptr));  /* es:[di]->buff */
+        uint16_t msgcnt = seg_r16(sd, (uint16_t)(bx + q_msgcnt));
         if (msgcnt == 0) {
             if (ax == 0) {
                 /* qr_wait: the running process waits on the QD's own DQ
                  * list; mpmif(f_sleep) is a boundary stub (no-op), which
                  * never changes msgcnt, so this retries forever -- see
                  * this file's own header comment */
-                uint16_t rlr = mem_r16(mem, SD_RLR);
-                mem[rlr + p_stat] = ps_dq;
+                seg_w8(sd, (uint16_t)(seg_r16(sd, SYSDAT_RLR) + p_stat), ps_dq);
                 continue; /* jmps qr_ver */
             }
             que_bxcx r = {0xFFFF, e_q_empty};
             return r;
         }
-        uint16_t msglen = mem_r16(mem, (uint16_t)(bx + q_msglen));
+        uint16_t msglen = seg_r16(sd, (uint16_t)(bx + q_msglen));
         if (msglen == 0) {
-            if (mem_r16(mem, (uint16_t)(bx + q_flags)) & qf_mx) {
-                mem_w16(mem, (uint16_t)(bx + q_buf), mem_r16(mem, SD_RLR)); /* MX queue: BUF=owner */
+            if (seg_r16(sd, (uint16_t)(bx + q_flags)) & qf_mx) {
+                seg_w16(sd, (uint16_t)(bx + q_buf), seg_r16(sd, SYSDAT_RLR)); /* MX queue: BUF=owner */
             }
         } else {
-            uint16_t msgout = mem_r16(mem, (uint16_t)(bx + q_msgout));
-            uint16_t si = (uint16_t)((uint16_t)(msgout * msglen) + mem_r16(mem, (uint16_t)(bx + q_buf)));
+            uint16_t msgout = seg_r16(sd, (uint16_t)(bx + q_msgout));
+            uint16_t si = (uint16_t)((uint16_t)(msgout * msglen) + seg_r16(sd, (uint16_t)(bx + q_buf)));
             for (uint16_t i = 0; i < msglen; i++) {
-                mem[(uint16_t)(di + i)] = mem[(uint16_t)(si + i)];
+                seg_w8(wseg, (uint16_t)(di + i), seg_r8(sd, (uint16_t)(si + i)));
             }
             msgout++;
-            if (msgout == mem_r16(mem, (uint16_t)(bx + q_nmsgs))) msgout = 0;
-            mem_w16(mem, (uint16_t)(bx + q_msgout), msgout);
+            if (msgout == seg_r16(sd, (uint16_t)(bx + q_nmsgs))) msgout = 0;
+            seg_w16(sd, (uint16_t)(bx + q_msgout), msgout);
         }
-        mem_w16(mem, (uint16_t)(bx + q_msgcnt), (uint16_t)(msgcnt - 1));
+        seg_w16(sd, (uint16_t)(bx + q_msgcnt), (uint16_t)(msgcnt - 1));
         /* call mpmif(f_wakeup) on the QD's own NQ list -- boundary stub, no-op */
         que_bxcx r = {0, 0};
         return r;
     }
 }
 
-que_bxcx readq_entry(uint8_t *mem, uint16_t dx) {
-    return readq(mem, dx, 0);
+que_bxcx readq_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    return readq(phys, sysdat, dx, 0);
 }
 
-que_bxcx creadq_entry(uint8_t *mem, uint16_t dx) {
-    return readq(mem, dx, 0xFFFF);
+que_bxcx creadq_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    return readq(phys, sysdat, dx, 0xFFFF);
 }
 
 /*
  * writeq -- shared body of writeq_entry (ax=0, unconditional) and
  * cwriteq_entry (ax=0xFFFF, conditional): write one message into a
  * queue, or wait for room.
- *	input:	dx = address of QPB in u_wrkseg (same flat simplification
- *		as readq above)
+ *	input:	dx = address of QPB in u_wrkseg
  *		ax = 0xFFFF if conditional, 0 if not
  *	output:	bx = 0 if okay, 0xFFFF if error; cx = error code
  */
-que_bxcx writeq(uint8_t *mem, uint16_t dx, uint16_t ax) {
-    for (;;) {
-        uint16_t cx = queverify(mem, dx);
-        if (cx != 0) {
-            que_bxcx r = {0xFFFF, cx};
-            return r;
-        }
-        uint16_t qpb = dx;                                       /* es:[di]->QPB */
-        uint16_t bx = mem_r16(mem, (uint16_t)(qpb + qpb_qaddr));   /* bx->QD */
-        uint16_t si = mem_r16(mem, (uint16_t)(qpb + qpb_buffptr)); /* es:[si]->QPB.buff */
-        uint16_t msgcnt = mem_r16(mem, (uint16_t)(bx + q_msgcnt));
-        uint16_t nmsgs = mem_r16(mem, (uint16_t)(bx + q_nmsgs));
+que_bxcx writeq(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t ax) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint16_t cx = queverify(phys, sysdat, dx);
+    if (cx != 0) {
+        que_bxcx r = {0xFFFF, cx};
+        return r;
+    }
+    for (;;) {                                                     /* qw_ver */
+        uint8_t *wseg = wrkseg_ptr(phys, sd);
+        uint16_t bx = seg_r16(wseg, (uint16_t)(dx + qpb_qaddr));    /* bx->QD */
+        uint16_t si = seg_r16(wseg, (uint16_t)(dx + qpb_buffptr));  /* es:[si]->QPB.buff */
+        uint16_t msgcnt = seg_r16(sd, (uint16_t)(bx + q_msgcnt));
+        uint16_t nmsgs = seg_r16(sd, (uint16_t)(bx + q_nmsgs));
         if (msgcnt == nmsgs) {
             if (ax == 0) {
                 /* qw_wait: the running process waits on the QD's own NQ
                  * list; mpmif(f_sleep) is a boundary stub (no-op), which
                  * never changes msgcnt, so this retries forever -- see
                  * this file's own header comment */
-                uint16_t rlr = mem_r16(mem, SD_RLR);
-                mem[rlr + p_stat] = ps_nq;
+                seg_w8(sd, (uint16_t)(seg_r16(sd, SYSDAT_RLR) + p_stat), ps_nq);
                 continue; /* jmps qw_ver */
             }
             que_bxcx r = {0xFFFF, e_q_full};
             return r;
         }
-        uint16_t msglen = mem_r16(mem, (uint16_t)(bx + q_msglen));
+        uint16_t msglen = seg_r16(sd, (uint16_t)(bx + q_msglen));
         if (msglen != 0) {
-            uint16_t slot = (uint16_t)(mem_r16(mem, (uint16_t)(bx + q_msgout)) + msgcnt);
+            uint16_t slot = (uint16_t)(seg_r16(sd, (uint16_t)(bx + q_msgout)) + msgcnt);
             if (slot >= nmsgs) slot = (uint16_t)(slot - nmsgs);
-            uint16_t di = (uint16_t)((uint16_t)(slot * msglen) + mem_r16(mem, (uint16_t)(bx + q_buf)));
+            uint16_t di = (uint16_t)((uint16_t)(slot * msglen) + seg_r16(sd, (uint16_t)(bx + q_buf)));
             for (uint16_t i = 0; i < msglen; i++) {
-                mem[(uint16_t)(di + i)] = mem[(uint16_t)(si + i)];
+                seg_w8(sd, (uint16_t)(di + i), seg_r8(wseg, (uint16_t)(si + i)));
             }
         }
-        mem_w16(mem, (uint16_t)(bx + q_msgcnt), (uint16_t)(msgcnt + 1));
-        if (mem_r16(mem, (uint16_t)(bx + q_flags)) & qf_mx) {
-            mem_w16(mem, (uint16_t)(bx + q_buf), 0); /* an MX queue, no owner */
+        seg_w16(sd, (uint16_t)(bx + q_msgcnt), (uint16_t)(msgcnt + 1));
+        if (seg_r16(sd, (uint16_t)(bx + q_flags)) & qf_mx) {
+            seg_w16(sd, (uint16_t)(bx + q_buf), 0); /* an MX queue, no owner */
         }
         /* call mpmif(f_wakeup) on the QD's own DQ list -- boundary stub, no-op */
         que_bxcx r = {0, 0};
@@ -274,10 +282,10 @@ que_bxcx writeq(uint8_t *mem, uint16_t dx, uint16_t ax) {
     }
 }
 
-que_bxcx writeq_entry(uint8_t *mem, uint16_t dx) {
-    return writeq(mem, dx, 0);
+que_bxcx writeq_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    return writeq(phys, sysdat, dx, 0);
 }
 
-que_bxcx cwriteq_entry(uint8_t *mem, uint16_t dx) {
-    return writeq(mem, dx, 0xFFFF);
+que_bxcx cwriteq_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
+    return writeq(phys, sysdat, dx, 0xFFFF);
 }

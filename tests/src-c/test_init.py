@@ -1,7 +1,24 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/kernel/init.c against src/kernel/
-INIT.SUP's `init`. `entry` is not ported -- see init.c's own header
-comment."""
+"""Differential test for src-c/kernel/init.c (`sup_init`) against
+src/kernel/INIT.SUP's `init`, both running against real memory layout.
+
+sup_init addresses real memory (defs.h's far_ptr(): seg*16 + off at
+real SYSDAT/IVT/SUP-cseg offsets), so the reference runs with
+tools/i86sim.py's segmented=True and a real, nonzero SYSDAT segment,
+and tests/src-c/fixtures/init_wrapper.A86 includes the real
+SYSDAT.FMT/VEC.FMT/UDA.FMT. Every field address below comes from the
+assembled symbol table, not a hand-copied constant, so a wrong
+SYSDAT_* offset in defs.h shows up as a mismatch at the real address.
+
+CS is 0: i86sim fetches instructions from the physical IP and ignores
+CS, so the code image has to sit at physical 0 for its own `cs:`
+accesses (cs:sysdat etc.) to land on it. The IVT at 380h is clear of
+the 17Dh-byte code image.
+
+Beyond the per-field checks, the two images are diffed byte for byte
+(outside the code image and the reference's own stack pushes) to
+catch a stray write on either side.
+"""
 import ctypes
 import os
 import subprocess
@@ -18,43 +35,33 @@ WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', '
 INIT_C = os.path.join(REPO_ROOT, 'src-c', 'kernel', 'init.c')
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 
-STACK_TOP = 0xFFF0
+SIM_MEM = 0x10000     # i86sim's segmented mode wraps at 64KB
+PHYS_MEM = 0x100000   # sup_init's view: the real 1MB 8086 address space
 
-# src-c/kernel/defs.h's own harness-chosen scratch addresses -- kept
-# in sync by hand with this test (see init_wrapper.A86's own header
-# comment for why these can't just be read off a real-system build).
-SD_INIT_VERSION, SD_INIT_TICK_TOS, SD_INIT_IDLE_TOS = 0xA800, 0xA802, 0xA804
-SD_INIT_INTFLAG = 0xA806
-SD_RSPSEG = 0xA80B
-SD_SUPMOD_SEG = 0xA88F
-I_MPM_IP, I_MPM_CS = 0x380, 0x382
-INIT_SYSDAT, INIT_SUPERVISOR_SEG = 0x0006, 0x000A
-SD_NCONDEV = 0xA036
-SD_NCIODEV = 0xA037
-SD_NLSTDEV = 0xA035
+CS = 0x0000
+DS_SYSDAT = 0x0400    # SYSDAT at physical 4000h-4B60h
+RSP_SEGS = (0x0600, 0x0700)
+NOTICK_OFS, IDLE_OFS, USER_ENTRY_OFS = 0x0179, 0x017A, 0x017B
+SUP_SEG = 0x1000      # module_table[SUP].entry segment half, copied to supervisor+2
+XIOS_INIT_SEG = 0xBEEF  # sentinel at SYSDAT 2Eh -- the bare `mov u_wrkseg,ds` bug's target
 
 
 def assemble_reference():
     asm = Assembler()
     asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
     code = asm.segment_bytes('cseg')
-    entry = asm.symtab['init'].value
-    xiosif = asm.symtab['xiosif'].value
-    # the 5 `callf dword ptr <...>mod[bx]` instructions -- their own
-    # *target* is only known at runtime (loaded from the module
-    # table), so tools/i86sim.py's far_call_stub_addrs keys off each
-    # instruction's own address instead; found by scanning cseg for
-    # `0xFF` with a ModRM reg field of 3 (CALL FAR r/m) in the range
-    # init's own body occupies, and cross-checked against nbdom/
-    # nciom/nxiom's own resolved addresses (each one's own `callf` +
-    # the trailing pop(s) lands exactly on the next label).
-    far_calls = []
-    for i in range(entry, len(code) - 1):
-        if code[i] == 0xFF and ((code[i + 1] >> 3) & 7) == 3:
-            far_calls.append(i)
+    sym = {name: asm.symtab[name].value for name in (
+        'init', 'rsp_out', 'xiosif', 'sysdat', 'supervisor', 'ver', 'version',
+        'tick_tos', 'idle_tos', 'intflag', 'ncondev', 'nciodev', 'nlstdev',
+        'rspseg', 'initpd', 'inituda', 'init_tos', 'supmod', 'i_mpm_ip', 'i_mpm_cs',
+        'p_uda', 'u_wrkseg', 'rsp_link')}
+    # the 5 `callf dword ptr <...>mod[bx]` -- target only known at
+    # run time, so stubbed by instruction address (0xFF /3, CALL FAR r/m)
+    far_calls = [i for i in range(sym['init'], len(code) - 1)
+                 if code[i] == 0xFF and ((code[i + 1] >> 3) & 7) == 3]
     assert len(far_calls) == 5, f"expected 5 callf sites, found {far_calls}"
-    stop_addr = asm.symtab['rsp_out'].value + 6  # past the final int mpmint
-    return code, entry, xiosif, far_calls, stop_addr
+    stop_addr = sym['rsp_out'] + 6  # past the final int mpmint
+    return code, sym, far_calls, stop_addr
 
 
 def build_c_library():
@@ -67,34 +74,60 @@ def build_c_library():
     return lib_path
 
 
-def base_memory():
-    return bytearray(0x10000)
+def phys(seg, off):
+    return seg * 16 + off
 
 
-def run_reference(code, entry, xiosif, far_calls, stop_addr, mem, regs):
+def w16(mem, addr, val):
+    mem[addr] = val & 0xFF
+    mem[addr + 1] = (val >> 8) & 0xFF
+
+
+def r16(mem, addr):
+    return mem[addr] | (mem[addr + 1] << 8)
+
+
+def initial_memory(sym, rsp_segs):
+    mem = bytearray(SIM_MEM)
+    w16(mem, phys(DS_SYSDAT, sym['supmod'] + 2), SUP_SEG)
+    w16(mem, phys(DS_SYSDAT, 0x2E), XIOS_INIT_SEG)
+    w16(mem, phys(DS_SYSDAT, sym['rspseg']), rsp_segs[0] if rsp_segs else 0)
+    for seg, nxt in zip(rsp_segs, list(rsp_segs[1:]) + [0]):
+        w16(mem, phys(seg, sym['rsp_link']), nxt)
+    return mem
+
+
+def run_reference(code, sym, far_calls, stop_addr, mem):
     image = bytearray(mem)
     image[0:len(code)] = code
     sim = I86Sim(
-        image, {**regs, 'sp': STACK_TOP}, entry,
+        image, {'cs': CS, 'ds': DS_SYSDAT, 'ss': DS_SYSDAT, 'sp': 0xFFF0}, sym['init'],
         stop_addrs={stop_addr},
-        call_stub_addrs={xiosif},
+        call_stub_addrs={sym['xiosif']},
         int_stub_nums={224},  # mpmint
         far_call_stub_addrs=set(far_calls),
+        segmented=True,
     )
     sim.run()
-    return sim.regs, image
+    return image
+
+
+def run_port(lib, code, mem):
+    buf = (ctypes.c_uint8 * PHYS_MEM)()
+    ctypes.memmove(buf, bytes(mem), len(mem))
+    ctypes.memmove(buf, bytes(code), len(code))
+    lib.sup_init(buf, ctypes.c_uint16(DS_SYSDAT), ctypes.c_uint16(CS),
+                 ctypes.c_uint16(NOTICK_OFS), ctypes.c_uint16(IDLE_OFS),
+                 ctypes.c_uint16(USER_ENTRY_OFS))
+    return bytes(buf)
 
 
 def main():
-    code, entry, xiosif, far_calls, stop_addr = assemble_reference()
+    code, sym, far_calls, stop_addr = assemble_reference()
     lib_path = build_c_library()
     try:
         lib = ctypes.CDLL(lib_path)
-        c_u8p = ctypes.POINTER(ctypes.c_uint8)
-
-        lib.sup_init.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16,
-                              ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16]
-
+        lib.sup_init.argtypes = [ctypes.POINTER(ctypes.c_uint8)] + [ctypes.c_uint16] * 5
         failures = []
 
         def check(label, ref, port):
@@ -103,53 +136,46 @@ def main():
             if status == "FAIL":
                 failures.append(label)
 
-        def to_ctypes(mem):
-            return (ctypes.c_uint8 * 0x10000)(*mem)
+        for case, rsp_segs in (("no RSPs", ()), ("two-RSP chain", RSP_SEGS)):
+            mem = initial_memory(sym, rsp_segs)
+            ref = run_reference(code, sym, far_calls, stop_addr, mem)
+            port = run_port(lib, code, mem)
 
-        DS_SYSDAT = 0x1234
-        CS = 0x5678
-        NOTICK_OFS = 0x0001
-        IDLE_OFS = 0x0002
-        USER_ENTRY_OFS = 0x0003
+            def both16(addr):
+                return r16(ref, addr), r16(port, addr)
 
-        # -- init: no RSPs (rspseg=0), straight through to termination --
-        mem = base_memory()
-        mem[SD_SUPMOD_SEG:SD_SUPMOD_SEG + 2] = (0xCD, 0xAB)
-        mem[SD_RSPSEG:SD_RSPSEG + 2] = (0, 0)
-        ref_regs, ref_img = run_reference(
-            code, entry, xiosif, far_calls, stop_addr, mem,
-            {'ds': DS_SYSDAT, 'cs': CS})
-        buf = to_ctypes(mem)
-        lib.sup_init(ctypes.cast(buf, c_u8p), ctypes.c_uint16(DS_SYSDAT), ctypes.c_uint16(CS),
-                  ctypes.c_uint16(NOTICK_OFS), ctypes.c_uint16(IDLE_OFS), ctypes.c_uint16(USER_ENTRY_OFS))
-        port = bytes(buf)
-        check("init: sysdat", ref_img[INIT_SYSDAT:INIT_SYSDAT + 2], port[INIT_SYSDAT:INIT_SYSDAT + 2])
-        check("init: supervisor segment", ref_img[INIT_SUPERVISOR_SEG:INIT_SUPERVISOR_SEG + 2],
-              port[INIT_SUPERVISOR_SEG:INIT_SUPERVISOR_SEG + 2])
-        check("init: version", ref_img[SD_INIT_VERSION:SD_INIT_VERSION + 2], port[SD_INIT_VERSION:SD_INIT_VERSION + 2])
-        check("init: tick_tos", ref_img[SD_INIT_TICK_TOS:SD_INIT_TICK_TOS + 2], port[SD_INIT_TICK_TOS:SD_INIT_TICK_TOS + 2])
-        check("init: idle_tos", ref_img[SD_INIT_IDLE_TOS:SD_INIT_IDLE_TOS + 2], port[SD_INIT_IDLE_TOS:SD_INIT_IDLE_TOS + 2])
-        check("init: i_mpm_ip", ref_img[I_MPM_IP:I_MPM_IP + 2], port[I_MPM_IP:I_MPM_IP + 2])
-        check("init: i_mpm_cs", ref_img[I_MPM_CS:I_MPM_CS + 2], port[I_MPM_CS:I_MPM_CS + 2])
-        check("init: intflag", ref_img[SD_INIT_INTFLAG], port[SD_INIT_INTFLAG])
-        check("init: ncondev", ref_img[SD_NCONDEV], port[SD_NCONDEV])
-        check("init: nciodev", ref_img[SD_NCIODEV], port[SD_NCIODEV])
-        check("init: nlstdev", ref_img[SD_NLSTDEV], port[SD_NLSTDEV])
-        # `u_wrkseg` (the bug fix) and the RSP-list walk both go
-        # through a real `es:`-prefixed access -- tools/i86sim.py
-        # only computes a real segment:offset address for one when
-        # `segmented=True`, which would also turn every *other*
-        # access in this same routine (version/tick_tos/etc, all
-        # plain bare instructions that default to DS) from this
-        # test's own flat scratch addresses into real `ds*16+offset`
-        # computations, breaking them instead -- init.c's own fields
-        # can't all be moved to genuine segment-relative addressing
-        # without redoing this port the way ml.c/proc.c/etc. do (a
-        # much bigger undertaking). Both are translated faithfully in
-        # init.c regardless (via mem_r16_seg/mem_w16_seg, the correct
-        # idiom either way), just not independently exercised by this
-        # test -- same "translated faithfully but not exercised"
-        # precedent as QUE1.RTM's own retry loops.
+            sd = lambda off: phys(DS_SYSDAT, off)  # noqa: E731
+            uda_seg = (sym['inituda'] >> 4) + DS_SYSDAT
+
+            check(f"{case}: cs:sysdat", *both16(phys(CS, sym['sysdat'])))
+            check(f"{case}: cs:supervisor segment", *both16(phys(CS, sym['supervisor'] + 2)))
+            check(f"{case}: version", *both16(sd(sym['version'])))
+            check(f"{case}: tick_tos", *both16(sd(sym['tick_tos'])))
+            check(f"{case}: idle_tos", *both16(sd(sym['idle_tos'])))
+            check(f"{case}: i_mpm_ip", *both16(phys(0, sym['i_mpm_ip'])))
+            check(f"{case}: i_mpm_cs", *both16(phys(0, sym['i_mpm_cs'])))
+            check(f"{case}: initpd.p_uda", *both16(sd(sym['initpd'] + sym['p_uda'])))
+            check(f"{case}: p_uda is inituda's own paragraph", uda_seg, r16(port, sd(sym['initpd'] + sym['p_uda'])))
+            check(f"{case}: inituda.u_wrkseg", *both16(phys(uda_seg, sym['u_wrkseg'])))
+            check(f"{case}: SYSDAT 2Eh untouched (u_wrkseg bug fix)", XIOS_INIT_SEG, r16(port, sd(0x2E)))
+            check(f"{case}: intflag", ref[sd(sym['intflag'])], port[sd(sym['intflag'])])
+            check(f"{case}: ncondev", ref[sd(sym['ncondev'])], port[sd(sym['ncondev'])])
+            check(f"{case}: nciodev", ref[sd(sym['nciodev'])], port[sd(sym['nciodev'])])
+            check(f"{case}: nlstdev", ref[sd(sym['nlstdev'])], port[sd(sym['nlstdev'])])
+            check(f"{case}: rspseg (list consumed)", *both16(sd(sym['rspseg'])))
+            for seg in rsp_segs:
+                check(f"{case}: RSP {seg:04X}h rsp_link = sysdat", *both16(phys(seg, sym['rsp_link'])))
+
+            # whole-image diff, outside the code image, the reference's
+            # own stack pushes just below init_tos, and the return
+            # sentinel I86Sim pushes onto the initial stack at entry
+            stack = set(range(sd(sym['init_tos']) - 0x10, sd(sym['init_tos'])))
+            entry_sp = (DS_SYSDAT * 16 + 0xFFF0 - 2) & 0xFFFF
+            stack |= {entry_sp, entry_sp + 1}
+            diffs = [hex(a) for a in range(len(code), SIM_MEM)
+                     if a not in stack and ref[a] != port[a]]
+            check(f"{case}: no other bytes differ", [], diffs[:8])
+            check(f"{case}: nothing written past 64KB", True, not any(port[SIM_MEM:]))
 
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")

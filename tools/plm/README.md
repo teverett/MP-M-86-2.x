@@ -113,12 +113,40 @@ compiler *listings*, never code generation.
   discoveries" below for how `MEMORY` specifically was confirmed to be a
   builtin rather than a missing declaration.
 
-## Calling convention (defined by this compiler)
+## Program layout
 
-Not independently verified against a historical PL/M-86 ABI reference —
-see the module docstring in `codegen.py` for the full rationale:
-- Arguments are pushed right-to-left, so the first declared parameter is
-  at `[bp+4]`, the second at `[bp+6]`, etc.
+A module that defines `PLMSTART` gets `MCD.A86`'s startup at code offset
+0: SS = DS, SP = a 256-byte stack at the end of the module's data, then
+`jmp plmstart`. The data segment starts with the base page (the loader
+fills it in), and EXTERNAL declarations of the base-page names `MCD.A86`
+makes PUBLIC (`fcb`, `fcb16`, `tbuff`/`buff`, `cmdrv`, `pass0`, `len0`,
+`pass1`, `len1`, `maxb`, `bdisk`, ...) refer to it at their fixed
+offsets; the module's own data starts at 100h.
+
+## Types
+
+Values are BYTE, ADDRESS (WORD/INTEGER are 16-bit too) or POINTER, as
+PL/M types them. A POINTER is the COMPACT model's (every utility here is
+`$COMPACT`): 4 bytes, offset then segment, held in DX:AX. `@x` is a
+POINTER (DS:x, or the segment of the POINTER that `x` is BASED on); data
+BASED on a POINTER is read and written through ES; a POINTER-returning
+EXTERNAL (`mon4`) comes back in ES:BX; MOVE/MOVB/MOVW take POINTER or
+ADDRESS operands. For BYTE and ADDRESS: a constant below 256 is a BYTE, an operation on two
+BYTEs is an 8-bit BYTE (`cnt = -1` with a BYTE `cnt` compares against
+0FFh; 0FFh + 1 is 0), anything with an ADDRESS operand is an ADDRESS.
+Everything is computed in AX, and a BYTE result is truncated. ROL/ROR/
+SHL/SHR/SCL/SCR on a BYTE work on 8 bits. `IF`/`WHILE` test the low bit
+of the condition (TRUE is 0FFh or any odd value).
+
+## Calling convention
+
+PL/M-86's, as DRI's `MCD.A86` stub (`runtime_stub.A86`) requires — it
+reads a `mon1(func, info)` call's `func` from `[bp+6]` and `info` from
+`[bp+4]`:
+- Arguments are pushed left to right, so the last declared parameter is
+  at `[bp+4]` and the first is deepest (`[bp+4+2*(n-1)]`). (Until
+  docs/bugs.md #115 this compiler pushed right to left, which swapped
+  every system call's function number and parameter.)
 - Every parameter and local variable occupies a full 16-bit stack slot
   regardless of its declared type.
 - The callee pops its own parameters (`RET imm16`).
@@ -136,9 +164,8 @@ compiler, a **static link**:
 
 - A nested procedure takes one extra, hidden, last argument: a pointer
   to its immediately enclosing procedure's stack frame (its `BP` at the
-  time of the call). It's pushed *after* the real arguments (which are
-  already pushed right-to-left), so it lands at `[bp+4]` in the callee
-  and the real parameters shift up to start at `[bp+6]` — see
+  time of the call). It's pushed *after* the real arguments, so it lands
+  at `[bp+4]` in the callee and the real parameters shift up by 2 — see
   `LINK_OFFSET`/`gen_proc` in `codegen.py`.
 - At the call site, the value pushed as the static link is whichever
   frame is currently reachable that corresponds to the callee's

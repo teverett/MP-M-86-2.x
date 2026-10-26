@@ -3,6 +3,11 @@
 subset of src/kernel/FILE3.BDO: pack_sdcnt, compare, search_olist/
 search_llist/searchn_list (+ internal search_listo). See file3.c's own
 header comment for why the rest of the file is deferred.
+On real memory: file*.c take (phys, ds_bdos) and address DATA.BDO's
+fields, FCBs and directory buffers through the BDOS's DS (the combined
+SYSDAT+DATA.BDO segment). This test keeps that segment at 0, so its flat
+addresses are those DS offsets; tests/src-c/test_bdos_real.py covers
+the same code with SYSDAT at a nonzero segment.
 """
 import ctypes
 import os
@@ -143,7 +148,7 @@ def main():
 
         lib.pack_sdcnt.argtypes = [c_u8p, ctypes.c_uint16]
         lib.compare.restype = ctypes.c_uint8
-        lib.compare.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint8]
+        lib.compare.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint8]
         lib.search_olist.restype = ctypes.c_uint8
         lib.search_olist.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint8]
         lib.search_llist.restype = ctypes.c_uint8
@@ -171,7 +176,11 @@ def main():
                 failures.append(label)
 
         def to_ctypes(mem):
-            return (ctypes.c_uint8 * 0x10000)(*mem)
+            # physical memory for the real-memory C side; this test keeps
+            # SYSDAT (the BDOS's DS) at segment 0, see the docstring
+            buf = (ctypes.c_uint8 * 0x100000)()
+            ctypes.memmove(buf, bytes(mem), len(mem))
+            return buf
 
         # -- pack_sdcnt: sdblk == 0, derive dblk from sdcnt --
         mem = base_memory()

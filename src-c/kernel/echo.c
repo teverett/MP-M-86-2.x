@@ -18,45 +18,36 @@
  * this function already makes explicit (reading the PD's console byte,
  * writing the patched command tail).
  *
- * `pdadr`/`cmdtail`/`console` below are ECHO.A86's own DSEG addresses,
- * confirmed via `python3 tools/asm86.py src/rsp/ECHO.A86 --symbols`, not
- * shared with the rest of the kernel (ECHO.A86 defines everything it
- * needs itself, with no INCLUDEs at all) -- hence hardcoded here rather
- * than added to defs.h.
- *
- * Not modeled: ECHO.A86's own `sdatseg` word (its copy of the pattern
- * seen in MEMIF.MEM/RTMIF.RTM/SUPIF.SUP) sits at cseg offset 0, which
- * numerically collides with this test's own flat memory model placing
- * ECHO's code at address 0 too (on real hardware CS and DS/ES are
- * different physical segments, so there's no actual collision there).
- * This is harmless here specifically because nothing this port implements
- * ever depends on the resulting (garbage, in the test) ES value -- see
- * tools/i86sim.py's own note on segment overrides being no-ops.
+ * Runs against real memory (defs.h's far_ptr): `phys` is the base of
+ * real physical memory and `ds` ECHO's data segment, with
+ * `sdatseg`/`pdadr`/`cmdtail`/`console` at their real ECHO.A86 DSEG
+ * offsets. The queue message (`qread`'s result, preset by the caller)
+ * is the CLI's: the sending process's PD, then the command tail. The PD
+ * is read through ES = sdatseg, the SYSDAT segment `main:` loads.
  */
 #include <stdint.h>
 
 #include "defs.h"
 
+#define ECHO_SDATSEG 0x000
 #define ECHO_P_CNS  0x20
 #define ECHO_PDADR  0x283
 #define ECHO_CMDTAIL 0x285
 #define ECHO_CONSOLE 0x319
 
-void echo_loop_once(uint8_t *mem) {
-    uint16_t bx = mem_r16(mem, ECHO_PDADR);
-    uint8_t dl = mem[(uint16_t)(bx + ECHO_P_CNS)];
-    mem[ECHO_CONSOLE] = dl;
+void echo_loop_once(uint8_t *phys, uint16_t ds) {
+    uint8_t *d = far_ptr(phys, ds, 0);
+    const uint8_t *es = far_ptr(phys, seg_r16(d, ECHO_SDATSEG), 0);
+    seg_w8(d, ECHO_CONSOLE, seg_r8(es, (uint16_t)(seg_r16(d, ECHO_PDADR) + ECHO_P_CNS)));
     /* mpm_setdefcon -- boundary stub, no-op */
 
-    bx = ECHO_CMDTAIL;
+    uint16_t bx = ECHO_CMDTAIL;
     uint16_t dx = (uint16_t)(bx + 131);
-    for (;;) {
-        if (bx > dx) break;
-        if (mem[bx] == '$' || mem[bx] == 0) break;
+    while (bx <= dx && seg_r8(d, bx) != '$' && seg_r8(d, bx) != 0) {
         bx++;
     }
-    mem[bx] = 13;
-    mem[(uint16_t)(bx + 1)] = 10;
-    mem[(uint16_t)(bx + 2)] = '$';
+    seg_w8(d, bx, 13);
+    seg_w8(d, (uint16_t)(bx + 1), 10);
+    seg_w8(d, (uint16_t)(bx + 2), '$');
     /* mpm_conwrite, mpm_condetach -- boundary stubs, no-op */
 }

@@ -40,7 +40,11 @@ REAL_FILE = os.path.join(REPO_ROOT, 'src', 'kernel', 'XIOS86Q.A86')
 XIOS86Q_C = os.path.join(REPO_ROOT, 'src-c', 'kernel', 'xios86q.c')
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 
-STACK_TOP = 0xFFF0
+XSEG = 0x0100        # the XIOS's DS: SYSDAT (its data follows SYSDAT's own, from 1000h)
+XBASE = XSEG * 16
+CSEG = 0x0600        # its CS: the combined kernel code segment, not SYSDAT
+CBASE = CSEG * 16
+STACK_SEG, STACK_TOP = 0x0800, 0x0FF0
 
 XQ_TICK_COUNT, XQ_CLOCKON = 0x1000, 0x1001
 XQ_DISK, XQ_TRK, XQ_SECT = 0x1004, 0x1005, 0x1006
@@ -112,6 +116,12 @@ def assemble_reference():
     return code, dseg, entries
 
 
+def assemble_symbols():
+    asm = Assembler()
+    asm.assemble(REAL_FILE, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+    return {k: v.value for k, v in asm.symtab.items()}
+
+
 def build_c_library():
     lib_path = tempfile.mktemp(suffix='.dylib' if sys.platform == 'darwin' else '.so')
     subprocess.run(
@@ -122,20 +132,22 @@ def build_c_library():
     return lib_path
 
 
-def run_reference(code, dseg, entry, regs, device, mem=None, stop_addrs=None, max_steps=100000):
+def xios_image(code, dseg, mem=None):
+    """the XIOS's code at CSEG and its DSEG image at XSEG (SYSDAT: the
+    XIOS's own fields start at 4096); then a case's own bytes (physical
+    addresses)"""
     image = bytearray(0x10000)
-    image[0:len(code)] = code
-    # XIOS86Q.A86's own DSEG switch happens at `org 4096`, well past
-    # cseg's own small length -- same cseg/dseg overlay-from-boundary
-    # technique as src-c/kernel/xios.c's own differential test (there,
-    # the boundary is cseg's own length; here it's the literal `4096`
-    # the source itself orgs to -- confirmed dseg's own real field
-    # addresses, e.g. XQ_TICK_COUNT=0x1000, all land past it).
-    image[len(code):len(dseg)] = dseg[len(code):]
+    image[CBASE:CBASE + len(code)] = code
+    image[XBASE:XBASE + len(dseg)] = dseg
     if mem is not None:
         for addr, val in enumerate(mem):
             if val != 0:
                 image[addr] = val
+    return image
+
+
+def run_reference(code, dseg, entry, regs, device, mem=None, stop_addrs=None, max_steps=100000):
+    image = xios_image(code, dseg, mem)
 
     def io_in_hook(sim, port, width):
         assert width == 8
@@ -145,8 +157,9 @@ def run_reference(code, dseg, entry, regs, device, mem=None, stop_addrs=None, ma
         assert width == 8
         device.out8(port, value)
 
-    sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry,
-                 stop_addrs=stop_addrs or frozenset(),
+    sim = I86Sim(image, {**regs, 'cs': CSEG, 'ds': XSEG, 'es': XSEG, 'ss': STACK_SEG, 'sp': STACK_TOP},
+                 CBASE + entry, segmented=True,
+                 stop_addrs={CBASE + a for a in stop_addrs or ()},
                  io_in_hook=io_in_hook, io_out_hook=io_out_hook)
     sim.run(max_steps=max_steps)
     return sim.regs, image
@@ -178,35 +191,35 @@ def main():
         lib.maxlist_entry.restype = ctypes.c_uint16
         lib.maxlist_entry.argtypes = []
         lib.disk_home_entry.restype = None
-        lib.disk_home_entry.argtypes = [c_u8p, IN8_FN, OUT8_FN]
+        lib.disk_home_entry.argtypes = [c_u8p, ctypes.c_uint16, IN8_FN, OUT8_FN]
         lib.seldsk_entry.restype = ctypes.c_uint16
-        lib.seldsk_entry.argtypes = [c_u8p, ctypes.c_uint8]
+        lib.seldsk_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint8]
         lib.settrk_entry.restype = None
-        lib.settrk_entry.argtypes = [c_u8p, ctypes.c_uint8]
+        lib.settrk_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint8]
         lib.setsec_entry.restype = None
-        lib.setsec_entry.argtypes = [c_u8p, ctypes.c_uint8]
+        lib.setsec_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint8]
         lib.setdma_entry.restype = None
-        lib.setdma_entry.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.setdma_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16]
         lib.setdmab_entry.restype = None
-        lib.setdmab_entry.argtypes = [c_u8p, ctypes.c_uint16]
+        lib.setdmab_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16]
         lib.sectran_entry.restype = ctypes.c_uint16
-        lib.sectran_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16]
+        lib.sectran_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16]
         lib.diskread_entry.restype = ctypes.c_uint8
-        lib.diskread_entry.argtypes = [c_u8p, IN8_FN, OUT8_FN, ctypes.c_uint16]
+        lib.diskread_entry.argtypes = [c_u8p, ctypes.c_uint16, IN8_FN, OUT8_FN]
         lib.diskwrite_entry.restype = ctypes.c_uint8
-        lib.diskwrite_entry.argtypes = [c_u8p, IN8_FN, OUT8_FN, ctypes.c_uint16]
+        lib.diskwrite_entry.argtypes = [c_u8p, ctypes.c_uint16, IN8_FN, OUT8_FN]
         lib.getsegt_entry.restype = ctypes.c_uint16
         lib.getsegt_entry.argtypes = []
         lib.flushbuf_entry.restype = ctypes.c_uint8
         lib.flushbuf_entry.argtypes = []
         lib.strtclk_entry.restype = None
-        lib.strtclk_entry.argtypes = [c_u8p]
+        lib.strtclk_entry.argtypes = [c_u8p, ctypes.c_uint16]
         lib.stopclk_entry.restype = None
-        lib.stopclk_entry.argtypes = [c_u8p]
+        lib.stopclk_entry.argtypes = [c_u8p, ctypes.c_uint16]
         lib.polldev_entry.restype = ctypes.c_uint8
         lib.polldev_entry.argtypes = [IN8_FN, ctypes.c_uint8]
         lib.init_entry.restype = None
-        lib.init_entry.argtypes = [c_u8p, IN8_FN, OUT8_FN]
+        lib.init_entry.argtypes = [c_u8p, ctypes.c_uint16, IN8_FN, OUT8_FN]
 
         failures = []
 
@@ -266,43 +279,43 @@ def main():
         # -- SELDSK: disk 0 / out-of-range --
         for cl in (0, 1, 2):
             ref_regs, _ = run_reference(code, dseg, entries['seldsk'], {'cx': cl}, Device())
-            port_ax = lib.seldsk_entry(to_ctypes(bytearray(0x10000)), ctypes.c_uint8(cl))
+            port_ax = lib.seldsk_entry(to_ctypes(bytearray(0x10000)), XSEG, ctypes.c_uint8(cl))
             check(f"SELDSK cl={cl}", ref_regs['ax'], port_ax)
         assert run_reference(code, dseg, entries['seldsk'], {'cx': 0}, Device())[0]['ax'] == XQ_DPH0
 
         # -- SETTRK/SETSEC --
         ref_regs, ref_img = run_reference(code, dseg, entries['settrk'], {'cx': 0x2A}, Device())
         buf = to_ctypes(bytearray(0x10000))
-        lib.settrk_entry(buf, ctypes.c_uint8(0x2A))
-        check("SETTRK", ref_img[XQ_TRK], bytes(buf)[XQ_TRK])
+        lib.settrk_entry(buf, XSEG, ctypes.c_uint8(0x2A))
+        check("SETTRK", ref_img[XBASE + XQ_TRK], bytes(buf)[XBASE + XQ_TRK])
 
         ref_regs, ref_img = run_reference(code, dseg, entries['setsec'], {'cx': 0x07}, Device())
         buf = to_ctypes(bytearray(0x10000))
-        lib.setsec_entry(buf, ctypes.c_uint8(0x07))
-        check("SETSEC", ref_img[XQ_SECT], bytes(buf)[XQ_SECT])
+        lib.setsec_entry(buf, XSEG, ctypes.c_uint8(0x07))
+        check("SETSEC", ref_img[XBASE + XQ_SECT], bytes(buf)[XBASE + XQ_SECT])
 
         # -- SETDMA/SETDMAB --
         ref_regs, ref_img = run_reference(code, dseg, entries['setdma'], {'cx': 0x1234}, Device())
         buf = to_ctypes(bytearray(0x10000))
-        lib.setdma_entry(buf, ctypes.c_uint16(0x1234))
-        check("SETDMA", ref_img[XQ_DMA_ADR:XQ_DMA_ADR + 2], bytes(buf)[XQ_DMA_ADR:XQ_DMA_ADR + 2])
+        lib.setdma_entry(buf, XSEG, ctypes.c_uint16(0x1234))
+        check("SETDMA", ref_img[XBASE + XQ_DMA_ADR:XBASE + XQ_DMA_ADR + 2], bytes(buf)[XBASE + XQ_DMA_ADR:XBASE + XQ_DMA_ADR + 2])
 
         ref_regs, ref_img = run_reference(code, dseg, entries['setdmab'], {'cx': 0x5678}, Device())
         buf = to_ctypes(bytearray(0x10000))
-        lib.setdmab_entry(buf, ctypes.c_uint16(0x5678))
-        check("SETDMAB", ref_img[XQ_DMA_SEG:XQ_DMA_SEG + 2], bytes(buf)[XQ_DMA_SEG:XQ_DMA_SEG + 2])
+        lib.setdmab_entry(buf, XSEG, ctypes.c_uint16(0x5678))
+        check("SETDMAB", ref_img[XBASE + XQ_DMA_SEG:XBASE + XQ_DMA_SEG + 2], bytes(buf)[XBASE + XQ_DMA_SEG:XBASE + XQ_DMA_SEG + 2])
 
         # -- SECTRAN --
         ref_regs, _ = run_reference(code, dseg, entries['sectran'], {'cx': 9, 'dx': 0}, Device())
         check("SECTRAN: no translation", ref_regs['ax'],
-              lib.sectran_entry(to_ctypes(bytearray(0x10000)), ctypes.c_uint16(9), ctypes.c_uint16(0)))
+              lib.sectran_entry(to_ctypes(bytearray(0x10000)), XSEG, ctypes.c_uint16(9), ctypes.c_uint16(0)))
         table_base = 0x2000
         table_data = bytes([10, 20, 30, 40])
         mem = bytearray(0x10000)
-        mem[table_base:table_base + len(table_data)] = table_data
+        mem[XBASE + table_base:XBASE + table_base + len(table_data)] = table_data
         ref_regs, _ = run_reference(code, dseg, entries['sectran'], {'cx': 2, 'dx': table_base}, Device(), mem=mem)
         check("SECTRAN: table lookup", ref_regs['ax'],
-              lib.sectran_entry(to_ctypes(mem), ctypes.c_uint16(2), ctypes.c_uint16(table_base)))
+              lib.sectran_entry(to_ctypes(mem), XSEG, ctypes.c_uint16(2), ctypes.c_uint16(table_base)))
 
         # -- POLLDEV --
         for label, cl, uart in (("c0indev not ready", 0x00, Uart86Q(rx_bytes=b'')),
@@ -319,24 +332,26 @@ def main():
         c_fdc = Fdc86Q()
         in8, out8 = make_c_hooks(Device(fdc=c_fdc))
         buf = to_ctypes(bytearray(0x10000))
-        lib.disk_home_entry(buf, in8, out8)
-        check("DISK_HOME: trk reset to 0", ref_img[XQ_TRK], bytes(buf)[XQ_TRK])
+        lib.disk_home_entry(buf, XSEG, in8, out8)
+        check("DISK_HOME: trk reset to 0", ref_img[XBASE + XQ_TRK], bytes(buf)[XBASE + XQ_TRK])
         check("DISK_HOME: FDC command bytes sent", ref_fdc.sent, c_fdc.sent)
 
-        # -- DISKREAD/DISKWRITE: trk=5/sect=3, ds=0 (moot -- see
-        # xios86q.c's own header comment), dma_seg:dma_adr = a flat
-        # scratch buffer this test owns --
-        DS = 0
-        DMA_SEG, DMA_ADR = 0x3000, 0x0000
+        # -- DISKREAD/DISKWRITE: trk=5/sect=3, the caller's buffer at
+        # dma_seg:dma_adr; the 8237 gets secbuf's physical address
+        # (XSEG:secbuf) --
+        DMA_SEG, DMA_ADR = 0x0500, 0x0010
         for name, entry_name, c_fn in (("DISKREAD", 'diskread', lib.diskread_entry),
                                         ("DISKWRITE", 'diskwrite', lib.diskwrite_entry)):
             mem = bytearray(0x10000)
-            mem[XQ_TRK] = 5
-            mem[XQ_SECT] = 3
-            mem[XQ_DMA_ADR] = DMA_ADR & 0xFF
-            mem[XQ_DMA_ADR + 1] = DMA_ADR >> 8
-            mem[XQ_DMA_SEG] = DMA_SEG & 0xFF
-            mem[XQ_DMA_SEG + 1] = DMA_SEG >> 8
+            mem[XBASE + XQ_TRK] = 5
+            mem[XBASE + XQ_SECT] = 3
+            mem[XBASE + XQ_DMA_ADR] = DMA_ADR & 0xFF
+            mem[XBASE + XQ_DMA_ADR + 1] = DMA_ADR >> 8
+            mem[XBASE + XQ_DMA_SEG] = DMA_SEG & 0xFF
+            mem[XBASE + XQ_DMA_SEG + 1] = DMA_SEG >> 8
+            # the sector as the 8237 left it in secbuf (DMA isn't modeled)
+            for i in range(512):
+                mem[XBASE + XQ_SECBUF + i] = (0x80 + i) & 0xFF
             if name == "DISKWRITE":
                 phys = (DMA_SEG * 16 + DMA_ADR) & 0xFFFF
                 for i in range(128):
@@ -349,11 +364,14 @@ def main():
                                                mem=mem, max_steps=400000)
             c_fdc = Fdc86Q()
             in8, out8 = make_c_hooks(Device(fdc=c_fdc))
-            c_mem = to_ctypes(mem)
-            port_al = c_fn(c_mem, in8, out8, ctypes.c_uint16(DS))
+            c_mem = to_ctypes(xios_image(code, dseg, mem))
+            port_al = c_fn(c_mem, XSEG, in8, out8)
             check(f"{name}: AL result", ref_regs['ax'] & 0xFF, port_al)
             check(f"{name}: FDC command bytes sent", ref_fdc.sent, c_fdc.sent)
             check(f"{name}: DMA register writes", ref_fdc.dma_writes, c_fdc.dma_writes)
+            check(f"{name}: no other bytes differ", [],
+                  [hex(i) for i in range(0x10000) if not CBASE <= i < CBASE + len(code)
+                   and not STACK_SEG * 16 <= i < STACK_SEG * 16 + STACK_TOP and ref_img[i] != c_mem[i]][:8])
             if name == "DISKREAD":
                 phys = (DMA_SEG * 16 + DMA_ADR) & 0xFFFF
                 ref_bytes = bytes(ref_img[(phys + i) & 0xFFFF] for i in range(128))
@@ -364,15 +382,15 @@ def main():
         mem = bytearray(0x10000)
         ref_regs, ref_img = run_reference(code, dseg, entries['strtclk'], {}, Device(), mem=mem)
         buf = to_ctypes(bytearray(0x10000))
-        lib.strtclk_entry(buf)
-        check("STRTCLK", ref_img[XQ_CLOCKON], bytes(buf)[XQ_CLOCKON])
+        lib.strtclk_entry(buf, XSEG)
+        check("STRTCLK", ref_img[XBASE + XQ_CLOCKON], bytes(buf)[XBASE + XQ_CLOCKON])
 
         mem = bytearray(0x10000)
-        mem[XQ_CLOCKON] = 0xff
+        mem[XBASE + XQ_CLOCKON] = 0xff
         ref_regs, ref_img = run_reference(code, dseg, entries['stopclk'], {}, Device(), mem=mem)
         buf = to_ctypes(mem)
-        lib.stopclk_entry(buf)
-        check("STOPCLK", ref_img[XQ_CLOCKON], bytes(buf)[XQ_CLOCKON])
+        lib.stopclk_entry(buf, XSEG)
+        check("STOPCLK", ref_img[XBASE + XQ_CLOCKON], bytes(buf)[XBASE + XQ_CLOCKON])
 
         # -- INIT: UART/PIT/PIC/FDC arming + signon, stop right at
         # the far-pointer-copy section this port doesn't model (the
@@ -416,68 +434,70 @@ def main():
                                            stop_addrs={entries['entry'] - 1})
         c_device = Device()
         c_mem = bytearray(0x10000)
-        c_mem[XQ_SIGNON:XQ_SIGNON + len(signon_bytes)] = signon_bytes
+        c_mem[XBASE + XQ_SIGNON:XBASE + XQ_SIGNON + len(signon_bytes)] = signon_bytes
         c_buf = to_ctypes(c_mem)
         in8, out8 = make_c_hooks(c_device)
-        lib.init_entry(c_buf, in8, out8)
+        lib.init_entry(c_buf, XSEG, in8, out8)
         check("INIT: UART setup writes", ref_device.uart.setup_writes, c_device.uart.setup_writes)
         check("INIT: PIT writes", ref_device.picpit.pit_writes, c_device.picpit.pit_writes)
         check("INIT: PIC writes", ref_device.picpit.pic_writes, c_device.picpit.pic_writes)
         check("INIT: FDC specify command sent", ref_device.fdc.sent, c_device.fdc.sent)
         check("INIT: signon printed", ref_device.uart.tx, c_device.uart.tx)
 
-        # -- TICKINT_ONCE: the real ISR's own tick_count countdown and
-        # flag decisions, isolated from its prologue/epilogue/dispatch
-        # tail (no C equivalent, see xios86q.c's own header comment)
-        # by starting right at `dec tick_count` and stopping right
-        # before the PIC EOI write that follows both flag checks --
-        # both addresses found by single-stepping and disassembling,
-        # not guessed. Each `call supif` in between is a boundary
-        # stub (`call_stub_addrs`), counted via `call_hooks` instead
-        # of actually reaching the Supervisor.
-        lib.tickint_once.argtypes = [c_u8p]
+        # -- TICKINT_ONCE: the whole real ISR, interrupting code whose
+        # DS/SS are neither the XIOS's CS nor SYSDAT, from `tickint` to
+        # its final `jmpf cs:dword ptr mydispatch` (the dispatcher tail
+        # tickint_once doesn't model). Each `call supif` (f_flagset) is a
+        # boundary, counted. Besides tick_count/clockon, the ISR may only
+        # write its CS save cells (code), its own stack in SYSDAT and the
+        # interrupted stack -- anything else is a stray write. --
+        lib.tickint_once.argtypes = [c_u8p, ctypes.c_uint16]
 
         class TickResult(ctypes.Structure):
             _fields_ = [('sec_flag_set', ctypes.c_uint8), ('tick_flag_set', ctypes.c_uint8)]
 
         lib.tickint_once.restype = TickResult
+        xsym = lambda name: assemble_symbols()[name]  # noqa: E731
+        TICKINT, SUPIF, TOS = xsym('tickint'), xsym('supif'), xsym('tickint_tos')
+        JMPF = code.index(b'\x2e\xff\x2e', xsym('tick_2'))   # jmpf cs:dword ptr mydispatch
+        USER_DS, USER_SS, USER_SP = 0x0A00, 0x0C00, 0x0100
+        isr_stack = set(range(XBASE + TOS - 64, XBASE + TOS))
+        # the interrupted stack: i86sim's own start word, then the ISR's push ds (and its push cs ! pop ds)
+        user_stack = set(range(USER_SS * 16 + USER_SP - 8, USER_SS * 16 + USER_SP))
 
-        DEC_TICK_COUNT, TICK_2 = 0x480, 0x4A8
-        SUPIF = 0x107
-
-        def run_tickint_once(tick_count, clockon):
-            mem = bytearray(0x10000)
-            mem[XQ_TICK_COUNT] = tick_count
-            mem[XQ_CLOCKON] = clockon
-            image = bytearray(0x10000)
-            image[0:len(code)] = code
-            image[len(code):len(dseg)] = dseg[len(code):]
-            for addr, val in enumerate(mem):
-                if val != 0:
-                    image[addr] = val
+        def run_tickint_once(mem):
+            image = xios_image(code, dseg, mem)
             supif_calls = []
-
-            def supif_hook(sim):
-                supif_calls.append(None)
-
-            sim = I86Sim(image, {'sp': STACK_TOP}, DEC_TICK_COUNT, stop_addrs={TICK_2},
-                         call_stub_addrs={SUPIF}, call_hooks={SUPIF: supif_hook})
+            sim = I86Sim(image, {'cs': CSEG, 'ds': USER_DS, 'es': USER_DS, 'ss': USER_SS, 'sp': USER_SP,
+                                 'ax': 0x1234}, CBASE + TICKINT, segmented=True, stop_addrs={CBASE + JMPF},
+                         call_stub_addrs={CBASE + SUPIF}, call_hooks={CBASE + SUPIF: lambda sim: supif_calls.append(1)},
+                         io_out_hook=lambda sim, port, width, value: None)
+            w16 = lambda a, v: (image.__setitem__(a, v & 0xFF), image.__setitem__(a + 1, v >> 8))  # noqa: E731
+            w16(CBASE + xsym('sysdat'), XSEG)       # init's `mov cs:sysdat,ds`
             sim.run()
-            return image[XQ_TICK_COUNT], image[XQ_CLOCKON], len(supif_calls)
+            regs = (sim.regs['ds'], sim.regs['ss'], sim.regs['sp'], sim.regs['ax'])
+            return image, len(supif_calls), regs
 
         for label, tick_count, clockon in (
                 ("mid-countdown, clock off", 30, 0x00),
                 ("rolls over to a new second, clock off", 1, 0x00),
                 ("mid-countdown, clock on (tick flag too)", 30, 0xff),
                 ("rolls over AND clock on (both flags)", 1, 0xff)):
-            ref_tc, ref_clockon, ref_calls = run_tickint_once(tick_count, clockon)
-            buf = to_ctypes(bytearray(0x10000))
-            buf[XQ_TICK_COUNT] = tick_count
-            buf[XQ_CLOCKON] = clockon
-            r = lib.tickint_once(buf)
+            mem = bytearray(0x10000)
+            mem[XBASE + XQ_TICK_COUNT] = tick_count
+            mem[XBASE + XQ_CLOCKON] = clockon
+            ref_img, ref_calls, ref_regs = run_tickint_once(mem)
+            c_mem = xios_image(code, dseg, mem)
+            buf = to_ctypes(c_mem)
+            r = lib.tickint_once(buf, XSEG)
             port_calls = int(r.sec_flag_set) + int(r.tick_flag_set)
-            check(f"TICKINT_ONCE {label}", (ref_tc, ref_clockon, ref_calls),
-                  (bytes(buf)[XQ_TICK_COUNT], bytes(buf)[XQ_CLOCKON], port_calls))
+            check(f"TICKINT_ONCE {label}", (ref_img[XBASE + XQ_TICK_COUNT], ref_img[XBASE + XQ_CLOCKON], ref_calls),
+                  (bytes(buf)[XBASE + XQ_TICK_COUNT], bytes(buf)[XBASE + XQ_CLOCKON], port_calls))
+            check(f"TICKINT_ONCE {label}: interrupted DS/SS/SP/AX restored", (USER_DS, USER_SS, USER_SP - 2, 0x1234),
+                  ref_regs)
+            check(f"TICKINT_ONCE {label}: no stray writes", [],
+                  [hex(i) for i in range(0x10000) if not CBASE <= i < CBASE + len(code) and i not in isr_stack
+                   and i not in user_stack and ref_img[i] != bytes(buf)[i]][:8])
 
         if failures:
             print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")

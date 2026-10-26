@@ -1,74 +1,25 @@
-; Standalone wrapper for src/kernel/INIT.SUP's `init`. Needs
-; tools/i86sim.py's new `far_call_stub_addrs` (see its own docstring):
-; `init` callfs into 5 other modules' own `init:` entry points through
-; SYSDAT.FMT's module table (`rtmmod`/`memmod`/`bdosmod`/`ciomod`/
-; `xiosmod`), each one's own real far-pointer target only known at
-; runtime (loaded from memory, not resolvable at assembly time the way
-; an ordinary CALL's fixed target is) -- so each of those 5 `callf`
-; instructions is stubbed by its own address instead.
+; Standalone wrapper for src/kernel/INIT.SUP's `init`, laid out like
+; the real SUP module: INIT.SUP at the very start of the SUP code
+; segment (org 0, so `sysdat`/`supervisor`/`ver` sit at their real
+; offsets), and the real VEC.FMT/UDA.FMT/SYSDAT.FMT included for the
+; interrupt vector table, UDA, and system data area -- so every field
+; `init` touches resolves to its genuine offset, the same ones
+; src-c/kernel/init.c uses. tests/src-c/test_init.py runs this with
+; tools/i86sim.py's segmented=True and real CS/DS values.
 ;
-; `sysdat`/`supervisor` are declared by INIT.SUP itself (its own cseg
-; cells, right before `init:`), not redeclared here.
-;
-; `version`/`tick_tos`/`idle_tos`/`intflag`/`ncondev`/`nciodev`/
-; `nlstdev`/`module_map`/`rspseg`/`initpd`/`inituda`/`rtmmod`/
-; `memmod`/`bdosmod`/`ciomod`/`xiosmod` are all real SYSDAT.FMT
-; fields, declared here as plain DSEG labels at the scratch addresses
-; src-c/kernel/defs.h and tests/src-c/test_init.py both use (see
-; idle_wrapper.A86's own comment for why a plain EQU would be wrong
-; for any of these) -- not via `include sysdat.fmt`, which would pull
-; in the whole real module table layout (dozens of unrelated fields)
-; this wrapper has no use for.
-;
-; `notick`/`idle`/`user_entry`/`xiosif` are real labels in
-; TICK.SUP/IDLE.SUP/SUPIF.SUP (the same real SUP module INIT.SUP is
-; itself part of, per src/kernel/SUP.A86's own include order) --
-; declared here as bare markers instead of pulling those whole files
-; in, since nothing about *their* own code matters to this test:
-; `notick`/`idle`/`user_entry` are only ever used as `offset X` (a
-; plain address value copied around, never executed from here), and
-; `xiosif` is an ordinary near CALL into a not-yet-ported routine,
-; the same `call_stub_addrs` boundary-stub convention as everywhere
-; else in this port.
+; `entry`/`notick`/`idle`/`user_entry`/`xiosif` are real labels in
+; other SUP files (SUPIF.SUP/TICK.SUP/IDLE.SUP) -- bare markers here,
+; since `init` only ever takes their offsets (or, for xiosif, makes a
+; near call the test stubs out). The five `callf ...mod[bx]` module
+; inits are stubbed by instruction address (far_call_stub_addrs).
 	include system.def
 	include modfunc.def
 	include modtab.def
 	include xioscb.def
-	include rsp.def
 	include pd.def
-	include uda.fmt
+	include rsp.def
 
-; `i_mpm_ip`/`i_mpm_cs` overlay the real, absolute (segment-0)
-; interrupt vector table at `mpmint*4`/`mpmint*4+2` (SYSTEM.DEF:
-; `mpmint equ 224`, so 380h/382h) -- declared as real DSEG labels at
-; those already-resolved absolute addresses (not a plain EQU, which
-; would wrongly assemble `mov i_mpm_ip,ax` as an immediate instead of
-; a memory write -- same reasoning as every other such wrapper).
-	dseg
-	org	0380h
-i_mpm_ip	dw	0
-i_mpm_cs	dw	0
-
-	dseg
-	org	0A800h
-version		dw	0
-tick_tos	dw	0
-idle_tos	dw	0
-intflag		db	0
-ncondev		db	0
-nciodev		db	0
-nlstdev		db	0
-module_map	db	0
-rspseg		dw	0
-initpd		rb	40h
-inituda		rb	40h
-supmod		rw	4
-rtmmod		rw	4
-memmod		rw	4
-bdosmod		rw	4
-ciomod		rw	4
-xiosmod		rw	4
-init_tos	rw	0
+	include init.sup
 
 	cseg
 entry:		ret
@@ -77,5 +28,7 @@ idle:		ret
 user_entry:	ret
 xiosif:		ret
 
-	include init.sup
+	include vec.fmt
+	include uda.fmt
+	include sysdat.fmt
 	end

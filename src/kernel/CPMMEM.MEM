@@ -148,12 +148,16 @@ cpmf_root:  mov bx,rlr
 cpmf_next:  mov si,ms_link[bx]
 	    cmp si,0 ! jne try_seg
 		sub bx,bx ! mov cx,bx ! ret
-try_seg:    and ms_flags[si],mf_load ! jz free_seg
+try_seg:    test ms_flags[si],mf_load ! jz free_seg
+					;was "and", which cleared every other
+					;flag bit of the segment it tested
 		mov bx,si ! jmps cpmf_next
 free_seg:   mov dx,ms_start[si]
 	    push si ! call free_memory ! pop si
 	    jcxz cpmf_root
-		jmps cpmf_next
+		mov bx,si ! jmps cpmf_next	;skip it -- without the "mov
+					;bx,si" a segment that failed to free
+					;was retried forever (docs/bugs.md #107)
 
 free_memory:
 ;-----------

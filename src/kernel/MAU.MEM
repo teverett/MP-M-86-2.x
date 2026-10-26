@@ -249,11 +249,12 @@ mau_collapse:		;collapse adjacent unallocated SATs
 mauc_nsat:
 	inc cx
 	cmp cx,.0 ! jb mauc_notend
-mauc_done:  sub cx,cx ! mov bx,bp ! ret
+	    add bx,satlen		;the table's last entry
+	    jmps mauc_last
 mauc_notend:
 	add bx,satlen ! lea di,satlen[bx]
 	cmp sat_start[bx],0 ! je mauc_done
-	cmp sat_start[di],0 ! je mauc_done
+	cmp sat_start[di],0 ! je mauc_last
 	cmp sat_nall[bx],0 ! jne mauc_notfree
 		;this SAT is free
 	    mov ax,sat_start[bx] ! add ax,sat_length[bx]
@@ -289,6 +290,16 @@ mauc_nfhole:		;Alloc SAT, followed by hole
 	    mov ax,sat_start[di] ! sub ax,sat_start[bx]
 	    sub sat_start[di],ax ! add sat_length[di],ax
 	    jmp mauc_nsat
+mauc_last:		;BX = the last SAT in use, which the loop above
+			;never judges (it decides each SAT by looking at
+			;the next one) -- both exits used to return
+			;"empty" here even with this SAT still allocated,
+			;so mfree_it freed a MAU that was still in use
+			;(see docs/bugs.md #106)
+	cmp sat_start[bx],0 ! je mauc_done
+	cmp sat_nall[bx],0 ! je mauc_done
+	    sub bp,bp			;not empty
+mauc_done:  sub cx,cx ! mov bx,bp ! ret
 
 mau_release:
 ;-----------

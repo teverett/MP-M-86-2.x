@@ -179,6 +179,14 @@ class I86Sim:
     which `callf`s into five other modules' own `init:` entry points
     through `SYSDAT.FMT`'s module table.
 
+    `far_call_hooks`: like `far_call_stub_addrs` (keyed by the `CALL FAR
+    [mem]` instruction's own address, no push, continue with the next
+    instruction), but a Python callable (`hook(sim)`) runs first -- the
+    far-call counterpart of `call_hooks`, for a far boundary call whose
+    real effect has to be modeled. First needed by `src/kernel/
+    BDOSIF.BDO`'s own `mpmif` (`callf cs:dword ptr .supervisor`), whose
+    `init`-time queue calls tests/src-c/test_bdosif_init.py runs for real.
+
     `far_jmp_stub_addrs`: like `far_call_stub_addrs`, but for a
     `JMP FAR [mem]` instruction (opcode `0xFF /5`) instead of a
     `CALL FAR [mem]` -- there's no caller to return to for a JMP, so
@@ -227,7 +235,8 @@ class I86Sim:
                  int_stub_nums=frozenset(), segmented: bool = False,
                  call_hooks=None, jmp_hooks=None, jmp_stub_addrs=frozenset(),
                  far_call_stub_addrs=frozenset(), far_jmp_stub_addrs=frozenset(),
-                 io_in_hook=None, io_out_hook=None, int_hooks=None):
+                 io_in_hook=None, io_out_hook=None, int_hooks=None,
+                 far_call_hooks=None):
         if len(mem) != 0x10000:
             raise I86SimError(f"mem must be exactly 64KB, got {len(mem)} bytes")
         self.mem = mem
@@ -245,6 +254,7 @@ class I86Sim:
         self.call_hooks = dict(call_hooks) if call_hooks else {}
         self.jmp_hooks = dict(jmp_hooks) if jmp_hooks else {}
         self.int_hooks = dict(int_hooks) if int_hooks else {}
+        self.far_call_hooks = dict(far_call_hooks) if far_call_hooks else {}
         self.segmented = segmented
         self.seg_override = None  # set per-instruction by a 26h/2Eh/36h/3Eh prefix
         self._last_ea_offset = 0  # raw (pre-segmentation) offset from the most
@@ -428,6 +438,14 @@ class I86Sim:
                 al = (al + 0x60) & 0xFF
                 self.cf = 1
             self.regs['ax'] = (self.regs['ax'] & 0xFF00) | al
+        elif op == 0xC2:  # RET imm16 (near, then drop imm16 bytes of arguments)
+            drop = self._fetch16()
+            target = self._pop16()
+            self.regs['sp'] = (self.regs['sp'] + drop) & 0xFFFF
+            if target == RET_SENTINEL:
+                self.halted = True
+            else:
+                self.ip = target
         elif op == 0xC3:  # RET (near)
             target = self._pop16()
             if target == RET_SENTINEL:
@@ -749,7 +767,9 @@ class I86Sim:
                                                 # docstring above for why
                                                 # this is keyed by the
                                                 # instruction's own address
-                if start_ip in self.far_call_stub_addrs:
+                if start_ip in self.far_call_hooks:
+                    self.far_call_hooks[start_ip](self)
+                elif start_ip in self.far_call_stub_addrs:
                     pass  # no-op -- ip is already past the whole instruction
                 else:
                     raise I86SimError(f"CALL FAR r/m not implemented (no stub) at {start_ip:#06x}")

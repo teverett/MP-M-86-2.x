@@ -3,14 +3,16 @@
 `kernel.elf` target: builds the whole src-c/kernel/ tree plus
 src-c/boot/'s own stub with the real i686-elf-gcc/i686-elf-ld
 toolchain and a real linker script (src-c/linker.ld), links them all
-into one real image, then boots the result under QEMU and checks its
-serial signon string comes out. See src-c/boot/boot.s's own header
-comment for what this is (a real `ld`-based image-builder pipeline,
-proven end to end -- including the real link, not just the stub) and
-isn't (not /src's own real MP/M-86 boot chain, and not yet wired to
-the real ported kernel logic actually *doing* anything at boot -- see
-that same comment for why 32-bit protected mode is a different
-execution model from MP/M-86's own real 16-bit one).
+into one real image, then boots the result under QEMU and checks the
+serial output. At boot, src-c/boot/kernel_main.c runs the real ported
+XIOS (init_entry, xios_conout_entry) and the real ported system
+initialization (sup_init) against real low memory, then reads every
+field sup_init should have written back from memory and reports
+"sup_init: ok" or which field was wrong. This is not /src's own real
+MP/M-86 boot chain, and the rest of the ported kernel above the XIOS
+still isn't called -- see src-c/boot/boot.s's own header comment for
+why 32-bit protected mode is a different execution model from
+MP/M-86's own real 16-bit one.
 
 Needs i686-elf-gcc/i686-elf-ld/i686-elf-grub-file and
 qemu-system-i386 on PATH -- not part of this project's own from-
@@ -33,6 +35,7 @@ REQUIRED_TOOLS = ('i686-elf-gcc', 'i686-elf-ld', 'i686-elf-grub-file', 'qemu-sys
 SIGNONS = (
     ("XIOS86Q init_entry signon", b"MP/M-86 XIOS86Q -- QEMU target (serial console, floppy disk)"),
     ("pipeline signon via xios_conout_entry", b"MP/M-86 src-c image-builder: pipeline ok"),
+    ("sup_init on real memory, all fields verified", b"sup_init: ok"),
 )
 
 

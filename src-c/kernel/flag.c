@@ -18,6 +18,13 @@
  * this port's callers can see. See tools/i86sim.py's CALL/RET sentinel
  * for how the test oracle executes the real mechanism instead of
  * replicating it here.
+ *
+ * Runs against real memory (defs.h's far_ptr), like proc.c/dsptch.c/
+ * sysent.c: `phys` is the base of real physical memory and `sysdat`
+ * the real SYSDAT segment (the real asm's DS). `nflags`, the `flags`
+ * table pointer, the flag entries it points to, and PDs are
+ * SYSDAT-relative; u_dparam goes to the running process's UDA (the real
+ * asm's ambient ES, p_uda[rlr]).
  */
 #include <stdint.h>
 
@@ -46,11 +53,11 @@ static flag_bxcx flag_bexit(uint16_t cx) {
  *		bx = its contents) and this returns 1
  *		on failure, returns 0 (the caller should flag_bexit(e_ill_flag))
  */
-static int flag_valid(const uint8_t *mem, uint8_t dl, uint16_t *si_out, uint16_t *bx_out) {
-    if (dl >= mem[SD_NFLAGS]) return 0;
-    uint16_t si = (uint16_t)(mem_r16(mem, SD_FLAGS) + dl * flglen);
+static int flag_valid(const uint8_t *sd, uint8_t dl, uint16_t *si_out, uint16_t *bx_out) {
+    if (dl >= seg_r8(sd, SYSDAT_NFLAGS)) return 0;
+    uint16_t si = (uint16_t)(seg_r16(sd, SYSDAT_FLAGS) + dl * flglen);
     *si_out = si;
-    *bx_out = mem_r16(mem, si);
+    *bx_out = seg_r16(sd, si);
     return 1;
 }
 
@@ -60,25 +67,27 @@ static int flag_valid(const uint8_t *mem, uint8_t dl, uint16_t *si_out, uint16_t
  *	output:	bx = 0 if okay, 0xFFFF if error
  *		cx = error code: 0, e_flag_ovrrun, or e_ill_flag
  */
-flag_bxcx flag_set_entry(uint8_t *mem, uint8_t dl) {
+flag_bxcx flag_set_entry(uint8_t *phys, uint16_t sysdat, uint8_t dl) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
     uint16_t si, bx;
-    if (!flag_valid(mem, dl, &si, &bx)) return flag_bexit(e_ill_flag);
+    if (!flag_valid(sd, dl, &si, &bx)) return flag_bexit(e_ill_flag);
 
-    if (mem[(uint16_t)(si + flg_ignore)] != flag_zig) {
-        mem[(uint16_t)(si + flg_ignore)]--;
+    uint8_t ignore = seg_r8(sd, (uint16_t)(si + flg_ignore));
+    if (ignore != flag_zig) {
+        seg_w8(sd, (uint16_t)(si + flg_ignore), (uint8_t)(ignore - 1));
         return flag_exit();
     }
     /* fs_set */
     if (bx == flag_on) return flag_bexit(e_flag_ovrrun);
     if (bx == flag_off) {
-        mem_w16(mem, (uint16_t)(si + flg_pd), flag_on);
+        seg_w16(sd, (uint16_t)(si + flg_pd), flag_on);
         return flag_exit();
     }
     /* fs_noff: bx is a PD address waiting on this flag -- wake it */
-    mem_w16(mem, (uint16_t)(bx + p_link), mem_r16(mem, SD_DRL));
-    mem_w16(mem, SD_DRL, bx);
-    mem[(uint16_t)(bx + p_stat)] = ps_run;
-    mem_w16(mem, (uint16_t)(si + flg_pd), flag_off);
+    seg_w16(sd, (uint16_t)(bx + p_link), seg_r16(sd, SYSDAT_DRL));
+    seg_w16(sd, SYSDAT_DRL, bx);
+    seg_w8(sd, (uint16_t)(bx + p_stat), ps_run);
+    seg_w16(sd, (uint16_t)(si + flg_pd), flag_off);
     return flag_exit();
 }
 
@@ -88,18 +97,18 @@ flag_bxcx flag_set_entry(uint8_t *mem, uint8_t dl) {
  *	output:	bx = 0 if okay, 0xFFFF if error
  *		cx = error code: 0, e_flag_underrun, or e_ill_flag
  */
-flag_bxcx flag_wait_entry(uint8_t *mem, uint8_t dl) {
+flag_bxcx flag_wait_entry(uint8_t *phys, uint16_t sysdat, uint8_t dl) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
     uint16_t si, bx;
-    if (!flag_valid(mem, dl, &si, &bx)) return flag_bexit(e_ill_flag);
+    if (!flag_valid(sd, dl, &si, &bx)) return flag_bexit(e_ill_flag);
 
     if (bx == flag_on) {
-        mem_w16(mem, (uint16_t)(si + flg_pd), flag_off);
+        seg_w16(sd, (uint16_t)(si + flg_pd), flag_off);
         return flag_exit();
     }
     if (bx == flag_off) {
-        uint16_t rlr_pd = mem_r16(mem, SD_RLR);
-        mem[(uint16_t)(rlr_pd + p_stat)] = ps_flagwait;
-        mem_w16(mem, UDA_DPARAM, si);
+        seg_w8(sd, (uint16_t)(seg_r16(sd, SYSDAT_RLR) + p_stat), ps_flagwait);
+        seg_w16(far_ptr(phys, rlr_uda(sd), 0), u_dparam, si);
         /* call dsptch -- boundary stub, modeled as an instant no-op return */
         return flag_exit();
     }

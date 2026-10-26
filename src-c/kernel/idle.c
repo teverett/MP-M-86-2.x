@@ -7,6 +7,8 @@
  * `cpm_bios` struct), this port's "return value" is the register state the
  * real routine would have handed to that jump -- the test
  * (tests/src-c/test_idle.py) checks that, not a control transfer.
+ *
+ * Runs against real memory: `rlr` and the PD are SYSDAT-relative.
  */
 #include <stdint.h>
 
@@ -25,11 +27,12 @@ typedef struct {
  *	input:	(none)
  *	output:	ds, es, ax as handed to `jmp xiosif`
  */
-idle_result idle(const uint8_t *mem, uint16_t sysdat) {
+idle_result idle(uint8_t *phys, uint16_t sysdat) {
+    const uint8_t *sd = far_ptr(phys, sysdat, 0);
     idle_result r;
     r.ds = sysdat;               /* mov ds,cs:sysdat */
-    uint16_t bx = mem_r16(mem, SD_RLR);
-    r.es = mem_r16(mem, (uint16_t)(bx + p_uda));
+    uint16_t bx = seg_r16(sd, SYSDAT_RLR);
+    r.es = seg_r16(sd, (uint16_t)(bx + p_uda));
     r.ax = io_idle;
     return r;
 }

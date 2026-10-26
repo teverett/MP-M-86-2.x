@@ -1,13 +1,15 @@
-; Standalone wrapper for src/kernel/SYSENT.RTM's creat_proc_entry only
-; (`call proc_creat ! jmp pdisp`), bundled with the whole of PROC.RTM
-; (`proc_creat`) and DSPTCH.RTM (`pdisp`/`dsptch`/...) as ordinary
-; internal calls -- not boundary stubs, now that both are ported (see
-; src-c/kernel/sysent.c's own header comment for why `creat_proc_entry`
-; goes all the way, unlike SYSENT.RTM's other 7 entries).
+; Wrapper for src/kernel/SYSENT.RTM's `creat_proc_entry` (`call
+; proc_creat ! jmp pdisp`) run all the way through for real: bundles
+; the real SYSENT.RTM, DSPTCH.RTM and PROC.RTM, plus the real UDA.FMT/
+; VEC.FMT/SYSDAT.FMT so every field resolves to its genuine offset.
+; tests/src-c/test_sysent.py runs it with segmented=True, a real SYSDAT
+; segment, and the code relocated off segment 0 (the dispatcher and
+; proc_creat touch the real interrupt vectors there).
 ;
-; Identical layout to dsptch_wrapper.A86 (copied verbatim, same
-; reasoning there) -- needs tools/i86sim.py's `segmented=True` mode and
-; a CSEG_BASE shift for the same reason.
+; `sysdat` is normally RTMIF.RTM's own cs cell; declared here at cseg
+; offset 0. `mpmif` is stubbed by address; `xiosif` is a real stub
+; returning AL=0 (poll "not ready", matching dsptch.c -- see
+; dsptch_wrapper.A86).
 	include system.def
 	include pd.def
 	include err.def
@@ -15,87 +17,16 @@
 	include flg.def
 	include modfunc.def
 	include xioscb.def
-i_mpm_ip	equ	380h
-mpmif	equ	9000h		; unported external call target (stub)
-xiosif	equ	9001h		; ditto
-	eseg
-	org	0
-u_dparam	dw	0
-u_dma_ofst	dw	0
-u_dma_seg	dw	0
-u_func		db	0
-u_searchl	db	0
-u_searcha	dw	0
-u_searchabase	dw	0
-u_dcnt		dw	0
-u_dblk		dw	0
-u_error_mode	db	0
-u_mult_cnt	db	0
-u_df_password	rb	8
-u_pd_cnt	db	0
-u_in_int	db	0
-u_sp		dw	0
-u_ss		dw	0
-u_ax		dw	0
-u_bx		dw	0
-u_cx		dw	0
-u_dx		dw	0
-u_di		dw	0
-u_si		dw	0
-u_bp		dw	0
-u_wrkseg_f	dw	0
-u_retseg	dw	0
-u_ds_sav	dw	0
-u_stack_sp	dw	0
-u_stack_ss	dw	0
-u_ivectors	rw	10
-u_es_sav	dw	0
-u_flag_sav	dw	0
-u_initcs	dw	0
-u_initds	dw	0
-u_inites	dw	0
-u_initss	dw	0
-u_mpm_ip	dw	0
-u_mpm_cs	dw	0
-u_debug_ip	dw	0
-u_debug_cs	dw	0
-u_insys		db	0
-u_stat_sav	db	0
-	dseg
-	org	0A000h
-rlr		dw	0
-	org	0A002h
-drl		dw	0
-	org	0A004h
-dlr		dw	0
-	org	0A012h
-u_wrkseg	dw	0
-	org	0A01Ch
-plr		dw	0
-	org	0A01Eh
-slr		dw	0
-	org	0A026h
-endseg		dw	0
-	org	0A032h
-thrdrt		dw	0
-	org	0A035h
-nlstdev		db	0
-ncondev		db	0
-	org	0A038h
-pul		dw	0
-	org	0A03Ah
-mxmemowner	dw	0
-	org	0AC00h
-indisp		db	0
-	org	0AC01h
-es_sav		dw	0
-bx_sav		dw	0
-mxmemqpb	rb	16
-	org	0AD00h
-dsptchtos	rw	0
+
 	cseg
-sysdat	dw	0		; normally supplied by this module's own init
+sysdat	dw	0
+mpmif	equ	9000h
 	include sysent.rtm
 	include dsptch.rtm
 	include proc.rtm
+xiosif:	mov al,0 ! ret
+
+	include uda.fmt
+	include vec.fmt
+	include sysdat.fmt
 	end

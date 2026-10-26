@@ -207,6 +207,34 @@ QUL_FIELD_OFFSET = 0x5e
 PD_POOL_SLOT_SIZE = 0x30  # pdlen (PD.DEF)
 PD_POOL_SLOTS = 4
 
+# The system Lock List: "FREE_ROOT, LOCK_MAX, OPEN_MAX INITIALIZED BY
+# SYSGEN" (DATA.BDO). Every file a process opens and every record it
+# locks takes one 10-byte item off `free_root` (FILE3.BDO's
+# CREATE_ITEM/SET_OLIST_ITEM: link, drive|attributes, 5 bytes, a word);
+# left at the template's 0, the first open of anything fails with "No
+# Room in System Lock List" (docs/bugs.md #113). GENSYS asks for the
+# list size and the per-process open-file and locked-record limits.
+FREE_ROOT_OFFSET = 0x52
+SYSLREC_OFFSET = 0x86     # total locked records
+SYSLFIL_OFFSET = 0x88     # total open files
+LOCK_MAX_OFFSET = 0x8A    # locked records per process
+OPEN_MAX_OFFSET = 0x8C    # open files per process
+SYSLTOT_OFFSET = 0x8E     # total Lock List items
+LOCK_ITEM_SIZE = 10
+LOCK_ITEMS = 16
+
+# Memory: `mdul` (unused Memory Descriptors) and `mfl` (Memory Free
+# List) are GENSYS's too -- left empty, every f_malloc (a program load
+# first of all) fails with e_no_memory (docs/bugs.md #113). A pool of
+# MDs goes on mdul, and one MD on mfl describes the free memory: from
+# the first paragraph after the system data area up to FREE_MEM_END
+# (below the EBDA; MPMLDR, at 0800h, is dead by then). SYSDAT's own
+# 4096 bytes are full, so the pool follows the XIOS's dseg tail.
+MFL_FIELD_OFFSET = 0x5A
+MD_LEN = 10                # mdlen (MEM.DEF)
+MD_POOL = 24
+FREE_MEM_END = 0x9000
+
 # `endseg` (SYSTEM.DAT: "dw 0 ;1st parag. outside of MP/M") is GENSYS-
 # computed data in the original 1981 build -- this tree's own
 # SYSTEM.DAT just declares it statically as 0 and nothing in src/
@@ -285,8 +313,7 @@ FLGLEN = 3             # flg_pd (word, FLG.DEF) + flg_ignore (byte)
 # data are appended, back to back, onto this SAME combined `cseg` blob
 # (right after the real kernel modules') rather than loaded as a
 # separate segment -- `tmp_data_seg` is computed as an offset purely
-# *within* that same blob, exactly the way `MPM_CODE_SEG`+`module_base`
-# already works for SUP/RTM/MEM/CIO/BDOS/XIOS.
+# *within* that same blob, the way each kernel module's own segment is.
 RSPSEG_FIELD_OFFSET = 0x42
 QD_POOL_SLOT_SIZE = 0x1c  # qdlen (QD.DEF) -- first word of each slot is
                           # its own q_link, matching getqdaddr's own
@@ -318,64 +345,12 @@ QMAU_BUF_SIZE = 0x200  # matches the stale template's own m_length
 QMAU_SAT_ENTRIES = 10  # generous capacity -- see the fix's own comment
                        # on why this must exceed the real entry count
 
-# Every module (SUP/RTM/MEM/CIO/BDOS/XIOS) dispatches its own "entry:"
-# function calls through a local jump table ("function"/"functab"),
-# built by each module's own standalone `asm86` run as a `dw label`
-# (or, for BDOS, `dw label ! db flag`) array -- near-call targets,
-# computed relative to offset 0 (that module's own assembly-time
-# origin), NOT relative to wherever this script ends up concatenating
-# that module's code within the combined cseg. SUP happens to load at
-# offset 0 (the first module here), so its own table's entries are
-# already correct by coincidence; every other module's table entries
-# are wrong by exactly that module's own `module_base` once
-# concatenated -- confirmed with a QEMU hardware breakpoint set at
-# RTM's real (combined-cseg) `makeq_entry` address: it never fired
-# when BDOS's init created its "mxdiskqd" queue (`f_qmake`, dispatched
-# correctly all the way through SUP's own module table into RTM's
-# `entry:` -- confirmed with a breakpoint *there*, which did fire,
-# with CX holding the right local function number, 4) -- and a direct
-# memory read of RTM's own `function[8]` (the jump-table slot for
-# function 4) showed it still held `0x0834`, `makeq_entry`'s offset
-# from RTM's own standalone assembly, not `0x1d40`, where
-# `makeq_entry` really lives once RTM is concatenated at its own
-# `module_base`. The resulting wild near-call (jumping into whatever
-# code/data happens to sit at that same raw offset within *SUP's* own
-# module, since every module shares the one `MPM_CODE_SEG`) is almost
-# certainly why RTM's own queue functions, and likely every other
-# module's own `entry:`-dispatched functions, silently hang somewhere
-# unrelated the first time anything actually calls through them --
-# every module-*init* call (through the already-correctly-patched
-# module table) worked fine up to now because none of them are
-# dispatched through a module's own *internal* function table at all.
-#
-# Fixed by patching every (non-SUP) module's own table entries here,
-# right after concatenating that module's code, adding its own
-# `module_base` to each one -- entry counts/strides below were
-# counted directly from each module's own source (BDOS's own table
-# entries are 3 bytes: a 2-byte offset plus a 1-byte flag that must be
-# left alone).
-FUNCTION_TABLES = {
-    'RTM': ('function', 21, 2),
-    'MEM': ('functab', 13, 2),
-    'CIO': ('functab', 16, 2),
-    'BDOS': ('functab', 47, 3),
-    'XIOS': ('functab', 25, 2),
-}
-
-# The opcode+modrm bytes (everything up to the table-offset displacement)
-# of each module's own "entry:" dispatcher instruction that locates its
-# FUNCTION_TABLES table -- see that relocation's own comment just above
-# where this is used. RTM/MEM/CIO: `call word ptr cs:[si+table]`. BDOS:
-# `mov si,offset functab` (an immediate load, not a memory operand, but
-# the same bare un-relocated value). XIOS: `call word ptr cs:[bx+table]`.
-DISPATCH_PATCHES = {
-    'RTM': b'\x2e\xff\x94',
-    'MEM': b'\x2e\xff\x94',
-    'CIO': b'\x2e\xff\x94',
-    'BDOS': b'\xc7\xc6',
-    'XIOS': b'\x2e\xff\x97',
-}
-
+# Each module (SUP/RTM/MEM/CIO/BDOS/XIOS) is assembled on its own, at
+# origin 0, and gets its own code segment here (paragraph-aligned within
+# the combined cseg), so its jump tables and code-label immediates need
+# no relocation. An earlier version put every module in MPM_CODE_SEG at
+# a byte offset and patched each table and immediate it knew about,
+# which missed some (docs/bugs.md #112).
 SYSDAT_DSEG_SIZE = 4096  # see XIOS86Q.A86's own comment on this number
 
 SYM_RE = re.compile(r'^\s*(init|entry)\s+label\s+([0-9A-Fa-f]+)h', re.MULTILINE)
@@ -453,173 +428,36 @@ def main():
         base = run_asm86(stem, out_dir)
         with open(base + '.cseg.bin', 'rb') as f:
             code = bytearray(f.read())
+        # Each module gets its own code segment, starting on a
+        # paragraph boundary, so every code offset it was assembled with
+        # (jump tables, `offset label` immediates, pushed return
+        # addresses) is right as is. Modules reach each other only
+        # through far pointers (the module table, `supervisor`,
+        # `dispatcher`, the IVT), all built as (offset, cs). This
+        # replaces the per-site relocations an earlier version of this
+        # script did with every module sharing MPM_CODE_SEG, which
+        # missed sites (docs/bugs.md #112).
+        cseg += b'\0' * (-len(cseg) % 16)
         module_base = len(cseg)
-
-        if name == 'RTM':
-            # RTMIF.RTM's own init: writes two more near-pointers
-            # (`dispatcher`/`rtm_pdisp`, SYSDAT fields read by XIOS86Q's
-            # tick ISR and by other modules' intermodule calls) using
-            # `mov word ptr[bx],offset fdisp`/`offset farpdisp` -- same
-            # unrelocated-immediate bug as FUNCTION_TABLES above, just
-            # baked into a MOV instruction's own operand bytes instead
-            # of a jump table: `offset fdisp` is fdisp's *standalone*
-            # RTM.A86 offset, assembled with no knowledge of this
-            # module's final module_base, so without this the real
-            # runtime write ends up (fdisp's bare offset, cs) instead
-            # of (module_base + fdisp's offset, cs) -- a wild far
-            # pointer landing wherever that bare offset falls inside
-            # the *combined* cseg (typically inside SUP, since
-            # module_base is always larger than these small standalone
-            # offsets), fired the moment anything actually calls
-            # through `dispatcher`/`rtm_pdisp` (a timer tick, or any
-            # other module's own intermodule call).
-            for sym in ('fdisp', 'farpdisp'):
-                off = get_symbol(stem, sym)
-                needle = b'\xc7\x07' + struct.pack('<H', off)
-                idx = code.find(needle)
-                if idx == -1:
-                    raise SystemExit(
-                        f"RTM.A86: couldn't find the "
-                        f"'mov word ptr[bx],offset {sym}' immediate "
-                        f"to relocate (expected {needle.hex()})")
-                if code.find(needle, idx + 1) != -1:
-                    raise SystemExit(
-                        f"RTM.A86: '{sym}' immediate pattern isn't "
-                        "unique -- relocation would be ambiguous")
-                struct.pack_into('<H', code, idx + 2,
-                                  (module_base + off) & 0xFFFF)
-
-        if name == 'XIOS':
-            # XIOS86Q.A86's own init: hooks the real IVT entry 8 (IRQ0,
-            # the 60Hz timer) directly: `mov word ptr .020h,offset
-            # tickint`. Same unrelocated-immediate bug as RTM's
-            # fdisp/farpdisp above -- `offset tickint` is tickint's own
-            # *standalone* XIOS86Q.A86 offset, assembled with no
-            # knowledge of this module's final module_base, so the real
-            # runtime write puts tickint's bare offset (0x468) into the
-            # live IVT instead of (module_base + 0x468) -- i.e. every
-            # single timer tick vectors into the *middle of SUP*
-            # (module_base is always larger than this module's own small
-            # standalone offsets) instead of into tickint, executing
-            # whatever unrelated bytes happen to sit there as if they
-            # were an interrupt handler. Confirmed live via GDB: IVT[8]
-            # read back 1000:0468 (tickint's bare offset) instead of the
-            # real 1000:61cb, and single-stepping from there landed in
-            # SeaBIOS's own default/unclaimed-interrupt stub
-            # (F000:FF53) a few instructions later -- this is the actual,
-            # direct cause of the project's whole "1000:004A"-class wild
-            # jump, not any of the earlier theories chased in docs/bugs.md.
-            off = get_symbol(stem, 'tickint')
-            needle = b'\xc7\x06\x20\x00' + struct.pack('<H', off)
-            idx = code.find(needle)
-            if idx == -1:
-                raise SystemExit(
-                    "XIOS86Q.A86: couldn't find the "
-                    "'mov word ptr .020h,offset tickint' immediate "
-                    f"to relocate (expected {needle.hex()})")
-            if code.find(needle, idx + 1) != -1:
-                raise SystemExit(
-                    "XIOS86Q.A86: 'tickint' immediate pattern isn't "
-                    "unique -- relocation would be ambiguous")
-            struct.pack_into('<H', code, idx + 4,
-                              (module_base + off) & 0xFFFF)
+        module_seg = MPM_CODE_SEG + module_base // 16
 
         cseg += code
         init_off, entry_off = get_init_entry_offsets(stem)
-        module_offsets[name] = module_base
-        print(f"build_mpmsys: {name:5s} code @ {module_base:#06x} "
+        module_offsets[name] = module_seg
+        print(f"build_mpmsys: {name:5s} code @ {module_base:#06x} seg {module_seg:#06x} "
               f"({len(code)} bytes), init={init_off:#x} entry={entry_off:#x}")
         if field_offset is not None:
             # Field layout (SYSDAT.FMT): entry far ptr (offset,segment),
-            # then init far ptr (offset,segment) -- same segment
-            # (MPM_CODE_SEG) for every module here, since they all
-            # share the one combined code segment.
-            struct.pack_into('<HH', dseg, field_offset,
-                              (module_base + entry_off) & 0xFFFF, MPM_CODE_SEG)
-            struct.pack_into('<HH', dseg, field_offset + 4,
-                              (module_base + init_off) & 0xFFFF, MPM_CODE_SEG)
-
-        # relocate this module's own internal function-dispatch table
-        # -- see FUNCTION_TABLES' own comment for why this is needed.
-        table_info = FUNCTION_TABLES.get(name)
-        if table_info is not None:
-            table_sym, entry_count, stride = table_info
-            table_off = get_symbol(stem, table_sym)
-            for i in range(entry_count):
-                entry_addr = module_base + table_off + i * stride
-                target = struct.unpack_from('<H', cseg, entry_addr)[0]
-                struct.pack_into('<H', cseg, entry_addr,
-                                  (target + module_base) & 0xFFFF)
-
-            # The table's own CONTENTS are now correctly relocated above,
-            # but the "entry:" dispatcher's own instruction that *locates*
-            # the table (`call cs:TABLE[si]`, or BDOS's `mov si,offset
-            # TABLE`) bakes TABLE's bare *standalone* offset directly into
-            # its own operand bytes -- same unrelocated-immediate bug as
-            # everywhere else in FUNCTION_TABLES/the dispatcher fix above,
-            # just encoded as part of a CALL/MOV instruction's own
-            # displacement instead of a jump-table entry or another MOV's
-            # immediate. Left unfixed, EVERY module but SUP ends up
-            # dispatching through CS:[bare table_off] -- i.e. through
-            # whatever unrelated bytes happen to sit at that same small
-            # offset inside *SUP* (since module_base is 0 there) -- which
-            # is why no non-SUP module's own internal dispatch has ever
-            # worked even with the table contents already fixed above.
-            dispatch_prefix = DISPATCH_PATCHES[name]
-            needle = dispatch_prefix + struct.pack('<H', table_off)
-            idx = cseg.find(needle, module_base, module_base + len(code))
-            if idx == -1:
-                raise SystemExit(
-                    f"{stem}.A86: couldn't find the dispatcher's own "
-                    f"'{table_sym}'-locating instruction to relocate "
-                    f"(expected {needle.hex()} somewhere in this module)")
-            if cseg.find(needle, idx + 1, module_base + len(code)) != -1:
-                raise SystemExit(
-                    f"{stem}.A86: '{table_sym}' dispatch-instruction "
-                    "pattern isn't unique -- relocation would be ambiguous")
-            struct.pack_into('<H', cseg, idx + len(dispatch_prefix),
-                              (module_base + table_off) & 0xFFFF)
-
-        if name == 'RTM':
-            # DSPTCH.RTM's own `dsp_table` (the process-status-code ->
-            # handler jump table `dsptch` uses to decide what to do
-            # with the process it just took off the Ready list) is a
-            # *second*, completely separate internal jump table in
-            # this same module -- not covered by FUNCTION_TABLES/
-            # DISPATCH_PATCHES above, which only ever knew about
-            # RTM's "function" (its *external*, intermodule entry
-            # table). Same bug, same fix, on both the table's own
-            # entries and the `jmp cs:dsp_table[bx]` instruction's own
-            # embedded (unrelocated) displacement -- found only once
-            # something actually exercised RTM's scheduler itself
-            # (`poll_entry`'s `jmp dsptch`) for the first time this
-            # whole tree's ever managed to.
-            dsp_table_off = get_symbol(stem, 'dsp_table')
-            dsp_table_entries = 9
-            for i in range(dsp_table_entries):
-                entry_addr = module_base + dsp_table_off + i * 2
-                target = struct.unpack_from('<H', cseg, entry_addr)[0]
-                struct.pack_into('<H', cseg, entry_addr,
-                                  (target + module_base) & 0xFFFF)
-            needle = b'\x2e\xff\xa7' + struct.pack('<H', dsp_table_off)
-            idx = cseg.find(needle, module_base, module_base + len(code))
-            if idx == -1:
-                raise SystemExit(
-                    "RTM.A86: couldn't find the 'jmp cs:dsp_table[bx]' "
-                    f"instruction to relocate (expected {needle.hex()})")
-            if cseg.find(needle, idx + 1, module_base + len(code)) != -1:
-                raise SystemExit(
-                    "RTM.A86: 'dsp_table' dispatch-instruction pattern "
-                    "isn't unique -- relocation would be ambiguous")
-            struct.pack_into('<H', cseg, idx + 3,
-                              (module_base + dsp_table_off) & 0xFFFF)
+            # then init far ptr (offset,segment), in the module's own
+            # code segment.
+            struct.pack_into('<HH', dseg, field_offset, entry_off, module_seg)
+            struct.pack_into('<HH', dseg, field_offset + 4, init_off, module_seg)
 
     # "dispatcher": no dedicated label found anywhere for this -- see
     # KNOWN LIMITATIONS above. Points at RTM's own general entry point.
-    rtm_base = module_offsets['RTM']
+    rtm_seg = module_offsets['RTM']
     rtm_init, rtm_entry = get_init_entry_offsets('RTM')
-    struct.pack_into('<HH', dseg, DISPATCHER_FIELD_OFFSET,
-                      (rtm_base + rtm_entry) & 0xFFFF, MPM_CODE_SEG)
+    struct.pack_into('<HH', dseg, DISPATCHER_FIELD_OFFSET, rtm_entry, rtm_seg)
 
     # module_map: which modules are present (MODFUNC.DEF's *mod_bit
     # values) -- every module built here except netmod.
@@ -852,6 +690,24 @@ def main():
         struct.pack_into('<H', dseg, slot_off, next_off)  # p_link
     struct.pack_into('<H', dseg, PUL_FIELD_OFFSET, pd_pool_start)
 
+    # Lock List: LOCK_ITEMS free items right after the PD pool, linked
+    # through their first word -- see FREE_ROOT_OFFSET's own comment.
+    lock_start = pd_pool_end
+    lock_end = lock_start + LOCK_ITEMS * LOCK_ITEM_SIZE
+    if lock_end > SYSDAT_DSEG_SIZE:
+        raise SystemExit(
+            f"Lock List (offset {lock_start:#x}..{lock_end:#x}) no longer "
+            f"fits in SYSDAT's {SYSDAT_DSEG_SIZE}-byte dseg")
+    for i in range(LOCK_ITEMS):
+        off = lock_start + i * LOCK_ITEM_SIZE
+        dseg[off:off + LOCK_ITEM_SIZE] = bytes(LOCK_ITEM_SIZE)
+        struct.pack_into('<H', dseg, off, off + LOCK_ITEM_SIZE if i < LOCK_ITEMS - 1 else 0)
+    struct.pack_into('<H', dseg, FREE_ROOT_OFFSET, lock_start)
+    for field in (SYSLREC_OFFSET, SYSLFIL_OFFSET, SYSLTOT_OFFSET):
+        struct.pack_into('<H', dseg, field, LOCK_ITEMS)
+    dseg[LOCK_MAX_OFFSET] = LOCK_ITEMS
+    dseg[OPEN_MAX_OFFSET] = LOCK_ITEMS
+
     # XIOS86Q's own private tail: the bytes from SYSDAT_DSEG_SIZE
     # onward in its own dseg.bin (see its own comment on why its
     # private data starts exactly there).
@@ -894,6 +750,21 @@ def main():
     # identical caller address -- not wild execution, just this one
     # mis-defaulted byte.
     struct.pack_into('<B', dseg, ccbtab0_off + 8, 0xFF)  # c_mimic
+
+    # Memory Descriptor pool and the Memory Free List -- see
+    # MFL_FIELD_OFFSET's own comment.
+    md_pool = len(dseg)
+    dseg += bytes(MD_POOL * MD_LEN)
+    for i in range(MD_POOL - 1):              # the last one is mfl's
+        off = md_pool + i * MD_LEN
+        struct.pack_into('<H', dseg, off, off + MD_LEN if i < MD_POOL - 2 else 0)
+    struct.pack_into('<H', dseg, MDUL_FIELD_OFFSET, md_pool)
+    mfl_md = md_pool + (MD_POOL - 1) * MD_LEN
+    free_start = sysdat_segment + (len(dseg) + 15) // 16
+    struct.pack_into('<HHHH', dseg, mfl_md, 0, free_start, FREE_MEM_END - free_start, 0)
+    struct.pack_into('<H', dseg, MFL_FIELD_OFFSET, mfl_md)
+    print(f"build_mpmsys: free memory {free_start:#06x}-{FREE_MEM_END:#06x}, "
+          f"{MD_POOL - 1} free MDs, {LOCK_ITEMS} Lock List items")
 
     out_path = args.output or os.path.join(out_dir, 'MPM.bin')
     with open(out_path + '.cseg', 'wb') as f:

@@ -1,302 +1,166 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/kernel/chario.c against src/kernel/
-CHARIO.CIO's 9 entry points: conin_entry, conout_entry, rconin_entry,
-rconout_entry, listout_entry, constat_entry, dirio_entry,
-conwrite_entry, conprint_entry, conread_entry.
-
-constf/coninf's own boundary-stub result is fixed at 0 under the
-convention (see chario.c's own header comment), which makes a few real
-paths (control_s's ctl-S wait loop, chkctl's "echo answer" block)
-unreachable; they're translated faithfully in chario.c but not
-exercised here, same reasoning as QUE1.RTM's cioattach.
+"""Differential test for src-c/kernel/chario.c (CHARIO.CIO's entry points
+and internals) against the real CIO module, on real memory layout --
+see tests/src-c/cioref.py. CCBs/PDs are SYSDAT-relative, print/read
+buffers are in the running process's u_wrkseg, and the three CS-resident
+messages (attach/abort/printer-busy) print from the CIO code segment on
+the reference side and from chario.c's constants on the C side. Both
+sides get the same scripted XIOS (cioref.Xios: typed input in, output
+recorded), so each case compares the call's result, the whole stream of
+XIOS calls (every character printed, every status poll and read), and
+every byte of state left behind (columns, attach/detach, flags, the
+buffers) -- a whole-image diff.
 """
 import ctypes
 import os
-import subprocess
 import sys
-import tempfile
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(REPO_ROOT, 'tools'))
+from cioref import (CioRef, Checker, CIO_C, NCONDEV, PD_RUN, SYSDAT, XIOS_FN, build_lib, c_buffer, c_xios,
+                    sd, wk, w16, r16, u8, u16, c_u8p)
 
-from asm86 import Assembler  # noqa: E402
-from i86sim import I86Sim  # noqa: E402
-
-WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'chario_wrapper.A86')
-CHARIO_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', 'console.c'),
-            os.path.join(REPO_ROOT, 'src-c', 'kernel', 'chario.c')]
-INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
-
-STACK_TOP = 0xFFF0
-SD_RLR, SD_CCB, SD_THRDRT = 0xA000, 0xA030, 0xA032
-SD_NCNS, SD_NLSTDEV, SD_NCONDEV = 0xA034, 0xA035, 0xA036
-MPMIF_STUB = 0x9000
-XIOSIF_STUB = 0x9010
-
-C_ATTACH, C_FLAG, C_STRTCOL, C_COLUMN, C_NCHAR, C_MIMIC, C_MSOURCE, CCBLEN = 0, 4, 5, 6, 7, 8, 9, 12
-P_FLAG, P_CNS, P_LST, P_SCRATCH = 6, 0x20, 0x24, 0x2E
-CF_COMPC = 0x02
-
-PD = 0x5000
-CCB_BASE = 0x6000
-
-
-def ccb_addr(dev):
-    return CCB_BASE + dev * CCBLEN
-
-
-def assemble_reference():
-    asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
-    code = asm.segment_bytes('cseg')
-    names = ('conin_entry', 'conout_entry', 'rconin_entry', 'rconout_entry',
-             'listout_entry', 'constat_entry', 'dirio_entry', 'conwrite_entry',
-             'conprint_entry', 'conread_entry')
-    entries = {name: asm.symtab[name].value for name in names}
-    return code, entries
-
-
-def build_c_library():
-    lib_path = tempfile.mktemp(suffix='.dylib' if sys.platform == 'darwin' else '.so')
-    subprocess.run(
-        ['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC',
-         '-I', INCLUDE_DIR, *CHARIO_C, '-o', lib_path],
-        check=True,
-    )
-    return lib_path
-
-
-def mem_w16(mem, addr, val):
-    mem[addr] = val & 0xFF
-    mem[addr + 1] = (val >> 8) & 0xFF
-
-
-def mem_r16(mem, addr):
-    return mem[addr] | (mem[addr + 1] << 8)
-
-
-def base_memory():
-    mem = bytearray(0x10000)
-    mem_w16(mem, SD_RLR, PD)
-    mem_w16(mem, SD_CCB, CCB_BASE)
-    mem_w16(mem, SD_THRDRT, 0)
-    mem[SD_NCNS] = 4
-    mem[SD_NLSTDEV] = 4
-    mem[SD_NCONDEV] = 2
-    mem[PD + P_CNS] = 0  # default console 0
-    mem[PD + P_LST] = 2  # default list device (ncondev + 0)
-    mem_w16(mem, ccb_addr(0) + C_ATTACH, PD)  # already attached, avoids
-    mem_w16(mem, ccb_addr(2) + C_ATTACH, 0)   # the attach-message cascade
-    return mem
-
-
-def run_reference(code, entry, mem, regs):
-    image = bytearray(mem)
-    image[0:len(code)] = code
-    sim = I86Sim(image, {**regs, 'sp': STACK_TOP}, entry,
-                 call_stub_addrs={MPMIF_STUB, XIOSIF_STUB})
-    sim.run(max_steps=20000)
-    return sim.regs, image
+PD_B = 0x2100
+BUF = 0x0100
+CTLC, CTLD, CTLE, CTLH, CTLP, CTLR, CTLU, CTLX, TAB, CR, LF, RUBOUT = \
+    3, 4, 5, 8, 0x10, 0x12, 0x15, 0x18, 9, 13, 10, 0x7F
 
 
 def main():
-    code, entries = assemble_reference()
-    lib_path = build_c_library()
+    ref = CioRef()
+    s = ref.s
+    lib_path = build_lib(CIO_C)
     try:
         lib = ctypes.CDLL(lib_path)
-        c_u8p = ctypes.POINTER(ctypes.c_uint8)
+        lib.cio_set_xios.argtypes = [XIOS_FN]
+        sigs = {'conin_entry': (u8, []), 'rconin_entry': (u8, []), 'constat_entry': (u8, []),
+                'dirio_entry': (u8, [u8]), 'conout_entry': (None, [u8]), 'rconout_entry': (None, [u8]),
+                'listout_entry': (None, [u8]), 'conwrite_entry': (None, [u16]),
+                'conread_entry': (None, [u16]), 'conprint_entry': (None, [u16, u8, u8])}
+        for name, (res, extra) in sigs.items():
+            fn = getattr(lib, name)
+            fn.restype = res
+            fn.argtypes = [c_u8p, u16] + extra
+        ck = Checker(ref)
 
-        lib.conin_entry.restype = ctypes.c_uint8
-        lib.conin_entry.argtypes = [c_u8p]
-        lib.conout_entry.argtypes = [c_u8p, ctypes.c_uint8]
-        lib.rconin_entry.restype = ctypes.c_uint8
-        lib.rconin_entry.argtypes = [c_u8p]
-        lib.rconout_entry.argtypes = [c_u8p, ctypes.c_uint8]
-        lib.listout_entry.argtypes = [c_u8p, ctypes.c_uint8]
-        lib.constat_entry.restype = ctypes.c_uint8
-        lib.constat_entry.argtypes = [c_u8p]
-        lib.dirio_entry.restype = ctypes.c_uint8
-        lib.dirio_entry.argtypes = [c_u8p, ctypes.c_uint8]
-        lib.conwrite_entry.argtypes = [c_u8p, ctypes.c_uint16]
-        lib.conprint_entry.argtypes = [c_u8p, ctypes.c_uint16, ctypes.c_uint8, ctypes.c_uint8]
-        lib.conread_entry.argtypes = [c_u8p, ctypes.c_uint16]
+        def base(attached=True, nchar=0, column=0):
+            mem = ref.base_memory()
+            if attached:
+                w16(mem, ref.ccb(0, 'c_attach'), PD_RUN)
+            mem[ref.ccb(0, 'c_nchar')] = nchar
+            mem[ref.ccb(0, 'c_column')] = column
+            return mem
 
-        failures = []
+        def run(label, entry, mem, regs=None, args=(), result=None, snap=None, typed=b''):
+            ref_regs, img = ref.run(entry, mem, regs or {}, xios_input=typed)
+            buf = c_buffer(mem)
+            x, keep = c_xios(lib, typed)
+            got = getattr(lib, entry)(buf, SYSDAT, *args)
+            ck.check(f"{label}: XIOS calls", ref.xios.log, x.log)
+            want = () if result is None else (ref_regs['bx'] & 0xFF,)
+            port = () if result is None else (got,)
+            snap = snap or (lambda i: (i[ref.ccb(0, 'c_column')], i[ref.ccb(0, 'c_nchar')],
+                                       r16(i, ref.ccb(0, 'c_attach')), r16(i, ref.pd(PD_RUN, 'p_flag'))))
+            ck.compare(label, img, buf, want, port, snap)
 
-        def check(label, ref, port):
-            status = "ok" if ref == port else "FAIL"
-            print(f"[{status}] {label}: reference {ref} | port {port}")
-            if status == "FAIL":
-                failures.append(label)
+        # -- conin_entry --
+        run("conin_entry: buffered graphic char, echoed", 'conin_entry', base(nchar=ord('A')), result=True)
+        run("conin_entry: ctl-D detaches, then reads NUL", 'conin_entry', base(nchar=CTLD), result=True)
+        run("conin_entry: ctl-C prints the abort prompt", 'conin_entry', base(nchar=CTLC, column=5), result=True)
+        mem = base(attached=False, nchar=ord('x'))
+        w16(mem, ref.pd(PD_RUN, 'p_flag'), s['pf_ctld'])
+        run("conin_entry: re-attach after ctl-D prints 'Attach: <name>'", 'conin_entry', mem, result=True)
 
-        def to_ctypes(mem):
-            return (ctypes.c_uint8 * 0x10000)(*mem)
+        # input from the XIOS rather than already buffered
+        run("conin_entry: typed char read through the XIOS", 'conin_entry', base(), result=True, typed=b'a')
+        run("conin_entry: ctl-S ... ctl-Q pauses, then reads", 'conin_entry', base(), result=True,
+            typed=b'\x13zz\x11x')
+        run("conin_entry: ctl-C answered Y sets pf_ctlc", 'conin_entry', base(column=3), result=True,
+            typed=b'\x03y')
+        run("conin_entry: ctl-C answered n, then reads on", 'conin_entry', base(), result=True, typed=b'\x03nq')
+        run("conin_entry: ctl-C, ctl-C again re-prompts", 'conin_entry', base(), result=True, typed=b'\x03\x03n')
+        run("rconin_entry: raw, ctl-C read as data", 'rconin_entry', base(), result=True, typed=b'\x03')
 
-        # -- conin_entry: a buffered, non-ctrl character --
-        mem = base_memory()
-        mem[ccb_addr(0) + C_NCHAR] = ord('Q')
-        mem[ccb_addr(0) + C_COLUMN] = 3
-        ref_regs, ref_img = run_reference(code, entries['conin_entry'], mem, {})
-        buf = to_ctypes(mem)
-        al = lib.conin_entry(ctypes.cast(buf, c_u8p))
-        ref = (ref_regs['bx'] & 0xFF, ref_img[ccb_addr(0) + C_COLUMN])
-        port = (al, bytes(buf)[ccb_addr(0) + C_COLUMN])
-        check("conin_entry: buffered graphic char", ref, port)
+        # -- conout / rconout --
+        for label, ch, col in (("conout_entry: column advances", ord('Z'), 3),
+                               ("conout_entry: tab expands to the next stop", TAB, 3),
+                               ("conout_entry: cr resets the column", CR, 7),
+                               ("conout_entry: backspace backs up", CTLH, 7),
+                               ("conout_entry: not attached -> attaches first", ord('Z'), 0)):
+            run(label, 'conout_entry', base(attached=col != 0, column=col), {'dx': ch}, (ch,))
+        run("rconin_entry: raw read, ctl-D passed through", 'rconin_entry', base(nchar=CTLD), result=True)
+        run("rconout_entry: lf leaves the column", 'rconout_entry', base(column=4), {'dx': LF}, (LF,))
 
-        # -- conin_entry: ctl-D detaches (chkctl's own ctld branch is
-        # reachable/deterministic, but conin_entry's "je conin_entry"
-        # retry loop that follows it calls conin/conbrk a second time,
-        # and under the convention their result is whatever bx happens
-        # to be at that point -- a real artifact of the full attach/
-        # conattach_entry/message-printing call chain the reference
-        # assembly runs through there, not something this port's own
-        # fixed-at-0 choice can be expected to reproduce (see header
-        # comment). Only the deterministic p_flag side effect is
-        # checked here, not the final returned character. --
-        mem = base_memory()
-        mem[ccb_addr(0) + C_NCHAR] = 0x04  # ctld
-        ref_regs, ref_img = run_reference(code, entries['conin_entry'], mem, {})
-        buf = to_ctypes(mem)
-        lib.conin_entry(ctypes.cast(buf, c_u8p))
-        ref = mem_r16(ref_img, PD + P_FLAG)
-        port = mem_r16(bytes(buf), PD + P_FLAG)
-        check("conin_entry: ctl-D detaches (p_flag side effect)", ref, port)
+        mem = base()
+        mem[ref.ccb(0, 'c_mimic')] = NCONDEV + 1   # list device 1 echoes console 0
+        run("conout_entry: echoed to the mimicking list device", 'conout_entry', mem, {'dx': ord('m')},
+            (ord('m'),))
+        mem = base()
+        mem[ref.ccb(0, 'c_mimic')] = 1             # console 1 echoes console 0
+        run("conout_entry: echoed to the mimicking console", 'conout_entry', mem, {'dx': ord('m')}, (ord('m'),))
 
-        # -- conout_entry: a plain character advances column --
-        mem = base_memory()
-        mem[ccb_addr(0) + C_COLUMN] = 10
-        ref_regs, ref_img = run_reference(code, entries['conout_entry'], mem, {'dx': ord('Z')})
-        buf = to_ctypes(mem)
-        lib.conout_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(ord('Z')))
-        check("conout_entry: column advances", ref_img[ccb_addr(0) + C_COLUMN], bytes(buf)[ccb_addr(0) + C_COLUMN])
+        # -- listout --
+        run("listout_entry: attaches to the list device", 'listout_entry', base(), {'dx': ord('X')}, (ord('X'),),
+            snap=lambda i: r16(i, ref.ccb(NCONDEV, 'c_attach')))
 
-        # -- rconin_entry: reads and clears c_nchar, raw (no chkctl) --
-        mem = base_memory()
-        mem[ccb_addr(0) + C_NCHAR] = 0x04  # ctld -- raw mode skips chkctl entirely
-        ref_regs, ref_img = run_reference(code, entries['rconin_entry'], mem, {})
-        buf = to_ctypes(mem)
-        al = lib.rconin_entry(ctypes.cast(buf, c_u8p))
-        ref = (ref_regs['bx'] & 0xFF, ref_img[ccb_addr(0) + C_NCHAR])
-        port = (al, bytes(buf)[ccb_addr(0) + C_NCHAR])
-        check("rconin_entry: raw read, ctld passed through untouched", ref, port)
+        # -- constat / dirio --
+        run("constat_entry: attached, char buffered", 'constat_entry', base(nchar=ord('A')), result=True)
+        run("constat_entry: not attached", 'constat_entry', base(attached=False), result=True)
+        run("dirio_entry: read (0xFD)", 'dirio_entry', base(nchar=ord('q')), {'dx': 0xFD}, (0xFD,), result=True)
+        run("dirio_entry: write, column advances", 'dirio_entry', base(column=2), {'dx': ord('w')}, (ord('w'),))
+        run("dirio_entry: status (0xFE), ready", 'dirio_entry', base(nchar=ord('q')), {'dx': 0xFE}, (0xFE,),
+            result=True)
+        run("dirio_entry: status (0xFE), not ready", 'dirio_entry', base(), {'dx': 0xFE}, (0xFE,), result=True)
+        run("dirio_entry: readif (0xFF), char buffered", 'dirio_entry', base(nchar=ord('r')), {'dx': 0xFF},
+            (0xFF,), result=True)
+        run("dirio_entry: readif (0xFF), nothing buffered", 'dirio_entry', base(), {'dx': 0xFF}, (0xFF,),
+            result=True)
 
-        # -- rconout_entry: line feed resets column --
-        mem = base_memory()
-        mem[ccb_addr(0) + C_COLUMN] = 7
-        ref_regs, ref_img = run_reference(code, entries['rconout_entry'], mem, {'dx': 0x0A})
-        buf = to_ctypes(mem)
-        lib.rconout_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0x0A))
-        check("rconout_entry: lf resets column", ref_img[ccb_addr(0) + C_COLUMN], bytes(buf)[ccb_addr(0) + C_COLUMN])
+        # -- conwrite / conprint (buffer in u_wrkseg) --
+        mem = base()
+        mem[wk(BUF):wk(BUF) + 6] = b'ab\tc$x'
+        run("conwrite_entry: stops at '$', tab expanded", 'conwrite_entry', mem, {'dx': BUF}, (BUF,))
+        mem = base()
+        mem[wk(BUF):wk(BUF) + 6] = b'abcdef'
+        run("conprint_entry: stops at max (3 chars)", 'conprint_entry', mem, {'dx': BUF, 'bx': 0x0300},
+            (BUF, 3, 0))
 
-        # -- listout_entry: attaches the calling process to its list device --
-        mem = base_memory()
-        ref_regs, ref_img = run_reference(code, entries['listout_entry'], mem, {'dx': ord('X')})
-        buf = to_ctypes(mem)
-        lib.listout_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(ord('X')))
-        ref = mem_r16(ref_img, ccb_addr(2) + C_ATTACH)
-        port = mem_r16(bytes(buf), ccb_addr(2) + C_ATTACH)
-        check("listout_entry: attaches to the list device", ref, port)
+        # -- conread (buffer in u_wrkseg) --
+        def reader(max_len, nchar, column=0):
+            mem = base(nchar=nchar, column=column)
+            mem[wk(BUF)] = max_len
+            return mem
 
-        # -- constat_entry: attached -> defers to conbrk --
-        mem = base_memory()
-        mem[ccb_addr(0) + C_NCHAR] = ord('Q')
-        ref_regs, _ = run_reference(code, entries['constat_entry'], mem, {})
-        buf = to_ctypes(mem)
-        bl = lib.constat_entry(ctypes.cast(buf, c_u8p))
-        check("constat_entry: attached, char buffered", ref_regs['bx'] & 0xFF, bl)
+        buf_snap = lambda i: (bytes(i[wk(BUF):wk(BUF) + 8]), i[ref.ccb(0, 'c_column')],  # noqa: E731
+                              i[ref.ccb(0, 'c_strtcol')], i[ref.ccb(0, 'c_flag')])
+        for label, max_len, ch in (("conread_entry: cr ends an empty line", 4, CR),
+                                   ("conread_entry: one char fills a 1-byte buffer", 1, ord('k')),
+                                   ("conread_entry: char then NULs to max length", 3, ord('k')),
+                                   ("conread_entry: ctl-H at the start is ignored", 2, CTLH),
+                                   ("conread_entry: rubout at the start is ignored", 2, RUBOUT),
+                                   ("conread_entry: ctl-E resets the columns", 2, CTLE),
+                                   ("conread_entry: ctl-X with nothing typed", 2, CTLX),
+                                   ("conread_entry: ctl-U redraws from the start column", 2, CTLU),
+                                   ("conread_entry: ctl-R retypes the line", 2, CTLR)):
+            run(label, 'conread_entry', reader(max_len, ch, column=6), {'dx': BUF}, (BUF,), snap=buf_snap)
 
-        # -- constat_entry: not attached -> boundary stub, always 0 --
-        mem = base_memory()
-        mem_w16(mem, ccb_addr(0) + C_ATTACH, 0x9999)  # some other PD
-        ref_regs, _ = run_reference(code, entries['constat_entry'], mem, {})
-        buf = to_ctypes(mem)
-        bl = lib.constat_entry(ctypes.cast(buf, c_u8p))
-        check("constat_entry: not attached", ref_regs['bx'] & 0xFF, bl)
+        # typed lines, with real line editing
+        for label, typed in (("conread_entry: typed line ended by cr", b'abc\r'),
+                             ("conread_entry: backspace (ctl-H) edits", b'ab\x08c\r'),
+                             ("conread_entry: rubout echoes the deleted char", b'ab\x7fc\r'),
+                             ("conread_entry: ctl-X erases the line", b'abc\x18d\r'),
+                             ("conread_entry: ctl-U starts over", b'ab\x15cd\r'),
+                             ("conread_entry: ctl-R retypes, then continues", b'ab\x12c\r'),
+                             ("conread_entry: control chars echo as ^X", b'a\x01b\r'),
+                             ("conread_entry: fills to max length", b'abcdefgh')):
+            run(label, 'conread_entry', reader(5, 0, column=2), {'dx': BUF}, (BUF,), snap=buf_snap, typed=typed)
 
-        # -- dirio_entry: read (0xFD) --
-        mem = base_memory()
-        mem[ccb_addr(0) + C_NCHAR] = ord('M')
-        ref_regs, ref_img = run_reference(code, entries['dirio_entry'], mem, {'dx': 0xFD})
-        buf = to_ctypes(mem)
-        al = lib.dirio_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0xFD))
-        check("dirio_entry: read (0xFD)", ref_regs['bx'] & 0xFF, al)
-
-        # -- dirio_entry: write (< 0xFD) --
-        mem = base_memory()
-        mem[ccb_addr(0) + C_COLUMN] = 0
-        ref_regs, ref_img = run_reference(code, entries['dirio_entry'], mem, {'dx': ord('K')})
-        buf = to_ctypes(mem)
-        lib.dirio_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(ord('K')))
-        check("dirio_entry: write, column advances", ref_img[ccb_addr(0) + C_COLUMN], bytes(buf)[ccb_addr(0) + C_COLUMN])
-
-        # -- dirio_entry: status (0xFE) --
-        mem = base_memory()
-        mem[ccb_addr(0) + C_NCHAR] = ord('N')  # ready
-        ref_regs, _ = run_reference(code, entries['dirio_entry'], mem, {'dx': 0xFE})
-        buf = to_ctypes(mem)
-        al = lib.dirio_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0xFE))
-        check("dirio_entry: status (0xFE), ready", ref_regs['bx'] & 0xFF, al)
-
-        # -- dirio_entry: readif (0xFF), nothing buffered -> boundary stub, dispatches --
-        mem = base_memory()
-        ref_regs, _ = run_reference(code, entries['dirio_entry'], mem, {'dx': 0xFF})
-        buf = to_ctypes(mem)
-        al = lib.dirio_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint8(0xFF))
-        check("dirio_entry: readif (0xFF), nothing buffered", ref_regs['bx'] & 0xFF, al)
-
-        # -- conwrite_entry: prints up to '$' --
-        mem = base_memory()
-        mem[ccb_addr(0) + C_COLUMN] = 0
-        BUF = 0x4000
-        msg = b'HEY$'
-        mem[BUF:BUF + len(msg)] = msg
-        ref_regs, ref_img = run_reference(code, entries['conwrite_entry'], mem, {'dx': BUF})
-        buf = to_ctypes(mem)
-        lib.conwrite_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(BUF))
-        check("conwrite_entry: column reflects 3 chars", ref_img[ccb_addr(0) + C_COLUMN], bytes(buf)[ccb_addr(0) + C_COLUMN])
-
-        # -- conprint_entry: a max-length cap stops it early --
-        mem = base_memory()
-        mem[ccb_addr(0) + C_COLUMN] = 0
-        BUF = 0x4000
-        mem[BUF:BUF + 5] = b'ABCDE'
-        ref_regs, ref_img = run_reference(code, entries['conprint_entry'], mem, {'dx': BUF, 'bx': 0x0300})  # bh=3,bl=0
-        buf = to_ctypes(mem)
-        lib.conprint_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(BUF), ctypes.c_uint8(3), ctypes.c_uint8(0))
-        check("conprint_entry: stops at max (3 chars)", ref_img[ccb_addr(0) + C_COLUMN], bytes(buf)[ccb_addr(0) + C_COLUMN])
-
-        # -- conread_entry: cr as the very first character ends the line immediately --
-        mem = base_memory()
-        mem[ccb_addr(0) + C_NCHAR] = 0x0D  # cr
-        BUF = 0x4000
-        mem[BUF] = 10  # max length
-        ref_regs, ref_img = run_reference(code, entries['conread_entry'], mem, {'dx': BUF})
-        buf = to_ctypes(mem)
-        lib.conread_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(BUF))
-        ref = (ref_img[BUF + 1], ref_img[ccb_addr(0) + C_COLUMN])
-        port = (bytes(buf)[BUF + 1], bytes(buf)[ccb_addr(0) + C_COLUMN])
-        check("conread_entry: cr ends an empty line", ref, port)
-
-        # -- conread_entry: a max-length-1 buffer accepts exactly one
-        # character before readen fires on its own -- avoids needing a
-        # second conin() read, which would only ever return the fixed
-        # NUL artifact (see header comment) --
-        mem = base_memory()
-        mem[ccb_addr(0) + C_NCHAR] = ord('Q')
-        BUF = 0x4000
-        mem[BUF] = 1  # max length
-        ref_regs, ref_img = run_reference(code, entries['conread_entry'], mem, {'dx': BUF})
-        buf = to_ctypes(mem)
-        lib.conread_entry(ctypes.cast(buf, c_u8p), ctypes.c_uint16(BUF))
-        ref = (ref_img[BUF + 1], ref_img[BUF + 2], ref_img[ccb_addr(0) + C_COLUMN])
-        port = (bytes(buf)[BUF + 1], bytes(buf)[BUF + 2], bytes(buf)[ccb_addr(0) + C_COLUMN])
-        check("conread_entry: one character fills a max-length-1 buffer", ref, port)
-
-        if failures:
-            print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")
-            return 1
-        print("\nall cases match.")
-        return 0
+        # ctl-P: turns on printer echo (mimic the list device)
+        mem = reader(2, CTLP)
+        run("conread_entry: ctl-P starts mimicking the list device", 'conread_entry', mem, {'dx': BUF}, (BUF,),
+            snap=lambda i: (buf_snap(i), r16(i, ref.ccb(NCONDEV, 'c_attach')), i[ref.ccb(0, 'c_mimic')]))
+        mem = reader(2, CTLP)
+        w16(mem, ref.ccb(NCONDEV, 'c_attach'), PD_B)
+        run("conread_entry: ctl-P with the printer busy", 'conread_entry', mem, {'dx': BUF}, (BUF,), snap=buf_snap)
+        return ck.finish()
     finally:
         os.remove(lib_path)
 

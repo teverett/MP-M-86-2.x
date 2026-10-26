@@ -275,7 +275,13 @@ mimic_entry:		; mimic character device
 				; SI->mimic CCB , DI->source CCB
 			mov c_attach[si],0ffffh
 			mov c_msource[si],dh
-			mov c_mimic[di],dl ! popf ! ret
+			mov c_mimic[di],dl
+			sub bx,bx ! mov cx,bx	;success -- was missing, leaving
+					;BX = rlr and CX = whatever the caller
+					;had, which control_p's "jcxz mimout"
+					;then misread as failure (see
+					;docs/bugs.md #108)
+			popf ! ret
 mim_err:mov bx,0ffffh ! mov cx,e_no_mimic
 	popf ! ret
 

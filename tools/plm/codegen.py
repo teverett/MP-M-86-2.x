@@ -1,10 +1,11 @@
 """Code generator: PL/M AST -> ASM86-dialect text (fed to tools/asm86).
 
-Calling convention (defined by this compiler, not independently verified
-against a historical PL/M-86 reference -- see tools/README.md):
-  - Arguments are pushed right-to-left, so the first declared parameter
-    ends up at [bp+4], the second at [bp+6], etc. (old BP at [bp+0],
-    return address at [bp+2]).
+Calling convention (PL/M-86's: DRI's MCD.A86 mon1..mon4 stub, which
+every utility is linked with, reads `func` from [bp+6] and `info` from
+[bp+4] -- docs/bugs.md #115):
+  - Arguments are pushed left to right, so the last declared parameter
+    ends up at [bp+4] and the first deepest (old BP at [bp+0], return
+    address at [bp+2]).
   - Every parameter and local variable occupies a full 16-bit stack slot,
     regardless of its declared BYTE/ADDRESS/POINTER type.
   - The callee pops its own parameters (RET imm16, which tools/asm86
@@ -20,6 +21,12 @@ from .errors import PlmError
 
 TRUE = 0xFFFF
 FALSE = 0x0000
+
+
+def type_size(t):
+    """bytes a scalar of PL/M type t occupies: a POINTER (the COMPACT
+    model's, which every utility here uses) is offset then segment"""
+    return 1 if t == 'byte' else 4 if t == 'pointer' else 2
 
 
 def sanitize(name):
@@ -79,6 +86,17 @@ class CodeGen:
     # -- top level ------------------------------------------------------
     MAIN_PROC_NAME = 'plmstart'
 
+    # The base page: the first 100h bytes of a program's data segment,
+    # which the loader fills in (default FCBs, command tail, ...). DRI's
+    # MCD.A86 (orig/mpm862sr/07/MCD.A86, the startup module every
+    # utility is linked with) declares these at fixed offsets and makes
+    # them PUBLIC; a module's EXTERNAL declaration of one of these names
+    # refers to that storage. Module data starts at 100h, past it.
+    BASE_PAGE = {'bdisk': 0x04, 'maxb': 0x06, 'cmdrv': 0x50, 'pass0': 0x51, 'len0': 0x53,
+                 'pass1': 0x54, 'len1': 0x56, 'fcb': 0x5C, 'fcba': 0x5C, 'fcb16': 0x6C,
+                 'cr': 0x7C, 'rr': 0x7D, 'ro': 0x7F, 'buff': 0x80, 'tbuff': 0x80, 'buffa': 0x80}
+    STACK_BYTES = 256
+
     def compile_module(self, module):
         # MEMORY is a PL/M-86 compiler-predeclared identifier, not
         # something the programmer ever DECLAREs: an implicit BYTE array
@@ -129,6 +147,15 @@ class CodeGen:
         for stmt in decls:
             if isinstance(stmt, ast.ProcDecl) and not stmt.external:
                 self.gen_proc(stmt)
+        has_main = any(isinstance(st, ast.ProcDecl) and st.name.lower() == self.MAIN_PROC_NAME
+                       and not st.external for st in decls)
+        self.has_main = has_main or any(not isinstance(st, ast.LabelMarker) for st in main_stmts)
+        if has_main:
+            # the module defines PLMSTART itself; its top-level labels
+            # (the module name) mark nothing executable
+            main_stmts = [st for st in main_stmts if not isinstance(st, ast.LabelMarker)]
+            if main_stmts:
+                self.err("executable top-level statements alongside a PLMSTART procedure")
         if main_stmts:
             synth = ast.ProcDecl(name=self.MAIN_PROC_NAME, params=[], rettype=None,
                                   external=False, public=True, body=main_stmts)
@@ -224,12 +251,20 @@ class CodeGen:
                                                      is_array=decl.dims is not None, elemsize=foff,
                                                      external=False, label_offset=off))
             else:
-                size = 1 if decl.type == 'byte' else 2
+                size = type_size(decl.type)
                 self.global_scope.define(name, Sym('global', label=label, size=size, fields=None,
                                                      is_array=decl.dims is not None, elemsize=size,
-                                                     count=None, external=False, label_offset=off))
+                                                     count=None, external=False, label_offset=off,
+                                                     type=decl.type))
             return
         if phase == 2:
+            return
+        if decl.external and name.lower() in self.BASE_PAGE:
+            if phase == 1:
+                size = 1 if decl.type == 'byte' else 2
+                self.global_scope.define(name, Sym('global', label=f"pl_bp_{name.lower()}", size=size,
+                                                     fields=None, is_array=decl.dims is not None,
+                                                     elemsize=size, count=None, external=True))
             return
         if decl.type == 'structure':
             fields, total, field_layout = self._build_struct_fields(decl.fields)
@@ -253,7 +288,7 @@ class CodeGen:
                 # self-consistent and assemblable.
                 self.dseg.append(f"{label}\trb\t{total * count}")
             return
-        size = 1 if decl.type == 'byte' else 2
+        size = type_size(decl.type)
         label = sanitize(name)
         initial = getattr(decl, 'initial', None)
         if phase == 1:
@@ -265,7 +300,7 @@ class CodeGen:
                 count = self.const_eval(decl.dims) if decl.dims is not None else None
             self.global_scope.define(name, Sym('global', label=label, size=size, fields=None,
                                                 is_array=decl.dims is not None, elemsize=size,
-                                                count=count, external=decl.external))
+                                                count=count, external=decl.external, type=decl.type))
             return
         # phase 3
         if decl.dims == '*' or initial is not None:
@@ -273,7 +308,7 @@ class CodeGen:
         else:
             count = self.const_eval(decl.dims) if decl.dims is not None else None
             unit = 'rb' if size == 1 else 'rw'
-            self.dseg.append(f"{label}\t{unit}\t{count or 1}")
+            self.dseg.append(f"{label}\t{unit}\t{(count or 1) * (2 if size == 4 else 1)}")
 
     def _emit_initial_values(self, label, sizes, initial):
         """Emit one DB/DW directive per INITIAL slot (sizes[i] bytes each,
@@ -344,7 +379,7 @@ class CodeGen:
         off = 0
         layout = []
         for fname, fdims, ftyp in field_decls:
-            fsize = 1 if ftyp == 'byte' else 2
+            fsize = type_size(ftyp)
             count = self.const_eval(fdims) if fdims is not None else 1
             fields[fname.lower()] = (off, fsize, fdims is not None)
             layout.append((fname, fsize, count, fdims is not None))
@@ -460,8 +495,12 @@ class CodeGen:
         local_scope = Scope(parent_scope)
         local_scope.is_proc_scope = True
         base_off = self.LINK_OFFSET + 2 if nested else 4
+        # PL/M-86 pushes arguments left to right, so the last parameter
+        # is nearest BP: [bp+base_off], the first deepest (DRI's MCD.A86
+        # xdos stub relies on this: func at [bp+6], info at [bp+4]).
+        n = len(proc.params)
         for idx, p in enumerate(proc.params):
-            off = base_off + 2 * idx
+            off = base_off + 2 * (n - 1 - idx)
             local_scope.define(p, Sym('param', offset=off))
         self.next_local_off = [0]
         self.cur_scope = local_scope
@@ -626,6 +665,12 @@ class CodeGen:
                 self.err(f"LITERALLY '{s.literally}' is not a simple number")
             self.cur_scope.define(s.name, Sym('const', value=val))
             return
+        existing = self.cur_scope.vars.get(s.name.lower())
+        if existing is not None and existing.kind == 'param':
+            # "PROCEDURE (char); DECLARE char BYTE;" -- a parameter's
+            # type declaration, not a new local
+            existing.info['type'] = s.type
+            return
         if s.based_on is not None:
             if s.type == 'structure':
                 fields, total, _ = self._build_struct_fields(s.fields)
@@ -640,7 +685,7 @@ class CodeGen:
             fields = {}
             off = 0
             for fname, fdims, ftyp in s.fields:
-                fsize = 1 if ftyp == 'byte' else 2
+                fsize = type_size(ftyp)
                 count = self.const_eval(fdims) if fdims is not None else 1
                 fields[fname.lower()] = (off, fsize, fdims is not None)
                 off += fsize * count
@@ -665,7 +710,7 @@ class CodeGen:
             words = (size * count + 1) // 2
             self.alloc_local(s.name, words, is_array=True, elemsize=size, count=count)
         else:
-            self.alloc_local(s.name)
+            self.alloc_local(s.name, 2 if s.type == 'pointer' else 1, type=s.type)
 
     def gen_VarDecl(self, s):
         """Dispatched inline (by gen_stmt) only for a declaration that has
@@ -752,8 +797,7 @@ class CodeGen:
         self.emit("\tpush ax")
         self.load_from(var_sym)
         self.emit("\tpop bx")
-        self.emit("\txchg ax,bx")
-        self.emit("\tcmp ax,bx")
+        self.emit("\tcmp ax,bx")          # var > stop: done
         self.emit_jcc_far('ja', end)
         for st in s.body:
             self.gen_stmt(st)
@@ -844,9 +888,10 @@ class CodeGen:
             self.emit("\tcmp ax,bx")
             self.emit_jcc_far(self.REL_JFALSE[cond.op], false_label)
             return
-        # general case: evaluate to TRUE/FALSE word, then test
+        # general case: PL/M tests the low bit of the value (TRUE is
+        # 0FFh, or any odd value; a relational result is 0FFFFh/0)
         self.gen_expr(cond)
-        self.emit("\tcmp ax,0")
+        self.emit("\ttest al,1")
         self.emit_jcc_far('je', false_label)
 
     # -- expressions --------------------------------------------------------
@@ -856,6 +901,75 @@ class CodeGen:
 
     def _ex_unsupported(self, e):
         self.err(f"unsupported expression: {type(e).__name__}")
+
+    # -- expression types ---------------------------------------------------
+    # PL/M has two value types here: BYTE and ADDRESS (WORD/INTEGER/POINTER
+    # are 16-bit like ADDRESS). A constant below 256 is a BYTE; an
+    # operation on two BYTEs is a BYTE (8-bit result: "cnt = -1" with a
+    # BYTE cnt compares against 0FFh, and 0FFh + 1 is 0); anything with
+    # an ADDRESS operand is an ADDRESS (the BYTE zero-extended). Every
+    # value is computed in AX; a BYTE result is truncated (AH = 0).
+    def expr_type(self, e):
+        if isinstance(e, ast.Num):
+            return 'byte' if 0 <= e.value < 256 else 'address'
+        if isinstance(e, ast.Str):
+            return 'byte' if len(e.value) == 1 else 'address'
+        if isinstance(e, ast.AddrOf):
+            return 'pointer' if getattr(e, 'far', False) else 'address'
+        if isinstance(e, ast.InlineArray):
+            return 'address'
+        if isinstance(e, ast.UnOp):
+            return self.expr_type(e.operand)
+        if isinstance(e, ast.BinOp):
+            if e.op in self.REL_JFALSE:
+                return 'byte'
+            return 'byte' if self.expr_type(e.left) == self.expr_type(e.right) == 'byte' else 'address'
+        if isinstance(e, ast.AssignExpr):
+            return self.expr_type(e.expr)
+        if isinstance(e, ast.Field):
+            return {1: 'byte', 4: 'pointer'}.get(self._field_size(e), 'address')
+        if isinstance(e, ast.Index):
+            return 'byte' if self._index_elem_size(e) == 1 else 'address'
+        if isinstance(e, ast.Name):
+            low = e.name.lower()
+            if low in self.FLAG_VARS:
+                return 'byte'
+            if low == 'stackptr':
+                return 'address'
+            sym = self.cur_scope.lookup(e.name)
+            if sym is None:
+                return 'address'
+            if sym.kind == 'proc':
+                return {'byte': 'byte', 'pointer': 'pointer'}.get(sym.info.get('rettype'), 'address')
+            return self._sym_type(sym)
+        if isinstance(e, ast.Call):
+            low = e.name.lower()
+            if low in self.BUILTINS and self._user_proc(e.name) is None:
+                if low in ('low', 'high', 'dec'):
+                    return 'byte'
+                if low in ('shl', 'shr', 'rol', 'ror', 'scl', 'scr'):
+                    return self.expr_type(e.args[0])
+                return 'address'
+            sym = self.cur_scope.lookup(e.name)
+            if sym is None:
+                return 'address'
+            if sym.kind == 'proc':
+                return {'byte': 'byte', 'pointer': 'pointer'}.get(sym.info.get('rettype'), 'address')
+            return 'byte' if sym.info.get('elemsize', sym.info.get('size', 2)) == 1 else 'address'
+        return 'address'
+
+    def _sym_type(self, sym):
+        if sym.kind == 'const':
+            return 'byte' if 0 <= sym.info['value'] < 256 else 'address'
+        if sym.kind in ('param', 'local'):
+            return {'byte': 'byte', 'pointer': 'pointer'}.get(sym.info.get('type'), 'address')
+        if sym.kind == 'global':
+            if sym.info.get('fields'):
+                return 'address'
+            return {1: 'byte', 4: 'pointer'}.get(sym.info.get('size'), 'address')
+        if sym.kind == 'based':
+            return 'byte' if sym.info.get('type') == 'byte' else 'address'
+        return 'address'
 
     def ex_Num(self, e):
         self.emit(f"\tmov ax,{e.value}")
@@ -903,7 +1017,9 @@ class CodeGen:
         self.load_from(sym)
 
     def ex_AddrOf(self, e):
-        self.gen_addr(e.expr)
+        far = self.gen_addr(e.expr)
+        if getattr(e, 'far', False) and not far:
+            self.emit("\tmov dx,ds")      # @x: a POINTER, DS:x
 
     def ex_InlineArray(self, e):
         parts = []
@@ -919,24 +1035,18 @@ class CodeGen:
         self.emit(f"\tmov ax,offset {label}")
 
     def ex_Field(self, e):
-        self.gen_field_addr(e)
+        far = self.gen_field_addr(e)
+        if far:
+            self.emit("\tmov es,dx")
         self.emit("\tmov bx,ax")
-        size = self._field_size(e)
-        if size == 1:
-            self.emit("\tmov al,[bx]")
-            self.emit("\tmov ah,0")
-        else:
-            self.emit("\tmov ax,[bx]")
+        self._load_at_bx(self._field_size(e), far)
 
     def ex_Index(self, e):
-        self.gen_index2_addr(e)
+        far = self.gen_index2_addr(e)
+        if far:
+            self.emit("\tmov es,dx")
         self.emit("\tmov bx,ax")
-        size = self._index_elem_size(e)
-        if size == 1:
-            self.emit("\tmov al,[bx]")
-            self.emit("\tmov ah,0")
-        else:
-            self.emit("\tmov ax,[bx]")
+        self._load_at_bx(self._index_elem_size(e), far)
 
     def _index_elem_size(self, e):
         return self._field_size(e.base) if isinstance(e.base, ast.Field) else 1
@@ -946,7 +1056,9 @@ class CodeGen:
         expression (not a plain named array) -- e.g. the second "(k)" in
         "dir$entries(j).file(k)"."""
         elemsize = self._index_elem_size(e)
-        self.gen_addr(e.base)
+        far = self.gen_addr(e.base)
+        if far:
+            self.emit("\tpush dx")
         self.emit("\tpush ax")
         self.gen_expr(e.index)
         if elemsize != 1:
@@ -954,6 +1066,9 @@ class CodeGen:
             self.emit("\tmul cx")
         self.emit("\tpop bx")
         self.emit("\tadd ax,bx")
+        if far:
+            self.emit("\tpop dx")
+        return far
 
     def ex_Call(self, e):
         if e.name.lower() in self.BUILTINS:
@@ -971,6 +1086,8 @@ class CodeGen:
             self.emit("\tnot ax")
         elif e.op == '-':
             self.emit("\tneg ax")
+        if self.expr_type(e) == 'byte':
+            self.emit("\tmov ah,0")
 
     def ex_AssignExpr(self, e):
         self.gen_expr(e.expr)
@@ -1026,6 +1143,8 @@ class CodeGen:
             self.emit("\txor ax,bx")
         else:
             self.err(f"unsupported operator '{e.op}'")
+        if self.expr_type(e) == 'byte':
+            self.emit("\tmov ah,0")
 
     # -- calls --------------------------------------------------------------
     BUILTINS = {'move', 'movw', 'movb', 'dec', 'length', 'last', 'size', 'low', 'high', 'shl',
@@ -1125,15 +1244,18 @@ class CodeGen:
             self.emit("\tpush ax")
             self.gen_expr(args[1])
             self.emit("\tpop bx")
-            self.emit("\txchg ax,bx")
-            self.emit("\tmov cl,al")
-            self.emit("\tmov ax,bx")
-            self.emit(f"\t{mnem} ax,cl")
+            self.emit("\txchg ax,bx")       # ax = value, bx = count
+            self.emit("\tmov cl,bl")
+            if self.expr_type(args[0]) == 'byte':
+                self.emit(f"\t{mnem} al,cl")   # an 8-bit shift/rotate
+                self.emit("\tmov ah,0")
+            else:
+                self.emit(f"\t{mnem} ax,cl")
             return
         sym = self.resolve(name)
         if sym.kind != 'proc':
             self.err(f"'{name}' is not a procedure")
-        for a in reversed(args):
+        for a in args:   # left to right, as PL/M-86 does (see gen_proc)
             self.gen_expr(a)
             self.emit("\tpush ax")
         if sym.info.get('nested'):
@@ -1145,22 +1267,16 @@ class CodeGen:
             reg = self._frame_reg_for_scope(sym.info['enclosing_scope'])
             self.emit(f"\tpush {reg}")
         self.emit(f"\tcall {sanitize(name)}")
+        if sym.info.get('rettype') == 'byte':
+            self.emit("\tmov ah,0")      # a BYTE result is AL
+        elif sym.info.get('rettype') == 'pointer' and sym.info.get('external'):
+            self.emit("\tmov dx,es")     # MCD's mon4: a POINTER comes back in ES:BX
 
     def gen_move_builtin(self, args):
         if len(args) != 3:
             self.err("MOVE requires 3 arguments: MOVE(count, source, dest)")
         count, src, dst = args
-        self.gen_expr(dst)
-        self.emit("\tmov di,ax")
-        self.gen_expr(src)
-        self.emit("\tmov si,ax")
-        self.gen_expr(count)
-        self.emit("\tmov cx,ax")
-        self.emit("\tpush ds")
-        self.emit("\tpush ds")
-        self.emit("\tpop es")
-        self.emit("\trep movsb")
-        self.emit("\tpop ds")
+        self._gen_block_move(src, dst, count, 'movsb')
 
     def gen_movw_builtin(self, args):
         # MOVW isn't a declared procedure anywhere in this tree, and
@@ -1176,17 +1292,7 @@ class CodeGen:
         if len(args) != 3:
             self.err("MOVW requires 3 arguments: MOVW(source, dest, word_count)")
         src, dst, count = args
-        self.gen_expr(dst)
-        self.emit("\tmov di,ax")
-        self.gen_expr(src)
-        self.emit("\tmov si,ax")
-        self.gen_expr(count)
-        self.emit("\tmov cx,ax")
-        self.emit("\tpush ds")
-        self.emit("\tpush ds")
-        self.emit("\tpop es")
-        self.emit("\trep movsw")
-        self.emit("\tpop ds")
+        self._gen_block_move(src, dst, count, 'movsw')
 
     def gen_movb_builtin(self, args):
         # MOVB: the byte-granularity sibling of MOVW, same (source, dest,
@@ -1202,16 +1308,27 @@ class CodeGen:
         if len(args) != 3:
             self.err("MOVB requires 3 arguments: MOVB(source, dest, byte_count)")
         src, dst, count = args
-        self.gen_expr(dst)
-        self.emit("\tmov di,ax")
-        self.gen_expr(src)
-        self.emit("\tmov si,ax")
+        self._gen_block_move(src, dst, count, 'movsb')
+
+    def _gen_block_move(self, src, dst, count, op):
+        """rep movsb/movsw from src to dst. A POINTER operand (COMPACT
+        model: `@x`, a POINTER variable, `@based.field` on one) carries
+        its own segment; an ADDRESS is in DS."""
+        for e in (dst, src):
+            self.gen_expr(e)
+            if self.expr_type(e) != 'pointer':
+                self.emit("\tmov dx,ds")
+            self.emit("\tpush dx")
+            self.emit("\tpush ax")
         self.gen_expr(count)
         self.emit("\tmov cx,ax")
+        self.emit("\tpop si")
+        self.emit("\tpop bx")          # source segment
+        self.emit("\tpop di")
+        self.emit("\tpop es")          # destination segment
         self.emit("\tpush ds")
-        self.emit("\tpush ds")
-        self.emit("\tpop es")
-        self.emit("\trep movsb")
+        self.emit("\tmov ds,bx")
+        self.emit(f"\trep {op}")
         self.emit("\tpop ds")
 
     def gen_length_builtin(self, kind, args):
@@ -1259,14 +1376,64 @@ class CodeGen:
             s = s.parent
         self.err(f"undefined identifier '{name}'")
 
+    def _load_at_bx(self, size, far):
+        seg = 'es:' if far else ''
+        if size == 1:
+            self.emit(f"\tmov al,{seg}[bx]")
+            self.emit("\tmov ah,0")
+        elif size == 4:
+            self.emit(f"\tmov ax,{seg}[bx]")
+            self.emit(f"\tmov dx,{seg}[bx+2]")
+        else:
+            self.emit(f"\tmov ax,{seg}[bx]")
+
+    def _store_at_bx(self, size, far):
+        seg = 'es:' if far else ''
+        if size == 1:
+            self.emit(f"\tmov {seg}[bx],al")
+        elif size == 4:
+            self.emit(f"\tmov {seg}[bx],ax")
+            self.emit(f"\tmov {seg}[bx+2],dx")
+        else:
+            self.emit(f"\tmov {seg}[bx],ax")
+
+    def _push_value(self, size):
+        if size == 4:
+            self.emit("\tpush dx")
+        self.emit("\tpush ax")
+
+    def _pop_value(self, size):
+        self.emit("\tpop ax")
+        if size == 4:
+            self.emit("\tpop dx")
+
+    def _frame_slot(self, reg, off):
+        return f"[{reg}{off}]" if off < 0 else f"[{reg}+{off}]"
+
     def load_from(self, sym):
+        if sym.kind in ('param', 'local') and sym.info.get('type') == 'pointer':
+            reg = self._frame_reg_for(sym)
+            off = sym.info['offset']
+            self.emit(f"\tmov ax,{self._frame_slot(reg, off)}")
+            self.emit(f"\tmov dx,{self._frame_slot(reg, off + 2)}")
+            return
+        if sym.kind == 'global' and sym.info.get('size') == 4 and not sym.info.get('fields'):
+            self.emit(f"\tmov bx,offset {sym.info['label']}")
+            if sym.info.get('label_offset', 0):
+                self.emit(f"\tadd bx,{sym.info['label_offset']}")
+            self._load_at_bx(4, False)
+            return
         if sym.kind == 'param':
             reg = self._frame_reg_for(sym)
             self.emit(f"\tmov ax,[{reg}+{sym.info['offset']}]")
+            if sym.info.get('type') == 'byte':
+                self.emit("\tmov ah,0")
         elif sym.kind == 'local':
             reg = self._frame_reg_for(sym)
             off = sym.info['offset']
             self.emit(f"\tmov ax,[{reg}{off}]" if off < 0 else f"\tmov ax,[{reg}+{off}]")
+            if sym.info.get('type') == 'byte':
+                self.emit("\tmov ah,0")
         elif sym.kind == 'global':
             size = sym.info['size']
             label = sym.info['label']
@@ -1293,18 +1460,29 @@ class CodeGen:
             if sym.info['type'] == 'structure':
                 self.err("cannot load a whole BASED structure as a scalar value "
                           "-- access one of its fields instead")
-            self.load_based_addr(sym)
+            far = self.load_based_addr(sym)
+            if far:
+                self.emit("\tmov es,dx")
             self.emit("\tmov bx,ax")
-            typ = sym.info['type']
-            if typ == 'byte':
-                self.emit("\tmov al,[bx]")
-                self.emit("\tmov ah,0")
-            else:
-                self.emit("\tmov ax,[bx]")
+            self._load_at_bx(type_size(sym.info['type']), far)
         else:
             self.err(f"cannot read value of '{sym.kind}'")
 
     def store_to(self, sym):
+        if sym.kind in ('param', 'local') and sym.info.get('type') == 'pointer':
+            reg = self._frame_reg_for(sym)
+            off = sym.info['offset']
+            self.emit(f"\tmov {self._frame_slot(reg, off)},ax")
+            self.emit(f"\tmov {self._frame_slot(reg, off + 2)},dx")
+            return
+        if sym.kind == 'global' and sym.info.get('size') == 4 and not sym.info.get('fields'):
+            self.emit("\tpush ax")
+            self.emit(f"\tmov bx,offset {sym.info['label']}")
+            if sym.info.get('label_offset', 0):
+                self.emit(f"\tadd bx,{sym.info['label_offset']}")
+            self.emit("\tpop ax")
+            self._store_at_bx(4, False)
+            return
         if sym.kind == 'param':
             reg = self._frame_reg_for(sym)
             self.emit(f"\tmov [{reg}+{sym.info['offset']}],ax")
@@ -1330,12 +1508,14 @@ class CodeGen:
             if sym.info['type'] == 'structure':
                 self.err("cannot store to a whole BASED structure as a scalar value "
                           "-- assign to one of its fields instead")
-            self.emit("\tpush ax")
-            self.load_based_addr(sym)
+            size = type_size(sym.info['type'])
+            self._push_value(size)
+            far = self.load_based_addr(sym)
+            if far:
+                self.emit("\tmov es,dx")
             self.emit("\tmov bx,ax")
-            self.emit("\tpop ax")
-            typ = sym.info['type']
-            self.emit("\tmov [bx],al" if typ == 'byte' else "\tmov [bx],ax")
+            self._pop_value(size)
+            self._store_at_bx(size, far)
         else:
             self.err(f"cannot assign to '{sym.kind}'")
 
@@ -1345,10 +1525,13 @@ class CodeGen:
             # "BASED struct.field type": the pointer value lives in that
             # structure field -- load it the same way any field read does.
             base_name, field = based_on
-            self.ex_Field(ast.Field(base=ast.Name(name=base_name), field=field))
-        else:
-            ptr_sym = self.resolve(based_on)
-            self.load_from(ptr_sym)
+            fld = ast.Field(base=ast.Name(name=base_name), field=field)
+            self.ex_Field(fld)
+            return self._field_size(fld) == 4
+        ptr_sym = self.resolve(based_on)
+        self.load_from(ptr_sym)
+        # BASED on a POINTER: the data is at its segment (in DX)
+        return self._sym_type(ptr_sym) == 'pointer'
 
     def store_lvalue(self, lv):
         if isinstance(lv, ast.Name):
@@ -1361,21 +1544,25 @@ class CodeGen:
             sym = self.resolve(lv.name)
             self.store_to(sym)
         elif isinstance(lv, ast.Field):
-            self.emit("\tpush ax")
-            self.gen_field_addr(lv)
-            self.emit("\tmov bx,ax")
-            self.emit("\tpop ax")
             size = self._field_size(lv)
-            self.emit("\tmov [bx],al" if size == 1 else "\tmov [bx],ax")
+            self._push_value(size)
+            far = self.gen_field_addr(lv)
+            if far:
+                self.emit("\tmov es,dx")
+            self.emit("\tmov bx,ax")
+            self._pop_value(size)
+            self._store_at_bx(size, far)
         elif isinstance(lv, ast.Call):
             self.store_index(lv)
         elif isinstance(lv, ast.Index):
-            self.emit("\tpush ax")
-            self.gen_index2_addr(lv)
-            self.emit("\tmov bx,ax")
-            self.emit("\tpop ax")
             size = self._index_elem_size(lv)
-            self.emit("\tmov [bx],al" if size == 1 else "\tmov [bx],ax")
+            self._push_value(size)
+            far = self.gen_index2_addr(lv)
+            if far:
+                self.emit("\tmov es,dx")
+            self.emit("\tmov bx,ax")
+            self._pop_value(size)
+            self._store_at_bx(size, far)
         else:
             self.err(f"unsupported assignment target: {type(lv).__name__}")
 
@@ -1398,21 +1585,23 @@ class CodeGen:
             elif sym.kind == 'based':
                 # The "address of" a BASED variable is just its pointer's
                 # current value (used e.g. as the base of a field access,
-                # "pd.cns" -> address-of(pd) + field offset).
-                self.load_based_addr(sym)
+                # "pd.cns" -> address-of(pd) + field offset) -- far, in
+                # DX:AX, when that's a POINTER.
+                return self.load_based_addr(sym)
             else:
                 self.err(f"cannot take the address of '{e.name}'")
         elif isinstance(e, ast.Field):
-            self.gen_field_addr(e)
+            return self.gen_field_addr(e)
         elif isinstance(e, ast.Call):
-            self.gen_index_addr(e)
+            return self.gen_index_addr(e)
         elif isinstance(e, ast.Index):
-            self.gen_index2_addr(e)
+            return self.gen_index2_addr(e)
         elif isinstance(e, ast.Str):
             label = self.intern_string(e.value)
             self.emit(f"\tmov ax,offset {label}")
         else:
             self.err(f"unsupported operand for '.': {type(e).__name__}")
+        return False
 
     def gen_field_addr(self, fld):
         base = fld.base
@@ -1432,10 +1621,11 @@ class CodeGen:
         if key not in fields:
             self.err(f"structure '{base.name}' has no field '{fld.field}'")
         off, size, _ = fields[key]
-        self.gen_addr(base)
+        far = self.gen_addr(base)
         if off:
             self.emit(f"\tadd ax,{off}")
         self._last_field_size = size
+        return far
 
     def _field_size(self, fld):
         base = fld.base
@@ -1452,8 +1642,10 @@ class CodeGen:
             # pointer's value is the base address, indexed the same way.
             if sym.info['type'] == 'structure':
                 self.err(f"cannot index BASED structure '{call.name}' as an array")
-            elemsize = 1 if sym.info['type'] == 'byte' else 2
-            self.load_based_addr(sym)
+            elemsize = type_size(sym.info['type'])
+            far = self.load_based_addr(sym)
+            if far:
+                self.emit("\tpush dx")
             self.emit("\tpush ax")
             self.gen_expr(call.args[0])
             if elemsize != 1:
@@ -1461,7 +1653,9 @@ class CodeGen:
                 self.emit("\tmul cx")
             self.emit("\tpop bx")
             self.emit("\tadd ax,bx")
-            return
+            if far:
+                self.emit("\tpop dx")
+            return far
         if sym.kind == 'local' and sym.info.get('is_array'):
             # A genuine local array ("DECLARE user(15) BYTE;"): its own
             # stack storage holds the elements directly, so the base
@@ -1479,7 +1673,7 @@ class CodeGen:
                 self.emit("\tmul cx")
             self.emit("\tpop bx")
             self.emit("\tadd ax,bx")
-            return
+            return False
         if sym.kind in ('param', 'local'):
             # An array parameter/local declared to hold an ADDRESS is
             # treated as a pointer when indexed (PL/M arrays are always
@@ -1489,7 +1683,7 @@ class CodeGen:
             self.gen_expr(call.args[0])
             self.emit("\tpop bx")
             self.emit("\tadd ax,bx")
-            return
+            return False
         if sym.kind != 'global':
             self.err(f"cannot index '{call.name}' as an array")
         elemsize = sym.info.get('elemsize', 1)
@@ -1507,10 +1701,11 @@ class CodeGen:
             self.emit("\tadd ax,bx")
         else:
             self.emit("\tadd ax,bx")
+        return False
 
     def _indexed_elem_size(self, sym):
         if sym.kind == 'based':
-            return 1 if sym.info['type'] == 'byte' else 2
+            return type_size(sym.info['type'])
         if sym.kind == 'local' and sym.info.get('is_array'):
             return sym.info.get('elemsize', 1)
         if sym.kind in ('param', 'local'):
@@ -1519,29 +1714,34 @@ class CodeGen:
 
     def gen_index_load(self, call):
         sym = self.resolve(call.name)
-        self.gen_index_addr(call)
+        far = self.gen_index_addr(call)
+        if far:
+            self.emit("\tmov es,dx")
         self.emit("\tmov bx,ax")
-        size = self._indexed_elem_size(sym)
-        if size == 1:
-            self.emit("\tmov al,[bx]")
-            self.emit("\tmov ah,0")
-        else:
-            self.emit("\tmov ax,[bx]")
+        self._load_at_bx(self._indexed_elem_size(sym), far)
 
     def store_index(self, call):
-        self.emit("\tpush ax")
-        self.gen_index_addr(call)
-        self.emit("\tmov bx,ax")
-        self.emit("\tpop ax")
         sym = self.resolve(call.name)
         size = self._indexed_elem_size(sym)
-        self.emit("\tmov [bx],al" if size == 1 else "\tmov [bx],ax")
+        self._push_value(size)
+        far = self.gen_index_addr(call)
+        if far:
+            self.emit("\tmov es,dx")
+        self.emit("\tmov bx,ax")
+        self._pop_value(size)
+        self._store_at_bx(size, far)
 
     # -- output -----------------------------------------------------------
     def to_asm_text(self):
         lines = []
         lines.append("\tcseg")
         lines.append("\torg\t0")
+        if getattr(self, 'has_main', False):
+            # MCD.A86's startup: the stack is in the data segment
+            # (SS = DS), then PLMSTART
+            lines += ["\tpushf", "\tpop ax", "\tcli", "\tmov cx,ds", "\tmov ss,cx",
+                      "\tmov sp,offset pl_stack_base", "\tpush ax", "\tpopf",
+                      f"\tjmp {sanitize(self.MAIN_PROC_NAME)}"]
         lines.extend(self.cseg)
         for tbl, arms in getattr(self, 'cseg_tables', []):
             lines.append(f"{tbl}:")
@@ -1550,7 +1750,15 @@ class CodeGen:
         lines.append("")
         lines.append("\tdseg")
         lines.append("\torg\t0")
+        seen = set()
+        for name, off in sorted(self.BASE_PAGE.items(), key=lambda kv: kv[1]):
+            lines.append(f"\torg\t{off:#x}")
+            lines.append(f"pl_bp_{name}\trb\t0")
+        lines.append("\torg\t100h")
         lines.extend(self.dseg)
+        if getattr(self, 'has_main', False):
+            lines.append(f"\trb\t{self.STACK_BYTES}")
+            lines.append("pl_stack_base\tdb\t0")
         # MEMORY (see compile_module): its address must be past every
         # other global *and* every string/array constant interned while
         # generating procedure bodies, so this has to come after all of

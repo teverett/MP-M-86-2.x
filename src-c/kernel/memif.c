@@ -7,9 +7,9 @@
  *
  * (the module's own inter-module MEM dispatch). Unlike `CIOIF.CIO`'s
  * own `entry` (plain dispatch), this one wraps every call in a real
- * binary-semaphore acquire/release (`SD_MXMEMOWNER`/`SD_MXMEMCOUNT`,
+ * binary-semaphore acquire/release (`mxmemowner`/`mxmemcount`,
  * a recursive lock: a process that already owns it skips re-
- * acquiring), implemented via the real MX queue `SD_MXMEMQPB`
+ * acquiring), implemented via the real MX queue `mxmemqpb`
  * (`f_qread` to acquire, `f_qwrite` to release) plus a `pf_tempkeep`/
  * `pf_ctlc` self-terminate check on the way out -- all genuine logic,
  * ported in full; only the `f_qread`/`f_qwrite`/`f_terminate` calls
@@ -31,16 +31,21 @@
  * `freeall_entry` has no C port of its own (`CPMMEM.MEM`'s own
  * one-liner tail-jump into `mpmif(f_terminate)`, nothing to port --
  * see that file's own header comment) -- modeled here as the same
- * boundary-stub no-op as the real `entry`'s own self-terminate call.
+ * boundary-stub no-op as the real `entry`'s own self-terminate call,
+ * leaving bx as passed in and cx = f_terminate, as the asm does.
  *
- * `init` itself is byte-for-byte identical to `CIOIF.CIO`'s own (same
- * 7-instruction body, no `call`/`callf`/`jmp` at all, ending in a far
- * `RET`) -- see that file's own header comment for the full
- * rationale, which applies here unchanged. `sysdat`=6/`supervisor`=
- * 8/0xA are the same real, already-resolved cseg offsets for the same
- * reason (this module's own `jmp init ! jmp entry` header is the
- * identical 6 bytes); confirmed directly against `tests/src-c/
- * fixtures/memif_wrapper.A86` via `--symbols`.
+ * `init` (memif_init) has the same shape as CIOIF.CIO's/BDOSIF.BDO's
+ * `init`: save `ds_sysdat` in this module's own `cs:sysdat` cell and
+ * copy SYSDAT's module_table[SUP] far pointer into `cs:supervisor`
+ * (real cseg offsets 6/8/0Ah -- the same 6-byte `jmp init ! jmp entry`
+ * header).
+ *
+ * Both run against real memory (defs.h's far_ptr): `phys` is the base
+ * of real physical memory, `sysdat` the real SYSDAT segment (the MEM
+ * module's DS) and `cs` this module's own code segment. `rlr`,
+ * `mxmemowner`/`mxmemcount` and the PD's `p_flag` are SYSDAT-relative.
+ * Every target is called directly, with u_wrkseg left as the caller
+ * set it (SUPIF's mpmif already pointed it at the caller's DS).
  */
 #include <stdint.h>
 
@@ -50,23 +55,25 @@ typedef struct {
     uint16_t bx, cx;
 } entry_result;
 
-extern entry_result maxmem_entry(uint8_t *mem, uint16_t dx);
-extern entry_result absmax_entry(uint8_t *mem, uint16_t dx);
-extern entry_result cpmalloc_entry(uint8_t *mem, uint16_t dx);
-extern entry_result cpmabsa_entry(uint8_t *mem, uint16_t dx);
-extern entry_result cpmfree_entry(uint8_t *mem, uint16_t dx);
-extern entry_result malloc_entry(uint8_t *mem, uint16_t dx);
-extern entry_result mfree_entry(uint8_t *mem, uint16_t dx);
-extern entry_result share_entry(uint8_t *mem, uint16_t dx);
-extern entry_result maualloc_entry(uint8_t *mem, uint16_t bx, uint16_t dx);
-extern entry_result maufree_entry(uint8_t *mem, uint16_t dx);
-extern entry_result mlalloc_entry(uint8_t *mem, uint16_t dx, uint16_t bx);
-extern entry_result mlfree_entry(uint8_t *mem, uint16_t dx, uint16_t bx);
+extern entry_result maxmem_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern entry_result absmax_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern entry_result cpmalloc_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern entry_result cpmabsa_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern entry_result cpmfree_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern entry_result malloc_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern entry_result mfree_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern entry_result share_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern entry_result maualloc_entry(uint8_t *phys, uint16_t sysdat, uint16_t bx, uint16_t dx);
+extern entry_result maufree_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx);
+extern entry_result mlalloc_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t bx);
+extern entry_result mlfree_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t bx);
 
-void memif_init(uint8_t *mem, uint16_t ds_sysdat) {
-    mem_w16(mem, MEMIF_SYSDAT, ds_sysdat);
-    mem_w16(mem, MEMIF_SUPERVISOR_OFF, mem_r16(mem, SD_SUPMOD_OFF));
-    mem_w16(mem, MEMIF_SUPERVISOR_SEG, mem_r16(mem, SD_SUPMOD_SEG));
+void memif_init(uint8_t *phys, uint16_t ds_sysdat, uint16_t cs) {
+    uint8_t *sysdat = far_ptr(phys, ds_sysdat, 0);
+    uint8_t *mem_cs = far_ptr(phys, cs, 0);
+    wr16(mem_cs + MEMIF_SYSDAT, ds_sysdat);
+    wr16(mem_cs + MEMIF_SUPERVISOR_OFF, rd16(sysdat + SYSDAT_SUPMOD));
+    wr16(mem_cs + MEMIF_SUPERVISOR_SEG, rd16(sysdat + SYSDAT_SUPMOD + 2));
 }
 
 /* entry -- MEMIF.MEM's own inter-module MEM dispatch, wrapped in the
@@ -75,45 +82,50 @@ void memif_init(uint8_t *mem, uint16_t ds_sysdat) {
  *		dx/bx = whichever of this specific function's own real
  *		inputs it needs
  */
-entry_result memif_entry(uint8_t *mem, uint8_t cl, uint16_t dx, uint16_t bx) {
-    uint16_t rlr = mem_r16(mem, SD_RLR);
+entry_result memif_entry(uint8_t *phys, uint16_t sysdat, uint8_t cl, uint16_t dx, uint16_t bx) {
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    uint16_t rlr = seg_r16(sd, SYSDAT_RLR);
     uint16_t saved_pflag = 0;
     int reacquired = 0;
-    if (mem_r16(mem, SD_MXMEMOWNER) != rlr) {
+    if (seg_r16(sd, SYSDAT_MXMEMOWNER) != rlr) {
         /* mpmif(f_qread, mxmemqpb) -- boundary stub, acquire always
          * succeeds immediately */
-        mem_w16(mem, SD_MXMEMOWNER, rlr);
-        mem[SD_MXMEMCOUNT] = 0;
-        saved_pflag = mem_r16(mem, (uint16_t)(rlr + p_flag));
-        mem_w16(mem, (uint16_t)(rlr + p_flag), (uint16_t)(saved_pflag | pf_tempkeep));
+        seg_w16(sd, SYSDAT_MXMEMOWNER, rlr);
+        seg_w8(sd, SYSDAT_MXMEMCOUNT, 0);
+        saved_pflag = seg_r16(sd, (uint16_t)(rlr + p_flag));
+        seg_w16(sd, (uint16_t)(rlr + p_flag), (uint16_t)(saved_pflag | pf_tempkeep));
         reacquired = 1;
     }
-    mem[SD_MXMEMCOUNT] = (uint8_t)(mem[SD_MXMEMCOUNT] + 1);
+    seg_w8(sd, SYSDAT_MXMEMCOUNT, (uint8_t)(seg_r8(sd, SYSDAT_MXMEMCOUNT) + 1));
 
     entry_result r = {0, 0};
     switch (cl) {
-    case 0: r = maxmem_entry(mem, dx); break;
-    case 1: r = absmax_entry(mem, dx); break;
-    case 2: r = cpmalloc_entry(mem, dx); break;
-    case 3: r = cpmabsa_entry(mem, dx); break;
-    case 4: r = cpmfree_entry(mem, dx); break;
-    case 5: break; /* freeall_entry -- mpmif(f_terminate) tail, boundary stub */
-    case 6: r = malloc_entry(mem, dx); break;
-    case 7: r = mfree_entry(mem, dx); break;
-    case 8: r = share_entry(mem, dx); break;
-    case 9: r = maualloc_entry(mem, bx, dx); break;
-    case 10: r = maufree_entry(mem, dx); break;
-    case 11: r = mlalloc_entry(mem, dx, bx); break;
-    case 12: r = mlfree_entry(mem, dx, bx); break;
+    case 0: r = maxmem_entry(phys, sysdat, dx); break;
+    case 1: r = absmax_entry(phys, sysdat, dx); break;
+    case 2: r = cpmalloc_entry(phys, sysdat, dx); break;
+    case 3: r = cpmabsa_entry(phys, sysdat, dx); break;
+    case 4: r = cpmfree_entry(phys, sysdat, dx); break;
+    case 5: /* freeall_entry -- "mov cx,f_terminate ! sub dx,dx ! jmp
+             * mpmif", a boundary stub: bx is untouched, cx keeps the code */
+        r.bx = bx;
+        r.cx = f_terminate;
+        break;
+    case 6: r = malloc_entry(phys, sysdat, dx); break;
+    case 7: r = mfree_entry(phys, sysdat, dx); break;
+    case 8: r = share_entry(phys, sysdat, dx); break;
+    case 9: r = maualloc_entry(phys, sysdat, bx, dx); break;
+    case 10: r = maufree_entry(phys, sysdat, dx); break;
+    case 11: r = mlalloc_entry(phys, sysdat, dx, bx); break;
+    case 12: r = mlfree_entry(phys, sysdat, dx, bx); break;
     default: break;
     }
 
-    mem[SD_MXMEMCOUNT] = (uint8_t)(mem[SD_MXMEMCOUNT] - 1);
-    if (mem[SD_MXMEMCOUNT] == 0) {
-        mem_w16(mem, SD_MXMEMOWNER, 0);
+    seg_w8(sd, SYSDAT_MXMEMCOUNT, (uint8_t)(seg_r8(sd, SYSDAT_MXMEMCOUNT) - 1));
+    if (seg_r8(sd, SYSDAT_MXMEMCOUNT) == 0) {
+        seg_w16(sd, SYSDAT_MXMEMOWNER, 0);
         if (reacquired && (saved_pflag & pf_tempkeep) == 0) {
-            uint16_t pflag = mem_r16(mem, (uint16_t)(rlr + p_flag));
-            mem_w16(mem, (uint16_t)(rlr + p_flag), (uint16_t)(pflag & (uint16_t)~pf_tempkeep));
+            uint16_t pflag = seg_r16(sd, (uint16_t)(rlr + p_flag));
+            seg_w16(sd, (uint16_t)(rlr + p_flag), (uint16_t)(pflag & (uint16_t)~pf_tempkeep));
         }
         /* mpmif(f_qwrite, mxmemqpb) -- boundary stub, release always
          * succeeds immediately */

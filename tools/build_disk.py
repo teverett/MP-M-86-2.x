@@ -109,17 +109,10 @@ ECHO.A86's 794 bytes of working storage); the Makefile only tracks the
 `.cseg.bin` as each utility/RSP's build product, but dropping the data
 segment would silently discard that real data. So each one gets the
 same two-segment header MPM.SYS gets (see `build_two_segment_body`),
-at a shared placeholder code segment (CMD_RSP_LOAD_SEG below) -- a
-placeholder because no CCP/process loader exists anywhere in this tree
-yet to actually read a `.CMD`/`.RSP` file and run it (`docs/build.md`'s
-own "minimum useful command set" section 5 is still just a target
-list), so there is no real convention here to match yet, only MPM.SYS's
-own confirmed-by-LDMPM.A86 header format to stay consistent with.
+but with relocatable groups (base 0, min = length), the way GENCMD
+writes a .CMD, so LOAD.SUP puts each one wherever memory is free.
 
 KNOWN LIMITATIONS:
-  - Nothing in this tree yet actually loads a `.CMD`/`.RSP` file from
-    disk and runs it -- these are placed in the filesystem in a format
-    modeled on MPM.SYS's own, but unconfirmed against any real loader.
   - Actually tested in QEMU (`make run`): boots through SeaBIOS, the
     boot sector loads MPMLDR.bin and jumps into it (see docs/bugs.md
     #12/#13 for the two real bugs that testing caught and fixed).
@@ -193,12 +186,16 @@ UTIL_NAMES = ['ABORT', 'ATTACH', 'CONS', 'DIR', 'DSKRST', 'ED', 'ERA',
 # SUBMIT.CMD instead (docs/build.md's own mapping -- it's invoked as
 # a CLI command, not attached to a console the way the other 2 are).
 RSP_NAMES = ['ECHO', 'CLOCK', 'SUBMIT']
-RSP_EXT = {'ECHO': 'RSP', 'CLOCK': 'RSP', 'SUBMIT': 'CMD'}
 
-# Placeholder load segment shared by every utility/RSP body below --
-# see this script's own docstring for why there's no real convention
-# yet to pick a better one.
-CMD_RSP_LOAD_SEG = 0x2000
+# Data-group maximums (paragraphs) DRI's own build gave GENCMD for the
+# utilities that size a buffer from the memory they're loaded with
+# (base page MAXB, the data group's real length): "gencmd ed data[b1a5
+# m253 xfff]" and "gencmd pip data[b1c3 m374 x980]" (orig/mpm862sr's
+# submit files). Everything else is built with no options, max = min.
+# Without these, ED had no room past its own data: "NO MEMORY"
+# (docs/bugs.md #120).
+DATA_MAX = {'ED': 0xFFF, 'PIP': 0x980}
+RSP_EXT = {'ECHO': 'RSP', 'CLOCK': 'RSP', 'SUBMIT': 'CMD'}
 
 
 def run(script, *args):
@@ -215,7 +212,7 @@ def block_to_offset(block_num):
     return DATA_AREA_START + block_num * BLOCK_SIZE
 
 
-def build_two_segment_body(code, data, code_seg):
+def build_two_segment_body(code, data, code_seg=None, data_max=0):
     """The 128-byte header record LDMPM.A86 itself checks for MPM.SYS,
     followed by the code then the data -- see this script's own
     docstring (including why clen/dlen are paragraph counts, not byte
@@ -235,16 +232,29 @@ def build_two_segment_body(code, data, code_seg):
     `clen + dlen` (now exact paragraph counts) against the real
     bytes-read count shifted right 4 (i.e. floor-divided) -- the two
     would quietly disagree by a paragraph or two.
+
+    With no `code_seg` the groups are relocatable, the way GENCMD
+    writes a .CMD: base 0 and min = the group's own length, so LOAD.SUP
+    mallocs them wherever memory is free. A fixed base made every
+    program load at the same address, which held only while nothing
+    stayed resident: once SPOOL detached there, every later load failed
+    with "Not Enough Memory" (docs/bugs.md #119). `data_max` is the data
+    group's max (paragraphs; 0 = just min), see DATA_MAX.
     """
     code_paras = (len(code) + 15) // 16  # paragraph-align
     code = code.ljust(code_paras * 16, b'\0')
-    data_seg = code_seg + code_paras
     data_paras = (len(data) + 15) // 16
     data = data.ljust(data_paras * 16, b'\0')
+    if code_seg is None:
+        data_seg = None
+        groups = (0, code_paras, 0, 0, data_paras, max(data_max, data_paras) if data_max else 0)
+    else:
+        data_seg = code_seg + code_paras
+        groups = (code_seg, 0, 0, data_seg, 0, 0)
     header = struct.pack(
         '<BHHHH BHHHH',
-        MPM_HEADER_TYPE_CODE, code_paras, code_seg, 0, 0,
-        MPM_HEADER_TYPE_DATA, data_paras, data_seg, 0, 0,
+        MPM_HEADER_TYPE_CODE, code_paras, *groups[:3],
+        MPM_HEADER_TYPE_DATA, data_paras, *groups[3:],
     )
     header = header.ljust(128, b'\0')
     return header + code + data, data_seg
@@ -362,7 +372,7 @@ def main():
             code = f.read()
         with open(f'{stem}.dseg.bin', 'rb') as f:
             data = f.read()
-        body, data_seg = build_two_segment_body(code, data, CMD_RSP_LOAD_SEG)
+        body, data_seg = build_two_segment_body(code, data, data_max=DATA_MAX.get(name, 0))
         util_bodies.append((name, ext, body, len(code), len(data),
                              data_seg, next_free_block))
         util_entries, next_free_block = directory_entries_for_file(
@@ -414,8 +424,7 @@ def main():
     for name, ext, body, code_len, data_len, data_seg, first_block in util_bodies:
         print(f"build_disk: {name}.{ext} {len(body)} bytes @ "
               f"{block_to_offset(first_block):#x} "
-              f"(code@{CMD_RSP_LOAD_SEG:04x}h len={code_len:#x}, "
-              f"data@{data_seg:04x}h len={data_len:#x})")
+              f"(relocatable, code len={code_len:#x}, data len={data_len:#x})")
     print(f"build_disk: directory has {len(entries)} entries used of "
           f"{DIR_ENTRIES}")
     print(f"build_disk: wrote {out_path} ({len(image)} bytes)")

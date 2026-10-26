@@ -34,8 +34,8 @@ the four sources have genuine unpatched 1981 bugs — see
 | `REN.PLM` | `REN.CMD` | Rename a file. |
 | `SET.PLM` | `SET.CMD` | Set/change system or per-drive/per-device configuration parameters (e.g. read-only flags, baud rates — see the file's own command table). |
 | `SHOW.PLM` | `SHOW.CMD` | Show system or disk status/configuration — the read-only counterpart to `SET`. |
-| `SPOOL.PLM` | `SPOOL.CMD` | Start spooling console/file output to the print spooler RSP. |
-| `SSPOOL.PLM` | `SSPOOL.CMD` | Stop spooling started by `SPOOL`. |
+| `SPOOL.PLM` | `SPOOL.CMD` | Print files on the list device in the background: loads, detaches from the console and runs as process `SPOOL` (MP/M-86 has no spooler RSP). |
+| `SSPOOL.PLM` | `SSPOOL.CMD` | STOPSPLR: abort the `SPOOL` process. |
 | `STSCMD.PLM` | `STSCMD.CMD` | The transient half of the MP/M-86 status command (`MPMSTAT`'s command-line front end) — queries and prints system/process status. See "STSCMD/STSCOM/STSRSP" below. |
 | `STSCOM.PLM` | `STSCOM.CMD` | Code shared between `STSCMD` and `STSRSP` ($include'd by both, per its own header comment) — compiled standalone here since this tree has no linker, but not a command in its own right. See below. |
 | `STSRSP.PLM` | `STSRSP.CMD` | The Resident System Process half of the status command, cooperating with `STSCMD` to gather status MP/M keeps per-process rather than globally. See below. |

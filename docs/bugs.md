@@ -9916,3 +9916,144 @@ later; set to 03/19/86 23:59:55, it shows Thu 03/20/86 00:00:04 nine
 seconds later; ten programs in a row (DIR, SUBMIT, TOD, ERA, REN, ...)
 run, the clock advancing through them.
 
+
+## 118. `tools/build_mpmsys.py` — ECHO's queued message overwrote SYSDAT's header — FIXED
+
+**Symptom.** With ECHO baked in as a third RSP, `ECHO hello` hung the
+system: every later system call went through `gofar` to `mpmif` with no
+module to dispatch to. A memory dump showed SYSDAT 0-~130h overwritten
+with message and FCB data, `module_table` and `module_map` included.
+
+**Cause.** ECHO's QD lives in its own data segment, below SYSDAT, so
+QUE2.RTM's `getqdaddr` copies it into the QD pool and `qspace` takes its
+131-byte buffer from `qmau`. `maualloc` returns the SAT entry's
+`sat_start`, which goes straight into `q_buf`, and `writeq`'s `qw_move`
+(QUE1.RTM) copies the message to `DS:q_buf` with DS = SYSDAT. So SAT
+starts have to be SYSDAT offsets. The script's hand-built SAT (#117 and
+earlier) gave SAT1 a start relative to the MAU's own segment (37h, just
+past the table), so the first message landed at SYSDAT:37h. TMP's and
+the BDOS's queues never hit this: the CLI queue's QD is already inside
+the system, and the disk MX queue has no buffer.
+
+**Patched**: SAT1.start = the buffer's SYSDAT offset + the table length.
+No kernel change, so /src and /src-c are unchanged. `src-c/boot/kernel_main.c`'s
+`SYSDAT_SEG` moves to 16F9h (ECHO adds 944 bytes of code).
+
+**Verified** in QEMU: `ECHO hello, world` prints "ECHO Msg Qued" then
+" hello, world"; TOD, DIR, a second ECHO and TOD follow, with the clock
+advancing. test_boot, test_que, test_mau, test_echo and test_plmc pass.
+
+## 119. SPOOL couldn't run: fixed-address .CMD files, one memory partition, no list device — FIXED
+
+**Request.** "Get the SPOOL RSP loaded." MP/M-86 2.0 has no spooler
+RSP: the user's guide and both MP/M-86 distributions ship SPOOL only
+as a .CMD (SPOOL.PLM). It loads, detaches from its console and keeps
+running as a process named `SPOOL` until it has printed its files;
+STOPSPLR (SSPOOL.PLM) aborts it by name. The `spool.rsp` in
+`orig/mpm_II` is MP/M-II's, 8080 code. So the job was to make
+SPOOL.CMD work, which took three fixes.
+
+**1. `tools/build_disk.py` — every .CMD loaded at 2000h.** The CMD
+header for each utility gave both groups an absolute base (code at
+2000h, data right after) with min = max = 0. LOAD.SUP takes a nonzero
+base as an absolute request, so every program went to the same
+address. That worked only while one program at a time was resident.
+After SPOOL detached there, every later command failed with
+"?Not Enough Memory". (With min 0, `maualloc` also handed out
+zero-length segments.) **Patched**: groups are relocatable, as GENCMD
+writes them: base 0, min = the group's length, max 0 (LOAD.SUP reads
+that as min).
+
+**2. `tools/build_mpmsys.py` — all of free memory was one partition.**
+MP/M-86 2.0 uses fixed partitions, which GENSYS asks for. ML.MEM's
+`mlalloc` builds a process's MAU from whole Memory Free List entries,
+and the MAU stays that process's until it frees everything in it. With
+one MFL entry covering 18A0h-9000h, the first resident program would
+own all of it. **Patched**: free memory is cut into 16K
+(`PARTITION_SIZE`) partitions, 29 of them, each an MD on `mfl` in
+memory order; `mlalloc` still combines contiguous ones for bigger
+requests. The MD pool is sized to the partition count plus 40 spares.
+
+**3. No list device.** XIOS86Q's LIST/LISTST were stubs and `maxlist`
+was 0, and SYSDAT's CCB table had only the console. Every PD's `p_lst`
+is CCB index 1 (list 0, after the console), so SPOOL's `attach$list`
+slept on a `c_queue` past the end of the table. Nothing could wake it,
+and STOPSPLR's abort (`abtcns`/`abtlst`) couldn't find it on any CCB
+queue: "Spooler not running". **Patched**:
+- XIOS86Q.A86 drives LPT1 (378h). LIST waits for not-busy through
+  `rtm_poll` (poll device 08h, `l0outdev` as in DRI's XIOS), latches
+  the byte and pulses strobe. LISTST polls it, and `maxlist` = 1.
+  `ccbtab0` holds two CCBs.
+- build_mpmsys sets `nlstdev` 1, `nciodev` 2, `nccb` 2, and
+  `c_mimic`/`c_msource` 0FFh in both CCBs.
+- run.sh sends QEMU's parallel port to `build/printer.txt`.
+- src-c's xios86q.c has the same LIST/LISTST/POLLDEV/MAXLIST, and its
+  `XQ_*` offsets after `ccbtab0` moved by 12 (defs.h). SYSDAT is now at
+  16FCh (kernel_main.c, docs/src-c.md).
+
+**Verified** in QEMU:
+- `SPOOL CLOCK.RSP` prints the file to LPT1 up to its ^Z, while TOD and
+  DIR run alongside it.
+- With ^P on (so the console holds the printer), SPOOL waits for the
+  printer, STOPSPLR prints "Spooler aborted", and a second STOPSPLR
+  prints "Spooler not running".
+- ECHO, DIR, TOD and ERA work before and after.
+
+All 56 tests/src-c and tests/plm test files pass, including
+test_xios86q.py's new PLIST/LISTST/l0outdev cases.
+
+**Not fixed here:** SHOW printed "A: RW, Space: 0" and then garbage
+forever, the same with the old headers. It was a PL/M compiler bug,
+fixed in #120.
+
+## 120. `tools/plm/codegen.py` — frames too small around nested procedures; BASED bytes typed as ADDRESS — FIXED (SHOW, SET, ED)
+
+**Symptom.** SHOW printed "A: RW, Space: 0" and then `]]]]...` forever.
+SET reported "read write (RW)" for a file it had just made read-only.
+ED said "NO MEMORY".
+
+**1. A procedure's frame was sized by its nested procedure's locals.**
+`gen_proc` registers a procedure's locals, then hoists and generates
+its nested procedures. Each of those resets `self.next_local_off`, and
+only `cur_scope`/`cur_proc` were restored afterwards. So the enclosing
+procedure's `sub sp,N` came from the *last nested procedure's* locals.
+SHOW's `printbcd` (locals `zerosup`, `i`; nested `pchar` with none) got
+no `sub sp` at all. Each `call pchar` pushed over `i`, so
+`do while (i:=i-1) <> -1` never ended. ED, ERA, PIP, REN, SET and SHOW
+all had procedures like this. (This was found by diffing every
+utility's output before and after the fix.)
+**Patched**: `next_local_off` is saved around the hoist and restored.
+
+**2. An element of a BASED array, `x(i)`, was ADDRESS.** That form
+parses as a Call node. On that path `expr_type` used `elemsize`/`size`,
+which a BASED symbol doesn't have, so it fell back to ADDRESS. SET's
+`attribute` does `if rol(fcbv(i),1)` to test an attribute bit (bit 7).
+As a 16-bit `rol ax,cl` the bit went to bit 8, so every attribute read
+as off. Byte arithmetic on such elements also lost its `mov ah,0`.
+**Patched**: a BASED symbol is typed from its declaration
+(`_sym_type`).
+
+**3. `tools/build_disk.py` — ED had no edit buffer.** ED sizes its
+buffer from base-page MAXB, the data group's real length. With
+relocatable headers (#119), max = min, so there was nothing past its
+data. DRI's build gave ED `data[m253 xfff]` and PIP `data[m374 x980]`.
+**Patched**: `DATA_MAX` gives those two utilities those maximums.
+
+tests/plm/test_plmc.py has new cases for both compiler fixes: a counting
+loop around a nested procedure, and `rol`/byte arithmetic on a BASED
+byte. The loop case runs away without fix 1.
+
+**Verified** in QEMU:
+- SHOW, SHOW SPACE/USERS/DRIVE/A:DRIVE/LABEL/HELP and an invalid option
+  all print correctly. Free space reads 1,152k, which matches the
+  directory: 177 8K blocks, minus 1 for the directory and 32 for files.
+- SET [RO]/[RW SYS]/[DIR] report and set correctly, and ERA refuses a
+  read-only file.
+- REN works both ways.
+- ED creates a file, inserts text and saves it, and TYPE shows it.
+
+All 56 tests/src-c and tests/plm files pass.
+
+**Still open:** PIP hangs after loading (`PIP U.TXT=T.TXT`). It does
+the same when built with the compiler from before these fixes.
+

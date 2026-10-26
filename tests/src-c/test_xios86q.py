@@ -49,8 +49,8 @@ STACK_SEG, STACK_TOP = 0x0800, 0x0FF0
 XQ_TICK_COUNT, XQ_CLOCKON = 0x1000, 0x1001
 XQ_DISK, XQ_TRK, XQ_SECT = 0x1004, 0x1005, 0x1006
 XQ_DMA_ADR, XQ_DMA_SEG = 0x1007, 0x1009
-XQ_SECBUF = 0x1040
-XQ_DPH0 = 0x1240
+XQ_SECBUF = 0x104C
+XQ_DPH0 = 0x1250
 
 
 class PicPit:
@@ -82,15 +82,49 @@ class PicPit:
             raise ValueError(f"PicPit: unexpected OUT to port 0x{port:04X}")
 
 
+class Lpt:
+    """LPT1 (0x378-0x37A): status reads report `ready` in bit 7
+    (not busy); a byte counts as printed when control goes from no
+    strobe to strobe, as QEMU's parallel port does it. Every write is
+    recorded too."""
+
+    def __init__(self, ready=True):
+        self.ready = ready
+        self.data = 0
+        self.ctrl = 0x0C
+        self.printed = []
+        self.writes = []
+
+    def in8(self, port):
+        if port == 0x379:
+            return 0x80 if self.ready else 0x00
+        raise ValueError(f"Lpt: unexpected IN from port 0x{port:04X}")
+
+    def out8(self, port, value):
+        value &= 0xFF
+        self.writes.append((port, value))
+        if port == 0x378:
+            self.data = value
+        elif port == 0x37A:
+            if value & 1 and not self.ctrl & 1:
+                self.printed.append(self.data)
+            self.ctrl = value
+        else:
+            raise ValueError(f"Lpt: unexpected OUT to port 0x{port:04X}")
+
+
 class Device:
-    def __init__(self, uart=None, fdc=None, picpit=None):
+    def __init__(self, uart=None, fdc=None, picpit=None, lpt=None):
         self.uart = uart or Uart86Q()
         self.fdc = fdc or Fdc86Q()
         self.picpit = picpit or PicPit()
+        self.lpt = lpt or Lpt()
 
     def _route(self, port):
         if port in (0x3F8, 0x3F9, 0x3FB, 0x3FC, 0x3FD):
             return self.uart
+        if port in (0x378, 0x379, 0x37A):
+            return self.lpt
         if port in (0x40, 0x43, 0x20, 0x21):
             return self.picpit
         return self.fdc
@@ -185,7 +219,9 @@ def main():
         lib.reader_entry.restype = ctypes.c_uint8
         lib.reader_entry.argtypes = []
         lib.listst_entry.restype = ctypes.c_uint8
-        lib.listst_entry.argtypes = []
+        lib.listst_entry.argtypes = [IN8_FN]
+        lib.plist_entry.restype = None
+        lib.plist_entry.argtypes = [IN8_FN, OUT8_FN, ctypes.c_uint8]
         lib.maxconsole_entry.restype = ctypes.c_uint16
         lib.maxconsole_entry.argtypes = []
         lib.maxlist_entry.restype = ctypes.c_uint16
@@ -261,8 +297,20 @@ def main():
         check("PUNCH", ref_regs['ax'] & 0xFF, lib.punch_entry())
         ref_regs, _ = run_reference(code, dseg, entries['reader'], {}, Device())
         check("READER", ref_regs['ax'] & 0xFF, lib.reader_entry())
-        ref_regs, _ = run_reference(code, dseg, entries['listst'], {}, Device())
-        check("LISTST", ref_regs['ax'] & 0xFF, lib.listst_entry())
+        for ready in (True, False):
+            ref_regs, _ = run_reference(code, dseg, entries['listst'], {}, Device(lpt=Lpt(ready)))
+            check(f"LISTST ready={ready}", ref_regs['ax'] & 0xFF,
+                  lib.listst_entry(make_c_hooks(Device(lpt=Lpt(ready)))[0]))
+
+        # -- PLIST --
+        d1 = Device()
+        run_reference(code, dseg, entries['plist'], {'cx': 0x41, 'dx': 0}, d1)
+        d2 = Device()
+        in8, out8 = make_c_hooks(d2)
+        lib.plist_entry(in8, out8, ctypes.c_uint8(0x41))
+        check("PLIST: byte printed", d1.lpt.printed, d2.lpt.printed)
+        check("PLIST: port writes", d1.lpt.writes, d2.lpt.writes)
+        assert d1.lpt.printed == [0x41]
 
         # -- MAXCONSOLE/MAXLIST --
         ref_regs, _ = run_reference(code, dseg, entries['maxconsole'], {}, Device())
@@ -321,6 +369,7 @@ def main():
         for label, cl, uart in (("c0indev not ready", 0x00, Uart86Q(rx_bytes=b'')),
                                  ("c0indev ready", 0x00, Uart86Q(rx_bytes=b'x')),
                                  ("c0outdev", 0x04, Uart86Q()),
+                                 ("l0outdev", 0x08, Uart86Q()),
                                  ("flpy_poll_dev", 0x09, Uart86Q())):
             ref_regs, _ = run_reference(code, dseg, entries['polldev'], {'cx': cl}, Device(uart=uart))
             port_ax = lib.polldev_entry(make_c_hooks(Device(uart=uart))[0], ctypes.c_uint8(cl))
@@ -419,7 +468,7 @@ def main():
         # present in `dseg` (its own static data) -- read directly so
         # the port's own copy (which has no equivalent preloaded
         # image) gets the exact same bytes, not just a truncated stand-in.
-        XQ_SIGNON = 0x134A
+        XQ_SIGNON = 0x135A
         signon_end = XQ_SIGNON
         while dseg[signon_end] != 0:
             signon_end += 1

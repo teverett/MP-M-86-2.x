@@ -31,9 +31,9 @@
  *     machinery, same "resumes exactly here once rescheduled"
  *     reasoning the boundary-stub convention describes; modeled as
  *     an immediate return once `polldev` reports ready, since
- *     neither `xios_conin_entry` nor `xios_conout_entry` (its only two
- *     real callers, named with an `xios_` prefix here -- see below
- *     for why) ever inspect `rtm_poll`'s own return value anyway --
+ *     none of `xios_conin_entry`, `xios_conout_entry` (named with an
+ *     `xios_` prefix here -- see below for why) and `plist_entry`,
+ *     its only real callers, ever inspect `rtm_poll`'s own return value anyway --
  *     its whole observable job, from their point of view, is just
  *     "block until ready," which this port's synthetic test device
  *     always already is.
@@ -65,7 +65,16 @@
 
 #define c0indev       0x00
 #define c0outdev      0x04
+#define l0outdev      0x08
 #define flpy_poll_dev 0x09
+
+#define lpt_data   0x378
+#define lpt_status 0x379
+#define lpt_ctrl   0x37A
+#define lpt_sts_notbusy 0x80
+#define lpt_ctl_select  0x08
+#define lpt_ctl_init    0x04
+#define lpt_ctl_strobe  0x01
 
 #define uart_rxtx 0x3F8
 #define uart_lsr  0x3FD
@@ -105,7 +114,7 @@ typedef void (*io_out8_fn)(uint16_t port, uint8_t value);
 /* -- POLL DEVICE / rtm_poll ------------------------------------------ */
 
 /* polldev_entry -- Function 17: Poll Device.
- *	input:	cl = device number (c0indev/c0outdev/flpy_poll_dev)
+ *	input:	cl = device number (c0indev/c0outdev/l0outdev/flpy_poll_dev)
  *	output:	returns al (0xFF if ready, 0 if not)
  */
 uint8_t polldev_entry(io_in8_fn io_in8, uint8_t cl) {
@@ -119,6 +128,9 @@ uint8_t polldev_entry(io_in8_fn io_in8, uint8_t cl) {
     if (cl == c0outdev) {
         uint8_t al = io_in8(uart_lsr);
         return (al & uart_lsr_txrdy) != 0 ? 0xFF : 0;
+    }
+    if (cl == l0outdev) {
+        return (io_in8(lpt_status) & lpt_sts_notbusy) != 0 ? 0xFF : 0;
     }
     /* flpy_poll_dev (and anything else): floppy I/O is fully
      * synchronous PIO, already complete by the time anything polls
@@ -163,8 +175,15 @@ void xios_conout_entry(io_in8_fn io_in8, io_out8_fn io_out8, uint8_t cl) {
     io_out8(uart_rxtx, cl);
 }
 
-/* plist_entry -- Function 3: List Output -- no list device. */
-void plist_entry(void) {
+/* plist_entry -- Function 3: List Output (LPT1): wait for not-busy,
+ * latch the byte, pulse strobe.
+ *	input:	cl = character to print
+ */
+void plist_entry(io_in8_fn io_in8, io_out8_fn io_out8, uint8_t cl) {
+    rtm_poll(io_in8, l0outdev);
+    io_out8(lpt_data, cl);
+    io_out8(lpt_ctrl, lpt_ctl_select | lpt_ctl_init | lpt_ctl_strobe);
+    io_out8(lpt_ctrl, lpt_ctl_select | lpt_ctl_init);
 }
 
 /* punch_entry -- Function 4 / reader_entry -- Function 5: not
@@ -177,9 +196,11 @@ uint8_t reader_entry(void) {
     return 0x1A;
 }
 
-/* listst_entry -- Function 13: List Status -- no list device. */
-uint8_t listst_entry(void) {
-    return 0;
+/* listst_entry -- Function 13: List Status.
+ *	output:	returns al (0xFF if ready, else 0)
+ */
+uint8_t listst_entry(io_in8_fn io_in8) {
+    return polldev_entry(io_in8, l0outdev);
 }
 
 /* maxconsole_entry -- Function 20: Maximum Consoles. */
@@ -189,7 +210,7 @@ uint16_t maxconsole_entry(void) {
 
 /* maxlist_entry -- Function 21: Maximum List Devices. */
 uint16_t maxlist_entry(void) {
-    return 0;
+    return 1;
 }
 
 /* -- FLOPPY CONTROLLER (NEC 765/8272) DRIVER -------------------------- */

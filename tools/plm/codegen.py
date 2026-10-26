@@ -512,11 +512,17 @@ class CodeGen:
         # registered (wherever nested in its body) *before* any nested
         # PROCEDURE within it is hoisted out and generated.
         proc.body = self._register_vardecls(proc.body)
+        next_local_off = self.next_local_off
         proc.body = self._hoist_procs(proc.body, local_scope)
         # A nested proc's own gen_proc call (just above) overwrote these;
         # restore them to resume generating *this* procedure's own body.
+        # next_local_off too: without it this procedure's frame was sized
+        # by its last nested procedure's locals, so SHOW's printbcd
+        # reserved none and the call to its nested pchar pushed over its
+        # loop index (docs/bugs.md #120).
         self.cur_scope = local_scope
         self.cur_proc = proc
+        self.next_local_off = next_local_off
 
         body_lines = []
         self.out = body_lines
@@ -955,6 +961,12 @@ class CodeGen:
                 return 'address'
             if sym.kind == 'proc':
                 return {'byte': 'byte', 'pointer': 'pointer'}.get(sym.info.get('rettype'), 'address')
+            if sym.kind == 'based':
+                # a BASED array element, e.g. SET's fcbv(i): typed by its
+                # declaration -- it has no elemsize/size, and taking it
+                # as ADDRESS made rol(fcbv(i),1) a 16-bit rotate
+                # (docs/bugs.md #120)
+                return self._sym_type(sym)
             return 'byte' if sym.info.get('elemsize', sym.info.get('size', 2)) == 1 else 'address'
         return 'address'
 

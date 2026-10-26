@@ -976,13 +976,13 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 #define XQ_CUR_BUFOFF    0x100E /* word */
 #define XQ_OUTBYTE_TMP   0x1010 /* byte: fdc_out_byte's scratch */
 #define XQ_DTRNTBL       0x1011 /* byte[4] */
-#define XQ_SPECIFY_PARMS 0x1021 /* byte[4] */
-#define XQ_RECAL_PARMS   0x1025 /* byte[3] */
-#define XQ_SEEK_PARMS    0x1028 /* byte[4] */
-#define XQ_READ_PARMS    0x102C /* byte[10] */
-#define XQ_WRITE_PARMS   0x1036 /* byte[10] */
-#define XQ_SECBUF        0x1040 /* byte[fd_secsize=512] */
-#define XQ_DPH0          0x1240 /* word: SELDSK's own DPH address */
-#define XQ_SIGNON        0x134A /* byte[...]: init's own signon message */
+#define XQ_SPECIFY_PARMS 0x102D /* byte[4] */
+#define XQ_RECAL_PARMS   0x1031 /* byte[3] */
+#define XQ_SEEK_PARMS    0x1034 /* byte[4] */
+#define XQ_READ_PARMS    0x1038 /* byte[10] */
+#define XQ_WRITE_PARMS   0x1042 /* byte[10] */
+#define XQ_SECBUF        0x104C /* byte[fd_secsize=512] */
+#define XQ_DPH0          0x1250 /* word: SELDSK's own DPH address */
+#define XQ_SIGNON        0x135A /* byte[...]: init's own signon message */
 
 #endif

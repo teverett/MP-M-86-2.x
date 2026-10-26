@@ -13,6 +13,8 @@
 ;*	    standard 1.44MB 3.5" floppy geometry)
 ;*	  - timer: standard PC 8253/8254 PIT (channel 0) + 8259
 ;*	    PIC IRQ0, reprogrammed for 60 ticks/second
+;*	  - list: standard PC parallel port, LPT1 @ 0378h,
+;*	    polled (run.sh sends QEMU's to build/printer.txt)
 ;*
 ;*	The real XIOS.A86 (orig/mpm862sr/.../XIOS.A86, also in
 ;*	this tree) targets Intel SBC 204 (8271 FDC) + SBC 534
@@ -39,10 +41,9 @@
 ;*	KNOWN LIMITATIONS (see tools/README.md and docs/bugs.md
 ;*	for the matching entries once filed):
 ;*	  - Single console (console 0 only); maxconsole = 1.
-;*	  - No list/punch/reader device; maxlist = 0, and
-;*	    PUNCH/READER/LIST/LISTST are stubs (DRI's own
-;*	    XIOSCB.DEF already marks PUNCH/READER/LISTST/GETSEGT
-;*	    "not used" by the rest of the kernel).
+;*	  - One list device (list 0, LPT1); maxlist = 1. No
+;*	    punch/reader device: PUNCH/READER are stubs (DRI's
+;*	    own XIOSCB.DEF marks them "not used").
 ;*	  - Single floppy drive (logical disk 0 only).
 ;*	  - The disk geometry/DPB below is a placeholder -- the
 ;*	    real system-generation tool (GENSYS-86-equivalent,
@@ -71,6 +72,7 @@ lf	equ	0ah
 
 c0indev		equ	00h	;console 0 input
 c0outdev	equ	04h	;console 0 output
+l0outdev	equ	08h	;list 0 output
 flpy_poll_dev	equ	09h	;floppy disk
 
 ;	Flag bit assignments (same as the real XIOS.A86).
@@ -85,6 +87,20 @@ sec_flag	equ	2
 ;	exactly as the real XIOS.A86 declares it itself.
 
 f_polldev	equ	131
+
+;*****************************************************
+;*	PARALLEL PORT EQUATES -- LPT1, polled
+;*****************************************************
+
+lpt_base	equ	0378h
+lpt_data	equ	lpt_base+0	;data latch (out)
+lpt_status	equ	lpt_base+1	;status (in)
+lpt_ctrl	equ	lpt_base+2	;control (out)
+
+lpt_sts_notbusy	equ	80h	;status bit 7: 1 = ready for a byte
+lpt_ctl_select	equ	08h	;control: select printer
+lpt_ctl_init	equ	04h	;control: 1 = not in reset (/INIT)
+lpt_ctl_strobe	equ	01h	;control: strobe the data latch
 
 ;*****************************************************
 ;*	UART (8250/16450) EQUATES -- COM1, polled, 9600 8N1
@@ -484,8 +500,22 @@ conout:	    ; Function 2: Console Output
 	ret
 
 ;=====
-plist:	    ; Function 3: List Output -- no list device
+plist:	    ; Function 3: List Output
 ;=====
+;	input:	CL = character, DL = list device # (ignored, one)
+;	output:	none
+;	Waits for not-busy, latches the byte, then pulses strobe.
+
+	push	cx
+	mov	bh,0 ! mov bl,l0outdev
+	call	rtm_poll
+	pop	ax
+	mov	dx,lpt_data ! out dx,al
+	mov	dx,lpt_ctrl
+	mov	al,lpt_ctl_select+lpt_ctl_init+lpt_ctl_strobe
+	out	dx,al
+	mov	al,lpt_ctl_select+lpt_ctl_init
+	out	dx,al
 	ret
 
 ;=====
@@ -499,10 +529,13 @@ reader:	    ; Function 5
 	ret
 
 ;======
-listst:	    ; Function 13: List Status -- no list device
+listst:	    ; Function 13: List Status
 ;======
-	xor	al,al
-	ret
+;	input:	CL = list device # (ignored, one)
+;	output:	AL = 0ffh if ready, else 0
+
+	mov	cl,l0outdev
+	jmp	polldev
 
 ;==========
 maxconsole: ; Function 20: Maximum Consoles
@@ -513,7 +546,7 @@ maxconsole: ; Function 20: Maximum Consoles
 ;=======
 maxlist:    ; Function 21: Maximum List Devices
 ;=======
-	xor	ax,ax
+	mov	ax,1
 	ret
 
 ;*****************************************************
@@ -737,6 +770,12 @@ polldev_1:
 	    jnz	polldev_rdy
 	    ret
 polldev_2:
+	cmp	cl,l0outdev ! jne polldev_3
+	    mov	dx,lpt_status ! in al,dx
+	    and	al,lpt_sts_notbusy
+	    jnz	polldev_rdy
+	    ret
+polldev_3:
 	cmp	cl,flpy_poll_dev ! jne polldev_rdy
 	    ; floppy I/O below is fully synchronous (PIO polled
 	    ; to completion inside fdc_send_cmd/fdc_wait_* already),
@@ -1222,13 +1261,14 @@ dtrntbl		db	000h,0ffh,0ffh,0ffh	;logical disk 0 -> drive 0
 ;	whatever garbage happens to sit at offset 0 as `c_attach`,
 ;	finds it non-zero, and sleeps forever waiting for a detach that
 ;	can never come, since nothing ever really held that attachment.
-;	Reserve real storage for this build's one CCB (`ncondev`=1,
-;	`nlstdev`=0, patched into `nccb` alongside those two in
+;	Reserve real storage for this build's two CCBs (`ncondev`=1,
+;	`nlstdev`=1, patched into `nccb` alongside those two in
 ;	build_mpmsys.py) here, in XIOS86Q.A86's own private dseg tail --
 ;	same pattern as `dirbuf0`'s own fix just above -- and have
 ;	build_mpmsys.py patch SYSDAT's `ccb` field to point at it.
-ccbtab0		rb	12	;one CCB (CCB.DEF's ccblen), zero-initialized
-				; (c_attach=0, i.e. "unattached") by `rb`
+ccbtab0		rb	24	;two CCBs (CCB.DEF's ccblen each): console
+				; 0 then list 0, zero-initialized (c_attach=0,
+				; i.e. "unattached") by `rb`
 
 	;	NEC765 command strings: [length][command byte]...
 

@@ -231,9 +231,22 @@ LOCK_ITEMS = 16
 # the first paragraph after the system data area up to FREE_MEM_END
 # (below the EBDA; MPMLDR, at 0800h, is dead by then). SYSDAT's own
 # 4096 bytes are full, so the pool follows the XIOS's dseg tail.
+#
+# MP/M-86 2.0's memory model is fixed partitions, which GENSYS asks
+# for: ML.MEM's `mlalloc` builds a process's MAU out of whole MFL
+# entries (combining contiguous ones when a request needs more), and
+# the MAU stays that process's until it frees everything in it. With
+# all of free memory as one MFL entry, the first program to stay
+# resident -- SPOOL, once it detaches -- owned all of it and every
+# later load failed with "Not Enough Memory" (docs/bugs.md #119). So
+# free memory is cut into PARTITION_SIZE-paragraph partitions, the
+# last taking the remainder. Each partition is an MD on mfl; the MD
+# pool holds those plus MD_SPARE for p_mem lists and multi-partition
+# MAUs.
 MFL_FIELD_OFFSET = 0x5A
 MD_LEN = 10                # mdlen (MEM.DEF)
-MD_POOL = 24
+MD_SPARE = 40
+PARTITION_SIZE = 0x400     # paragraphs: 16K
 FREE_MEM_END = 0x9000
 
 # `endseg` (SYSTEM.DAT: "dw 0 ;1st parag. outside of MP/M") is GENSYS-
@@ -356,7 +369,7 @@ QMAU_SAT_ENTRIES = 10  # generous capacity -- see the fix's own comment
 SYSDAT_DSEG_SIZE = 4096  # see XIOS86Q.A86's own comment on this number
 
 # RSPs baked into the image: (src/rsp name, its initial-stack-frame label)
-BAKED_RSPS = [('TMP', 'stack_top'), ('CLOCK', 'stack_tos')]
+BAKED_RSPS = [('TMP', 'stack_top'), ('CLOCK', 'stack_tos'), ('ECHO', 'stack_tos')]
 
 SYM_RE = re.compile(r'^\s*(init|entry)\s+label\s+([0-9A-Fa-f]+)h', re.MULTILINE)
 ANY_SYM_RE = re.compile(r'^\s*(\S+)\s+(?:label|equ)\s+([0-9A-Fa-f]+)h', re.MULTILINE)
@@ -469,12 +482,13 @@ def main():
     dseg[MODULE_MAP_OFFSET] = 0x3F  # sup|rtm|mem|bdos|cio|xios, not net
 
     # A few "answers to GENSYS questions" fields that matter for
-    # XIOS86Q's own specific configuration (one console, no list
+    # XIOS86Q's own specific configuration (one console, one list
     # device, 60 ticks/sec) -- see KNOWN LIMITATIONS for what's *not*
-    # set here.
+    # set here. (INIT.SUP re-reads the device counts from the XIOS's
+    # maxconsole/maxlist anyway.)
     dseg[NCONDEV_OFFSET] = 1
-    dseg[NLSTDEV_OFFSET] = 0
-    dseg[NCIODEV_OFFSET] = 1
+    dseg[NLSTDEV_OFFSET] = 1
+    dseg[NCIODEV_OFFSET] = 2
     dseg[TICKSPERSEC_OFFSET] = 60
 
     # srchdisk ("default search disk", SYSDAT.FMT) is also the disk
@@ -509,11 +523,11 @@ def main():
 
     # nccb ("# character control blocks", SYSDAT.FMT) must match the
     # number of CCB-backed devices this build actually has --
-    # ncondev+nlstdev = 1+0 = 1, not SYSTEM.DAT's stock 5 (written for
+    # ncondev+nlstdev = 1+1 = 2, not SYSTEM.DAT's stock 5 (written for
     # the original multi-device target). See CCB_OFFSET's own patch
     # below for why `ccb` (where that/those CCB(s) actually live)
     # matters far more than this count does, but keep them consistent.
-    dseg[NCCB_OFFSET] = 1
+    dseg[NCCB_OFFSET] = 2
 
     # mdul/qlr: reset every stale "unused list"/"queue list root" head
     # to empty -- see PUL_FIELD_OFFSET's own comment for why their
@@ -673,8 +687,15 @@ def main():
     satlen = 5  # sat_start(2) + sat_length(2) + sat_nall(1)
     sat_table_len = satlen * (QMAU_SAT_ENTRIES + 1)  # +1 for SAT0 itself
     dseg[qmau_buf_off] = QMAU_SAT_ENTRIES  # SAT0.ents = capacity
+    # SAT1.start is a SYSDAT offset, not one relative to m_start: the
+    # queue code stores maualloc's mpb_start straight into q_buf and
+    # writeq/readq index it with DS = SYSDAT (QUE1.RTM's qw_move, and
+    # getqdaddr's own SYSDAT-relative q_buf for in-system QDs). Relative
+    # to the buffer, the first table-copied queue with a message buffer
+    # (ECHO's) got q_buf = 37h and wrote over SYSDAT's own header
+    # (docs/bugs.md #118).
     struct.pack_into('<HHB', dseg, qmau_buf_off + satlen,
-                      sat_table_len,                   # SAT1.start
+                      qmau_buf_off + sat_table_len,    # SAT1.start
                       QMAU_BUF_SIZE - sat_table_len,    # SAT1.length
                       0)                                # SAT1.nall (free)
     struct.pack_into('<HHHH', dseg, QMAU_FIELD_OFFSET,
@@ -742,22 +763,40 @@ def main():
     # twice per character, back-to-back, both returns landing on the
     # identical caller address -- not wild execution, just this one
     # mis-defaulted byte.
-    struct.pack_into('<B', dseg, ccbtab0_off + 8, 0xFF)  # c_mimic
+    # Both CCBs: console 0 and list 0 (CCB index ncondev + 0, which
+    # is what every PD's p_lst holds). Without the list's, a program
+    # attaching the printer (SPOOL) waits on a c_queue past the end of
+    # the table, where nothing ever wakes it and ABORT can't find it
+    # (docs/bugs.md #119).
+    for ccb_index in range(2):
+        struct.pack_into('<BB', dseg, ccbtab0_off + 12 * ccb_index + 8,
+                         0xFF, 0xFF)  # c_mimic, c_msource: none
 
     # Memory Descriptor pool and the Memory Free List -- see
     # MFL_FIELD_OFFSET's own comment.
+    # Enough MDs for the partitions whatever the pool's own size moves
+    # free_start to: count them from the pool's start, an upper bound.
     md_pool = len(dseg)
-    dseg += bytes(MD_POOL * MD_LEN)
-    for i in range(MD_POOL - 1):              # the last one is mfl's
-        off = md_pool + i * MD_LEN
-        struct.pack_into('<H', dseg, off, off + MD_LEN if i < MD_POOL - 2 else 0)
-    struct.pack_into('<H', dseg, MDUL_FIELD_OFFSET, md_pool)
-    mfl_md = md_pool + (MD_POOL - 1) * MD_LEN
+    nparts = (FREE_MEM_END - (sysdat_segment + md_pool // 16)) // PARTITION_SIZE
+    md_count = MD_SPARE + nparts
+    dseg += bytes(md_count * MD_LEN)
     free_start = sysdat_segment + (len(dseg) + 15) // 16
-    struct.pack_into('<HHHH', dseg, mfl_md, 0, free_start, FREE_MEM_END - free_start, 0)
-    struct.pack_into('<H', dseg, MFL_FIELD_OFFSET, mfl_md)
-    print(f"build_mpmsys: free memory {free_start:#06x}-{FREE_MEM_END:#06x}, "
-          f"{MD_POOL - 1} free MDs, {LOCK_ITEMS} Lock List items")
+    starts = list(range(free_start, FREE_MEM_END, PARTITION_SIZE))
+    if len(starts) > 1 and FREE_MEM_END - starts[-1] < PARTITION_SIZE:
+        starts.pop()                          # fold the remainder into the last
+    assert len(starts) <= nparts
+    ends = starts[1:] + [FREE_MEM_END]
+    mds = [md_pool + i * MD_LEN for i in range(md_count)]
+    spare, parts = mds[:md_count - len(starts)], mds[md_count - len(starts):]
+    for i, off in enumerate(spare):           # mdul
+        struct.pack_into('<H', dseg, off, spare[i + 1] if i + 1 < len(spare) else 0)
+    struct.pack_into('<H', dseg, MDUL_FIELD_OFFSET, spare[0])
+    for i, off in enumerate(parts):           # mfl, in memory order
+        struct.pack_into('<HHHH', dseg, off, parts[i + 1] if i + 1 < len(parts) else 0,
+                         starts[i], ends[i] - starts[i], 0)
+    struct.pack_into('<H', dseg, MFL_FIELD_OFFSET, parts[0])
+    print(f"build_mpmsys: free memory {free_start:#06x}-{FREE_MEM_END:#06x} in "
+          f"{len(parts)} partitions, {len(spare)} free MDs, {LOCK_ITEMS} Lock List items")
 
     out_path = args.output or os.path.join(out_dir, 'MPM.bin')
     with open(out_path + '.cseg', 'wb') as f:

@@ -16,7 +16,7 @@
  * base-0 segments, so linear == physical) and real segments, laid out
  * the way the real /src boot lays them out: the SUP code segment at
  * MPM_CODE_SEG (1000h, tools/build_mpmsys.py) and SYSDAT just past the
- * combined kernel code (16BEh for the current /src build). Nothing
+ * combined kernel code (16FCh for the current /src build). Nothing
  * loads MPM.SYS here, so kernel_main builds the minimal SYSDAT image
  * sup_init reads (module_table[SUP]'s entry segment, an empty RSP
  * list) in that space first. The notick/idle/user_entry offsets are
@@ -32,7 +32,7 @@
 #include "defs.h"
 
 #define SUP_CS          0x1000 /* tools/build_mpmsys.py's MPM_CODE_SEG */
-#define SYSDAT_SEG      0x16BE /* MPM_CODE_SEG + combined code paragraphs */
+#define SYSDAT_SEG      0x16FC /* MPM_CODE_SEG + combined code paragraphs */
 #define SYSDAT_LEN      0x1000 /* SYSDAT.A86's own 4096-byte dseg */
 #define SUP_NOTICK      0x018C /* src/kernel/SUP.A86: notick */
 #define SUP_IDLE        0x0178 /* src/kernel/SUP.A86: idle */

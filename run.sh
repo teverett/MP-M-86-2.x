@@ -10,7 +10,7 @@
 #
 # The console is QEMU's serial port (COM1), on this terminal: MPMLDR and
 # MP/M-86 itself talk to the UART directly. Ctrl-A X quits QEMU, Ctrl-A C
-# toggles its monitor.
+# toggles its monitor. The list device (LPT1) prints to build/printer.txt.
 set -e
 
 cd "$(dirname "$0")"
@@ -23,7 +23,7 @@ while [ $# -gt 0 ]; do
         --headless) headless=1 ;;
         --build-only) boot=0 ;;
         --img) shift; copy="$1" ;;
-        -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "run.sh: unknown option '$1' (try --help)" >&2; exit 2 ;;
     esac
     shift
@@ -51,4 +51,5 @@ display=
 [ "$headless" = 1 ] && display="-display none"
 echo "run.sh: booting (Ctrl-A X quits)"
 # shellcheck disable=SC2086
-exec qemu-system-i386 -drive file="$IMG",format=raw,if=floppy -serial mon:stdio $display
+exec qemu-system-i386 -drive file="$IMG",format=raw,if=floppy -serial mon:stdio \
+    -parallel file:build/printer.txt $display

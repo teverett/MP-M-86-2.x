@@ -66,6 +66,8 @@ end t;
 PROC_PLM = r'''t: do;
 declare out(20) address;
 declare k byte initial (0);
+declare bvp address, bv based bvp (2) byte;   /* SET's fcbv */
+declare bsrc (2) byte initial (80h, 0ffh);
 put: procedure (x);
   declare x address;
   out(k) = x; k = k + 1;
@@ -88,12 +90,27 @@ outer: procedure (p, q);
   call inner(5);
   call put(loc);
   end outer;
+looper: procedure;                 /* SHOW's printbcd: locals, and a */
+  declare (i, n) byte;             /* nested procedure without any   */
+  bump: procedure;
+    n = n + 1;
+    end bump;
+  n = 0; i = 4;
+  do while (i := i - 1) <> -1;
+    call bump;
+    end;
+  call put(n);
+  end looper;
 plmstart: procedure public;
   call put(three(1, 2, 3));        /* 123 */
   call put(three(4, 5, 6));        /* 456 */
   call put(bytep(0ffh));           /* 0 */
   call put(bytep(1234h));          /* 35h: arg truncated to a byte */
   call outer(10, 20);              /* 35 */
+  call looper;                     /* 4 */
+  bvp = .bsrc;
+  call put(rol(bv(0), 1));         /* 1: an 8-bit rotate */
+  call put(bv(1) + 1);             /* 0: byte arithmetic */
   end plmstart;
 end t;
 '''
@@ -281,8 +298,8 @@ def main():
     got = run_program(EXPR_PLM, len(want))
     for i, (w, g) in enumerate(zip(want, got)):
         check(f"expression {i}", hex(w), hex(g))
-    check("procedures: argument order, BYTE parameters, a nested closure", [123, 456, 0, 0x35, 35],
-          run_program(PROC_PLM, 5))
+    check("procedures: argument order, BYTE parameters, nested closures, frames around them, BASED bytes",
+          [123, 456, 0, 0x35, 35, 4, 1, 0], run_program(PROC_PLM, 8))
     check("DIR: lists user 0's non-system files, 4 to a line",
           "Directory for User  0:\r\nA: DIR      CMD : HELLO    TXT : A        TXT : B        TXT"
           "\r\nSystem Files Exist", run_dir([b' ' * 11]))

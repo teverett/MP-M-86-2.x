@@ -111,7 +111,55 @@ plmstart: procedure public;
   bvp = .bsrc;
   call put(rol(bv(0), 1));         /* 1: an 8-bit rotate */
   call put(bv(1) + 1);             /* 0: byte arithmetic */
+  call put(128 * shr(bv(0), 6));   /* 100h: a byte product is ADDRESS */
+  call put((bv(1) / 1) + 1);       /* 100h: so is a byte quotient */
   end plmstart;
+end t;
+'''
+
+
+GOTO_PLM = r'''t: do;
+declare out(10) address;
+declare k byte initial (0);
+declare n byte, (s1, s3) address;
+put: procedure (x);
+  declare x address;
+  out(k) = x; k = k + 1;
+  end put;
+bail: procedure (depth);           /* PIP's ERROR: GO TO RETRY */
+  declare depth byte;
+  if depth = 0 then go to retry;
+  call bail(depth - 1);
+  end bail;
+outer: procedure;
+  declare j address;
+  inner: procedure;
+    call put(77h);
+    goto done;                     /* out of a nested procedure */
+    call put(1);
+    end inner;
+  j = 5;
+  call inner;
+  call put(2);
+done:
+  call put(j);                     /* outer's frame is back */
+  end outer;
+n = 0;
+retry:
+  n = n + 1;
+  if n = 1 then s1 = stackptr;
+  if n = 3 then s3 = stackptr;
+  call put(n);
+  if n < 3 then call bail(4);
+  goto skip;
+  call put(0ffh);
+skip:
+  call put(s1 = s3);               /* the abandoned frames are gone */
+  call outer;
+  do case n - 2;                   /* the jump table is in CS, not DS */
+    call put(0aah);
+    call put(0bbh);
+    end;
 end t;
 '''
 
@@ -127,8 +175,28 @@ put: procedure (x);
   declare x address;
   out(k) = x; k = k + 1;
   end put;
+sum: procedure (count, source) address;  /* STSCOM's display$text */
+  declare count byte, source pointer;
+  declare ch based source byte;
+  declare sp2 structure (offset word, segment word) at (@source);
+  declare (i, t) address;
+  t = 0;
+  do i = 1 to count;
+    t = t + ch;
+    sp2.offset = sp2.offset + 1;         /* moves source itself */
+    end;
+  return t;
+  end sum;
+segof: procedure (q) address;
+  declare q pointer;
+  declare qq structure (off word, seg word) at (@q);
+  return qq.seg;
+  end segof;
 plmstart: procedure public;
   pp.off = 10h; pp.seg = 0e00h;          /* 0E00:0010 */
+  call put(sum(3, p));                   /* 34h+12h+56h: 9Ch */
+  call put(segof(p));                    /* 0E00h: all 4 bytes passed */
+  call put(segof(.local));               /* 0600h: an ADDRESS is DS: */
   call put(far.a); call put(far.b);      /* the far data: 1234h, 56h */
   far.c = 77h;                           /* far store */
   call movb(@far.a, @local.a, 4);        /* far -> near copy */
@@ -299,18 +367,20 @@ def main():
     for i, (w, g) in enumerate(zip(want, got)):
         check(f"expression {i}", hex(w), hex(g))
     check("procedures: argument order, BYTE parameters, nested closures, frames around them, BASED bytes",
-          [123, 456, 0, 0x35, 35, 4, 1, 0], run_program(PROC_PLM, 8))
+          [123, 456, 0, 0x35, 35, 4, 1, 0, 0x100, 0x100], run_program(PROC_PLM, 10))
     check("DIR: lists user 0's non-system files, 4 to a line",
           "Directory for User  0:\r\nA: DIR      CMD : HELLO    TXT : A        TXT : B        TXT"
           "\r\nSystem Files Exist", run_dir([b' ' * 11]))
     check("DIR: no match", "Directory for User  0:\r\nFile not found.", run_dir([b'NONE    X  ']))
+    check("GOTO: forward, out of recursion to the main program, out of a nested procedure; DO CASE",
+          [1, 2, 3, 0xFFFF, 0x77, 5, 0xBB], run_program(GOTO_PLM, 7))
     far = 0x0E00 * 16 + 0x10
 
     def setup(mem):
         mem[far:far + 4] = bytes([0x34, 0x12, 0x56, 0x00])
-    vals, farbytes = run_program(PTR_PLM, 5, setup, lambda m: bytes(m[far:far + 4]))
-    check("POINTER: far loads, a far store, MOVB both ways, @x is DS:x", [0x1234, 0x56, 0x1234, 0x77, 0xFFFF],
-          vals)
+    vals, farbytes = run_program(PTR_PLM, 8, setup, lambda m: bytes(m[far:far + 4]))
+    check("POINTER: parameters, AT(@param), far loads, a far store, MOVB both ways, @x is DS:x",
+          [0x9C, 0x0E00, 0x0600, 0x1234, 0x56, 0x1234, 0x77, 0xFFFF], vals)
     check("POINTER: the far data afterwards", bytes([0x34, 0x12, 0x99, 0x77]), farbytes)
     for day, text in ((1, 'Sun 01/01/78'), (60, 'Wed 03/01/78'), (790, 'Fri 02/29/80'), (3000, 'Wed 03/19/86')):
         check(f"TOD: day {day}", (f"{text} 23:59:09", (day, 0x23, 0x59, 0x09)),

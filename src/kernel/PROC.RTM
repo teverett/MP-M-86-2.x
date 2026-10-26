@@ -68,6 +68,13 @@ cp_mnxt:	mov di,ms_link[di]
 		    pop bx ! pop si ! pop ax ! pop di
 		    jmps cp_mnxt
 cp_nm:
+		;p_mem 0FFFFh (TMP.A86's PD) only means "don't share
+		;the creator's memory" -- it's no list. Left as is, every
+		;p_mem walker followed it to SYSDAT:FFFFh (MPMSTAT showed
+		;a "0000 0000 Tmp" partition; docs/bugs.md #122)
+	cmp p_mem[si],0ffffh ! jne cp_nm1
+	    mov p_mem[si],0
+cp_nm1:
 		;set physical UDA segment
 
 	mov ax,u_wrkseg

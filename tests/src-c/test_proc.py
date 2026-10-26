@@ -185,11 +185,11 @@ def main():
                 w16(mem, sym['i_mpm_ip'] + 2 * i, 0x2200 + i)
             return mem
 
-        def child_pd(mem, wrkseg, pd_addr, uda_seg, lst, link=0, initss=0):
+        def child_pd(mem, wrkseg, pd_addr, uda_seg, lst, link=0, initss=0, pmem=0):
             w16(mem, pd_addr + P_LINK, link)
             w16(mem, pd_addr + P_UDA, (uda_seg - wrkseg) & 0xFFFF)  # relative, per real asm
             mem[pd_addr + P_LST] = lst
-            w16(mem, pd_addr + P_MEM, 0)
+            w16(mem, pd_addr + P_MEM, pmem)
             w16(mem, phys(uda_seg, sym['u_stack_sp']), 0x00F0)
             w16(mem, phys(uda_seg, sym['u_initss']), initss)
 
@@ -242,6 +242,12 @@ def main():
         mem = creator_mem(wrkseg=SYSDAT)
         child_pd(mem, SYSDAT, sd(CHILD_PD), UDA_SEG, lst=1, initss=0x0700)
         run_case("proc_creat: single success", mem, CHILD_PD, [(CHILD_PD, UDA_SEG)])
+
+        # -- p_mem 0FFFFh (TMP's PD): not shared, and left an empty list --
+        mem = creator_mem(wrkseg=SYSDAT)
+        child_pd(mem, SYSDAT, sd(CHILD_PD), UDA_SEG, lst=1, initss=0x0700, pmem=0xFFFF)
+        port = run_case("proc_creat: p_mem 0FFFFh", mem, CHILD_PD, [(CHILD_PD, UDA_SEG)])
+        check("proc_creat: p_mem 0FFFFh -> 0", 0, r16(port, sd(CHILD_PD + P_MEM)))
 
         # -- 2-long creation chain (tail loop drains both) --
         CHILD2_PD, UDA_SEG2 = 0x2300, 0x0600

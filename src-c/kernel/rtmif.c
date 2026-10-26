@@ -88,7 +88,7 @@ extern uint16_t proc_creat(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t
  * RTM.A86 build -- see this file's own header comment. Probed via
  * `python3 tools/asm86.py src/kernel/RTM.A86 -I src/kernel --symbols`;
  * re-probe if that build's own encoding ever shifts. */
-#define RTMIF_ABORT_TERMINATE_OFFSET 0x0C68
+#define RTMIF_ABORT_TERMINATE_OFFSET 0x0C76
 
 typedef struct {
     uint16_t bx, cx;

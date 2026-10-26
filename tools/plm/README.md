@@ -50,16 +50,11 @@ compiler *listings*, never code generation.
   the grouped-name form `DECLARE (a, b, c) BYTE;` (each name may also
   carry its own `BASED ptr` override). A *local* array (declared inside
   a procedure) gets its own stack storage, indexed the same way as a
-  global one; one with `INITIAL`/`DATA` (including a `(*)`-sized one)
-  has its values copied onto the stack by code generated right at the
-  `DECLARE` statement's own position, since a local has no "initial
-  contents" the way a global's data-segment storage does — it has to be
-  written there every time that point in the procedure actually runs.
-  If any entry is the address of *another local* (its address is only
-  known at runtime, stack-relative, so it can't be baked into a static
-  table the usual way), every entry is instead stored individually with
-  its own instructions rather than copied in bulk — see
-  `_addrof_is_local` in `codegen.py`.
+  global one. A local with `INITIAL`/`DATA` (including a `(*)`-sized
+  one) is static, as in PL/M: one copy in the data segment under a
+  per-procedure label (`pl_proc_s_name`), initialized at load, so
+  `.name` in another `DATA` list is a constant address (PIP's `ERROR`
+  message tables, docs/bugs.md #121).
 - `PROCEDURE` declarations with parameters, `BYTE`/`ADDRESS`/`POINTER`
   return types, `EXTERNAL`, `PUBLIC`, and **nested procedures with real
   closure access** (a `PROCEDURE` declared inside another one, reading or
@@ -67,8 +62,9 @@ compiler *listings*, never code generation.
   procedures are real closures" below for how).
 - Statements: `IF`/`THEN`/`ELSE`, `DO`/`END`, `DO WHILE`, `DO CASE`,
   `DO var = start TO stop [BY step]`, `CALL`, `RETURN`, assignment
-  (`a = expr;` and multi-target `a, b = expr;`), labeled blocks, and a
-  bare top-level statement sequence under PL/M-86's classic `PLMSTART`
+  (`a = expr;` and multi-target `a, b = expr;`), labels on any
+  statement, `GOTO`/`GO TO` (see below), and a bare top-level statement
+  sequence under PL/M-86's classic `PLMSTART`
   entry-point convention (with or without a wrapping `DO; ... END;`).
 - Expressions: the full operator set (`+ - * / MOD AND OR XOR NOT`, plus
   the word-form `PLUS` as a synonym for `+` — evidence-backed but seen
@@ -116,7 +112,7 @@ compiler *listings*, never code generation.
 ## Program layout
 
 A module that defines `PLMSTART` gets `MCD.A86`'s startup at code offset
-0: SS = DS, SP = a 256-byte stack at the end of the module's data, then
+0: SS = DS, SP = a 1K stack (MCD.A86's is 256 bytes; locals here live on the stack, not statically) at the end of the module's data, then
 `jmp plmstart`. The data segment starts with the base page (the loader
 fills it in), and EXTERNAL declarations of the base-page names `MCD.A86`
 makes PUBLIC (`fcb`, `fcb16`, `tbuff`/`buff`, `cmdrv`, `pass0`, `len0`,
@@ -132,7 +128,8 @@ POINTER (DS:x, or the segment of the POINTER that `x` is BASED on); data
 BASED on a POINTER is read and written through ES; a POINTER-returning
 EXTERNAL (`mon4`) comes back in ES:BX; MOVE/MOVB/MOVW take POINTER or
 ADDRESS operands. For BYTE and ADDRESS: a constant below 256 is a BYTE, an operation on two
-BYTEs is an 8-bit BYTE (`cnt = -1` with a BYTE `cnt` compares against
+BYTEs is an 8-bit BYTE, except `*` and `/`, which are always ADDRESS
+(PLMLANG.DOC; docs/bugs.md #121) (`cnt = -1` with a BYTE `cnt` compares against
 0FFh; 0FFh + 1 is 0), anything with an ADDRESS operand is an ADDRESS.
 Everything is computed in AX, and a BYTE result is truncated. ROL/ROR/
 SHL/SHR/SCL/SCR on a BYTE work on 8 bits. `IF`/`WHILE` test the low bit
@@ -192,6 +189,24 @@ procedures differently (a different static-link convention, or a
 "display" of frame pointers instead) — but it's internally consistent,
 and it's what makes `ERA.PLM`/`REN.PLM` (both: nested procedure reading
 an outer local) compile and assemble correctly end to end.
+
+### GOTO
+
+A label can sit on any statement (`NOTDEST: stmt`, or a labeled `DO`).
+Labels belong to the procedure they're in (the main program counts as
+the `PLMSTART` procedure); a `GOTO` to one in the same procedure is a
+`JMP`. PL/M also lets a `GOTO` leave procedures, to a label in an
+enclosing procedure or in the main program (PIP's `ERROR` ends with
+`GO TO RETRY`, back into the main loop). That jumps to a second entry
+at the label (`<label>_nl`) after setting `BP` to the target frame,
+found through the static links for an enclosing procedure, or from
+`pl_main_bp`, which the main program saves on entry. The entry resets
+`SP` to that frame's base (`BP` minus its locals), which is where it is
+at any statement boundary, dropping the abandoned procedures' frames.
+(Until docs/bugs.md #121 every `GOTO` was parsed and dropped.)
+
+`DO CASE` jumps through a table in the code segment, read as
+`cs:table[bx]`.
 
 ## Notable discoveries made while building this
 
@@ -321,10 +336,9 @@ an outer local) compile and assemble correctly end to end.
   `user BYTE`, with every `user(i)` access reading/writing adjacent
   stack memory instead of a real array. Fixed by making `alloc_local`
   reserve as many words as the declared size needs, and by generating,
-  for a local with `INITIAL`/`DATA`, an inline `REP MOVSB` copy from an
-  interned data-segment constant onto the stack *at the `DECLARE`
-  statement's own position* every time it's reached (a local has no
-  "initial contents" any other way — see `gen_VarDecl`/`_declare_var`).
+  for a local with `INITIAL`/`DATA`, an inline copy onto the stack at
+  the `DECLARE` (since replaced: such locals are static now, as PL/M
+  has them — docs/bugs.md #121).
 - **`LITERALLY` is scoped like any other declaration — not file-global
   forever.** `PIP.PLM` declares `M LITERALLY '20'` inside one nested
   `DO` block, then reuses the plain name `M` as an ordinary `BYTE` local
@@ -389,13 +403,9 @@ an outer local) compile and assemble correctly end to end.
 
 ## Known limitations
 
-- `GOTO` and `LABEL`-typed declarations are parsed and dropped — no
-  control-flow support for them (`ABORT.PLM`'s own `PLMSTART` label
-  works regardless, since that specific pattern is recognized
-  structurally — see the "bare top-level statement sequence" item
-  above).
-- `DO CASE` generates a jump table but hasn't been exercised against a
-  real file yet.
+- `LABEL`-typed declarations (`DECLARE x LABEL;`) are only forward
+  references and generate nothing. Labels are per procedure, not per
+  block: the same label twice in one procedure is an error.
 - `SIGNED`/`DOUBLE`/`UNSIGN` are accepted but are no-ops (every value is
   already a full word in `AX`, and this compiler's relational operators
   are always unsigned) — code that depends on them actually changing

@@ -117,6 +117,8 @@ TICKSPERSEC_OFFSET = 0x51
 SRCHDISK_OFFSET = 0x4b
 MPMSEG_OFFSET = 0x40
 NCCB_OFFSET = 0x49
+NCNS_OFFSET = 0x47        # GENSYS's "# system console devices"
+NLST_OFFSET = 0x48        # GENSYS's "# system list devices"
 CCB_OFFSET = 0x54
 
 # SYSDAT.FMT's "pul" (Process Descriptor Unused List head, 0x5c) -- a
@@ -528,6 +530,12 @@ def main():
     # below for why `ccb` (where that/those CCB(s) actually live)
     # matters far more than this count does, but keep them consistent.
     dseg[NCCB_OFFSET] = 2
+    # ncns/nlst (the GENSYS answers, beside the XIOS's own ncondev/
+    # nlstdev counts) were SYSTEM.DAT's stock 4 and 1. CONSOLE.CIO checks
+    # console numbers against ncns, and MPMSTAT showed 4 physical and
+    # nccb - (nlst + ncns) = FDh virtual consoles (docs/bugs.md #122).
+    dseg[NCNS_OFFSET] = 1
+    dseg[NLST_OFFSET] = 1
 
     # mdul/qlr: reset every stale "unused list"/"queue list root" head
     # to empty -- see PUL_FIELD_OFFSET's own comment for why their

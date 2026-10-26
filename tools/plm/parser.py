@@ -66,7 +66,9 @@ class Parser:
             stmt = self.parse_statement()
             if isinstance(stmt, (ast.Block, ast.WhileBlock, ast.CaseBlock, ast.ForBlock)):
                 stmt.label = label
-            return stmt
+                return stmt
+            # any other statement can be a GOTO target too
+            return ast.Block(label=None, body=[ast.LabelMarker(name=label), stmt])
 
         if self.at_kw('DECLARE', 'DCL'):
             decls = self.parse_decl_stmt()
@@ -92,7 +94,7 @@ class Parser:
                     self.next()
             name = self.expect('IDENT').val
             self.expect(';')
-            return ast.Empty()  # GOTO not supported in codegen; parsed & dropped
+            return ast.Goto(name=name)
         if self.at_kw('DISABLE', 'ENABLE'):
             self.next()
             self.expect(';')

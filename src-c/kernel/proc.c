@@ -153,6 +153,11 @@ uint16_t proc_creat(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t *dx_ou
                 /* call mpmif(f_share) -- boundary stub, no-op */
             }
         }
+        /* p_mem 0FFFFh (TMP.A86's PD) only means "don't share the
+         * creator's memory" -- it's no list (docs/bugs.md #122) */
+        if (seg_r16(sd, (uint16_t)(si + p_mem)) == 0xFFFF) {
+            seg_w16(sd, (uint16_t)(si + p_mem), 0);
+        }
 
         /* cp_nm -- set physical UDA segment (creator's UDA is the
          * real asm's ambient ES) */

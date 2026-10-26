@@ -10054,6 +10054,154 @@ byte. The loop case runs away without fix 1.
 
 All 56 tests/src-c and tests/plm files pass.
 
-**Still open:** PIP hangs after loading (`PIP U.TXT=T.TXT`). It does
-the same when built with the compiler from before these fixes.
+**Still open here:** PIP hung after loading (`PIP U.TXT=T.TXT`), the
+same with the compiler from before these fixes. Fixed in #121.
+
+## 121. `tools/plm` — GOTO was dropped; CASE tables read through DS; byte products truncated; DATA locals on the stack — FIXED (PIP)
+
+**Symptom.** PIP hung after loading, doing disk I/O over and over. Once
+that was fixed:
+- MPM.SYS copied 6 records short.
+- "PIP NONE.TXT=MISSING.TXT" printed "TEFILE NOT FOUND IT:" followed
+  by garbage.
+
+**1. GOTO.** The parser parsed every `GOTO`/`GO TO` and dropped it, and
+kept a label only when it was on a `DO` block. PIP's control flow is
+built on them: 40 GOTOs, such as `GO TO NOTDEST` in its device-name
+scanner, `GO TO SIMPLECOM`/`ENDCOM` in the main loop, and `GO TO RETRY`
+out of its ERROR procedure. ED (30), REN (5), ERA, ERAQ, SET and TYPE
+(4 each) use them too. **Patched**:
+- A label can sit on any statement.
+- Labels belong to their procedure, and a GOTO within it is a `JMP`.
+- A GOTO out to an enclosing procedure (found through the static links)
+  or to the main program (whose BP is saved in `pl_main_bp` on entry)
+  sets BP to that frame. It then enters the label's `_nl` stub, which
+  resets SP to the frame's base. The stack is balanced at every
+  statement boundary, so that's always the right SP.
+- See tools/plm/README.md, "GOTO".
+
+**2. DO CASE.** It dispatched with `jmp ctbl[bx]`, but the table is in
+the code segment, so it was read through DS: an arbitrary word of the
+program's data whenever DS ≠ CS, which is every .CMD here. PIP and SET
+use DO CASE. **Patched**: `jmp cs:ctbl[bx]`.
+
+This also fixed ED printing `BREAK ">" AT ^@` right after "NEW FILE".
+ED's startup ends `RESTART: CALL SETUP; ... GO TO START;`. With the
+GOTO dropped, it fell through `OVERCOUNT:`/`BADCOM:`/`OVERFLOW:`, set
+`FLAG = '>'`, and printed the error report at `RESET:` with `CHAR`
+still 0. Checked by replaying the same keystrokes against an ED built
+with the pre-#121 compiler (the message appears) and the current one
+(it doesn't).
+
+**3. `*` and `/` on two BYTEs.** These were typed BYTE, so the result
+was truncated to 8 bits. "Multiply and divide always produce ADDRESS
+results" (orig/plm80s/PLMLANG.DOC). PIP's fast copy reads 8 records at
+a time; at EOF it adds back `128 * shr(exten,4)`, the records the BDOS
+read before EOF, which the BDOS reports in AH's high nibble. A test
+.CMD confirmed the BDOS's side: 34 reads of 0000, then 6001h. The
+compiler made 128 × 6 = 0, so the last partial group was dropped.
+**Patched**: `*` and `/` are always ADDRESS.
+
+**4. Locals with INITIAL/DATA were copied onto the stack** each time
+their DECLARE was reached. PIP's ERROR declares about 450 bytes of DATA
+message tables, more than the program's whole 256-byte stack, so they
+overwrote the strings below it. In PL/M such locals are static.
+**Patched**:
+- They live in dseg as `pl_<proc>_s_<name>`, initialized once, and
+  `.name` in another DATA list is a constant.
+- `gen_VarDecl` and `_addrof_is_local` are gone.
+- The program stack is now 1K (`STACK_BYTES`). This compiler keeps
+  ordinary locals on the stack, unlike PL/M, and a call-graph estimate
+  puts PIP's deepest chain at about 460 bytes and ED's at about 190.
+
+New tests/plm/test_plmc.py cases:
+- GOTO forward;
+- GOTO out of 5-deep recursion back to the main program three times,
+  with SP the same each time;
+- GOTO out of a nested procedure, with the parent's local still
+  readable;
+- DO CASE with DS ≠ CS;
+- a BYTE product and quotient that need 16 bits.
+
+**Verified** in QEMU (comparing files read back out of the disk
+image):
+- `PIP BIG.SYS=MPM.SYS[V]` (278 records, three extents) and
+  `PIP P2.CMD=PIP.CMD` (20K) copy byte-identical.
+- Text copies, `[U]`, `CON:`, `LST:` (to the printer), and interactive
+  `*` mode all work.
+- The errors print "ERROR - FILE NOT FOUND - A:MISSING.TXT" and
+  "ERROR - INVALID SOURCE".
+- A regression pass over DIR, TOD, SHOW, ECHO, ED, TYPE, REN, SET, ERA,
+  ERAQ, SPOOL/SSPOOL, ABORT, DSKRST, CONS and ATTACH is all correct.
+
+All 56 tests/src-c and tests/plm files pass.
+
+**Still open here:** STSCMD (MPMSTAT) printed `SSSS...` forever, the
+same with the compiler from before #120. Fixed in #122.
+
+## 122. STSCMD (MPMSTAT): POINTER parameters, local AT, and three wrong status values — FIXED
+
+**Symptom.** STSCMD printed `SSSS...` forever after its banner.
+STSCOM's `display$text(count, source)` writes a string a byte at a time
+from a POINTER, stepping it with
+`src$ptr structure(offset word, segment word) at (@source)`.
+
+**1. `tools/plm/codegen.py` — POINTER parameters had 2 bytes.**
+- Every parameter got a 2-byte slot, and a call pushed only AX. So a
+  POINTER argument lost its segment, and the callee read `count` from
+  the pointer's segment word.
+- `RET n` used the same 2-bytes-per-parameter count.
+- **Patched**:
+  - Parameter sizes come from the DECLAREs that type them
+    (`_param_sizes`). A POINTER is 4 bytes (offset nearest BP), and
+    `RET n` is the sum of the sizes.
+  - Each procedure symbol records `psizes`, and a call pushes DX:AX
+    for a POINTER parameter. An ADDRESS argument gets DS.
+
+**2. A local `AT(@x)` got its own storage.** `src$ptr` was a fresh
+local, so incrementing `src$ptr.offset` never moved `source`, and the
+first character printed forever. **Patched** (`_declare_local_at`): a
+target in the same frame is aliased by offset, and anything else
+resolves like a module-level AT.
+
+Once STSCMD ran, three of its values were wrong:
+
+**3. `tools/build_mpmsys.py` — `ncns`/`nlst`** were SYSTEM.DAT's stock
+4 and 1 (GENSYS answers that were never set). It showed 4 physical
+consoles and `nccb - (nlst + ncns)` = FDh virtual ones, and
+CONSOLE.CIO's console-number check went by `ncns`. **Patched**: both 1.
+
+**4. `src/kernel/PROC.RTM` (and `src-c/kernel/proc.c`) — TMP's memory
+list was `0FFFFh`.** TMP.A86's PD, like DRI's own, has `p_mem` =
+0FFFFh. That keeps `proc_creat` from sharing the creator's memory with
+it (it shares only into a child whose `p_mem` is 0). But nothing ever
+turned it into an empty list, so every `p_mem` walker followed it to
+SYSDAT:FFFFh. MPMSTAT listed a `0000 0000 Tmp` partition, and
+termination (DSPTCH.RTM) and LOAD.SUP's chain path would walk it too.
+**Patched**: after the share check, a 0FFFFh `p_mem` becomes 0.
+test_proc.py has a new case for it, matching asm and C.
+
+Collateral:
+- RTM grew, so SYSDAT is now at 16FDh (kernel_main.c, docs/src-c.md).
+- rtmif.c's `RTMIF_ABORT_TERMINATE_OFFSET` is now 0C76h (and
+  test_rtmif_entry.py's copy of it).
+
+tests/plm/test_plmc.py's POINTER case now also covers:
+- `display$text`'s pattern (summing 3 bytes through a POINTER
+  parameter stepped via `AT(@source)`);
+- a POINTER argument's segment;
+- an ADDRESS passed as a POINTER getting DS.
+
+**Verified** in QEMU: STSCMD shows the whole status display, matching
+the configuration:
+- 1 console, 0 virtual consoles, 1 list device;
+- 2 free PDs, 3 free QCBs;
+- 146h of queue buffer free (the qmau buffer less its table and ECHO's
+  131 bytes);
+- the ready/DQ/flag-wait lists, the ECHO and MXdisk queues, the
+  console/printer owners, and the 16K partitions, with STSCMD's own
+  partition marked.
+
+The regression pass (DIR, ECHO, TOD, ED, PIP, TYPE, ^P with
+SPOOL/STOPSPLR, SHOW) is correct, and all 56 test files pass.
 

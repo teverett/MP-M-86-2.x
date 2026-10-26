@@ -47,7 +47,7 @@ RTMIF_ENTRY_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f)
                  for f in ('rtmif.c', 'sysent.c', 'proc.c', 'dsptch.c', 'flag.c',
                            'que1.c', 'que2.c', 'findpd.c', 'abort.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
-RTMIF_ABORT_TERMINATE_OFFSET = 0x0C68  # rtmif.c's #define
+RTMIF_ABORT_TERMINATE_OFFSET = 0x0C76  # rtmif.c's #define
 
 SIM_MEM = 0x10000
 PHYS_MEM = 0x100000

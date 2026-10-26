@@ -73,6 +73,7 @@ class CodeGen:
         self.cseg = []   # list of asm text lines
         self.dseg = []
         self.label_n = 0
+        self.static_locals = set()  # labels of INITIAL/DATA locals already emitted
         self.proc_stack = []  # (local_scope, next_local_offset:list[int])
         self.extern_procs = set()
 
@@ -95,7 +96,10 @@ class CodeGen:
     BASE_PAGE = {'bdisk': 0x04, 'maxb': 0x06, 'cmdrv': 0x50, 'pass0': 0x51, 'len0': 0x53,
                  'pass1': 0x54, 'len1': 0x56, 'fcb': 0x5C, 'fcba': 0x5C, 'fcb16': 0x6C,
                  'cr': 0x7C, 'rr': 0x7D, 'ro': 0x7F, 'buff': 0x80, 'tbuff': 0x80, 'buffa': 0x80}
-    STACK_BYTES = 256
+    # MCD.A86 gives a PL/M program 256 bytes of stack, but PL/M keeps a
+    # procedure's locals static, while this compiler puts them on the
+    # stack: PIP's deepest call chain needs ~460 bytes (docs/bugs.md #121).
+    STACK_BYTES = 1024
 
     def compile_module(self, module):
         # MEMORY is a PL/M-86 compiler-predeclared identifier, not
@@ -135,6 +139,16 @@ class CodeGen:
         # label to already be registered), then emit every global's
         # actual DB/DW/RB/RW content now that all symbols exist.
         var_decls = [s for s in decls if isinstance(s, ast.VarDecl)]
+        # GOTO: the main program's labels have to be known before any
+        # procedure is generated, since a procedure may GOTO one (PIP's
+        # error handler does "GO TO RETRY") -- see gen_Goto.
+        main_decl = [st for st in decls if isinstance(st, ast.ProcDecl) and not st.external
+                     and st.name.lower() == self.MAIN_PROC_NAME]
+        main_body = main_decl[0].body if main_decl else main_stmts
+        self.main_labels = {n: f"{sanitize(self.MAIN_PROC_NAME)}_L_{n}"
+                            for n in self._collect_labels(main_body)}
+        self.main_nl = set()
+        self.main_done = False
         for stmt in var_decls:
             self.declare_or_skip_toplevel(stmt, phase=1)
         for stmt in var_decls:
@@ -169,6 +183,8 @@ class CodeGen:
         for stmt in stmts:
             if isinstance(stmt, (ast.VarDecl, ast.ProcDecl, ast.Empty)):
                 decls.append(stmt)
+            elif isinstance(stmt, ast.LabelMarker) and stmt.name.lower() == self.MAIN_PROC_NAME:
+                continue
             elif isinstance(stmt, ast.Block):
                 if stmt.label is not None and stmt.label.lower() != self.MAIN_PROC_NAME:
                     main.append(ast.LabelMarker(name=stmt.label))
@@ -193,6 +209,7 @@ class CodeGen:
                 return
             self.global_scope.define(stmt.name, Sym('proc', rettype=stmt.rettype,
                                                       nparams=len(stmt.params),
+                                                      psizes=self._param_sizes(stmt),
                                                       external=stmt.external))
             if stmt.external:
                 self.extern_procs.add(stmt.name)
@@ -386,14 +403,6 @@ class CodeGen:
             off += fsize * count
         return fields, off, layout
 
-    def _addrof_is_local(self, expr):
-        """True if expr is ".name"/"@name" and name resolves to something
-        other than a module-level global (i.e. its address is only known
-        at runtime, stack-relative) -- see gen_VarDecl."""
-        if not isinstance(expr, ast.AddrOf) or not isinstance(expr.expr, ast.Name):
-            return False
-        return self.resolve(expr.expr.name).kind != 'global'
-
     def _resolve_at_target(self, expr):
         """Resolve an AT(...) expression to (dseg_label, byte_offset)."""
         if isinstance(expr, ast.BinOp) and expr.op in ('+', '-') and isinstance(expr.left, ast.AddrOf):
@@ -498,10 +507,13 @@ class CodeGen:
         # PL/M-86 pushes arguments left to right, so the last parameter
         # is nearest BP: [bp+base_off], the first deepest (DRI's MCD.A86
         # xdos stub relies on this: func at [bp+6], info at [bp+4]).
-        n = len(proc.params)
-        for idx, p in enumerate(proc.params):
-            off = base_off + 2 * (n - 1 - idx)
+        # A POINTER parameter takes 4 bytes (offset nearest BP, then
+        # segment -- the caller pushes DX then AX), every other one 2.
+        sizes = self._param_sizes(proc)
+        off = base_off
+        for p, size in reversed(list(zip(proc.params, sizes))):
             local_scope.define(p, Sym('param', offset=off))
+            off += size
         self.next_local_off = [0]
         self.cur_scope = local_scope
         self.cur_proc = proc
@@ -512,6 +524,18 @@ class CodeGen:
         # registered (wherever nested in its body) *before* any nested
         # PROCEDURE within it is hoisted out and generated.
         proc.body = self._register_vardecls(proc.body)
+        # GOTO targets: this procedure's own labels, collected before its
+        # nested procedures are generated (they may GOTO out to one).
+        # A label reached by a non-local GOTO gets an entry that resets
+        # SP to this frame's base (see _emit_label); the frame size it
+        # needs is only known after the body, hence the token.
+        is_main = proc.name.lower() == self.MAIN_PROC_NAME
+        if is_main:
+            local_scope.labels, local_scope.nl_labels = self.main_labels, self.main_nl
+        else:
+            local_scope.labels = {n: f"{label}_L_{n}" for n in self._collect_labels(proc.body)}
+            local_scope.nl_labels = set()
+        local_scope.frame_token = f"@@frame_{label}@@"
         next_local_off = self.next_local_off
         proc.body = self._hoist_procs(proc.body, local_scope)
         # A nested proc's own gen_proc call (just above) overwrote these;
@@ -529,18 +553,24 @@ class CodeGen:
         for stmt in proc.body:
             self.gen_stmt(stmt)
         local_bytes = -self.next_local_off[0]
+        body_lines = [l.replace(local_scope.frame_token, str(local_bytes)) for l in body_lines]
 
         self.cseg.append(f"{label}:")
         self.cseg.append("\tpush bp")
         self.cseg.append("\tmov bp,sp")
         if local_bytes:
             self.cseg.append(f"\tsub sp,{local_bytes}")
+        if is_main:
+            self.main_done = True
+            if self.main_nl:
+                self.dseg.append("pl_main_bp\tdw\t0")
+                self.cseg.append("\tmov pl_main_bp,bp")
         self.cseg.extend(body_lines)
         self.cseg.append(f"{label}_exit:")
         if local_bytes:
             self.cseg.append("\tmov sp,bp")
         self.cseg.append("\tpop bp")
-        popbytes = 2 * len(proc.params)
+        popbytes = sum(sizes)
         if nested:
             popbytes += 2  # the static link this procedure itself took
         self.cseg.append(f"\tret {popbytes}" if popbytes else "\tret")
@@ -550,18 +580,13 @@ class CodeGen:
         (and any nested block/if/while/case/for bodies within it -- but
         *not* inside a nested ProcDecl, which registers its own when its
         own gen_proc runs) into the current scope. A plain declaration
-        produces no code and is removed from the list entirely. One with
-        an INITIAL/DATA value, though, has to actually copy those bytes
-        onto the stack every time it's reached (a local doesn't get
-        "initial contents" any other way) -- so it's left in the list,
-        to run inline in its proper place in execution order (see
-        gen_VarDecl)."""
+        produces no code and is removed from the list entirely -- one
+        with an INITIAL/DATA value too, since that's static storage (see
+        _declare_var)."""
         out = []
         for s in stmts:
             if isinstance(s, ast.VarDecl):
                 self._declare_var(s)
-                if getattr(s, 'initial', None) is not None:
-                    out.append(s)
                 continue
             out.append(self._register_vardecls_in_stmt(s))
         return out
@@ -591,6 +616,7 @@ class CodeGen:
                 s.enclosing_scope = enclosing_scope
                 self.global_scope.define(s.name, Sym('proc', rettype=s.rettype,
                                                        nparams=len(s.params), external=s.external,
+                                                       psizes=self._param_sizes(s),
                                                        nested=True, enclosing_scope=enclosing_scope))
                 if s.external:
                     self.extern_procs.add(s.name)
@@ -644,25 +670,150 @@ class CodeGen:
         self.out.append(line)
 
     def gen_stmt(self, s):
+        if isinstance(s, (ast.Block, ast.WhileBlock, ast.CaseBlock, ast.ForBlock)) and s.label:
+            if s.label.lower() in getattr(self.cur_scope, 'labels', {}):
+                self._emit_label(s.label.lower())
         t = type(s).__name__
         getattr(self, f"gen_{t}", self._unsupported)(s)
 
+    def _param_sizes(self, proc):
+        """Each parameter's stack size, from the DECLAREs in the
+        procedure's body that type it (4 for a POINTER, else 2). Needed
+        before the body is generated, and at every call site: until
+        docs/bugs.md #122 every parameter took 2 bytes and a call pushed
+        only AX, so a POINTER argument lost its segment."""
+        names = {p.lower() for p in proc.params}
+        types = {}
+
+        def walk(stmts):
+            for st in stmts:
+                if isinstance(st, ast.VarDecl) and st.name.lower() in names:
+                    types[st.name.lower()] = st.type
+                elif isinstance(st, ast.Block) and st.label is None:
+                    walk(st.body)
+        walk(proc.body or [])
+        return [4 if types.get(p.lower()) == 'pointer' else 2 for p in proc.params]
+
+    def _collect_labels(self, stmts):
+        """Every label defined in a statement list, not counting those
+        inside nested procedures (which have their own)."""
+        out = []
+
+        def walk(n):
+            if isinstance(n, list):
+                for x in n:
+                    walk(x)
+                return
+            if n is None or isinstance(n, ast.ProcDecl):
+                return
+            if isinstance(n, ast.LabelMarker):
+                out.append(n.name.lower())
+                return
+            if isinstance(n, (ast.Block, ast.WhileBlock, ast.CaseBlock, ast.ForBlock)) and n.label:
+                out.append(n.label.lower())
+            for attr in ('body', 'then_stmt', 'else_stmt'):
+                if isinstance(getattr(n, attr, None), (list, ast.Node)):
+                    walk(getattr(n, attr))
+        walk(stmts)
+        dups = {n for n in out if out.count(n) > 1}
+        if dups:
+            self.err(f"label(s) defined more than once: {', '.join(sorted(dups))}")
+        return out
+
+    def _emit_label(self, key):
+        scope = self.cur_scope
+        asm = scope.labels[key]
+        if key in scope.nl_labels:
+            # entered by a non-local GOTO with BP already this frame's:
+            # drop whatever the abandoned procedures left on the stack
+            self.emit(f"\tjmp {asm}")
+            self.emit(f"{asm}_nl:")
+            self.emit("\tmov sp,bp")
+            self.emit(f"\tsub sp,{scope.frame_token}")
+        self.emit(f"{asm}:")
+
+    def gen_Goto(self, s):
+        """A GOTO within this procedure is a JMP. One to a label in an
+        enclosing procedure (reached through the static links) or in the
+        main program (whose BP it saves in pl_main_bp) also restores that
+        frame: BP here, SP at the label's _nl entry."""
+        key = s.name.lower()
+        if key in getattr(self.cur_scope, 'labels', {}):
+            self.emit(f"\tjmp {self.cur_scope.labels[key]}")
+            return
+        t = self.cur_scope.parent
+        while t is not None:
+            if t.is_proc_scope and key in getattr(t, 'labels', {}):
+                reg = self._frame_reg_for_scope(t)
+                self.emit(f"\tmov bp,{reg}")
+                t.nl_labels.add(key)
+                self.emit(f"\tjmp {t.labels[key]}_nl")
+                return
+            t = t.parent
+        if key in self.main_labels:
+            if self.main_done:
+                self.err(f"GOTO {s.name}: main program already generated")
+            self.emit("\tmov bp,pl_main_bp")
+            self.main_nl.add(key)
+            self.emit(f"\tjmp {self.main_labels[key]}_nl")
+            return
+        self.err(f"GOTO {s.name}: no such label")
+
     def _unsupported(self, s):
         self.err(f"unsupported construct: {type(s).__name__}")
+
+    def _declare_local_at(self, s, at_target):
+        """A local "AT(@x)": the same bytes as x, no storage of its own.
+        STSCOM's display$text steps a POINTER parameter through a string
+        with "src$ptr structure(offset word, segment word) at (@source)";
+        given fresh stack storage instead, the parameter never moved and
+        STSCMD printed its first character forever (docs/bugs.md #122).
+        A target in this procedure's frame is aliased by offset; anything
+        else resolves like a module-level AT."""
+        inner = at_target.expr if isinstance(at_target, ast.AddrOf) else None
+        tsym = self.cur_scope.vars.get(inner.name.lower()) if isinstance(inner, ast.Name) else None
+        if tsym is not None and tsym.kind in ('param', 'local', 'local_struct'):
+            off = tsym.info['offset']
+            if s.type == 'structure':
+                fields, foff = {}, 0
+                for fname, fdims, ftyp in s.fields:
+                    fsize = type_size(ftyp)
+                    fields[fname.lower()] = (foff, fsize, fdims is not None)
+                    foff += fsize * (self.const_eval(fdims) if fdims is not None else 1)
+                self.cur_scope.define(s.name, Sym('local_struct', offset=off, fields=fields, size=foff))
+            elif s.dims is not None:
+                size = type_size(s.type)
+                self.cur_scope.define(s.name, Sym('local', offset=off, is_array=True, elemsize=size,
+                                                    count=self.const_eval(s.dims)))
+            else:
+                self.cur_scope.define(s.name, Sym('local', offset=off, type=s.type))
+            return
+        label, off = self._resolve_at_target(at_target)
+        if s.type == 'structure':
+            fields, foff, _ = self._build_struct_fields(s.fields)
+            self.cur_scope.define(s.name, Sym('global', label=label, size=foff, fields=fields,
+                                                is_array=s.dims is not None, elemsize=foff,
+                                                external=False, label_offset=off))
+        else:
+            size = type_size(s.type)
+            self.cur_scope.define(s.name, Sym('global', label=label, size=size, fields=None,
+                                                is_array=s.dims is not None, elemsize=size,
+                                                count=None, external=False, label_offset=off,
+                                                type=s.type))
 
     def gen_Empty(self, s):
         pass
 
     def gen_LabelMarker(self, s):
-        self.emit(f"{sanitize(s.name)}:")
+        if s.name.lower() in getattr(self.cur_scope, 'labels', {}):
+            self._emit_label(s.name.lower())
+        else:
+            self.emit(f"{sanitize(s.name)}:")
 
     def _declare_var(self, s):
         """Register a local's symbol/storage -- no code emitted. Called
         early (see _register_vardecls) so a nested procedure's closure
-        references resolve correctly regardless of textual order, and
-        again (harmlessly -- it's pure registration) from gen_VarDecl
-        when a declaration with an INITIAL value is left inline (see
-        below) and actually executed."""
+        references resolve correctly regardless of textual order."""
         if s.type == 'literally':
             try:
                 from .lexer import parse_number
@@ -676,6 +827,10 @@ class CodeGen:
             # "PROCEDURE (char); DECLARE char BYTE;" -- a parameter's
             # type declaration, not a new local
             existing.info['type'] = s.type
+            return
+        at_target = getattr(s, 'at_target', None)
+        if at_target is not None:
+            self._declare_local_at(s, at_target)
             return
         if s.based_on is not None:
             if s.type == 'structure':
@@ -705,6 +860,26 @@ class CodeGen:
             return
         size = 1 if s.type == 'byte' else 2
         initial = getattr(s, 'initial', None)
+        if initial is not None:
+            # A local with INITIAL or DATA is static in PL/M: one copy,
+            # initialized at load. (It used to be copied onto the stack
+            # each time its declaration was reached -- PIP's ERROR has
+            # ~450 bytes of DATA message tables, which ran off the end of
+            # the 256-byte stack into the program's strings: docs/bugs.md
+            # #121.) Storage is in dseg under a per-procedure label, so
+            # ".name" in another DATA list is a constant address.
+            label = f"{sanitize(self.cur_proc.name)}_s_{s.name.lower()}"
+            if s.dims == '*':
+                count = self._initial_total_bytes(initial, size) // size
+            else:
+                count = self.const_eval(s.dims) if s.dims is not None else None
+            self.cur_scope.define(s.name, Sym('global', label=label, size=size, fields=None,
+                                                is_array=s.dims is not None, elemsize=size,
+                                                count=count, external=False, type=s.type))
+            if label not in self.static_locals:
+                self.static_locals.add(label)
+                self._emit_initial_values(label, [size] * len(initial), initial)
+            return
         if s.dims == '*':
             if initial is None:
                 self.err(f"'{s.name}': (*) array needs an INITIAL/DATA list to size it from")
@@ -717,53 +892,6 @@ class CodeGen:
             self.alloc_local(s.name, words, is_array=True, elemsize=size, count=count)
         else:
             self.alloc_local(s.name, 2 if s.type == 'pointer' else 1, type=s.type)
-
-    def gen_VarDecl(self, s):
-        """Dispatched inline (by gen_stmt) only for a declaration that has
-        an INITIAL/DATA value -- see _register_vardecls, which registers
-        every local's symbol/storage up front but leaves these ones in
-        the statement stream, since initializing a *local* (unlike a
-        global) is a real runtime action that has to happen in its
-        proper place in execution order, every time this point in the
-        procedure is reached."""
-        initial = getattr(s, 'initial', None)
-        if initial is None:
-            return
-        self._declare_var(s)  # idempotent: re-registers the same symbol
-        sym = self.cur_scope.vars[s.name.lower()]
-        size = sym.info.get('elemsize', 2)
-        off = sym.info['offset']
-
-        if any(self._addrof_is_local(e) for e in initial):
-            # At least one entry is the address of another LOCAL (e.g.
-            # PIP.PLM's "declare errmsg(*) address data(.er00,.er01,...)",
-            # where er00 etc. are locals of the same procedure): that
-            # address is only known at runtime (stack-relative), so it
-            # can't be baked into a static table and REP MOVSB'd like
-            # the all-constant case below -- store each element with its
-            # own instructions instead.
-            for i, expr in enumerate(initial):
-                if isinstance(expr, ast.Str):
-                    self.err(f"'{s.name}': INITIAL mixes a string constant with a local "
-                              "address reference -- not supported")
-                self.gen_expr(expr)
-                item_off = off + i * size
-                dst = f"[bp{item_off}]" if item_off < 0 else f"[bp+{item_off}]"
-                self.emit(f"\tmov {dst},ax" if size == 2 else f"\tmov {dst},al")
-            return
-
-        total = self._initial_total_bytes(initial, size)
-        label = self.new_label('linit')
-        self._emit_initial_values(label, [size] * len(initial), initial)
-        self.emit("\tmov di,bp")
-        self.emit(f"\tadd di,{off}" if off >= 0 else f"\tsub di,{-off}")
-        self.emit(f"\tmov si,offset {label}")
-        self.emit(f"\tmov cx,{total}")
-        self.emit("\tpush ds")
-        self.emit("\tpush ds")
-        self.emit("\tpop es")
-        self.emit("\trep movsb")
-        self.emit("\tpop ds")
 
     def gen_Block(self, s):
         for st in s.body:
@@ -826,8 +954,10 @@ class CodeGen:
         self.emit("\tmov bx,ax")
         self.emit("\tadd bx,bx")  # word-sized jump table entries
         tbl = self.new_label('ctbl')
-        self.emit(f"\tjmp {tbl}[bx]")
-        # jump table lives in cseg as DW of arm labels (same segment as code)
+        # the jump table lives in cseg (DW of the arm labels), so it has to
+        # be read through CS: a bare "jmp tbl[bx]" reads DS:tbl, which is
+        # some other program's data whenever DS <> CS (docs/bugs.md #121)
+        self.emit(f"\tjmp cs:{tbl}[bx]")
         self.cseg_tables = getattr(self, 'cseg_tables', [])
         self.cseg_tables.append((tbl, arms))
         for arm_label, stmt in zip(arms, s.body):
@@ -929,6 +1059,13 @@ class CodeGen:
         if isinstance(e, ast.BinOp):
             if e.op in self.REL_JFALSE:
                 return 'byte'
+            if e.op in ('*', '/'):
+                # "Multiply and divide always produce ADDRESS results"
+                # (orig/plm80s/PLMLANG.DOC): PIP's "128 * shr(exten,4)"
+                # records-read count came out 0 as a BYTE product, and
+                # every multi-sector copy lost its last partial group
+                # (docs/bugs.md #121)
+                return 'address'
             return 'byte' if self.expr_type(e.left) == self.expr_type(e.right) == 'byte' else 'address'
         if isinstance(e, ast.AssignExpr):
             return self.expr_type(e.expr)
@@ -1267,9 +1404,14 @@ class CodeGen:
         sym = self.resolve(name)
         if sym.kind != 'proc':
             self.err(f"'{name}' is not a procedure")
-        for a in args:   # left to right, as PL/M-86 does (see gen_proc)
+        psizes = sym.info.get('psizes') or [2] * len(args)
+        for a, size in zip(args, psizes + [2] * (len(args) - len(psizes))):
+            # left to right, as PL/M-86 does (see gen_proc). A POINTER
+            # parameter gets DX:AX; an ADDRESS passed to one is DS-relative.
             self.gen_expr(a)
-            self.emit("\tpush ax")
+            if size == 4 and self.expr_type(a) != 'pointer':
+                self.emit("\tmov dx,ds")
+            self._push_value(size)
         if sym.info.get('nested'):
             # Nested procedures take one extra hidden last argument: a
             # static link to their enclosing procedure's frame (see

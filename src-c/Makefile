@@ -3,9 +3,10 @@
 # against its real assembled src/<module> reference (see docs/src-c.md).
 #
 # `kernel.elf` below links the boot stub and all kernel-port objects,
-# and boots far enough to print a signon under QEMU. It does not call
-# the ported routines, so it is not a working MP/M-86 kernel yet (see
-# docs/src-c.md). The differential tests compile each tested .c file
+# and boots under QEMU into the real ported XIOS (xios86q.c's
+# init_entry/xios_conout_entry drive the real UART/PIT/PIC/FDC). The
+# layers above the XIOS aren't called yet, so it is not a working
+# MP/M-86 kernel (see docs/src-c.md). The differential tests compile each tested .c file
 # with host `cc` as a ctypes-loadable library; `make build` is a
 # separate cross-compiler pass (`-c`, matching flags) so type errors
 # show up independently of test failures.
@@ -97,10 +98,11 @@ boot: $(BOOT_OBJS)
 # together with every compiled src-c/kernel/ object (not
 # src-c/loader/ -- see KERNEL_OBJS's own comment above) into one
 # image via the real `ld` + linker.ld. This links successfully and
-# boots/signs on under QEMU -- but "bootable(ish)" because that still
-# doesn't mean a working MP/M-86 kernel: nothing in kernel_main.c
-# calls into any of these ported routines yet (see docs/src-c.md's
-# own "`src-c/boot/`" section for why: every one of them takes a
+# boots under QEMU into the real ported XIOS (kernel_main.c calls
+# xios86q.c's init_entry/xios_conout_entry with real inb/outb) -- but
+# "bootable(ish)" because that still doesn't mean a working MP/M-86
+# kernel: nothing above the XIOS is called yet (see docs/src-c.md's
+# own "`src-c/boot/`" section for why: those routines take a
 # `uint8_t *mem` array + a 16-bit offset, built for host-side
 # differential testing, not real pointers in a real 32-bit protected-
 # mode address space).
@@ -124,8 +126,8 @@ kernel.elf: $(BOOT_OBJS) $(KERNEL_OBJS) $(STRING_SHIM_OBJ) linker.ld
 	i686-elf-grub-file --is-x86-multiboot kernel.elf
 
 # run -- boot kernel.elf under QEMU with serial output on stdout.
-# Halts forever right after signing on (by design, see
-# boot/kernel_main.c), so this just idles once that's printed --
+# Halts forever right after the two signons (by design, see
+# boot/kernel_main.c), so this just idles once they're printed --
 # Ctrl-C to stop.
 run: kernel.elf
 	$(QEMU) -kernel kernel.elf -serial stdio -display none -no-reboot -no-shutdown

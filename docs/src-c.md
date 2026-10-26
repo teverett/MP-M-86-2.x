@@ -206,13 +206,10 @@ are two separate executables that never coexist in one linked image
 either, so linking them together here would be wrong even by the
 real architecture's own design, not just inconvenient) into one real
 ELF via `i686-elf-ld`. This **succeeds** -- `kernel.elf` links, passes
-`i686-elf-grub-file --is-x86-multiboot`, and still boots/signs on
-under QEMU exactly like `src-c/boot/`'s own standalone stub (nothing
-in `kernel_main.c` calls into any of these routines yet, so this
-isn't evidence any of them *work* together -- just that the tree
-*links* as one unit, see this section's own opening paragraphs above
-for why that's still a different question from "boots a working
-MP/M-86 kernel").
+`i686-elf-grub-file --is-x86-multiboot`, and boots under QEMU (as
+first linked, `kernel_main.c` still called none of these routines --
+proof only that the tree *links* as one unit; see "Entering the real
+XIOS" below for the first real call in).
 
 Getting there required two real fixes, not just flag-tuning:
 
@@ -260,6 +257,40 @@ This was deliberately a rename, not a build-system-only `-D` macro
 patch kept in a separate list: more invasive up front (eight test
 files touched), but the source now says what the symbol actually is,
 with nothing to keep in sync by hand.
+
+### Entering the real XIOS
+
+`kernel_main.c` now hands the machine to the real ported XIOS
+(`xios86q.c`, the C port of `XIOS86Q.A86`) instead of driving the
+UART itself: it calls `init_entry()`, which arms the real UART/PIT/
+PIC/FDC and prints XIOS86Q's own signon, then prints the pipeline
+signon one byte at a time through the real `xios_conout_entry()`.
+`tests/src-c/test_boot.py` checks for both strings in QEMU's serial
+output.
+
+XIOS86Q went first because it's the one ported subsystem whose
+interface already fits real hardware: all its port I/O goes through
+`io_in8`/`io_out8` callbacks, which real `inb`/`outb` satisfy
+directly, and its `mem` parameter covers only three harness-scratch
+fields (`XQ_TICK_COUNT`, `XQ_CLOCKON`, and the signon text at
+`XQ_SIGNON`), so a static buffer in `kernel_main.c` stands in for
+them. Two things worth knowing:
+
+- `xios_conout_entry()`'s own `rtm_poll` checks the UART's
+  transmit-ready status once and doesn't loop (by design, see
+  `xios86q.c`'s header comment). Under QEMU every byte of both
+  signons still comes through intact, but real hardware at a real
+  baud rate could drop bytes.
+- `init_entry()` unmasks IRQ0 and programs the PIT, but interrupts
+  stay disabled (multiboot enters with `IF` clear and nothing sets
+  it), so no tick ever fires. If something later enables
+  interrupts, IRQ0 would land on protected-mode vector 8 (the
+  double-fault slot) until the PIC is remapped and an IDT exists.
+
+Everything above the XIOS (`sup_init()` and the rest) still uses the
+simulated flat-array `mem`+offset convention and isn't called yet.
+Reworking that convention to real pointers and segments is the
+remaining step to a kernel that does real work.
 
 ## Status
 

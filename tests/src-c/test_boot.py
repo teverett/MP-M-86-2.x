@@ -30,7 +30,10 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 SRC_C_DIR = os.path.join(REPO_ROOT, 'src-c')
 
 REQUIRED_TOOLS = ('i686-elf-gcc', 'i686-elf-ld', 'i686-elf-grub-file', 'qemu-system-i386')
-SIGNON = b"MP/M-86 src-c image-builder: pipeline ok"
+SIGNONS = (
+    ("XIOS86Q init_entry signon", b"MP/M-86 XIOS86Q -- QEMU target (serial console, floppy disk)"),
+    ("pipeline signon via xios_conout_entry", b"MP/M-86 src-c image-builder: pipeline ok"),
+)
 
 
 def main():
@@ -58,12 +61,17 @@ def main():
         with open(log_path, 'rb') as f:
             output = f.read()
 
-    status = "ok" if SIGNON in output else "FAIL"
-    print(f"[{status}] serial signon: expected {SIGNON!r} in QEMU output, got {output!r}")
-    if status != "ok":
-        print("\n1 case(s) failed: serial signon")
+    failures = []
+    for label, expected in SIGNONS:
+        status = "ok" if expected in output else "FAIL"
+        print(f"[{status}] {label}: expected {expected!r} in QEMU output")
+        if status != "ok":
+            failures.append(label)
+    if failures:
+        print(f"\nQEMU output was: {output!r}")
+        print(f"\n{len(failures)} case(s) failed: {', '.join(failures)}")
         return 1
-    print("\nall 1 case(s) match.")
+    print(f"\nall {len(SIGNONS)} case(s) match.")
     return 0
 
 

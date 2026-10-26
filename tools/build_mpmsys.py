@@ -205,7 +205,8 @@ QUL_FIELD_OFFSET = 0x5e
 # points to 0) -- matching exactly what `getpdadr`'s `gpd_have` path
 # (PROC.RTM) already expects to find there.
 PD_POOL_SLOT_SIZE = 0x30  # pdlen (PD.DEF)
-PD_POOL_SLOTS = 4
+PD_POOL_SLOTS = 6          # TMP and CLOCK each take one (their PDs are
+                           # copied out of their own data segments)
 
 # The system Lock List: "FREE_ROOT, LOCK_MAX, OPEN_MAX INITIALIZED BY
 # SYSGEN" (DATA.BDO). Every file a process opens and every record it
@@ -312,8 +313,9 @@ FLGLEN = 3             # flg_pd (word, FLG.DEF) + flg_ignore (byte)
 # describes this as CS=DS=ES=SS all the same segment), so its code and
 # data are appended, back to back, onto this SAME combined `cseg` blob
 # (right after the real kernel modules') rather than loaded as a
-# separate segment -- `tmp_data_seg` is computed as an offset purely
-# *within* that same blob, the way each kernel module's own segment is.
+# separate segment -- each RSP's segments are computed purely *within*
+# that same blob, the way each kernel module's own segment is (see
+# BAKED_RSPS: TMP, then CLOCK).
 RSPSEG_FIELD_OFFSET = 0x42
 QD_POOL_SLOT_SIZE = 0x1c  # qdlen (QD.DEF) -- first word of each slot is
                           # its own q_link, matching getqdaddr's own
@@ -352,6 +354,9 @@ QMAU_SAT_ENTRIES = 10  # generous capacity -- see the fix's own comment
 # a byte offset and patched each table and immediate it knew about,
 # which missed some (docs/bugs.md #112).
 SYSDAT_DSEG_SIZE = 4096  # see XIOS86Q.A86's own comment on this number
+
+# RSPs baked into the image: (src/rsp name, its initial-stack-frame label)
+BAKED_RSPS = [('TMP', 'stack_top'), ('CLOCK', 'stack_tos')]
 
 SYM_RE = re.compile(r'^\s*(init|entry)\s+label\s+([0-9A-Fa-f]+)h', re.MULTILINE)
 ANY_SYM_RE = re.compile(r'^\s*(\S+)\s+(?:label|equ)\s+([0-9A-Fa-f]+)h', re.MULTILINE)
@@ -528,11 +533,15 @@ def main():
     # (QUE2.RTM) already expects to find there.
     qd_pool_start = get_symbol('RTM', 'mxmemcount') + 1
     qd_pool_end = qd_pool_start + QD_POOL_SLOTS * QD_POOL_SLOT_SIZE
-    if qd_pool_end > SYSDAT_DSEG_SIZE:
+    # SYSDAT's 4096 bytes are SYSTEM.DAT's fields up to `mxmemcount`, then
+    # DATA.BDO (from `efcb`: the BDOS's variables, its internal stack and
+    # mxdiskqd/mxdiskqpb, up to FBFh). Only the gap between is free --
+    # the other pools go past the XIOS's data tail (docs/bugs.md #117).
+    data_bdo_start = get_symbol('SYSDAT', 'efcb')
+    if qd_pool_end > data_bdo_start:
         raise SystemExit(
-            f"QD pool (offset {qd_pool_start:#x}..{qd_pool_end:#x}) no "
-            f"longer fits in SYSDAT's {SYSDAT_DSEG_SIZE}-byte dseg -- "
-            "SYSDAT.FMT grew too close to the end")
+            f"QD pool (offset {qd_pool_start:#x}..{qd_pool_end:#x}) runs "
+            f"into DATA.BDO (from {data_bdo_start:#x})")
     for slot in range(QD_POOL_SLOTS):
         slot_off = qd_pool_start + slot * QD_POOL_SLOT_SIZE
         next_off = (slot_off + QD_POOL_SLOT_SIZE
@@ -583,131 +592,61 @@ def main():
     # code ran with every `module_table`/`qmau`/etc. pointer correct
     # for one segment while the loader actually put SYSDAT at another,
     # corrupting everything within the first few dispatches.
-    tmp_src = os.path.join(ROOT, 'src', 'rsp', 'TMP.A86')
-    tmp_out = os.path.join(out_dir, 'TMP')
-    result = subprocess.run(ASM86 + [tmp_src, '-o', tmp_out],
-                             capture_output=True, text=True)
-    if result.returncode != 0:
-        sys.stderr.write(result.stdout)
-        sys.stderr.write(result.stderr)
-        raise SystemExit("asm86 failed assembling src/rsp/TMP.A86")
-    with open(tmp_out + '.cseg.bin', 'rb') as f:
-        tmp_cseg = bytearray(f.read())
-    with open(tmp_out + '.dseg.bin', 'rb') as f:
-        tmp_dseg = bytearray(f.read())
+    # RSPs baked into the image, in the order INIT.SUP creates them (its
+    # `nrsp:` loop follows each RSP's `rsp_link`, the first word of its
+    # data segment, starting from SYSDAT's `rspseg`). TMP is the console's
+    # command processor; CLOCK advances SYSDAT's time of day, waiting on
+    # the seconds flag XIOS86Q's tick ISR sets (docs/bugs.md #117).
+    rsp_data_segs = []
+    rsp_images = []
+    for name, stack_label in BAKED_RSPS:
+        src = os.path.join(ROOT, 'src', 'rsp', name + '.A86')
+        out = os.path.join(out_dir, name)
+        result = subprocess.run(ASM86 + [src, '-o', out], capture_output=True, text=True)
+        if result.returncode != 0:
+            sys.stderr.write(result.stdout)
+            sys.stderr.write(result.stderr)
+            raise SystemExit(f"asm86 failed assembling src/rsp/{name}.A86")
+        with open(out + '.cseg.bin', 'rb') as f:
+            rsp_cseg = bytearray(f.read())
+        with open(out + '.dseg.bin', 'rb') as f:
+            rsp_dseg = bytearray(f.read())
+        syms = subprocess.run(ASM86 + [src, '--symbols'], capture_output=True, text=True).stdout
+        sym = {k.lower(): int(v, 16) for k, v in ANY_SYM_RE.findall(syms)}
 
-    # Pad `cseg` itself up to the next paragraph boundary *before*
-    # appending TMP -- `tmp_code_seg` below rounds `len(cseg)` UP to
-    # compute TMP's own segment, but without this padding the actual
-    # `cseg += tmp_cseg` a few lines down still appends at the
-    # *unrounded* current length, leaving every byte of TMP's own
-    # code+data physically offset from where `tmp_code_seg` (and every
-    # address computed relative to it -- "offset tmp" in TMP.A86's own
-    # dseg, the two build-time patches just below, etc.) claims it
-    # starts. Confirmed directly this session: the combined kernel
-    # cseg's real length (29023 bytes) isn't itself a multiple of 16,
-    # a 1-byte gap that silently shifted every single address inside
-    # TMP by one byte.
-    cseg += b'\0' * ((-len(cseg)) % 16)
-    tmp_code_seg = MPM_CODE_SEG + len(cseg) // 16
-    tmp_cseg_paras = (len(tmp_cseg) + 15) // 16
-    tmp_cseg = tmp_cseg.ljust(tmp_cseg_paras * 16, b'\0')
-    tmp_data_seg = tmp_code_seg + tmp_cseg_paras
+        # Pad `cseg` itself up to the next paragraph boundary before
+        # appending the RSP: its code segment is computed from the
+        # rounded length, so the bytes have to start exactly there (a
+        # 1-byte gap once shifted every address inside TMP by one byte).
+        cseg += b'\0' * ((-len(cseg)) % 16)
+        code_seg = MPM_CODE_SEG + len(cseg) // 16
+        cseg_paras = (len(rsp_cseg) + 15) // 16
+        rsp_cseg = rsp_cseg.ljust(cseg_paras * 16, b'\0')
+        data_seg = code_seg + cseg_paras
 
-    # Patch TMP's own dseg: `stack_top`'s 2nd word (its "code seg" slot,
-    # GENSYS-filled in the real build -- TMP.A86's own template leaves
-    # it as the placeholder `unknown` equ, 0) and `u_initcs` (UDA-
-    # relative offset 50h, confirmed via --symbols against a real
-    # kernel file that includes UDA.FMT) both need the real code
-    # segment -- "Small Model" semantics (MP/M-86 Programmer's Guide
-    # 5.3.2): CS set explicitly, DS/ES/SS left 0 so PROC.RTM's own
-    # `cp_uda` auto-fills them from `ax`=`u_wrkseg` (which `INIT.SUP`'s
-    # `nrsp:` loop already sets to `rspseg`, i.e. `tmp_data_seg`, via
-    # `mov ds,cx` right before `int mpmint`).
-    struct.pack_into('<H', tmp_dseg, 0x1DA, tmp_code_seg)  # stack_top+2
-    struct.pack_into('<H', tmp_dseg, 0x90, tmp_code_seg)   # u_initcs
-    tmp_dseg_paras = (len(tmp_dseg) + 15) // 16
-    tmp_dseg = tmp_dseg.ljust(tmp_dseg_paras * 16, b'\0')
-
-    cseg += tmp_cseg
-    cseg += tmp_dseg
-    print(f"build_mpmsys: TMP   code @ {tmp_code_seg:#06x}, "
-          f"data @ {tmp_data_seg:#06x} ({len(tmp_cseg)}+{len(tmp_dseg)} "
-          "bytes)")
+        # The RSP's code segment, GENSYS-filled in the real build (the
+        # templates leave `unknown`, 0): the 2nd word of the initial
+        # stack frame (offset, segment, flags) and `u_initcs` (UDA offset
+        # 50h). "Small Model" (MP/M-86 Programmer's Guide 5.3.2): CS set
+        # explicitly, DS/ES/SS left 0 so PROC.RTM's `cp_uda` fills them
+        # from `u_wrkseg`, which INIT.SUP's `nrsp:` sets to the RSP's data
+        # segment.
+        struct.pack_into('<H', rsp_dseg, sym[stack_label] + 2, code_seg)
+        struct.pack_into('<H', rsp_dseg, sym['uda'] + 0x50, code_seg)
+        dseg_paras = (len(rsp_dseg) + 15) // 16
+        rsp_dseg = rsp_dseg.ljust(dseg_paras * 16, b'\0')
+        cseg += rsp_cseg
+        rsp_images.append((len(cseg), rsp_dseg))   # where its dseg will go
+        cseg += rsp_dseg
+        rsp_data_segs.append(data_seg)
+        print(f"build_mpmsys: {name:5s} code @ {code_seg:#06x}, "
+              f"data @ {data_seg:#06x} ({len(rsp_cseg)}+{len(rsp_dseg)} bytes)")
+    # chain them: each `rsp_link` (dseg offset 0) names the next one's
+    # data segment, the last 0
+    for (off, _), nxt in zip(rsp_images, rsp_data_segs[1:] + [0]):
+        struct.pack_into('<H', cseg, off, nxt)
 
     sysdat_segment = MPM_CODE_SEG + (len(cseg) + 15) // 16
-    qmau_buf_off = (qd_pool_end + 15) & ~0xF
-    qmau_buf_end = qmau_buf_off + QMAU_BUF_SIZE
-    if qmau_buf_end > SYSDAT_DSEG_SIZE:
-        raise SystemExit(
-            f"qmau buffer (offset {qmau_buf_off:#x}..{qmau_buf_end:#x}) "
-            f"no longer fits in SYSDAT's {SYSDAT_DSEG_SIZE}-byte dseg -- "
-            "SYSDAT.FMT grew too close to the end")
-    satlen = 5  # sat_start(2) + sat_length(2) + sat_nall(1)
-    sat_table_len = satlen * (QMAU_SAT_ENTRIES + 1)  # +1 for SAT0 itself
-    for i in range(sat_table_len):
-        dseg[qmau_buf_off + i] = 0  # whole table starts zeroed/unused
-    dseg[qmau_buf_off] = QMAU_SAT_ENTRIES  # SAT0.ents = capacity
-    struct.pack_into('<HHB', dseg, qmau_buf_off + satlen,
-                      sat_table_len,                   # SAT1.start
-                      QMAU_BUF_SIZE - sat_table_len,    # SAT1.length
-                      0)                                # SAT1.nall (free)
-    struct.pack_into('<HHHH', dseg, QMAU_FIELD_OFFSET,
-                      0, sysdat_segment + (qmau_buf_off >> 4),
-                      QMAU_BUF_SIZE, 0)
-    struct.pack_into('<H', dseg, QUL_FIELD_OFFSET, qd_pool_start)
-    struct.pack_into('<H', dseg, ENDSEG_FIELD_OFFSET, 0xFFFF)
-    struct.pack_into('<H', dseg, RSPSEG_FIELD_OFFSET, tmp_data_seg)
-
-    # flag table: real, zero-initialized-then-filled entries right
-    # after the qmau buffer -- see FLAGS_FIELD_OFFSET's own comment.
-    flagtab_start = qmau_buf_end
-    flagtab_end = flagtab_start + NFLAGS * FLGLEN
-    if flagtab_end > SYSDAT_DSEG_SIZE:
-        raise SystemExit(
-            f"flag table (offset {flagtab_start:#x}..{flagtab_end:#x}) "
-            f"no longer fits in SYSDAT's {SYSDAT_DSEG_SIZE}-byte dseg -- "
-            "SYSDAT.FMT grew too close to the end")
-    for i in range(NFLAGS):
-        off = flagtab_start + i * FLGLEN
-        struct.pack_into('<HB', dseg, off, 0xFFFF, 0xFF)  # flag_off, flag_zig
-    struct.pack_into('<H', dseg, FLAGS_FIELD_OFFSET, flagtab_start)
-
-    # PD pool: real free PD slots right after the flag table -- see
-    # PUL_FIELD_OFFSET's own comment for why zeroing `pul` alone isn't
-    # enough.
-    pd_pool_start = flagtab_end
-    pd_pool_end = pd_pool_start + PD_POOL_SLOTS * PD_POOL_SLOT_SIZE
-    if pd_pool_end > SYSDAT_DSEG_SIZE:
-        raise SystemExit(
-            f"PD pool (offset {pd_pool_start:#x}..{pd_pool_end:#x}) no "
-            f"longer fits in SYSDAT's {SYSDAT_DSEG_SIZE}-byte dseg -- "
-            "SYSDAT.FMT grew too close to the end")
-    for slot in range(PD_POOL_SLOTS):
-        slot_off = pd_pool_start + slot * PD_POOL_SLOT_SIZE
-        next_off = (slot_off + PD_POOL_SLOT_SIZE
-                    if slot < PD_POOL_SLOTS - 1 else 0)
-        struct.pack_into('<H', dseg, slot_off, next_off)  # p_link
-    struct.pack_into('<H', dseg, PUL_FIELD_OFFSET, pd_pool_start)
-
-    # Lock List: LOCK_ITEMS free items right after the PD pool, linked
-    # through their first word -- see FREE_ROOT_OFFSET's own comment.
-    lock_start = pd_pool_end
-    lock_end = lock_start + LOCK_ITEMS * LOCK_ITEM_SIZE
-    if lock_end > SYSDAT_DSEG_SIZE:
-        raise SystemExit(
-            f"Lock List (offset {lock_start:#x}..{lock_end:#x}) no longer "
-            f"fits in SYSDAT's {SYSDAT_DSEG_SIZE}-byte dseg")
-    for i in range(LOCK_ITEMS):
-        off = lock_start + i * LOCK_ITEM_SIZE
-        dseg[off:off + LOCK_ITEM_SIZE] = bytes(LOCK_ITEM_SIZE)
-        struct.pack_into('<H', dseg, off, off + LOCK_ITEM_SIZE if i < LOCK_ITEMS - 1 else 0)
-    struct.pack_into('<H', dseg, FREE_ROOT_OFFSET, lock_start)
-    for field in (SYSLREC_OFFSET, SYSLFIL_OFFSET, SYSLTOT_OFFSET):
-        struct.pack_into('<H', dseg, field, LOCK_ITEMS)
-    dseg[LOCK_MAX_OFFSET] = LOCK_ITEMS
-    dseg[OPEN_MAX_OFFSET] = LOCK_ITEMS
-
     # XIOS86Q's own private tail: the bytes from SYSDAT_DSEG_SIZE
     # onward in its own dseg.bin (see its own comment on why its
     # private data starts exactly there).
@@ -719,6 +658,60 @@ def main():
                           "shared system data area -- its own 'org "
                           f"{SYSDAT_DSEG_SIZE}' must not have taken effect")
     dseg += xios_dseg[SYSDAT_DSEG_SIZE:]
+
+    # The rest of the system tables go after the XIOS's data tail (the
+    # dseg grows; everything here is a SYSDAT offset): the queue
+    # buffer's MAU (paragraph-aligned -- its m_start is a segment), the
+    # flag table, the PD pool and the Lock List.
+    def alloc(n, align=1):
+        dseg.extend(bytes((-len(dseg)) % align))
+        off = len(dseg)
+        dseg.extend(bytes(n))
+        return off
+
+    qmau_buf_off = alloc(QMAU_BUF_SIZE, 16)
+    satlen = 5  # sat_start(2) + sat_length(2) + sat_nall(1)
+    sat_table_len = satlen * (QMAU_SAT_ENTRIES + 1)  # +1 for SAT0 itself
+    dseg[qmau_buf_off] = QMAU_SAT_ENTRIES  # SAT0.ents = capacity
+    struct.pack_into('<HHB', dseg, qmau_buf_off + satlen,
+                      sat_table_len,                   # SAT1.start
+                      QMAU_BUF_SIZE - sat_table_len,    # SAT1.length
+                      0)                                # SAT1.nall (free)
+    struct.pack_into('<HHHH', dseg, QMAU_FIELD_OFFSET,
+                      0, sysdat_segment + (qmau_buf_off >> 4),
+                      QMAU_BUF_SIZE, 0)
+    struct.pack_into('<H', dseg, QUL_FIELD_OFFSET, qd_pool_start)
+    struct.pack_into('<H', dseg, ENDSEG_FIELD_OFFSET, 0xFFFF)
+    struct.pack_into('<H', dseg, RSPSEG_FIELD_OFFSET, rsp_data_segs[0])
+
+    # flag table -- see FLAGS_FIELD_OFFSET's own comment.
+    flagtab_start = alloc(NFLAGS * FLGLEN)
+    for i in range(NFLAGS):
+        off = flagtab_start + i * FLGLEN
+        struct.pack_into('<HB', dseg, off, 0xFFFF, 0xFF)  # flag_off, flag_zig
+    struct.pack_into('<H', dseg, FLAGS_FIELD_OFFSET, flagtab_start)
+
+    # PD pool: real free PD slots -- see PUL_FIELD_OFFSET's own comment
+    # for why zeroing `pul` alone isn't enough.
+    pd_pool_start = alloc(PD_POOL_SLOTS * PD_POOL_SLOT_SIZE, 2)
+    for slot in range(PD_POOL_SLOTS):
+        slot_off = pd_pool_start + slot * PD_POOL_SLOT_SIZE
+        next_off = (slot_off + PD_POOL_SLOT_SIZE
+                    if slot < PD_POOL_SLOTS - 1 else 0)
+        struct.pack_into('<H', dseg, slot_off, next_off)  # p_link
+    struct.pack_into('<H', dseg, PUL_FIELD_OFFSET, pd_pool_start)
+
+    # Lock List: LOCK_ITEMS free items, linked through their first word
+    # -- see FREE_ROOT_OFFSET's own comment.
+    lock_start = alloc(LOCK_ITEMS * LOCK_ITEM_SIZE, 2)
+    for i in range(LOCK_ITEMS):
+        off = lock_start + i * LOCK_ITEM_SIZE
+        struct.pack_into('<H', dseg, off, off + LOCK_ITEM_SIZE if i < LOCK_ITEMS - 1 else 0)
+    struct.pack_into('<H', dseg, FREE_ROOT_OFFSET, lock_start)
+    for field in (SYSLREC_OFFSET, SYSLFIL_OFFSET, SYSLTOT_OFFSET):
+        struct.pack_into('<H', dseg, field, LOCK_ITEMS)
+    dseg[LOCK_MAX_OFFSET] = LOCK_ITEMS
+    dseg[OPEN_MAX_OFFSET] = LOCK_ITEMS
 
     # ccb ("addr. Console Ctrl Blk Table", SYSDAT.FMT) -- real GENSYS
     # computes this; SYSTEM.DAT's stock value is the unconfigured

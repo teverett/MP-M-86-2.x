@@ -347,8 +347,8 @@ After handing console I/O to the XIOS, `kernel_main.c` runs
 
 - **Layout** follows the real `/src` boot: the SUP code segment at
   `MPM_CODE_SEG` (1000h, `tools/build_mpmsys.py`), SYSDAT just past
-  the combined kernel code (1697h for the current `/src` build:
-  1000h + 26992 bytes / 16), so the init UDA lands at 1703h. The
+  the combined kernel code (16BEh for the current `/src` build:
+  1000h + 27616 bytes / 16), so the init UDA lands at 172Ah. The
   physical base passed in is 0, since multiboot leaves the CPU in
   flat 32-bit mode with base-0 segments (linear == physical). That
   base is kept in a `volatile` so the compiler treats `far_ptr()`
@@ -364,12 +364,12 @@ After handing console I/O to the XIOS, `kernel_main.c` runs
   `cs:` cells, version, tick/idle stack tops, the INT mpmint vector,
   `p_uda`, the init UDA's `u_wrkseg`, intflag, rspseg, and SYSDAT 2Eh
   left alone) is read back from real memory. QEMU prints
-  `sup_init: ok (sysdat 1697, init uda 1703)`, or `sup_init: FAIL
+  `sup_init: ok (sysdat 16BE, init uda 172A)`, or `sup_init: FAIL
   <field> = <got>, expected <want>` per bad field; changing one write
   in `init.c` produces exactly that. `test_boot.py` checks for the ok
   line.
 
-`SYSDAT_SEG` (1697h) is copied from the current `/src` build and
+`SYSDAT_SEG` (16BEh) is copied from the current `/src` build and
 won't track it automatically if the combined kernel code size
 changes. Nothing breaks if it drifts, since this image doesn't load
 the `/src` code, but it will stop matching the real layout.

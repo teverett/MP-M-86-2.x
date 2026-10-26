@@ -9881,3 +9881,38 @@ rejected by TOD itself, by design.) `tests/plm/test_plmc.py` adds
 POINTER cases and TOD's display (leap years included), set, and Feb 29
 of a non-leap year; the pre-fix compiler fails 7 of its checks.
 
+## 117. `tools/build_mpmsys.py` — CLOCK never ran, and the "slack" tables sat on top of DATA.BDO — FIXED
+
+**CLOCK.** The time never advanced: TOD always showed SYSDAT's
+SYSTEM.DAT value. CLOCK.RSP (src/rsp/CLOCK.A86: wait on the seconds
+flag, BCD-increment SYSDAT's TOD) was on the disk but never loaded --
+nothing loads an RSP from disk; build_mpmsys.py bakes RSPs into the
+image, and it only baked TMP. Now it bakes a list (`BAKED_RSPS`: TMP,
+then CLOCK). Each RSP is assembled and appended paragraph-aligned, its
+code segment patched into its initial stack frame and `u_initcs` (from
+its own symbols, no longer hardcoded offsets), and the RSPs chained
+through `rsp_link` from SYSDAT's `rspseg`, which INIT.SUP's `nrsp:` loop
+walks to create one process each. The PD pool grew to 6, since each RSP
+takes a slot.
+
+**The slack.** With that, two programs in a row worked and the third
+failed with "No Room in System Lock List". SYSDAT's 4096 bytes are
+SYSTEM.DAT's fields up to `mxmemcount` (B66h), then DATA.BDO from
+`efcb` (C00h): the BDOS's variables, its internal stack (`bdosstack`,
+F8Eh, growing down) and `mxdiskqd`/`mxdiskqpb` (to FBFh). The script
+treated everything after `mxmemcount` as free, checking only against
+4096, and put the queue buffer's MAU (BE0h-DE0h), the flag table, the
+PD pool and the Lock List (#113) on top of DATA.BDO. The BDOS and those
+tables overwrote each other; growing the PD pool for CLOCK just moved
+the overlap somewhere that broke sooner.
+
+**Patched**: only the QD pool stays in the real gap (B67h-BD7h, now
+checked against `efcb`); the queue MAU, flag table, PD pool and Lock
+List go after the XIOS's data tail, alongside the MD pool, so DATA.BDO's
+own initial values are intact too.
+
+**Verified** in QEMU: TOD reads 12:00:14, then 12:00:24 ten seconds
+later; set to 03/19/86 23:59:55, it shows Thu 03/20/86 00:00:04 nine
+seconds later; ten programs in a row (DIR, SUBMIT, TOD, ERA, REN, ...)
+run, the clock advancing through them.
+

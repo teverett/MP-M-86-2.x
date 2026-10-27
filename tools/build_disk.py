@@ -395,9 +395,12 @@ def main():
             name.encode('ascii'), ext.encode('ascii'), len(body),
             first_block=next_free_block)
         entries.extend(util_entries)
-    for name, ext, path in RAW_FILES:
-        with open(os.path.join(ROOT, path), 'rb') as f:
-            body = f.read()
+    # DDT86.CMD, DRI's debugger, built from src-assem/toolchain/ (an
+    # 8080-model CMD: tools/build_ddt86.py), copied as is
+    import build_ddt86
+    raw = [(name, ext, open(os.path.join(ROOT, path), 'rb').read()) for name, ext, path in RAW_FILES]
+    raw.append(('DDT86', 'CMD', build_ddt86.build()[0]))
+    for name, ext, body in raw:
         util_bodies.append((name, ext, body, None, None, None, next_free_block))
         util_entries, next_free_block = directory_entries_for_file(
             name.encode('ascii'), ext.encode('ascii'), len(body),

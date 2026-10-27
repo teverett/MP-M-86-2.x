@@ -212,7 +212,8 @@ end t;
 # docs/bugs.md #131: a short INITIAL list still allocates the whole
 # array (a structure's string field too); a variable named like a flag
 # pseudo-variable hides it; BYTE + and - set CARRY from 8 bits; PLUS and
-# MINUS take the carry in; DISABLE/ENABLE are CLI/STI
+# MINUS take the carry in; DISABLE/ENABLE are CLI/STI; and (bugs.md
+# #137) a 2-character string is a constant, the first character high
 FIX_PLM = r'''t: do;
 declare (b, c) byte;
 declare out(16) address;
@@ -245,6 +246,7 @@ plmstart: procedure public;
   b = 99h; b = dec(b + 1); c = 0; c = dec(c plus 0);
   call put(b); call put(c);           /* 0, 1: BCD 99 + 1 = 100 */
   disable; enable;
+  call put('AB');                     /* 4142h: a 2-character constant */
   end plmstart;
 end t;
 '''
@@ -414,8 +416,8 @@ def main():
     check("DIR: no match", "Directory for User  0:\r\nFile not found.", run_dir([b'NONE    X  ']))
     check("GOTO: forward, out of recursion to the main program, out of a nested procedure; DO CASE",
           [1, 2, 3, 0xFFFF, 0x77, 5, 0xBB], run_program(GOTO_PLM, 7))
-    check("bugs.md #131: short INITIAL lists, a local ZERO, byte CARRY, PLUS/MINUS, DEC carry",
-          [4, 9, 8, 5, 1, 0, 6, 4, 0, 1], run_program(FIX_PLM, 10))
+    check("bugs.md #131/#137: short INITIAL lists, a local ZERO, byte CARRY, PLUS/MINUS, DEC carry, 'AB'",
+          [4, 9, 8, 5, 1, 0, 6, 4, 0, 1, 0x4142], run_program(FIX_PLM, 11))
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, 'T.PLM')
         open(p, 'w').write(FIX_PLM)

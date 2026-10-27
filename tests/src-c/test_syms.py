@@ -25,7 +25,8 @@ sys.path.insert(0, os.path.join(REPO_ROOT, 'tools'))
 from asm86 import Assembler  # noqa: E402
 
 HEADERS = [os.path.join(SRC_C, 'rt', 'rt_syms.h'), os.path.join(SRC_C, 'rsp', 'rsp_syms.h'),
-           os.path.join(SRC_C, 'utils', 'utils_syms.h'), os.path.join(SRC_C, 'gensys', 'gensys_syms.h')]
+           os.path.join(SRC_C, 'utils', 'utils_syms.h'), os.path.join(SRC_C, 'gensys', 'gensys_syms.h'),
+           os.path.join(SRC_C, 'toolchain', 'toolchain_syms.h')]
 SRC_DIRS = [os.path.join(REPO_ROOT, 'src-assem', d) for d in ('kernel', 'rsp', 'utils')]
 STUB = os.path.join(REPO_ROOT, 'tools', 'plm', 'runtime_stub.A86')
 
@@ -47,11 +48,26 @@ def plm_source(path, tmp):
     with open(combined, 'w') as f:
         f.write(''.join(lines) + open(STUB).read())
     return combined
-DEFINE_RE = re.compile(r'^#define\s+(\w+)\s+(0x[0-9A-Fa-f]+)\s+/\*\s*(\S+\.(?:A86|PLM)):\s*(.+?)\s*\*/', re.MULTILINE)
+DEFINE_RE = re.compile(r'^#define\s+(\w+)\s+(0x[0-9A-Fa-f]+)\s+/\*\s*(\S+\.(?:A86|PLM|CMD)):\s*(.+?)\s*\*/',
+                       re.MULTILINE)
+
+
+def ddt86_symbols():
+    """DDT86.CMD as tools/build_ddt86.py builds it: {'<piece>:<label>'
+    (ddt86, dis, ass; lower case): offset, 'layout:<key>': value}"""
+    sys.path.insert(0, os.path.join(REPO_ROOT, 'tools'))
+    import build_ddt86
+    _, layout, parts = build_ddt86.build(parts=True)
+    table = {f'layout:{k}': v for k, v in layout.items() if isinstance(v, int)}
+    for piece, (asm, _) in parts.items():
+        table.update({f'{piece}:{k.lower()}': v.value for k, v in asm.symtab.items() if v.kind == 'label'})
+    return table
 
 
 def symbols(src):
     """{label (lower case): offset, 'cseg length': n, 'dseg length': n}"""
+    if src.upper() == 'DDT86.CMD':
+        return ddt86_symbols()
     path = next(os.path.join(d, src) for d in SRC_DIRS if os.path.exists(os.path.join(d, src)))
     asm = Assembler()
     if src.upper().endswith('.PLM'):

@@ -10672,3 +10672,112 @@ search's `srchnext` (src-c/kernel/file2.c, FILE2.BDO) had two slips:
 - With the label's Make XFCBs on (`SET [PROTECT=ON,MAKE=ON]`),
   `PIP X.TXT=PW.TXT;KEY` gives X.TXT the password KEY on both builds:
   TYPE X.TXT is a Password Error, and TYPE X.TXT;KEY types it.
+
+## 136. DDT86 builds and runs on src-assem — src-assem/toolchain completed
+
+**Request.** Port the toolchain to C (src-c/toolchain/), the whole of
+DDT86.
+
+**What was missing.** src-assem/toolchain/ had four of DDT86's sources
+(INS86.PLM, DIS86.PLM, ASS86.PLM, GENTAB.PLI). DRI's full set is in
+orig/mpm862sr/06, and these files were copied from it unchanged:
+- DDT86.A86, the debugger itself;
+- ASMTAB.PLM, the assembler's op$tab, which ASS86 needs;
+- ASSLNK86.ASM and DISLNK86.ASM, the overlays' link stubs;
+- OP86.DAT, GENTAB's input;
+- DDT86.SUB, DRI's build.
+
+The four sources already here are identical to DRI's. A86.CPM and
+GENCMD.CPM are DRI's binaries, with no source; tools/asm86.py and the
+CMD writers stand in for them.
+
+**The build: tools/build_ddt86.py**, as DDT86.SUB does it, with this
+repo's tools:
+- **Compile:** plmc compiles the PL/M.
+- **Link:** a new linker, tools/plm/link.py, joins INS86 + DIS86 into
+  the disassembler overlay and ASMTAB + ASS86 into the assembler
+  overlay. It prefixes each module's own labels, drops plmc's storage
+  for EXTERNAL data, and takes another overlay's publics as absolute
+  equates. DISLNK86/ASSLNK86's stubs jump to the overlay and back to
+  DDT86's vectors at 103h–10Fh.
+- **Merge:** DDT86.A86 is assembled, and the three images are merged
+  into an 8080-model CMD (one code group, DS = CS).
+- **Placement:** `make -C src-assem` builds
+  src-assem/build/toolchain/DDT86.CMD, and build_disk.py puts it on the
+  floppy.
+
+**The layout isn't DRI's.** DRI's overlays sit at 1400h and 2300h.
+tools/asm86 picks longer encodings than DRI's ASM86 for some
+instructions: no accumulator-direct `mov al,[x]` (A0h), no sign-extended
+imm8 ALU form (83h), no `mov r16,imm` short form (B8h+r). So DDT86's own
+code is 10Ah bytes longer, and its data, ending with its stack, runs to
+141Ah, past 1400h. plmc's PL/M is also larger than Intel PL/M-86's.
+
+The build therefore places each overlay after what precedes it: the
+disassembler at 1420h, the assembler at 2A70h. A build copy of DDT86.A86
+gets matching `lasmorg`/`asmorg` equates; the source in the tree is
+DRI's, unchanged. DDT86.CMD is 559h paragraphs, against DRI's 360h.
+
+**Tool fix.** tools/asm86 gained LDS/LES (C5h/C4h): DDT86.A86's
+breakpoint code uses `les si,[di]`.
+
+**Verified.** On src-assem's floppy in QEMU, DDT86 1.1 signs on and:
+- `A1000` assembles `MOV AX,1234` and `JMP 1000`;
+- `L1000` lists them back (`MOV AX,1234`, `JMP 1000`);
+- `D1000,100F` shows `B8 34 12 E9 FA FF`;
+- `X` displays the registers.
+
+## 137. Tool bugs found porting DDT86 to C, and ASS86's IN AX — FIXED
+
+Found porting src-assem/toolchain/ (#136) to src-c/toolchain/.
+- **tools/asm86: a distance between two offsets kept the address type.**
+  `ndelims equ offset $ - offset delims` (DDT86.A86's file-name parser)
+  assembled `mov cx,ndelims` as a load from DS:000Bh, not the number 11.
+  So src-assem's DDT86 found no delimiters, and R, E, W and I all failed.
+  expr.py's own comment described the fix, but no code did it. Now one
+  address minus another (each an `offset` or a label) is a plain number.
+  - **The fix exposed a second bug, in the prescan.** The prescan
+    still guessed such an `equ` was an address, so the tentative pass
+    sized an instruction using it bigger than the final pass did. Every
+    label after it then moved, while references kept pass 1's addresses.
+    In the loader, LDBDOS's `mov cl,dpblist` became an immediate (the
+    right value, 15) and shrank by a byte. LDBDOS's BDOS function table
+    still pointed one byte past each function, so MPMLDR hung after its
+    sign-on: a divide by zero in `seek`, the disk never selected.
+  - **Fix:** the prescan now treats `offset A - offset B` as a number,
+    and the final pass refuses to finish if any label moved between
+    passes ("label ... moved between passes"), instead of writing a
+    wrong binary.
+  - **Also:** build_mpmldr.py puts LDBIOS on a paragraph, as DRI's
+    fixed 1200h is.
+  - **The loader's old build was wrong by luck.** It copied 29h bytes
+    (whatever was at DS:000Fh) instead of 15 into the DPB fields; that
+    overran 26 bytes into the loader BDOS's variables.
+- **tools/plm (plmc): a two-character string constant in an expression
+  was the address of an interned copy.** In PL/M it is a 16-bit number,
+  first character high. ASS86's `token$word = 'YB'` (BYTE) and `'OW'`
+  (WORD) therefore never matched, and `MOV BYTE [BX],5` was an error.
+  Now `'AB'` is 4142h. test_plmc.py checks it.
+- **plmc: two procedures' nested procedures of the same name shared a
+  label.** ED.PLM's FILLSOURCE and WRITEDEST each have a ZN. asm86's
+  final pass happened to resolve each call correctly, so ED.CMD was
+  right, but the duplicate label is what tripped the new pass check. A
+  nested procedure now gets a label of its own (pl_zn, pl_zn_1). ED's
+  binary is unchanged.
+- **ASS86.PLM (DRI's): `IN AX,port` assembled as `IN AL,port`** (E4h, not
+  E5h). The immediate branch of type$in left out op1's W bit, which the
+  DX form includes. Fixed in ASS86.PLM and ass86.c.
+- **tools/i86sim.py** gained LES/LDS (C4h/C5h) and NOP (90h). It also has
+  optional IF tracking (`track_if`), with which CLI, STI, PUSHF and POPF
+  carry IF; DDT86's start-up tests IF. It is off by default, so other
+  callers' flags words are unchanged.
+
+**Verified.**
+- A clean `make -C src-assem` rebuilds every product byte-identical to
+  before these fixes, except LDBDOS/MPMLDR.bin (the dpblist
+  instruction).
+- src-assem's floppy boots. Its DDT86 assembles `IN AX,40` as E5 40 and
+  `MOV BYTE [BX],5` as C6 07 05, and loads DIR.CMD with E.
+- The C port's tests run with no tool workarounds: test_dis86.py (8415
+  cases), test_ass86.py (324), test_ddt86.py (27), test_gentab.py.
+- All 73 src-c tests pass.

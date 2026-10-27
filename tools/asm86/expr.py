@@ -275,6 +275,16 @@ class _Parser:
             # EQU across the whole tree, several of which are genuinely
             # read as memory elsewhere, to immediates instead, and broke
             # the loader almost immediately.)
+            # a DISTANCE: one address minus another (each an "offset" or a
+            # label), e.g. DDT86.A86's "ndelims equ offset $ - offset
+            # delims" -- a plain number in ASM86, not an address (the
+            # comment above says so; until docs/bugs.md #137 nothing did
+            # it, and the label's symbol and size rode along, so "mov
+            # cx,ndelims" read memory)
+            def addr(x):
+                return x.is_offset or (x.symbol is not None and x.symbol.kind == 'label')
+            if op == '-' and addr(v) and addr(r):
+                sym, size, is_offset = None, None, False
             v = Value(n, size, sym, is_offset=is_offset)
         return v
 

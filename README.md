@@ -18,8 +18,9 @@ src-assem/      The same source, organized by what it builds:
                   LDBIOS86Q.A86/ROM86Q.A86, from-scratch QEMU
                   replacements for LDBIOS/ROM.
   rsp/            Resident System Processes (CLOCK, ECHO, TMP, SUBMIT).
-  toolchain/      PL/M sources for DRI's own dev tools (ASS86, DIS86,
-                  INS86).
+  toolchain/      DRI's debugger DDT86 (DDT86.A86) with its PL/M
+                  assembler (ASS86, ASMTAB) and disassembler (DIS86,
+                  INS86) overlays: DDT86.CMD on the floppy.
   utils/          PL/M sources for user-facing utilities (PIP, ED,
                   DIR, TYPE, etc.).
   Makefile        Build everything with `make -C src-assem` (or `cd
@@ -33,6 +34,8 @@ src-c/          A C port of src-assem/ (see docs/src-c.md) that builds
                   transients (SUBMIT, RANDOM), as C programs.
   utils/          All of src-assem/utils/'s PL/M utilities (PIP, ED,
                   SET, SHOW, DIR, ...), as C programs.
+  toolchain/      src-assem/toolchain/'s DDT86 and its assembler and
+                  disassembler, as C (DDT86.CMD; no G/T/U).
   rt/             The runtime that runs the kernel as MP/M in 32-bit
                   protected mode.
   gensys/         System generation: the low-memory image.

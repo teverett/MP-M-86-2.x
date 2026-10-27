@@ -53,12 +53,12 @@ def reference(tmp):
 def c_image(tmp):
     lib_path = os.path.join(tmp, 'gensys.dylib' if sys.platform == 'darwin' else 'gensys.so')
     srcs = [os.path.join(SRC_C, 'gensys', f) for f in ('gensys.c', 'sysdat.c')]
-    srcs += [os.path.join(SRC_C, d, f) for d in ('rsp', 'utils')  # programs.c's table names utils' mains
-             for f in sorted(os.listdir(os.path.join(SRC_C, d))) if f.endswith('.c')]
+    srcs += [os.path.join(SRC_C, d, f) for d in ('rsp', 'utils', 'toolchain')  # programs.c's table names their mains
+             for f in sorted(os.listdir(os.path.join(SRC_C, d))) if f.endswith('.c') and f != 'gentab.c']
     srcs.append(os.path.join(FIXTURES, 'rt_host.c'))
     subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-unknown-warning-option',
                     '-Wno-unterminated-string-initialization', '-shared', '-fPIC',
-                    *[f'-I{os.path.join(SRC_C, d)}' for d in ('kernel', 'rt', 'rsp', 'gensys', 'utils')], *srcs,
+                    *[f'-I{os.path.join(SRC_C, d)}' for d in ('kernel', 'rt', 'rsp', 'gensys', 'utils', 'toolchain')], *srcs,
                     '-o', lib_path], check=True)
     lib = ctypes.CDLL(lib_path)
     lib.gensys_rsps.restype = ctypes.c_void_p

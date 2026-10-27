@@ -132,6 +132,25 @@ def disk_name(name):
     return DISK_NAMES.get(name, name)
 
 
+# the 8080-model transients: one code group, DS = CS (DDT86, whose data
+# and overlays share its segment): (name, directory, the group's length --
+# the C image is its start, zeros after: the program installs the rest)
+TRANSIENTS_8080 = [('DDT86', 'toolchain', 'TC_DDT86_IMAGE_LEN')]
+
+
+def toolchain_const(name):
+    text = open(os.path.join(SRC_C, 'toolchain', 'toolchain_syms.h')).read()
+    return int(re.search(rf'#define {name} (0x[0-9A-Fa-f]+)', text).group(1), 16)
+
+
+def cmd_8080(data, length):
+    """an 8080-model CMD file: a single code group (form 1) of `length`
+    bytes, the image at its start"""
+    paras = (length + 15) // 16
+    header = struct.pack('<BHHHH', 1, paras, 0, paras, 0).ljust(RECORD, b'\0')
+    return header + data.ljust(paras * 16, b'\0')
+
+
 def code_len(name, where='rsp'):
     text = open(os.path.join(SRC_C, where, 'rsp_syms.h' if where == 'rsp' else 'utils_syms.h')).read()
     return int(re.search(rf'#define {name}_CODE_LEN (0x[0-9A-Fa-f]+)', text).group(1), 16)
@@ -161,6 +180,9 @@ def main():
     for name, where in TRANSIENTS:
         data = c_image(os.path.join(build, where, name.lower() + '.o'), name.lower())
         disk.add(disk_name(name).encode(), b'CMD', cmd_file(code_len(name, where), data, DATA_MAX.get(name, 0)))
+    for name, where, length in TRANSIENTS_8080:
+        data = c_image(os.path.join(build, where, name.lower() + '.o'), name.lower())
+        disk.add(name.encode(), b'CMD', cmd_8080(data, toolchain_const(length)))
     disk.add(b'DEMO', b'SUB', DEMO_SUB)
 
     lba = block_offset(first) // SECTOR
@@ -169,7 +191,8 @@ def main():
     with open(args.output, 'wb') as f:
         f.write(disk.img)
     print(f"mkdisk: {os.path.relpath(args.output, SRC_C)}: KERNEL.SYS ({nsectors} sectors from LBA {lba}), "
-          f"{', '.join(disk_name(n) + '.CMD' for n, _ in TRANSIENTS)}, DEMO.SUB; {disk.next_block - 1} of {DSM + 1} blocks, "
+          f"{', '.join(disk_name(n) + '.CMD' for n, _ in TRANSIENTS)}, "
+          f"{', '.join(n + '.CMD' for n, _, _ in TRANSIENTS_8080)}, DEMO.SUB; {disk.next_block - 1} of {DSM + 1} blocks, "
           f"{disk.next_entry} of {DIR_ENTRIES} directory entries")
 
 

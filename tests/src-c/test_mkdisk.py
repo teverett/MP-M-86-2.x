@@ -44,12 +44,12 @@ def gensys_dpb(tmp):
     """the DPB in the image src-c/gensys builds"""
     lib_path = os.path.join(tmp, 'gensys.so')
     srcs = [os.path.join(SRC_C, 'gensys', f) for f in ('gensys.c', 'sysdat.c')]
-    srcs += [os.path.join(SRC_C, d, f) for d in ('rsp', 'utils')  # programs.c's table names utils' mains
-             for f in sorted(os.listdir(os.path.join(SRC_C, d))) if f.endswith('.c')]
+    srcs += [os.path.join(SRC_C, d, f) for d in ('rsp', 'utils', 'toolchain')  # programs.c's table names their mains
+             for f in sorted(os.listdir(os.path.join(SRC_C, d))) if f.endswith('.c') and f != 'gentab.c']
     srcs.append(os.path.join(FIXTURES, 'rt_host.c'))
     subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-unknown-warning-option',
                     '-Wno-unterminated-string-initialization', '-shared', '-fPIC',
-                    *[f'-I{os.path.join(SRC_C, d)}' for d in ('kernel', 'rt', 'rsp', 'gensys', 'utils')], *srcs,
+                    *[f'-I{os.path.join(SRC_C, d)}' for d in ('kernel', 'rt', 'rsp', 'gensys', 'utils', 'toolchain')], *srcs,
                     '-o', lib_path], check=True)
     lib = ctypes.CDLL(lib_path)
     lib.gensys_rsps.restype = ctypes.c_void_p
@@ -138,7 +138,8 @@ def main():
         check("image size", 1474560, len(img))
         files = directory(img)
         check("the files", sorted([(b'KERNEL  ', b'SYS'), (b'DEMO    ', b'SUB')] +
-                                  [(mkdisk.disk_name(n).encode().ljust(8), b'CMD') for n, _ in mkdisk.TRANSIENTS]), sorted(files))
+                                  [(mkdisk.disk_name(n).encode().ljust(8), b'CMD') for n, _ in mkdisk.TRANSIENTS] +
+                                  [(n.encode().ljust(8), b'CMD') for n, _, _ in mkdisk.TRANSIENTS_8080]), sorted(files))
 
         attrs, extents = files[(b'KERNEL  ', b'SYS')]
         check("KERNEL.SYS is read-only", b'\x80\x00\x00', attrs)
@@ -160,6 +161,14 @@ def main():
             check(f"{name.upper()}.CMD: data group = the C image", (2, (len(image) + 15) // 16, image),
                   (form2, dparas, data[128 + cparas * 16:128 + cparas * 16 + len(image)]))
             check(f"{name.upper()}.CMD: data group max", mkdisk.DATA_MAX.get(upper, 0), dmax)
+        for upper, where, length in mkdisk.TRANSIENTS_8080:  # one code group, DS = CS
+            data = read_file(img, files[(upper.encode().ljust(8), b'CMD')][1])
+            image = mkdisk.c_image(os.path.join(SRC_C, 'build', where, upper.lower() + '.o'), upper.lower())
+            paras = (mkdisk.toolchain_const(length) + 15) // 16
+            form, cparas, _, cmin, _, form2 = struct.unpack_from('<BHHHHB', data, 0)
+            check(f"{upper}.CMD: an 8080-model code group, {paras:#x} paragraphs", (1, paras, paras, 0),
+                  (form, cparas, cmin, form2))
+            check(f"{upper}.CMD: the group starts with the C image", image, data[128:128 + len(image)])
         demo = read_file(img, files[(b'DEMO    ', b'SUB')][1])
         check("DEMO.SUB", mkdisk.DEMO_SUB, demo.rstrip(b'\x1a'))
 

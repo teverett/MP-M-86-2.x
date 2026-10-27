@@ -56,6 +56,9 @@ STRING_SHIM_OBJ := $(BUILD_DIR)/freestanding-include/string_shim.o
 RT_OBJS  := $(BUILD_DIR)/rt/rt.o $(BUILD_DIR)/rt/rt_asm.o
 RSP_OBJS := $(patsubst rsp/%.c,$(BUILD_DIR)/rsp/%.o,$(wildcard rsp/*.c))
 UTILS_OBJS := $(patsubst utils/%.c,$(BUILD_DIR)/utils/%.o,$(wildcard utils/*.c))
+# src-c/toolchain: DDT86 (ddt86.c) and its overlays, linked into the kernel;
+# gentab.c is a host tool (GENTAB.PLI), not part of it
+TOOLCHAIN_OBJS := $(patsubst toolchain/%.c,$(BUILD_DIR)/toolchain/%.o,$(filter-out toolchain/gentab.c,$(wildcard toolchain/*.c)))
 GENSYS_OBJS := $(patsubst gensys/%.c,$(BUILD_DIR)/gensys/%.o,$(wildcard gensys/*.c))
 
 .PHONY: all build test boot run run-elf disk clean
@@ -72,7 +75,7 @@ endef
 $(foreach m,$(MODULES),$(eval $(call MODULE_RULE,$(m))))
 
 $(foreach m,$(MODULES),$(BUILD_DIR)/$(m)) $(BUILD_DIR)/boot $(BUILD_DIR)/freestanding-include \
-		$(BUILD_DIR)/rt $(BUILD_DIR)/rsp $(BUILD_DIR)/gensys $(BUILD_DIR)/utils:
+		$(BUILD_DIR)/rt $(BUILD_DIR)/rsp $(BUILD_DIR)/gensys $(BUILD_DIR)/utils $(BUILD_DIR)/toolchain:
 	mkdir -p $@
 
 
@@ -91,6 +94,10 @@ $(BUILD_DIR)/rsp/%.o: rsp/%.c rsp/rsp.h rsp/rsp_syms.h rt/rt.h kernel/defs.h gen
 # src-c/utils: the PL/M utilities (src-assem/utils), as C programs
 $(BUILD_DIR)/utils/%.o: utils/%.c utils/utils_syms.h rsp/rsp.h rt/rt.h kernel/defs.h | $(BUILD_DIR)/utils
 	$(CC) $(CFLAGS) -Wno-unterminated-string-initialization -I kernel -I rt -I rsp -I utils -c $< -o $@
+
+# src-c/toolchain: DDT86 and its overlays (src-assem/toolchain), as C
+$(BUILD_DIR)/toolchain/%.o: toolchain/%.c toolchain/toolchain.h toolchain/toolchain_syms.h rsp/rsp.h rt/rt.h kernel/defs.h | $(BUILD_DIR)/toolchain
+	$(CC) $(CFLAGS) -Wno-unterminated-string-initialization -I kernel -I rt -I rsp -I toolchain -c $< -o $@
 
 # src-c/gensys: the low-memory image, from src-c's own data
 $(BUILD_DIR)/gensys/%.o: gensys/%.c gensys/gensys.h gensys/gensys_syms.h kernel/defs.h | $(BUILD_DIR)/gensys
@@ -124,7 +131,7 @@ disk: $(DISK)
 
 $(DISK): tools/mkdisk.py tools/bootsect.py rsp/rsp_syms.h $(BUILD_DIR)/boot/bootsect.bin \
 		$(BUILD_DIR)/boot/kernel.bin $(BUILD_DIR)/rsp/submit.o $(BUILD_DIR)/rsp/random.o \
-		$(UTILS_OBJS) utils/utils_syms.h
+		$(UTILS_OBJS) utils/utils_syms.h $(TOOLCHAIN_OBJS) toolchain/toolchain_syms.h
 	$(PYTHON) tools/mkdisk.py -o $@
 
 $(BUILD_DIR)/boot/kernel_main.o: $(BOOT_DIR)/kernel_main.c kernel/defs.h gensys/gensys.h | $(BUILD_DIR)/boot
@@ -162,8 +169,8 @@ boot: $(BOOT_OBJS)
 # section for the full list and reasoning. `memcpy`/`memcmp` also
 # needed real bodies (not just declarations) once anything actually
 # links against them -- freestanding-include/string_shim.c.
-kernel.elf: $(BOOT_OBJS) $(KERNEL_OBJS) $(RT_OBJS) $(RSP_OBJS) $(UTILS_OBJS) $(GENSYS_OBJS) $(STRING_SHIM_OBJ) linker.ld
-	$(LD) -T linker.ld -o kernel.elf $(BOOT_OBJS) $(KERNEL_OBJS) $(RT_OBJS) $(RSP_OBJS) $(UTILS_OBJS) $(GENSYS_OBJS) $(STRING_SHIM_OBJ)
+kernel.elf: $(BOOT_OBJS) $(KERNEL_OBJS) $(RT_OBJS) $(RSP_OBJS) $(UTILS_OBJS) $(TOOLCHAIN_OBJS) $(GENSYS_OBJS) $(STRING_SHIM_OBJ) linker.ld
+	$(LD) -T linker.ld -o kernel.elf $(BOOT_OBJS) $(KERNEL_OBJS) $(RT_OBJS) $(RSP_OBJS) $(UTILS_OBJS) $(TOOLCHAIN_OBJS) $(GENSYS_OBJS) $(STRING_SHIM_OBJ)
 	i686-elf-grub-file --is-x86-multiboot kernel.elf
 
 # run -- boot src-c's floppy (`disk`) under QEMU, the way ./run.sh boots

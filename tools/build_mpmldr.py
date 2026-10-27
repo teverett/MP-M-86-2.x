@@ -187,7 +187,10 @@ def main():
         ])
         ldbdos_path, _ = assemble('LDBDOS', out_dir)
         ldbdos_bytes = strip_org_padding(ldbdos_path, ldbdos_offset, 'LDBDOS.A86')
-        new_mldbios_offset = ldbdos_offset + len(ldbdos_bytes)
+        # LDBIOS on a paragraph, as DRI's fixed 1200h is: an odd position
+        # (10EFh, once tools/asm86 made `mov cl,dpblist` an immediate --
+        # docs/bugs.md #137) hangs the loader after its sign-on
+        new_mldbios_offset = (ldbdos_offset + len(ldbdos_bytes) + 15) // 16 * 16
         if new_mldbios_offset == mldbios_offset:
             break
         mldbios_offset = new_mldbios_offset
@@ -223,6 +226,7 @@ def main():
         out.write(ldmpm_data)
         print(f"build_mpmldr: {'LDMPM':8s} {ldmpm_size:6d} bytes "
               f"@ {out.tell() - ldmpm_size:#06x}")
+        ldbdos_bytes = ldbdos_bytes.ljust(mldbios_offset - ldbdos_offset, b'\0')  # to LDBIOS's paragraph
         out.write(ldbdos_bytes)
         print(f"build_mpmldr: {'LDBDOS':8s} {len(ldbdos_bytes):6d} bytes "
               f"@ {out.tell() - len(ldbdos_bytes):#06x}")

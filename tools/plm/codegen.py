@@ -79,6 +79,7 @@ class CodeGen:
         self.static_locals = set()  # labels of INITIAL/DATA locals already emitted
         self.proc_stack = []  # (local_scope, next_local_offset:list[int])
         self.extern_procs = set()
+        self._label_uses = {}   # procedure labels taken (see _hoist_procs)
 
     def err(self, msg):
         raise PlmError(msg, self.filename)
@@ -218,6 +219,7 @@ class CodeGen:
                                                       nparams=len(stmt.params),
                                                       psizes=self._param_sizes(stmt),
                                                       external=stmt.external))
+            self._label_uses[sanitize(stmt.name)] = 1
             if stmt.external:
                 self.extern_procs.add(stmt.name)
         elif isinstance(stmt, ast.Empty):
@@ -513,6 +515,11 @@ class CodeGen:
     # the usual [bp+4]. See _frame_reg_for_scope for how it's chased.
     LINK_OFFSET = 4
 
+    def _proc_label(self, proc):
+        """a procedure's label: pl_<name>, or a nested one's own (see
+        _hoist_procs)"""
+        return getattr(proc, 'label', None) or sanitize(proc.name)
+
     def gen_proc(self, proc):
         # PL/M allows a PROCEDURE declared inside another one ("nested
         # procedures") whose body can reference the enclosing procedure's
@@ -527,7 +534,7 @@ class CodeGen:
         # _frame_reg_for_scope). Nested procedures still get only one
         # flat (non-block-scoped) local scope per procedure, same as
         # everything else in this compiler.
-        label = sanitize(proc.name)
+        label = self._proc_label(proc)
         nested = getattr(proc, 'nested', False)
         parent_scope = proc.enclosing_scope if nested else self.global_scope
         local_scope = Scope(parent_scope)
@@ -643,10 +650,19 @@ class CodeGen:
             if isinstance(s, ast.ProcDecl):
                 s.nested = True
                 s.enclosing_scope = enclosing_scope
+                # two procedures' nested procedures of one name (ED.PLM's
+                # FILLSOURCE and WRITEDEST each have a ZN) need two labels:
+                # until docs/bugs.md #137 both were pl_zn, and the last one
+                # assembled took every call
+                base = sanitize(s.name)
+                n = self._label_uses.get(base, 0)
+                self._label_uses[base] = n + 1
+                s.label = base if n == 0 else f"{base}_{n}"
                 self.global_scope.define(s.name, Sym('proc', rettype=s.rettype,
                                                        nparams=len(s.params), external=s.external,
                                                        psizes=self._param_sizes(s),
-                                                       nested=True, enclosing_scope=enclosing_scope))
+                                                       nested=True, enclosing_scope=enclosing_scope,
+                                                       label=s.label))
                 if s.external:
                     self.extern_procs.add(s.name)
                 else:
@@ -900,7 +916,7 @@ class CodeGen:
             # the 256-byte stack into the program's strings: docs/bugs.md
             # #121.) Storage is in dseg under a per-procedure label, so
             # ".name" in another DATA list is a constant address.
-            label = f"{sanitize(self.cur_proc.name)}_s_{s.name.lower()}"
+            label = f"{self._proc_label(self.cur_proc)}_s_{s.name.lower()}"
             if s.dims == '*':
                 count = self._initial_total_bytes(initial, size) // size
             else:
@@ -1013,7 +1029,7 @@ class CodeGen:
     def gen_Return(self, s):
         if s.expr is not None:
             self.gen_expr(s.expr)
-        self.emit(f"\tjmp {sanitize(self.cur_proc.name)}_exit")
+        self.emit(f"\tjmp {self._proc_label(self.cur_proc)}_exit")
 
     # -- boolean short-circuit for IF/WHILE conditions ---------------------
     REL_JFALSE = {'=': 'jne', '<>': 'je', '<': 'jae', '<=': 'ja', '>': 'jbe', '>=': 'jb'}
@@ -1166,12 +1182,19 @@ class CodeGen:
         self.emit(f"\tmov ax,{e.value}")
 
     def ex_Str(self, e):
-        # A single-character string literal used bare (not under '.') is a
-        # BYTE constant (its ASCII code) -- e.g. "fcb16(1) = ' '" -- while
-        # a longer one decays to the address of its interned text, as a
-        # PL/M string constant passed where an ADDRESS is expected.
+        # A one- or two-character string literal used bare (not under '.')
+        # is a constant: one character a BYTE (its ASCII code), e.g.
+        # "fcb16(1) = ' '"; two an ADDRESS, the first character high --
+        # ASS86.PLM's "token$word = 'YB'" (5942h: "BY" in memory) (it was
+        # the address of interned text until docs/bugs.md #137). A longer
+        # one decays to the address of its interned text, as a PL/M
+        # string constant passed where an ADDRESS is expected.
         if len(e.value) == 1:
             self.emit(f"\tmov ax,{ord(e.value) & 0xFF}")
+            return
+        if len(e.value) == 2:
+            b = e.value.encode('latin-1')
+            self.emit(f"\tmov ax,{(b[0] << 8) | b[1]}")
             return
         label = self.intern_string(e.value)
         self.emit(f"\tmov ax,offset {label}")
@@ -1467,7 +1490,7 @@ class CodeGen:
             # to start at [bp+6].
             reg = self._frame_reg_for_scope(sym.info['enclosing_scope'])
             self.emit(f"\tpush {reg}")
-        self.emit(f"\tcall {sanitize(name)}")
+        self.emit(f"\tcall {sym.info.get('label') or sanitize(name)}")
         if sym.info.get('rettype') == 'byte':
             self.emit("\tmov ah,0")      # a BYTE result is AL
         elif sym.info.get('rettype') == 'pointer' and sym.info.get('external'):

@@ -37,6 +37,7 @@ extern void sspool_main(uint16_t ds);
 extern void stscmd_main(uint16_t ds);
 extern void tod_main(uint16_t ds);
 extern void mpmstat_main(uint16_t ds);
+extern void ddt86_main(uint16_t ds); /* src-c/toolchain/ */
 extern void clock_main(uint16_t ds);
 extern void echo_main(uint16_t ds);
 extern void random_main(uint16_t ds);
@@ -62,6 +63,7 @@ const rt_program rt_programs[] = {
     {"ABORT   ", abort_main, rt_any},
     {"ATTACH  ", attach_main, rt_any},
     {"CONSOLE ", cons_main, rt_any},
+    {"DDT86   ", ddt86_main, rt_any},
     {"DIR     ", dir_main, rt_any},
     {"DSKRESET", dskrst_main, rt_any},
     {"ED      ", ed_main, rt_any},

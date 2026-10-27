@@ -233,6 +233,13 @@ def _encode_body(mnemonic, ops, ctx):
         if src.kind != 'mem':
             ctx.err("LEA source must be a memory operand")
         return bytes([0x8D]) + encode_rm(src, dst.reg, ctx)
+    if m in ('lds', 'les'):  # load a far pointer: DDT86.A86's `les si,[di]`
+        dst, src = ops
+        if dst.kind != 'reg' or dst.size != 2:
+            ctx.err(f"{m.upper()} destination must be a 16-bit register")
+        if src.kind != 'mem':
+            ctx.err(f"{m.upper()} source must be a memory operand")
+        return bytes([0xC5 if m == 'lds' else 0xC4]) + encode_rm(src, dst.reg, ctx)
     if m in ('push', 'pop'):
         return _encode_pushpop(m, ops, ctx)
     if m in ('inc', 'dec'):
@@ -531,6 +538,6 @@ def _encode_out(ops, ctx):
 
 
 ALL_MNEMONICS = (set(NO_OPERAND) | set(REP_PREFIXES) | {'movs', 'lods', 'stos', 'cmps', 'scas'}
-                  | {'int'} | BRANCH_MNEMONICS | {'mov'} | set(ALU) | {'test', 'xchg', 'lea'}
+                  | {'int'} | BRANCH_MNEMONICS | {'mov'} | set(ALU) | {'test', 'xchg', 'lea', 'lds', 'les'}
                   | {'push', 'pop', 'inc', 'dec'} | set(F6_GROUP) | set(SHIFT_GROUP)
                   | {'in', 'out'})

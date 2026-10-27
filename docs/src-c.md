@@ -64,6 +64,7 @@ The floppy holds:
 | `SUBMIT.CMD` | SUBMIT, as a C program |
 | `RANDOM.CMD` | DRI's random-access sample, as a C program |
 | `ABORT.CMD`, `ATTACH.CMD`, `CONSOLE.CMD`, `DIR.CMD`, `DSKRESET.CMD`, `ED.CMD`, `ERA.CMD`, `ERAQ.CMD`, `MPMSTAT.CMD`, `PIP.CMD`, `REN.CMD`, `SET.CMD`, `SHOW.CMD`, `SPOOL.CMD`, `SSPOOL.CMD`, `TOD.CMD`, `TYPE.CMD` | src-assem/utils/'s PL/M utilities, as C programs (src-c/utils/; MPMSTAT.CMD is STSCMD.PLM, CONSOLE CONS.PLM, DSKRESET DSKRST.PLM, as on src-assem's floppy) |
+| `DDT86.CMD` | src-assem/toolchain/'s DDT86, as C (src-c/toolchain/): A, B, D, E, F, H, I, L, M, R, S, V, W and X work; G, T and U, which run 8086 code, are refused with `?` |
 | `DEMO.SUB` | A sample: try `SUBMIT DEMO hello` |
 
 Besides those programs you can use TMP's built-ins (`X:`, `USER n`,
@@ -1037,6 +1038,37 @@ memory at physical 0). After `sup_init`'s check, `kernel_main` calls
   reference really does what it should, so the two can't match by
   failing the same way. Porting turned up five plmc bugs (bugs.md #131)
   and bugs in the PL/M source (#132).
+- **The toolchain: src-c/toolchain/ (all of src-assem/toolchain/: DDT86.A86,
+  ASS86.PLM with ASMTAB.PLM, DIS86.PLM with INS86.PLM, and GENTAB's
+  OP86.DAT tables).** DDT86 is an 8080-model program (one group, DS = CS):
+  its code from 100h, with the service vectors at 103h-10Fh, its data,
+  then the disassembler overlay and the assembler overlay, each linked by
+  tools/plm/link.py behind DRI's DISLNK86/ASSLNK86 jump stubs.
+  tools/build_ddt86.py builds DDT86.CMD for src-assem's floppy; it places
+  each overlay after what precedes it (our asm86 and plmc make bigger code
+  than DRI's 1400h/2300h allow) and patches lasmorg/asmorg to match. The C
+  keeps that image: each module's variables and tables sit at the asm
+  build's offsets (toolchain/toolchain_syms.h, checked by test_syms.py),
+  and mkdisk writes DDT86.CMD as an 8080-model CMD whose one group is the
+  C image at the asm build's length.
+  - ins86.c, dis86.c: the disassembler (`disem`), and dis86_install,
+    which puts back the overlay's tables;
+  - asmtab.c, ass86.c: the line assembler (`asm`), ass86_install;
+  - ddt86.c: the command loop, the file commands (E, R, W, I) through
+    the BDOS, and the overlays called directly in place of the vectors.
+    G, T and U would run 8086 code, which the C kernel can't, so they
+    are invalid commands (`?`);
+  - gentab.c: a host tool, GENTAB, that regenerates OPTAB.DAT/LIT from
+    OP86.DAT byte for byte (test_gentab.py).
+
+  tests/src-c/toolref.py runs each overlay against the asm build in
+  i86sim with one Python model of DDT86's services serving both: the asm
+  overlay's calls to the vectors are i86sim call hooks, the C's are
+  pseudo-functions E0h-E4h (fixtures/toolchain_host.c). test_dis86.py
+  covers every opcode and ModRM form, prefixes and segment wrap (8415
+  cases); test_ass86.py 324 lines; test_ddt86.py runs the whole program
+  against DDT86.CMD (27 sessions). Porting turned up asm86, plmc and
+  i86sim bugs and one in ASS86.PLM (bugs.md #137).
 - **CACHE.** cache.c hooks `rt_xiosmod` and writes the bytes the binary
   writes: its DS at CS:0, the old XIOS entry at CS:2, and SYSDAT's
   xiosmod = CS:0038. Verified in QEMU: 1920:0038, with 193Ah and
@@ -1391,9 +1423,10 @@ listed there include work in `src-assem/kernel/`, `src-assem/rsp/` and
 
 ### Scope notes
 
-- `src-assem/toolchain/` (PL/M source: DRI's ASM86, DIS86, INS86) is out
-  of scope for now. `src-assem/utils/`, PL/M too, is ported:
-  src-c/utils/ and the MPMSTAT RSP (see "The PL/M utilities").
+- `src-assem/toolchain/` (DDT86 and its PL/M assembler and disassembler)
+  is ported: src-c/toolchain/ (see "The toolchain"). `src-assem/utils/`,
+  PL/M too, is ported: src-c/utils/ and the MPMSTAT RSP (see "The PL/M
+  utilities").
 - Only files that currently assemble cleanly (the `*_OK` lists in the
   `Makefile`) are candidates. `XIOS.A86` (bug #7) and the three broken RSPs
   (`CLOCK`/`TMP`/`SUBMIT`, bugs #1–#3, see `docs/bugs.md`) were kept out

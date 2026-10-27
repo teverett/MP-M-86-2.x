@@ -163,6 +163,10 @@ class Assembler:
                 raise AsmError(f"symbol '{name}' redefined (was {existing.kind}={existing.value}, "
                                 f"now {kind}={value})", filename, lineno)
         seg = self.cur_seg if kind == 'label' else None
+        moved = getattr(self, '_moved', None)
+        if (moved is not None and kind == 'label' and existing is not None and existing.kind == 'label'
+                and existing.value != value):
+            moved.append((name, existing.value, value, (filename, lineno)))
         self.symtab[key] = Symbol(name, kind, value, size, seg, is_addr)
         self.pending.discard(key)
 
@@ -190,7 +194,16 @@ class Assembler:
         self.if_stack = []
         self.ended = False
         self._jump_idx = 0
+        self._moved = []
         self._run_pass(lines, is_final=True)
+        # every reference used pass 1's addresses: a label the final pass
+        # puts elsewhere (an instruction sized differently between the
+        # passes) means a wrong binary, so it's an error, not silent
+        if self._moved:
+            name, was, now, where = self._moved[0]
+            raise AsmError(f"label '{name}' moved between passes ({was:#06x} -> {now:#06x}; "
+                           f"{len(self._moved)} label(s) in all): an instruction before it assembled to a "
+                           f"different size in the final pass (an assembler bug)", *where)
 
     def _relax_jumps(self, lines, max_iters=50):
         """Iterate pass 1 until every SHORT_JUMP_MNEMONICS occurrence's
@@ -255,6 +268,12 @@ class Assembler:
 
     _CAST_PREFIX_RE = re.compile(r'^\s*(byte|word)\s+ptr\b', re.IGNORECASE)
     _OFFSET_KEYWORD_RE = re.compile(r'\boffset\b', re.IGNORECASE)
+    # "offset A - offset B" (parenthesized or not): a distance, a plain
+    # number -- as the final evaluation makes it (expr.py, docs/bugs.md
+    # #137); prescanning it as an address sized the instruction using it
+    # differently in the tentative pass than in the final one
+    _DISTANCE_RE = re.compile(r'^\s*\(?\s*offset\s+[\w$@?]+\s*\)?\s*-\s*\(?\s*offset\s+[\w$@?]+\s*\)?\s*$',
+                              re.IGNORECASE)
     # A cast's remaining text is a *bare* reference (just one optionally
     # dot-prefixed identifier, e.g. "aret" in "lret equ byte ptr aret")
     # rather than an arithmetic expression (e.g. "p_parent + word" in
@@ -316,6 +335,9 @@ class Assembler:
                         # the same way the final one will.
                         rest = self._CAST_PREFIX_RE.sub('', operand_text, count=1)
                         is_addr = bool(has_offset or self._BARE_REF_RE.match(rest))
+                    elif self._DISTANCE_RE.match(operand_text):
+                        size = None
+                        is_addr = False
                     elif has_offset:
                         # "label equ offset <expr>" / "label equ $" (and
                         # arithmetic on these, e.g. SYSDAT.FMT's own

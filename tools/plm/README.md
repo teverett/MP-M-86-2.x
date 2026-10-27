@@ -5,10 +5,11 @@ compiles the `.PLM` dialect subset used in this tree's `src-assem/utils/` and
 `src-assem/toolchain/` to ASM86-dialect text, which `tools/asm86/` (see its own
 README) then assembles to machine code. Like `asm86`, it does not aim for
 historical byte-for-byte fidelity to DRI's real PL/M-86 compiler — only
-functionally equivalent 8086 code — and it only handles one source file
-(plus its `$INCLUDE`s) at a time: there is no linker, so a call to an
-`EXTERNAL` *procedure* produces an unresolved symbol in the generated
-assembly (see Limitations).
+functionally equivalent 8086 code — and it compiles one source file
+(plus its `$INCLUDE`s) at a time. A call to an `EXTERNAL` *procedure*
+alone produces an unresolved symbol in the generated assembly; to link
+several modules into one program, as LINK86 would, use `link.py` (see
+"Linking modules").
 
 ## Usage
 
@@ -435,11 +436,11 @@ at any statement boundary, dropping the abandoned procedures' frames.
   depends on `TIME`'s delay being any particular real-world duration
   won't get it; code that just needs "pause for roughly proportionally
   longer with a bigger argument" will.
-- A call to an `EXTERNAL` *procedure* compiles to a `CALL` on an
-  unresolved symbol — there is no linker, so this is as far as a single
-  translation unit can go. `EXTERNAL` *data* is, by contrast, still
-  given storage in this module (so the output stays assemblable), which
-  means it won't actually alias the real external module's copy.
+- Compiled alone, a call to an `EXTERNAL` *procedure* is a `CALL` on an
+  unresolved symbol, and `EXTERNAL` *data* gets storage in this module
+  (so the output stays assemblable) that doesn't alias the real
+  module's copy. `link.py` resolves both when several modules are
+  linked into one program (see "Linking modules").
 - No `INTERRUPT`/`REENTRANT` semantics.
 - A structure field declared as an array (e.g. `pname(8) byte`) isn't
   validated against the length of a string given for it in `INITIAL` —
@@ -448,6 +449,22 @@ at any statement boundary, dropping the abandoned procedures' frames.
   catch this was removed when `INITIAL` rendering was reworked to defer
   address-of values to assembly time — see the commit history in this
   file's "Notable discoveries" for why.)
+
+## Linking modules
+
+`tools/plm/link.py` links several plmc-compiled modules into one
+assembly program, the job LINK86/LOC86 do in DRI's builds:
+- each module's own labels, everything it defines except its `PUBLIC`
+  names, get a per-module prefix, so labels like `pl_plmstart` and
+  `arrNN` don't clash between modules;
+- the storage plmc reserved for `EXTERNAL` data is dropped, so references
+  bind to another module's `PUBLIC` copy, or to an absolute address the
+  caller passes as an equate (LOC86's `po(...)`);
+- the code and data go at the origins given, without the base page.
+
+`tools/build_ddt86.py` uses it to build DDT86's two overlays, the
+disassembler (INS86 + DIS86) and the assembler (ASMTAB + ASS86), into
+DDT86.CMD (`src-assem/toolchain/DDT86.SUB`).
 
 ## Validated so far
 
@@ -492,9 +509,9 @@ from `orig/mpm862sr/07/MCD.A86` (byte-identical in `08/SCD.A86` and
 `INT 224`. Concatenating it (after stripping the generated file's own
 trailing `end`) onto any `plmc`-compiled `.gen.A86` output and
 reassembling now produces a fully-resolved binary for 20 of the 22
-files — the same two `ASS86.PLM`/`DIS86.PLM` DDT86-entry-point gaps noted
-in Limitations above are unaffected, since the stub only ever claimed to
-cover `mon1`–`mon4`.
+files. The other two, `ASS86.PLM` and `DIS86.PLM`, are DDT86's overlays,
+not programs: their DDT86 entry points are resolved when
+`build_ddt86.py` links them (see "Linking modules").
 
 Building and verifying this stub surfaced a real bug in `tools/asm86`,
 not in this compiler: `ret`/`retf` were listed in `isa.py`'s

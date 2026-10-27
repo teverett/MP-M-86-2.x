@@ -970,7 +970,7 @@ type$in: procedure;
 	  call set$instr (instr$1 or 8 or op1.w$bit);
 	else if op2.num$type and (op2.value <= 255) then
 		do;
-			call put$instr;
+			call set$instr (instr$1 or op1.w$bit);  /* IN AX,port: E5 */
 			call put$mem (low (op2.value));
 		end;
 	else call error;

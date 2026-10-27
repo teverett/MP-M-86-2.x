@@ -8,9 +8,7 @@
 #
 # Usage (from the repo root: `make -C src-assem <target>`; or `cd src-assem &&
 # make <target>`):
-#   make            # build everything in ALL_GOOD below
-#   make partial    # also compile (but not assemble) the two known-
-#                   # incomplete toolchain files
+#   make            # build everything in ALL_GOOD below (DDT86.CMD too)
 #   make disk       # build build/disk/mpm86q.img, a bootable floppy
 #                   # image
 #   make run        # boot that image in QEMU (builds it first if needed)
@@ -37,16 +35,15 @@ QEMU    := qemu-system-i386
 # mon1-4 interface stub and assemble the result (see
 # tools/plm/README.md's "pl_mon1-pl_mon4 now have a real
 # implementation"). All of utils/ and INS86.PLM assemble cleanly
-# this way. ASS86.PLM/DIS86.PLM compile but don't fully assemble -- they
-# also need DDT86 entry points that runtime_stub.A86 explicitly doesn't
-# provide (see docs/bugs.md and tools/plm/README.md's "Known
-# limitations").
+# this way. ASS86.PLM/DIS86.PLM (with INS86.PLM and ASMTAB.PLM) are
+# DDT86's overlays, not programs: ../tools/build_ddt86.py links them into
+# DDT86.CMD with toolchain/DDT86.A86, as DRI's toolchain/DDT86.SUB does
+# (below).
 PLM_UTILS := ABORT ATTACH CONS DIR DSKRST ED ERA ERAQ PIP REN SET SHOW \
              SPOOL SSPOOL STSCMD STSCOM TOD TYPE
 # STSRSP.PLM is an RSP, not a program: it's built as MPMSTAT.RSP below
 # (plmc --rsp), the name its own header comment gives it.
 PLM_TOOLCHAIN_OK := INS86
-PLM_TOOLCHAIN_PARTIAL := ASS86 DIS86
 
 # --- RSPs: ECHO.A86 always assembled cleanly. CLOCK.A86/TMP.A86/
 # SUBMIT.A86 each had a genuine 1981 source bug (docs/bugs.md #1-3) --
@@ -140,21 +137,28 @@ DISK_IMG := $(BUILD)/disk/mpm86q.img
 
 PLM_UTILS_BIN      := $(addprefix $(BUILD)/utils/,$(addsuffix .cseg.bin,$(PLM_UTILS)))
 PLM_TOOLCHAIN_BIN   := $(addprefix $(BUILD)/toolchain/,$(addsuffix .cseg.bin,$(PLM_TOOLCHAIN_OK)))
-PLM_PARTIAL_GEN     := $(addprefix $(BUILD)/toolchain/,$(addsuffix .gen.A86,$(PLM_TOOLCHAIN_PARTIAL)))
+# DDT86.CMD, DRI's debugger: DDT86.A86 and its two PL/M overlays (the
+# disassembler, INS86 + DIS86; the assembler, ASMTAB + ASS86), linked and
+# laid out as an 8080-model CMD by ../tools/build_ddt86.py (DRI's
+# toolchain/DDT86.SUB; that script's docstring has the layout)
+DDT86_CMD := $(BUILD)/toolchain/DDT86.CMD
+DDT86_SRC := toolchain/DDT86.A86 toolchain/INS86.PLM toolchain/DIS86.PLM toolchain/ASMTAB.PLM \
+             toolchain/ASS86.PLM toolchain/OPTAB.DAT toolchain/OPTAB.LIT ../tools/build_ddt86.py \
+             ../tools/plm/link.py
 RSP_BIN             := $(addprefix $(BUILD)/rsp/,$(addsuffix .cseg.bin,$(RSP_OK))) $(BUILD)/rsp/MPMSTAT.cseg.bin
 KERNEL_BIN          := $(addprefix $(BUILD)/kernel/,$(addsuffix .cseg.bin,$(KERNEL_OK)))
 KERNEL_NEW_BIN      := $(addprefix $(BUILD)/kernel/,$(addsuffix .cseg.bin,$(KERNEL_NEW)))
 LOADER_BIN          := $(addprefix $(BUILD)/loader/,$(addsuffix .cseg.bin,$(LOADER_OK)))
 LOADER_NEW_BIN      := $(addprefix $(BUILD)/loader/,$(addsuffix .cseg.bin,$(LOADER_NEW)))
 
-ALL_GOOD := $(PLM_UTILS_BIN) $(PLM_TOOLCHAIN_BIN) $(RSP_BIN) $(KERNEL_BIN) $(KERNEL_NEW_BIN) $(LOADER_BIN) $(LOADER_NEW_BIN) $(MPMLDR_BIN) $(MPMSYS_BIN) $(BOOTSECT_BIN)
+ALL_GOOD := $(PLM_UTILS_BIN) $(PLM_TOOLCHAIN_BIN) $(DDT86_CMD) $(RSP_BIN) $(KERNEL_BIN) $(KERNEL_NEW_BIN) $(LOADER_BIN) $(LOADER_NEW_BIN) $(MPMLDR_BIN) $(MPMSYS_BIN) $(BOOTSECT_BIN)
 
-.PHONY: all partial disk run clean
+.PHONY: all disk run clean
 all: $(ALL_GOOD)
 	@echo "Built $(words $(ALL_GOOD)) file(s) successfully."
 
-partial: all $(PLM_PARTIAL_GEN)
-	@echo "Compiled (but did not assemble) $(words $(PLM_PARTIAL_GEN)) partial file(s)."
+$(DDT86_CMD): $(DDT86_SRC) $(PLMC_SRC) | $(BUILD)/toolchain
+	$(PYTHON) ../tools/build_ddt86.py -o $@
 
 disk: $(DISK_IMG)
 
@@ -238,7 +242,7 @@ $(BOOTSECT_BIN): loader/ROM86Q.A86 ../tools/build_bootsect.py | $(BUILD)/loader
 # -- mpm86q.img: ../tools/build_disk.py re-invokes build_bootsect.py/
 # build_mpmldr.py/build_mpmsys.py itself, so its own real dependencies
 # are those three scripts' own sources, not their outputs.
-$(DISK_IMG): loader/ROM86Q.A86 ../tools/build_bootsect.py loader/LDMPM.A86 loader/LDBDOS.A86 loader/LDBIOS86Q.A86 ../tools/build_mpmldr.py $(KERNEL_SRC) ../tools/build_mpmsys.py ../tools/build_disk.py $(PLM_UTILS_BIN) $(RSP_BIN) rsp/CACHE.RSP | $(BUILD)/disk
+$(DISK_IMG): loader/ROM86Q.A86 ../tools/build_bootsect.py loader/LDMPM.A86 loader/LDBDOS.A86 loader/LDBIOS86Q.A86 ../tools/build_mpmldr.py $(KERNEL_SRC) ../tools/build_mpmsys.py ../tools/build_disk.py $(PLM_UTILS_BIN) $(RSP_BIN) rsp/CACHE.RSP $(DDT86_SRC) | $(BUILD)/disk
 	$(PYTHON) ../tools/build_disk.py -o $@
 
 $(BUILD)/kernel/MPM.bin.cseg $(BUILD)/kernel/MPM.bin.dseg: $(MPMSYS_STAMP)

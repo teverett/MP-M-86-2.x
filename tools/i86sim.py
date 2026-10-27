@@ -236,7 +236,7 @@ class I86Sim:
                  call_hooks=None, jmp_hooks=None, jmp_stub_addrs=frozenset(),
                  far_call_stub_addrs=frozenset(), far_jmp_stub_addrs=frozenset(),
                  io_in_hook=None, io_out_hook=None, int_hooks=None,
-                 far_call_hooks=None):
+                 far_call_hooks=None, track_if=False, iflag=1):
         if len(mem) != 0x10000:
             raise I86SimError(f"mem must be exactly 64KB, got {len(mem)} bytes")
         self.mem = mem
@@ -267,6 +267,12 @@ class I86Sim:
         self.sf = 0
         self.of = 0
         self.df = 0  # direction flag -- CLD/STD; see string-op handling below
+        # IF, opt-in (track_if): CLI/STI set it and PUSHF/POPF carry it (bit
+        # 9). Off by default, so every existing caller's flags words stay
+        # ZF/CF-only; DDT86 checks IF in its start-up's pushf/pop ax
+        # (tests/src-c/test_ddt86.py)
+        self.track_if = track_if
+        self.iflag = iflag
         self.halted = False
 
     # -- memory helpers -----------------------------------------------
@@ -952,10 +958,18 @@ class I86Sim:
                     self.ip = ret_addr
             else:
                 self.ip = target
-        elif op == 0xFA:  # CLI -- no interrupt model here; parsed and ignored
-            pass
+        elif op == 0xFA:  # CLI -- no interrupt model here; only IF itself (track_if)
+            self.iflag = 0
         elif op == 0xFB:  # STI -- ditto
+            self.iflag = 1
+        elif op == 0x90:  # NOP (XCHG AX,AX) -- DDT86.A86's allocabsmem
             pass
+        elif op in (0xC4, 0xC5):  # LES/LDS r16, m16:16 -- DDT86.A86's setbp ("les si,[di]")
+            _, reg, rm = self._modrm()
+            if rm[0] != 'mem':
+                raise I86SimError(f"LES/LDS with a register operand at {start_ip:#06x}")
+            self.regs[_R16[reg]] = self._r16(rm[1])
+            self.regs['es' if op == 0xC4 else 'ds'] = self._r16(rm[1] + 2)
         elif op == 0xFC:  # CLD
             self.df = 0
         elif op == 0xFD:  # STD -- src-c/kernel/mau.c's own mau_insert is the
@@ -1079,11 +1093,16 @@ class I86Sim:
     # nothing the test checks depends on the other flag bits surviving.
 
     def _flags_word(self) -> int:
-        return (0x0040 if self.zf else 0) | (0x0001 if self.cf else 0)
+        w = (0x0040 if self.zf else 0) | (0x0001 if self.cf else 0)
+        if self.track_if and self.iflag:
+            w |= 0x0200
+        return w
 
     def _set_flags_word(self, word: int) -> None:
         self.zf = 1 if (word & 0x0040) else 0
         self.cf = 1 if (word & 0x0001) else 0
+        if self.track_if:
+            self.iflag = 1 if (word & 0x0200) else 0
 
     def _push16(self, value: int) -> None:
         self._push16_into(self.regs, value)

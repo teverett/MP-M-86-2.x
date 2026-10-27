@@ -1,4 +1,4 @@
-; Standalone wrapper for src/loader/LBDOSIO.A86's conbrk, conout,
+; Standalone wrapper for src-assem/loader/LBDOSIO.A86's conbrk, conout,
 ; tabout, crlf, print, func9, staret, funcret, setlret1.
 ;
 ; constf/coninf/conouf/listf/wbootf resolve (via LBDOSEQU.A86's own

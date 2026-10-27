@@ -1,11 +1,11 @@
 /*
- * chario.c -- C port of src/kernel/CHARIO.CIO: conin_entry,
+ * chario.c -- C port of src-assem/kernel/CHARIO.CIO: conin_entry,
  * conout_entry, rconin_entry, rconout_entry, listout_entry,
  * constat_entry, dirio_entry, conwrite_entry, conprint_entry,
  * conread_entry (+ internal rawinit, coninit, getconnum, attach,
  * echoc, conbrk, chkctl, control_p, prcsmsg, prname, conout, compout,
  * stdout, ctlout, tabout, pspace, pbacksp, pcr, crlf, crlfp, conin).
- * src/kernel/CHARIO.CIO's own getccbadr is in src-c/kernel/console.c
+ * src-assem/kernel/CHARIO.CIO's own getccbadr is in src-c/kernel/console.c
  * (ported alongside CONSOLE.CIO, which needed it first -- see that
  * file's own header comment); this file calls back into it, and into
  * console.c's conattach_entry/condetach_entry/mimic_entry/

@@ -1,11 +1,11 @@
 /*
- * rom.c -- C port of the whole of src/loader/ROM.A86: the real
- * SBC86/12 + iSBC 204 boot ROM src/loader/ROM86Q.A86/rom86q.c above
+ * rom.c -- C port of the whole of src-assem/loader/ROM.A86: the real
+ * SBC86/12 + iSBC 204 boot ROM src-assem/loader/ROM86Q.A86/rom86q.c above
  * replaces for the QEMU target (see rom86q.c's own header comment
  * for that sibling's own architecture, which this file follows
  * closely -- same CMD-header convention, same `sector1` buffer
  * layout: `Ty` (byte), `Len` (word), `Abs` (word), confirmed by
- * reading src/loader/ROM.A86 itself, not assumed from the sibling).
+ * reading src-assem/loader/ROM.A86 itself, not assumed from the sibling).
  *
  * `debug equ true` (0FFh) might look like it turns the `IF NOT DEBUG`
  * console USART/8253 baud-rate setup block off at assembly time, but

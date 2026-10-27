@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/memif.c's memif_init against
-src/kernel/MEMIF.MEM's `init`, on real memory layout. (`entry` is
+src-assem/kernel/MEMIF.MEM's `init`, on real memory layout. (`entry` is
 covered by tests/src-c/test_memif_entry.py.)
 
-The reference is the whole real MEM module (src/kernel/MEM.A86); see
+The reference is the whole real MEM module (src-assem/kernel/MEM.A86); see
 tests/src-c/memref.py. `init` saves DS (SYSDAT) in cs:sysdat and copies
 SYSDAT's module_table[SUP] far pointer (`supmod`) into cs:supervisor.
 The code segment is at 0 here, so those cells are the first bytes of

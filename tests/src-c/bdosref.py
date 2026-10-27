@@ -3,7 +3,7 @@ SYSDAT at a nonzero segment (test_file4.py, test_bdosif.py,
 test_bdos_real.py). test_file1-3.py keep SYSDAT at segment 0; this
 harness is what catches anything that still assumes DS = 0.
 
-The reference is src/kernel/BDOS.A86 itself -- the whole real module
+The reference is src-assem/kernel/BDOS.A86 itself -- the whole real module
 (BDOSIF + FILE1-4 + DATA.BDO + the real UDA.FMT/SYSDAT.FMT). The combined
 SYSDAT+DATA.BDO data segment is the BDOS's DS (SUPIF enters the BDOS with
 DS = sysdat), loaded from the module's real assembled dseg bytes at
@@ -29,7 +29,7 @@ from memref import (REPO_ROOT, KERNEL_C, SIM_MEM, PHYS_MEM, ULEN, UDA_STACK, phy
 from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
-BDOS_A86 = os.path.join(REPO_ROOT, 'src', 'kernel', 'BDOS.A86')
+BDOS_A86 = os.path.join(REPO_ROOT, 'src-assem', 'kernel', 'BDOS.A86')
 BDOS_C = [os.path.join(KERNEL_C, f) for f in ('bdosif.c', 'file1.c', 'file2.c', 'file3.c', 'file4.c', 'que1.c', 'que2.c')]
 SYSDAT = 0x0300     # the BDOS's DS: SYSDAT+DATA.BDO
 UDA = 0x0800        # running process's UDA (and system-call stack)
@@ -48,7 +48,7 @@ def us(off):
 class BdosRef:
     def __init__(self, extra_syms=()):
         asm = Assembler()
-        asm.assemble(BDOS_A86, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+        asm.assemble(BDOS_A86, [os.path.join(REPO_ROOT, 'src-assem', 'kernel')])
         self.code = asm.segment_bytes('cseg')
         self.data = asm.segment_bytes('dseg')
         self.sym = asm.symtab

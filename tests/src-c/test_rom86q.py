@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Differential test for src-c/loader/rom86q.c against the whole of
-src/loader/ROM86Q.A86: `start:` (ported as `start_entry`), plus its
+src-assem/loader/ROM86Q.A86: `start:` (ported as `start_entry`), plus its
 internal subroutines `advance_chs`, `read_sector`, `pmsg`, `putc`.
 
 Drives tests/src-c/fixtures/uart86q.py's `Uart86Q` (console output)
@@ -24,7 +24,7 @@ from i86sim import I86Sim  # noqa: E402
 from uart86q import Uart86Q  # noqa: E402
 from bootdisk import BootDisk  # noqa: E402
 
-REAL_FILE = os.path.join(REPO_ROOT, 'src', 'loader', 'ROM86Q.A86')
+REAL_FILE = os.path.join(REPO_ROOT, 'src-assem', 'loader', 'ROM86Q.A86')
 ROM86Q_C = os.path.join(REPO_ROOT, 'src-c', 'loader', 'rom86q.c')
 
 STACK_TOP = 0x7C00

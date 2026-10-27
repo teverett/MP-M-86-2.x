@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/mau.c (maualloc_entry,
 maufree_entry + internal mau_split/mau_insert/mau_release/mau_collapse)
-against src/kernel/MAU.MEM, on real memory layout.
+against src-assem/kernel/MAU.MEM, on real memory layout.
 
-The reference is the whole real MEM module (src/kernel/MEM.A86); see
+The reference is the whole real MEM module (src-assem/kernel/MEM.A86); see
 tests/src-c/memref.py. The MAU's MD is SYSDAT-relative, its SAT lives in
 the MAU's own segment (MAU_SEG), and the MPB/MAF is in the running
 process's u_wrkseg. Every case diffs the whole image.

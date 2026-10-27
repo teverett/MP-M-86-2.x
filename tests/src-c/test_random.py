@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""src-c/rsp/random.c against src/rsp/RANDOM.A86 (DRI's sample
+"""src-c/rsp/random.c against src-assem/rsp/RANDOM.A86 (DRI's sample
 random-access program), as whole programs (see tests/src-c/rspref.py):
 RANDOM opens (or makes) the file in its FCB, then takes commands -- nW
 and nZ write a typed line to record n, nR prints record n, Q closes the

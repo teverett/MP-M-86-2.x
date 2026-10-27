@@ -1,6 +1,6 @@
 /*
- * console.c -- C port of all of src/kernel/CONSOLE.CIO, plus
- * src/kernel/CHARIO.CIO's getccbadr (a tiny, fully self-contained
+ * console.c -- C port of all of src-assem/kernel/CONSOLE.CIO, plus
+ * src-assem/kernel/CHARIO.CIO's getccbadr (a tiny, fully self-contained
  * dependency pulled in on its own). The rest of CHARIO.CIO -- the much
  * larger, deeply interdependent console-input state machine
  * (coninit/attach/conbrk/conin/chkctl/echoc/tabout/...) -- is ported in
@@ -44,7 +44,7 @@ extern uint16_t findpdname_entry(uint8_t *phys, uint16_t sysdat, uint16_t bx, ui
  *	output:	returns address of CCB (in SYSDAT); *bx_out = PD address
  *		(rlr)
  *
- * Not static: src-c/kernel/chario.c (the rest of src/kernel/CHARIO.CIO)
+ * Not static: src-c/kernel/chario.c (the rest of src-assem/kernel/CHARIO.CIO)
  * calls into this same instance -- see its own header comment.
  */
 uint16_t getccbadr(uint8_t *phys, uint16_t sysdat, uint8_t dh, uint16_t *bx_out) {

@@ -1,6 +1,6 @@
-; Standalone wrapper so tools/asm86.py can assemble src/kernel/FINDPD.RTM
+; Standalone wrapper so tools/asm86.py can assemble src-assem/kernel/FINDPD.RTM
 ; on its own: it has no INCLUDEs of its own and relies on equates that
-; normally come from RTM.A86's own include chain (see src/kernel/RTM.A86).
+; normally come from RTM.A86's own include chain (see src-assem/kernel/RTM.A86).
 ; SYSTEM.DEF (pnamsiz), PD.DEF (p_thread/p_name), ERR.DEF (e_no_pdname),
 ; and the real UDA.FMT/SYSDAT.FMT so `u_wrkseg`/`rlr`/`thrdrt` resolve to
 ; their genuine offsets -- the same ones src-c/kernel/findpd.c uses on

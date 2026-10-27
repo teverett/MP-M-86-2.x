@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Differential test for src-c/loader/rom.c against the whole of
-src/loader/ROM.A86: the real SBC86/12 + iSBC 204 boot ROM. See rom.c's
+src-assem/loader/ROM.A86: the real SBC86/12 + iSBC 204 boot ROM. See rom.c's
 own header comment for exactly what's not ported (console I/O and its
 only caller, the fatal-error retry tail; the final far jump) and why.
 
@@ -30,7 +30,7 @@ bx,sector1` below) but NOT kept: it also flips `LBDOSENT.A86`'s own
 operand, which genuinely needs the mem-shaped operand `is_addr`
 provides, unlike a plain `MOV reg,EQU`) from a 'mem' to an 'imm'
 operand, which `isa.py`'s own LEA validation then rejects outright --
-confirmed by re-running `make` in `src/` after the change. Properly
+confirmed by re-running `make` in `src-assem/` after the change. Properly
 distinguishing "bare EQU address constant, MOV wants it as an
 immediate" from "bare EQU address constant, LEA wants it as a memory-
 shaped operand" needs LEA's own operand parsing to force that shape
@@ -70,7 +70,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, 'tools'))
 from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
-REAL_FILE = os.path.join(REPO_ROOT, 'src', 'loader', 'ROM.A86')
+REAL_FILE = os.path.join(REPO_ROOT, 'src-assem', 'loader', 'ROM.A86')
 ROM_C = os.path.join(REPO_ROOT, 'src-c', 'loader', 'rom.c')
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'loader')
 

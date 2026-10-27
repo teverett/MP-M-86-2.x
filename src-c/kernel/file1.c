@@ -1,5 +1,5 @@
 /*
- * file1.c -- C port of a self-contained subset of src/kernel/FILE1.BDO:
+ * file1.c -- C port of a self-contained subset of src-assem/kernel/FILE1.BDO:
  * the error handlers (pererror/roderror/roferror/selerror, sharing
  * goerr) and the low-level disk-I/O/FCB-arithmetic helpers (move,
  * selectdisk, home, PASS_ARECORD, rdbuff, wrbuff/wrbufflg, seekdir,

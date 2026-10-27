@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""src-c/rsp/submit.c against src/rsp/SUBMIT.A86, as whole programs (see
+"""src-c/rsp/submit.c against src-assem/rsp/SUBMIT.A86, as whole programs (see
 tests/src-c/rspref.py): SUBMIT reads its .SUB file a line at a time,
 puts the command tail's arguments in for $1..$99, prints each command,
 does X:, USER, PRINTER and $INCLUDE itself and hands the rest to the

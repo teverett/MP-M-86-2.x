@@ -1,5 +1,5 @@
 /*
- * sysfunc.c -- C port of all 8 entries in src/kernel/SYSFUNC.SUP.
+ * sysfunc.c -- C port of all 8 entries in src-assem/kernel/SYSFUNC.SUP.
  *
  * `sysdat_entry`/`tod_entry`/`serial_entry` were deferred as "copy from
  * module-local data this port doesn't have a home for yet" -- revisited:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Differential test for src-c/loader/ldbios.c against the whole of
-src/loader/LDBIOS.A86: the real iSBC 86/12 + iSBC 204 driver. See
+src-assem/loader/LDBIOS.A86: the real iSBC 86/12 + iSBC 204 driver. See
 ldbios.c's own header comment for exactly what's not modeled (`INIT`'s
 own no-op hardware setup, `WBOOT`, `LISTOUT`/`LISTST`/`SETIOBF`, the
 error-retry-with-console-interaction tail) and why.
@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, 'tools'))
 from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
-REAL_FILE = os.path.join(REPO_ROOT, 'src', 'loader', 'LDBIOS.A86')
+REAL_FILE = os.path.join(REPO_ROOT, 'src-assem', 'loader', 'LDBIOS.A86')
 LDBIOS_C = os.path.join(REPO_ROOT, 'src-c', 'loader', 'ldbios.c')
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'loader')
 

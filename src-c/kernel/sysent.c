@@ -1,5 +1,5 @@
 /*
- * sysent.c -- C port of all 8 of src/kernel/SYSENT.RTM's entries.
+ * sysent.c -- C port of all 8 of src-assem/kernel/SYSENT.RTM's entries.
  *
  * poll_entry/delay_entry/dispatch_entry/set_prior_entry/sleep_entry all
  * tail-jump into the dispatcher (`dsptch`/`pdisp`) and never return in the

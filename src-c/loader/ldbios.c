@@ -1,6 +1,6 @@
 /*
- * ldbios.c -- C port of the whole of src/loader/LDBIOS.A86: the real
- * iSBC 86/12 + iSBC 204 driver src/loader/LDBIOS86Q.A86 replaces for
+ * ldbios.c -- C port of the whole of src-assem/loader/LDBIOS.A86: the real
+ * iSBC 86/12 + iSBC 204 driver src-assem/loader/LDBIOS86Q.A86 replaces for
  * the QEMU target (see ldbios86q.c's own header comment for that
  * sibling's own architecture, which this file follows closely).
  *
@@ -9,7 +9,7 @@
  * `bdos_offset`/`bdos_segment` writes, then `jmp ccp` -- same "no C
  * equivalent, nothing left to port" scope as every other real OS
  * entry point in this port (the real hardware init this file's
- * callers need already happened in src/loader/ROM.A86's own boot
+ * callers need already happened in src-assem/loader/ROM.A86's own boot
  * sequence before LDBIOS.A86 is even loaded). `WBOOT` is nothing but
  * `jmp ccp+6` -- nothing to port there either. `LISTOUT`/`LISTST` are
  * bare `ret`s, `SETIOBF` likewise -- same "no observable effect"

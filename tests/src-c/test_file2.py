@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/file2.c against a self-contained
-subset of src/kernel/FILE2.BDO: GET_NALBS, getblock (+ internal
+subset of src-assem/kernel/FILE2.BDO: GET_NALBS, getblock (+ internal
 lefttst/righttst/rblok/rblok0), and now SWAP (`swap_sdcnt`), the first
 routine in this file's own DATA.BDO cseg/dseg collision cluster to get
 a real differential test, now that file1.c/file2.c/file3.c/file4.c's
@@ -79,7 +79,7 @@ def _readf_writef_hook(sim):
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src-assem', 'kernel')])
     code = asm.segment_bytes('cseg')
     dseg = asm.segment_bytes('dseg')
     names = ('get_nalbs', 'getblock', 'swap', 'search', 'readf', 'writef', 'xiosif')

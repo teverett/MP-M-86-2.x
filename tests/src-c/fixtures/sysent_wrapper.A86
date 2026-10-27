@@ -1,4 +1,4 @@
-; Standalone wrapper for 7 of src/kernel/SYSENT.RTM's 8 entries: poll_entry,
+; Standalone wrapper for 7 of src-assem/kernel/SYSENT.RTM's 8 entries: poll_entry,
 ; delay_entry, dispatch_entry, set_prior_entry, pd_entry, sleep_entry,
 ; wakeup_entry. `creat_proc_entry` has its own wrapper,
 ; creat_proc_wrapper.A86 (it really calls proc_creat/pdisp).

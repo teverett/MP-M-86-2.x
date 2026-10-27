@@ -1,5 +1,5 @@
 /*
- * rom86q.c -- C port of the whole of src/loader/ROM86Q.A86, the QEMU
+ * rom86q.c -- C port of the whole of src-assem/loader/ROM86Q.A86, the QEMU
  * PC boot sector: `start:` (ported here as `start_entry`), plus its
  * internal subroutines `advance_chs`, `read_sector`, `pmsg`, `putc`.
  *

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/kernel/abort.c against src/kernel/
+"""Differential test for src-c/kernel/abort.c against src-assem/kernel/
 ABORT.RTM's sysreset_entry/terminate_entry/abort_spec_entry (+
 internal helpers, including every abort_tab handler). Bundled with
-src/kernel/QUE2.RTM (rlsmx) and src/kernel/FINDPD.RTM
+src-assem/kernel/QUE2.RTM (rlsmx) and src-assem/kernel/FINDPD.RTM
 (findpdname_entry), both called as ordinary internal calls, not
 boundary stubs.
 
@@ -37,7 +37,7 @@ ABORT_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', 'abort.c'),
            os.path.join(REPO_ROOT, 'src-c', 'kernel', 'que2.c'),
            os.path.join(REPO_ROOT, 'src-c', 'kernel', 'findpd.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
-KERNEL_DIR = os.path.join(REPO_ROOT, 'src', 'kernel')
+KERNEL_DIR = os.path.join(REPO_ROOT, 'src-assem', 'kernel')
 
 SIM_MEM = 0x10000
 PHYS_MEM = 0x100000

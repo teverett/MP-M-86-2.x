@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/file1.c against a self-contained
-subset of src/kernel/FILE1.BDO. See file1.c's own header comment for
+subset of src-assem/kernel/FILE1.BDO. See file1.c's own header comment for
 exactly which routines are ported and why the one remaining holdout
 (CHECK_FCB) is still deferred -- its own MPM branch calls FILE2.BDO's
 still-unported CLOSE1.
@@ -40,7 +40,7 @@ PF_CTLC = 0x0080
 # plain stub address (see its own header comment). Each one's own real
 # address is registered directly as a call_stub_addr instead, found
 # via `python3 tools/asm86.py tests/src-c/fixtures/file1_wrapper.A86
-# -I src/kernel --symbols`.
+# -I src-assem/kernel --symbols`.
 STUBS = {
     0x488,  # mpmif
     0x4b5,  # homef
@@ -88,7 +88,7 @@ PD = 0x5000
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src-assem', 'kernel')])
     code = asm.segment_bytes('cseg')
     dseg = asm.segment_bytes('dseg')
     names = ('pererror', 'roderror', 'roferror', 'selerror', 'move', 'selectdisk', 'home',

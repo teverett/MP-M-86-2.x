@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/init.c (`sup_init`) against
-src/kernel/INIT.SUP's `init`, both running against real memory layout.
+src-assem/kernel/INIT.SUP's `init`, both running against real memory layout.
 
 sup_init addresses real memory (defs.h's far_ptr(): seg*16 + off at
 real SYSDAT/IVT/SUP-cseg offsets), so the reference runs with
@@ -48,7 +48,7 @@ XIOS_INIT_SEG = 0xBEEF  # sentinel at SYSDAT 2Eh -- the bare `mov u_wrkseg,ds` b
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src-assem', 'kernel')])
     code = asm.segment_bytes('cseg')
     sym = {name: asm.symtab[name].value for name in (
         'init', 'rsp_out', 'xiosif', 'sysdat', 'supervisor', 'ver', 'version',

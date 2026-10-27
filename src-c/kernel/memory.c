@@ -1,8 +1,8 @@
 /*
- * memory.c -- C port of src/kernel/MEMORY.MEM: malloc_entry,
+ * memory.c -- C port of src-assem/kernel/MEMORY.MEM: malloc_entry,
  * mall_try_mau, mfree_entry, mfree_it.
  *
- * Unlike src/kernel/MAU.MEM/SHARE.MEM, none of these switch DS to a
+ * Unlike src-assem/kernel/MAU.MEM/SHARE.MEM, none of these switch DS to a
  * dynamically-computed segment and then use a fixed offset relative to
  * it -- only the already-established `u_wrkseg`/`cs:sysdat` patterns --
  * so the real segment-addressing gap documented for those two files (and
@@ -44,7 +44,7 @@
  * address (`si`), not a deliberate value -- same "undefined artifact,
  * fixed choice" treatment used throughout this project.
  *
- * `getmd`/`freemd` (src/kernel/UTIL.MEM, util_mem.c) are called as
+ * `getmd`/`freemd` (src-assem/kernel/UTIL.MEM, util_mem.c) are called as
  * ordinary internal calls below, not boundary stubs. They're declared
  * here with locally-named but layout-identical types rather than shared
  * ones, matching the convention src-c/kernel/que1.c already uses for
@@ -271,7 +271,7 @@ mem_bxcx mfree_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
         for (;;) {
             walk = seg_r16(sd, (uint16_t)(walk + p_thread)); /* was p_link --
                 mismatched the SYSDAT_THRDRT (thrdrt - p_thread) bias; same bug
-                as src/kernel/MEMORY.MEM's mfree_nxtpd, see docs/src-c.md */
+                as src-assem/kernel/MEMORY.MEM's mfree_nxtpd, see docs/src-c.md */
             if (walk == 0) break; /* mfree_gotpd */
             if (walk != bx) continue;
             if (walk == seg_r16(sd, SYSDAT_RLR)) break; /* mfree_gotpd */

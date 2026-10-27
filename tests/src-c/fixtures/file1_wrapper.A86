@@ -1,9 +1,9 @@
-; Standalone wrapper for a self-contained subset of src/kernel/
+; Standalone wrapper for a self-contained subset of src-assem/kernel/
 ; FILE1.BDO -- see src-c/kernel/file1.c's own header comment for
 ; exactly which routines and why the rest is deferred.
 ;
 ; The whole BDOS module (FILE1-4.BDO + BDOSIF.BDO + DATA.BDO, the same
-; bundle src/kernel/BDOS.A86 itself assembles) has to assemble
+; bundle src-assem/kernel/BDOS.A86 itself assembles) has to assemble
 ; together, since FILE1.BDO's own tail calls (GOBACK in FILE4.BDO,
 ; staret/XCRLF/XPRINT in BDOSIF.BDO) and its scratch fields (DATA.BDO)
 ; live in those sibling files. Unlike every other wrapper so far, this
@@ -13,7 +13,7 @@
 ; needs just to assemble cleanly, so src-c/kernel/defs.h's own BD_*
 ; scratch constants are kept in sync with DATA.BDO's real resulting
 ; addresses instead (checked against `python3 tools/asm86.py
-; tests/src-c/fixtures/file1_wrapper.A86 -I src/kernel --symbols`).
+; tests/src-c/fixtures/file1_wrapper.A86 -I src-assem/kernel --symbols`).
 ;
 ; This combined module's own cseg is long enough (~0x2659 bytes) to
 ; run past DATA.BDO's dseg (org 0C00h, 0x1000 bytes) if both start at

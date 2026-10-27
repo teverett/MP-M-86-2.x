@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/kernel/parse.c against src/kernel/PARSE.SUP's
+"""Differential test for src-c/kernel/parse.c against src-assem/kernel/PARSE.SUP's
 parse_entry, on real memory layout -- see tests/src-c/supref.py. The PCB,
 the string and the FCB are all in the running process's u_wrkseg. Every
 case compares bx/cx and diffs the whole image (the FCB bytes included).

@@ -1,5 +1,5 @@
 /*
- * lbdosf3.c -- C port of src/loader/LBDOSF3.A86: sequential disk read,
+ * lbdosf3.c -- C port of src-assem/loader/LBDOSF3.A86: sequential disk read,
  * disk (re)selection, and the dispatcher epilogue (goback/retmon) for
  * the loader's own BDOS.
  *

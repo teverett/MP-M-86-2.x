@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/kernel/proc.c against src/kernel/
+"""Differential test for src-c/kernel/proc.c against src-assem/kernel/
 PROC.RTM's freepd/proc_creat (+ internal getpdadr), both on real
 memory layout.
 
@@ -33,7 +33,7 @@ from i86sim import I86Sim  # noqa: E402
 WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'proc_wrapper.A86')
 PROC_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', 'proc.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
-KERNEL_DIR = os.path.join(REPO_ROOT, 'src', 'kernel')
+KERNEL_DIR = os.path.join(REPO_ROOT, 'src-assem', 'kernel')
 
 SIM_MEM = 0x10000
 PHYS_MEM = 0x100000

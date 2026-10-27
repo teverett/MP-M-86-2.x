@@ -1,5 +1,5 @@
 /*
- * tick.c -- C port of src/kernel/TICK.SUP: `notick:`/`tick:`.
+ * tick.c -- C port of src-assem/kernel/TICK.SUP: `notick:`/`tick:`.
  *
  * TICK is the MP/M tick-flag RSP: it waits for the hardware clock's
  * tick flag, then walks the Delay List (`dlr`) decrementing the head

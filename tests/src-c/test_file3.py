@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/file3.c against a self-contained
-subset of src/kernel/FILE3.BDO: pack_sdcnt, compare, search_olist/
+subset of src-assem/kernel/FILE3.BDO: pack_sdcnt, compare, search_olist/
 search_llist/searchn_list (+ internal search_listo). See file3.c's own
 header comment for why the rest of the file is deferred.
 On real memory: file*.c take (phys, ds_bdos) and address DATA.BDO's
@@ -65,7 +65,7 @@ STUBS = {0x488, 0x4b5, 0x4ba, 0x4bf, 0x4c4, 0x4c9, 0x4ce, 0x4d3, 0x4d8, 0x4dd, 0
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src-assem', 'kernel')])
     code = asm.segment_bytes('cseg')
     dseg = asm.segment_bytes('dseg')
     names = ('pack_sdcnt', 'compare', 'search_olist', 'search_llist', 'searchn_list',

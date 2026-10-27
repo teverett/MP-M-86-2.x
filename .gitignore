@@ -2,8 +2,9 @@
 /.idea
 __pycache__/
 *.pyc
-src/**/*.bin
+src-assem/**/*.bin
 /build/
-/src-c/obj/
+/src-assem/build/
+/src-c/build/
 /src-c/kernel.elf
 /&1

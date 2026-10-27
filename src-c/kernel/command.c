@@ -1,5 +1,5 @@
 /*
- * command.c -- C port of src/kernel/COMMAND.SUP: `clicmd_entry`/
+ * command.c -- C port of src-assem/kernel/COMMAND.SUP: `clicmd_entry`/
  * `chain_entry` (the CLI: run a typed command, or chain to one, `dx==0`)
  * and every routine they call -- `cli_checkque` (hand the command to an
  * RSP's queue), `cli_fload`/`cli_gopen` (open and load a .CMD file, set

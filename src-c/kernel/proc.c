@@ -1,5 +1,5 @@
 /*
- * proc.c -- C port of all 3 of src/kernel/PROC.RTM's routines: freepd,
+ * proc.c -- C port of all 3 of src-assem/kernel/PROC.RTM's routines: freepd,
  * proc_creat (+ internal getpdadr).
  *
  * Runs against real memory (defs.h's far_ptr), like init.c and

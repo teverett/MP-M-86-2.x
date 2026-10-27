@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/loader/lbdosent.c against src/loader/
+"""Differential test for src-c/loader/lbdosent.c against src-assem/loader/
 LBDOSENT.A86: `oldbdos` (the dispatch), plus `persub`/`selsub`/
 `rodsub`/`rofsub`. See lbdosent.c's own header comment for the full
 scope (which function numbers resolve to which already-ported real
@@ -11,7 +11,7 @@ same minimal-wrapper approach as lbdosf3_wrapper.A86's own: a fake
 dseg at the usual 0xB0xx scratch addresses, standing in for the real
 LBDOSDAT.A86's own fields at THEIR real resolved addresses -- which
 only matter for a file with no other includes, see docs/src-c.md's
-BD_*/SD_* distinction) rather than assembling the real src/loader/
+BD_*/SD_* distinction) rather than assembling the real src-assem/loader/
 LDBDOS.A86 bundle directly: this module's own `info`/`aret`/etc.
 resolve to genuinely different (real) addresses once LBDOSDAT.A86
 is included at its own true position in that full bundle, which
@@ -90,7 +90,7 @@ BIOS_FUNCS = ('bootf', 'wbootf', 'constf', 'coninf', 'conouf', 'listf', 'punchf'
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'loader')])
+    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src-assem', 'loader')])
     code = asm.segment_bytes('cseg')
     oldbdos = asm.symtab['oldbdos'].value
     persub = asm.symtab['persub'].value

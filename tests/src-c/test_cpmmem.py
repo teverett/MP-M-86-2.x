@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/cpmmem.c (maxmem_entry,
 absmax_entry, cpmalloc_entry, cpmabsa_entry, cpmfree_entry + internal
-getmemory/free_memory) against src/kernel/CPMMEM.MEM, on real memory
+getmemory/free_memory) against src-assem/kernel/CPMMEM.MEM, on real memory
 layout.
 
-The reference is the whole real MEM module (src/kernel/MEM.A86); see
+The reference is the whole real MEM module (src-assem/kernel/MEM.A86); see
 tests/src-c/memref.py. getmemory/free_memory build their MPB/MFPB on
 the stack (SS = the running UDA) and call `mpmif` with DS = SS; the
 SUPIF hook turns that into u_wrkseg = the UDA and re-enters MEM's real

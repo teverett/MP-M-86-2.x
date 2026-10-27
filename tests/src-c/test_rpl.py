@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/kernel/rpl.c against src/kernel/RPL.SUP's
+"""Differential test for src-c/kernel/rpl.c against src-assem/kernel/RPL.SUP's
 rpl_entry, on real memory layout -- see tests/src-c/supref.py. The CPB is
 in u_wrkseg. RPL's `mpmif(f_qopen)` reaches the RTM, which isn't loaded
 here, so it's the no-op stub rpl.c models (CX stays nonzero), and the

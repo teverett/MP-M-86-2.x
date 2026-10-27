@@ -1,8 +1,8 @@
 /*
  * defs.h -- field offsets and scratch addresses translated from the
- * .A86/.EQU files under src/loader/.
+ * .A86/.EQU files under src-assem/loader/.
  *
- * /src-c is a routine-by-routine C port of /src's hand-written ASM86,
+ * /src-c is a routine-by-routine C port of /src-assem's hand-written ASM86,
  * verified by differential testing (see docs/src-c.md), not a byte-for-byte
  * recompilation. Separate from src-c/kernel/defs.h -- the loader and the
  * kernel are different modules with their own symbol spaces, even though
@@ -16,7 +16,7 @@
 
 #include <stdint.h>
 
-/* src/loader/LBDOSEQU.A86 -- control character constants LBDOSIO.A86 uses */
+/* src-assem/loader/LBDOSEQU.A86 -- control character constants LBDOSIO.A86 uses */
 #define ctlc   0x03
 #define ctlh   0x08
 #define ctls   0x13
@@ -25,7 +25,7 @@
 #define cr     0x0D
 #define lf     0x0A
 
-/* src/loader/LBDOSDAT.A86 -- LBDOSIO.A86's own scratch variables, at
+/* src-assem/loader/LBDOSDAT.A86 -- LBDOSIO.A86's own scratch variables, at
  * fixed harness-chosen addresses (same reasoning as src-c/kernel/
  * defs.h's own SD_RLR et al: tools/i86sim.py has no real segment
  * registers, so every routine touching one of these needs to agree on a
@@ -37,7 +37,7 @@
 #define LD_LISTCP  0xB003 /* byte: listing toggle */
 #define LD_ARET    0xB004 /* word: dispatch return value; low byte = lret */
 
-/* src/loader/LBDOSEQU.A86 -- FCB-layout equates src-c/loader/lbdosf1.c's
+/* src-assem/loader/LBDOSEQU.A86 -- FCB-layout equates src-c/loader/lbdosf1.c's
  * own ported routines touch. Same numeric values as src-c/kernel/
  * defs.h's own fcb_* constants (same real FCB layout, just a separate
  * symbol space -- see this file's own header comment). */
@@ -54,7 +54,7 @@
 #define dskmsk  3 /* dirrec-1 */
 #define fcbshf  5 /* log2(fcblen) */
 
-/* src/loader/LBDOSDAT.A86 -- the subset of this module's own scratch
+/* src-assem/loader/LBDOSDAT.A86 -- the subset of this module's own scratch
  * fields src-c/loader/lbdosf1.c's own ported routines touch, at fixed
  * harness-chosen scratch addresses (same reasoning as every other
  * scratch constant in this file: LBDOSDAT.A86 keeps this data in cseg,
@@ -94,7 +94,7 @@
 #define LD_DMABASE 0xB043 /* word: segment base for disk i/o */
 #define LD_PARAMETERSEGMENT 0xB045 /* word: user parameter segment */
 
-/* src/loader/LBDOSDAT.A86 -- the subset src-c/loader/lbdosf2.c's own
+/* src-assem/loader/LBDOSDAT.A86 -- the subset src-c/loader/lbdosf2.c's own
  * ported routines touch, same reasoning/method as the LD_* block
  * above (checked against tests/src-c/fixtures/lbdosf2_wrapper.A86) */
 #define LD_DIRBLK    0xB047 /* word: reserved allocation bits for the directory */
@@ -109,7 +109,7 @@
                                 real memory location (FILE1.BDO's own
                                 "make" temporarily points LD_INFO here) */
 
-/* src/loader/LBDOSDAT.A86 -- the subset src-c/loader/lbdosf3.c's own
+/* src-assem/loader/LBDOSDAT.A86 -- the subset src-c/loader/lbdosf3.c's own
  * ported routines touch, same reasoning/method as the LD_* block
  * above (checked against tests/src-c/fixtures/lbdosf3_wrapper.A86) */
 #define LD_DLOG      0xB051 /* word: logged-in disks vector */
@@ -122,7 +122,7 @@
 #define LD_INFOSAVE  0xB059 /* word: LD_INFO's own value before parsave */
 #define LD_LOC_PAR_AREA 0xB05B /* byte[258]: local parameter-block copy */
 
-/* src/loader/LBDOSEQU.A86 -- more FCB-layout/BDOS equates src-c/
+/* src-assem/loader/LBDOSEQU.A86 -- more FCB-layout/BDOS equates src-c/
  * loader/lbdosf2.c's own ported routines touch, same reasoning as the
  * fcblen/extnum/etc. block above */
 #define empty  0xE5 /* empty directory entry marker */
@@ -131,15 +131,15 @@
 #define maxmod 15   /* largest module number */
 #define namlen 15   /* name length */
 
-/* src/loader/LDBIOS86Q.A86's own scratch/data cells and tables, at
+/* src-assem/loader/LDBIOS86Q.A86's own scratch/data cells and tables, at
  * their own REAL resolved addresses (not harness-chosen scratch
  * ones, unlike the LD_* block above): this file is fully self-
  * contained (no `INCLUDE`s at all, confirmed by grep) and always
- * assembled standalone, so `python3 tools/asm86.py src/loader/
+ * assembled standalone, so `python3 tools/asm86.py src-assem/loader/
  * LDBIOS86Q.A86 --symbols` gives one real, deterministic layout,
  * same reasoning as src-c/kernel/defs.h's own BD_* block. */
 /* All of these (through LDB86Q_SEGTABLE below) are probed directly via
- * `--symbols` against src/loader/LDBIOS86Q.A86, and shift whenever
+ * `--symbols` against src-assem/loader/LDBIOS86Q.A86, and shift whenever
  * tools/asm86.py's own encoding choices change (last: `_encode_alu`'s
  * own accumulator-immediate short form, see that function's own
  * header comment) -- not a uniform shift across all of them, since
@@ -160,11 +160,11 @@
 #define LDB86Q_DPE0        0x1660 /* word: SELDSK's own DPH address (content unconsumed, not modeled -- see init.c-style precedent) -- probed via `--symbols`; shifts whenever tools/asm86.py's own encoding choices change (last: `_encode_alu`'s own accumulator-immediate short form, see that function's own header comment) */
 #define LDB86Q_SEGTABLE    0x1650 /* word: GETSEGT's own segment-table address (static cseg data, content unconsumed by anything ported so far) -- probed via `--symbols`; shifts whenever tools/asm86.py's own encoding choices change (last: `_encode_alu`'s own accumulator-immediate short form, see that function's own header comment) */
 
-/* src/loader/LDBIOS.A86 -- the real iSBC 86/12 + iSBC 204 driver
+/* src-assem/loader/LDBIOS.A86 -- the real iSBC 86/12 + iSBC 204 driver
  * LDBIOS86Q.A86 above replaces for the QEMU target. Same "no
  * INCLUDEs, always assembles standalone, so these are real probed
  * addresses" reasoning as the LDB86Q_* block above -- probed via
- * `python3 tools/asm86.py src/loader/LDBIOS.A86 --symbols` (this file
+ * `python3 tools/asm86.py src-assem/loader/LDBIOS.A86 --symbols` (this file
  * has no shifting-encoding history yet, so these are expected to be
  * stable, but re-probe if `tools/asm86.py` changes again). */
 #define LDB_TRK       0x1541 /* byte: current track */
@@ -175,8 +175,8 @@
 #define LDB_DPBASE    0x154D /* word: Base of Disk Parameter Blocks (dpe0/dpe1, 16 bytes/drive) */
 #define LDB_SEGTABLE  0x1548 /* word: GETSEGT's own segment-table address */
 
-/* src/loader/ROM.A86 -- the real SBC86/12 + iSBC 204 boot ROM
- * src/loader/ROM86Q.A86 above replaces for the QEMU target. Same
+/* src-assem/loader/ROM.A86 -- the real SBC86/12 + iSBC 204 boot ROM
+ * src-assem/loader/ROM86Q.A86 above replaces for the QEMU target. Same
  * "no INCLUDEs, always assembles standalone, real probed address"
  * reasoning as the LDB86Q_ and LDB_ blocks above. */
 #define ROM_SECTOR1 0x032A /* word: offset of the T0S1 header-sector DMA target -- only its own address matters here (the real transfer it kicks off isn't modeled, see rom.c's own header comment), not any content at that address */

@@ -1,13 +1,13 @@
 /*
- * que1.c -- C port of all 10 of src/kernel/QUE1.RTM's routines:
+ * que1.c -- C port of all 10 of src-assem/kernel/QUE1.RTM's routines:
  * makeq_entry, openq_entry, deleteq_entry, queverify, readq_entry,
  * creadq_entry, readq, writeq_entry, cwriteq_entry, writeq.
  *
- * `getqdaddr`/`remqd` (src/kernel/QUE2.RTM, que2.c) are called here as
+ * `getqdaddr`/`remqd` (src-assem/kernel/QUE2.RTM, que2.c) are called here as
  * ordinary internal calls, not boundary stubs -- they're ported too.
  *
  * `deleteq_entry`'s `qd_noq` path (the QD being deleted isn't actually on
- * `qlr`) matches src/kernel/QUE1.RTM as it now reads after docs/bugs.md
+ * `qlr`) matches src-assem/kernel/QUE1.RTM as it now reads after docs/bugs.md
  * #100's fix (a `pop ax` added there, balancing the routine's own earlier
  * `push es` the same way `qd_use`'s own exit already did -- the original
  * jumped straight to `popf ! ret` with that word still on the stack,

@@ -5,14 +5,14 @@ This describes `build/disk/mpm86q.img`, the bootable floppy image
 outputs. There is no DRI original to match here — the real hardware
 had no boot sector at all (`04/ROM.A86` ran from EPROM, not disk) — so
 every convention below was designed from scratch for this project's
-QEMU target, informed only by what `src/loader/ROM86Q.A86` and
-`src/loader/LDMPM.A86` themselves expect to find.
+QEMU target, informed only by what `src-assem/loader/ROM86Q.A86` and
+`src-assem/loader/LDMPM.A86` themselves expect to find.
 
 ## Geometry
 
 A standard 1.44MB 3.5" floppy: 80 cylinders × 2 heads × 18 sectors/
 track × 512 bytes/sector = 1,474,560 bytes total. This is the same
-geometry `src/kernel/XIOS86Q.A86` and `src/loader/LDBIOS86Q.A86`
+geometry `src-assem/kernel/XIOS86Q.A86` and `src-assem/loader/LDBIOS86Q.A86`
 target for their own NEC765 disk I/O once MP/M-86 itself is running.
 
 CP/M's own "logical" 128-byte-record view of this disk (used by the
@@ -29,13 +29,13 @@ are 80 × 2 = 160 CP/M tracks total — see "Disk Parameter Block" below).
 | `0x00200`–`0x003FF` | cyl 0, head 0, sector 2 | the loader header (9 bytes + padding) |
 | `0x00400`–`0x047FF` | cyl 0, head 0, sector 3 through cyl 0, head 1, sector 18 | `MPMLDR.bin` (within the 2 reserved CP/M tracks) |
 | `0x04800`–`0x067FF` | — | the CP/M directory (one 8192-byte allocation block) |
-| `0x06800`– | — | `MPM.SYS`'s own body (header + code + data), then each `src/utils/` utility's own body (as `<NAME>.CMD`) and `ECHO.RSP`, back to back, each with the same header+code+data shape as `MPM.SYS` |
+| `0x06800`– | — | `MPM.SYS`'s own body (header + code + data), then each `src-assem/utils/` utility's own body (as `<NAME>.CMD`) and `ECHO.RSP`, back to back, each with the same header+code+data shape as `MPM.SYS` |
 | everything else | — | zero-filled, unallocated |
 
 ### The boot sector (byte 0)
 
 `ROM86Q.bin`, built by `tools/build_bootsect.py` from
-`src/loader/ROM86Q.A86`. Exactly 512 bytes, ending in the mandatory
+`src-assem/loader/ROM86Q.A86`. Exactly 512 bytes, ending in the mandatory
 `55h AAh` boot signature. SeaBIOS (or any PC BIOS) loads this at
 `0000:7C00h` and jumps to it with `DL` = the boot drive number — see
 that file's own header comment for everything it does once running.
@@ -80,14 +80,14 @@ One 8192-byte allocation block (block 0), holding up to 64 32-byte
 directory entries. Unused entries are filled with `E5h` (CP/M's
 standard "available" marker), not zero. `MPM.SYS` needs 2 entries here
 (see "Why some files need more than one directory entry" below); each
-`src/utils/` utility and `ECHO.RSP` gets its own entry (or more, by the
+`src-assem/utils/` utility and `ECHO.RSP` gets its own entry (or more, by the
 same rule) after it — 23 entries in total.
 
 ### `MPM.SYS`'s body (byte 0x6800, allocation block 1 onward)
 
 Built by `tools/build_disk.py` itself (`build_mpm_sys_body`), combining
 `MPM.bin.cseg`/`MPM.bin.dseg` (from `tools/build_mpmsys.py`) with a
-128-byte header `src/loader/LDMPM.A86`'s own code reads and validates
+128-byte header `src-assem/loader/LDMPM.A86`'s own code reads and validates
 (`cmp ctype,codetype ! jnz badhdr`, etc. — see that file's `perr:`/
 `hdrok:` logic around line 140):
 
@@ -120,7 +120,7 @@ Disk Parameter Block described below to exist at all.
 
 ## Disk Parameter Block
 
-The DPB both `src/kernel/XIOS86Q.A86` and `src/loader/LDBIOS86Q.A86`
+The DPB both `src-assem/kernel/XIOS86Q.A86` and `src-assem/loader/LDBIOS86Q.A86`
 carry (and must keep identical, since both read the same on-disk
 filesystem) — `tools/build_disk.py` builds the directory/allocation
 layout to match it exactly:
@@ -148,8 +148,8 @@ below share them, allocated back to back in the order
 
 ### The utilities and `ECHO.RSP` (after `MPM.SYS`'s own blocks)
 
-Each of the 19 `src/utils/` `.PLM` utilities the Makefile's own
-`PLM_UTILS` list builds, plus `src/rsp/ECHO.A86` (the only RSP that
+Each of the 19 `src-assem/utils/` `.PLM` utilities the Makefile's own
+`PLM_UTILS` list builds, plus `src-assem/rsp/ECHO.A86` (the only RSP that
 assembles cleanly — see `RSP_OK` in the Makefile), gets written as its
 own file: `<NAME>.CMD` for the utilities, `ECHO.RSP` for `ECHO` — plain
 8.3 names matching the Makefile's own basenames (see
@@ -187,7 +187,7 @@ most of the utilities fit in one.
 
 ## A hard-won lesson: don't let a disk read overflow its own buffer
 
-`src/loader/ROM86Q.A86`'s own header read used to target a 9-byte
+`src-assem/loader/ROM86Q.A86`'s own header read used to target a 9-byte
 buffer declared inside its own 512-byte boot sector — but `INT 13h`
 (and any real floppy controller) always transfers a full 512-byte
 sector regardless of how much of it the caller actually wants, so the

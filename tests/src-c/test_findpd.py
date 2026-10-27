@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/kernel/findpd.c against src/kernel/FINDPD.RTM,
+"""Differential test for src-c/kernel/findpd.c against src-assem/kernel/FINDPD.RTM,
 on real memory layout.
 
 findpd.c addresses real memory (defs.h's far_ptr), so the reference runs
@@ -56,7 +56,7 @@ def w16(mem, addr, val):
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src-assem', 'kernel')])
     code = asm.segment_bytes('cseg')
     sym = {name: asm.symtab[name].value for name in ('findpdname_entry', 'rlr', 'thrdrt', 'u_wrkseg')}
     if sym['findpdname_entry'] != 0:

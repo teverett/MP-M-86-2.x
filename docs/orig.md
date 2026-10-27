@@ -189,9 +189,9 @@ main subject) was done. 239 files across 15 top-level subdirectories
   - `xdos2.lib` = `cli.asm` ("Command Line Interpreter," MP/M II's
     Supervisor-equivalent command parser), `tick.asm` ("Tick Process"),
     `clock.asm` ("Clock Process" — the direct ancestor of
-    `src/rsp/CLOCK.A86`; this and `tmpsub.asm` below are themselves RSP
+    `src-assem/rsp/CLOCK.A86`; this and `tmpsub.asm` below are themselves RSP
     source, not nucleus code proper, despite living in this directory),
-    `attach.asm` ("Attach Process" — the ancestor of `src/utils/
+    `attach.asm` ("Attach Process" — the ancestor of `src-assem/utils/
     ATTACH.PLM`, here apparently a background process rather than a
     console utility).
   - `xdos3.lib` = `datapg.asm` ("Data Page" — shared data storage),
@@ -237,7 +237,7 @@ main subject) was done. 239 files across 15 top-level subdirectories
     the same pattern, at the hex-binary level instead of source level).
   Banked vs. non-banked memory was an 8080/Z80-specific concern MP/M-86's
   flat 8086 memory model doesn't have, so neither variant has a direct
-  MP/M-86 counterpart as such — `src/kernel/BDOS.A86` corresponds to
+  MP/M-86 counterpart as such — `src-assem/kernel/BDOS.A86` corresponds to
   *both* of these together conceptually, not to either one alone.
 - **`RSPs/`** — background Resident System Processes, all with no direct
   MP/M-86 equivalent in this tree. Three of the four follow the exact
@@ -285,10 +285,10 @@ main subject) was done. 239 files across 15 top-level subdirectories
   not a background process.
 
 `CUSPs_1` through `CUSPs_5` are "Console Utility Programs," MP/M II's
-name for the category `src/utils/` holds under MP/M-86 — split across
+name for the category `src-assem/utils/` holds under MP/M-86 — split across
 five directories (by distribution disk, going by `Control_1`/`Control_2`
 below holding the equivalent pre-built binaries in the same groupings)
-rather than one, unlike `src/utils/`. Every one of them is built the
+rather than one, unlike `src-assem/utils/`. Every one of them is built the
 same way, confirmed directly in each directory's own build script
 (`CUSPs_1/prla1-3.sub`, `CUSPs_2/prlb1-4.sub`, `CUSPs_4/pip.sub`,
 `CUSPs_5/dall.sub`): compile with `PLM80`, then `LINK` with a small
@@ -306,7 +306,7 @@ dir.hex xdir.prl`) — see the correction under `CUSPs_3/` below for where
 that `x`-prefix convention actually comes from.
 
 - **`CUSPs_1/`** — direct file-for-file ancestors of utilities already
-  in `src/utils/`, same PL/M source just for the 8080: `dir.plm`,
+  in `src-assem/utils/`, same PL/M source just for the 8080: `dir.plm`,
   `era.plm`, `eraq.plm`, `ren.plm`, `set.plm`, `show.plm`, `type.plm`,
   and `stat.plm` (the undivided ancestor of MP/M-86's `STSCMD.PLM`/
   `STSCOM.PLM`/`STSRSP.PLM` split — one PL/M-80 program where MP/M-86
@@ -314,9 +314,9 @@ that `x`-prefix convention actually comes from.
   compiled forms and build (Submit) scripts for the same set.
 - **`CUSPs_2/`** — more direct ancestors (`abort.plm`, `cns.plm`
   ≈ `CONS.PLM`, `drst.plm` ≈ `DSKRST.PLM`, and `tod.plm` — the direct
-  ancestor of `src/utils/TOD.PLM`, title "MP/M II V2.0 Date and Time"),
+  ancestor of `src-assem/utils/TOD.PLM`, title "MP/M II V2.0 Date and Time"),
   plus several command-side utilities with **no equivalent in
-  `src/utils/`**: `mschd.plm` ("Scheduler Transient Program," controls
+  `src-assem/utils/`**: `mschd.plm` ("Scheduler Transient Program," controls
   the `sched` RSP in `RSPs/`), `mspl.plm` ("Spool Program," controls the
   `spool` RSP), `stpsp.plm` ("Stop Spooler Program"), `msts.plm`
   ("Status Program," controls the `mpmstat` RSP — the same
@@ -357,11 +357,11 @@ that `x`-prefix convention actually comes from.
   `era.prl`, `sdir.prl`, etc., with no source `.PLM` alongside them to
   collide with there), so the `x`-prefix is dropped again somewhere
   between building a CUSP here and shipping it on that disk.
-- **`CUSPs_4/`** — two more direct ancestors of `src/utils/` utilities,
+- **`CUSPs_4/`** — two more direct ancestors of `src-assem/utils/` utilities,
   confirmed via `pip.sub` to use the exact same double-address/`GENMOD`
   build as everything else in `CUSPs_1`–`CUSPs_5`: `ed.plm`/`.prl` and
   `pip.plm`/`.prl`/`.sub` (`ED.PLM` and `PIP.PLM` already exist under
-  those exact names in `src/utils/`).
+  those exact names in `src-assem/utils/`).
 - **`CUSPs_5/`** — a single program with no MP/M-86 equivalent in this
   tree at all — **SDIR**, an "extended directory" command built from one
   module per file (`dm.plm`, "Super Directory Command," is the entry
@@ -374,43 +374,43 @@ that `x`-prefix convention actually comes from.
 - **`LITs/`** — `DECLARE ... LITERALLY` include files, the direct
   ancestor of this tree's own `.LIT` convention (see
   `docs/filetypes.md`). File-by-file, against what's actually in
-  `src/` (not just name-matching — each pair was `diff`ed):
-  - **`copyrt.lit`** → `src/utils/COPYRT.LIT`, nearly verbatim (just the
+  `src-assem/` (not just name-matching — each pair was `diff`ed):
+  - **`copyrt.lit`** → `src-assem/utils/COPYRT.LIT`, nearly verbatim (just the
     copyright year range shortened from "1979,1980,1981" to "1981").
-  - **`fcb.lit`** (`fcb$descriptor` structure) → `src/utils/`'s own FCB
+  - **`fcb.lit`** (`fcb$descriptor` structure) → `src-assem/utils/`'s own FCB
     handling, same concept, not a verbatim carryover.
-  - **`flag.lit`** → `src/utils/FLAG.LIT`: both define a process
+  - **`flag.lit`** → `src-assem/utils/FLAG.LIT`: both define a process
     flag/status data layout, but the actual fields differ (MP/M II's
     is just `nmbflags literally '16'`; MP/M-86's is a full
     `flag$structure` with `pd`/`ignore` fields) — same role, reworked
     content, not a copy.
-  - **`proces.lit`** → `src/utils/PROCES.LIT` — and this is the one
+  - **`proces.lit`** → `src-assem/utils/PROCES.LIT` — and this is the one
     with the smoking-gun evidence for the whole tree's lineage:
     MP/M-86's own copy's banner comment literally reads `"Proces
     Literals MP/M-8086 II"`, an intermediate name directly naming both
     ancestor and descendant in one string.
   - **`queue.lit`** (`queueheader` structure) → renamed to
-    `src/utils/QD.LIT` under MP/M-86 ("QD" = Queue Descriptor), not a
+    `src-assem/utils/QD.LIT` under MP/M-86 ("QD" = Queue Descriptor), not a
     name match despite being the same concept.
   - **`sysdat.lit`** (byte-offset layout comments for system data) →
-    renamed `src/utils/SD.LIT` ("System Data Page") under MP/M-86, same
+    renamed `src-assem/utils/SD.LIT` ("System Data Page") under MP/M-86, same
     concept (a based structure describing the system data page), not a
     name match either.
   - **`memmgr.lit`** (one combined `memory$descriptor` structure) →
-    split into three named structures, `src/utils/MDSAT.LIT`'s
+    split into three named structures, `src-assem/utils/MDSAT.LIT`'s
     `md$structure`/`ms$structure`/`sat$structure` — same role, evolved
     layout, renamed file.
   - **`common.lit`** (`TRUE`/`FALSE`/`BOOLEAN`/`FOREVER` plus the
     `LITERALLY`→`LIT`/`DECLARE`→`DCL` abbreviation bootstrap) → renamed
-    `src/utils/COMLIT.LIT` under MP/M-86 — the exact file
+    `src-assem/utils/COMLIT.LIT` under MP/M-86 — the exact file
     `tools/plm/README.md`'s "Notable discoveries" already singles out
     for "bootstrapping its own syntax sugar."
   - **`dpgos.lit`**, **`xdos.lit`** — BDOS/XDOS function-code constants
-    with no identified direct `.LIT` counterpart in `src/`; the same
-    *information* (function numbers) lives on in `src/`'s own `.DEF`
+    with no identified direct `.LIT` counterpart in `src-assem/`; the same
+    *information* (function numbers) lives on in `src-assem/`'s own `.DEF`
     files instead, under the 8086 port's own naming.
 
-  `src/utils/UDA.LIT`'s own banner comment is a second instance of the
+  `src-assem/utils/UDA.LIT`'s own banner comment is a second instance of the
   same "MP/M-86 II" intermediate naming found in `PROCES.LIT` above —
   `"MP/M-86 II  User Data Area format - August 8, 1981"` — further
   confirming the whole `.LIT` set's lineage isn't just a resemblance,
@@ -511,7 +511,7 @@ that `x`-prefix convention actually comes from.
     places, not a coincidence of naming.
 - **`mpmldr/gensys/`** — MP/M II's own loader and system-generator, the
   direct ancestor of `orig/mpm862sr/`'s `MPMLDR` (`docs/glossary.md`)
-  and of this repo's own `src/loader/`. Two separately-built programs,
+  and of this repo's own `src-assem/loader/`. Two separately-built programs,
   each with its own PL/M main module plus supporting `.ASM` pieces —
   and `mpmldr.sub`/`gensys.sub` (this directory's own build scripts, not
   just a generic `comgen.sub`-style template) spell out exactly how:
@@ -783,7 +783,7 @@ copied and sent to an OEM.
 Unlike `orig/mpm862sr/`'s clean 11-disk distribution set, this is a
 grab-bag of unrelated in-house material spanning several DRI products
 and projects, in every stage of completion — nothing here has been
-diffed against `src/` or validated against this repo's tooling; it's
+diffed against `src-assem/` or validated against this repo's tooling; it's
 inventoried, not analyzed:
 
 - **`01`, `02`** — label scan plus disk image only; no files extracted.
@@ -811,10 +811,10 @@ inventoried, not analyzed:
   support material for producing DRI's own printed documentation.
 - **`07`, `08`, `13`** — working **MP/M-86** installations: built
   `.MPM` kernel modules (`BDOS`/`RTM`/`SUP`/`MEM`/`CIO`/`XIOS`/
-  `SYSDAT`), `MPM.SYS`/`MPMLDR.CMD`, the full `src/utils/`-equivalent
+  `SYSDAT`), `MPM.SYS`/`MPMLDR.CMD`, the full `src-assem/utils/`-equivalent
   command set (`DIR`/`TYPE`/`PIP`/`ED`/`STAT`/`SDIR`/`ASM86`/`DDT86`
   etc. as built `.CMD`s), and RSPs (`CLOCK`, `TMP`, `MPMSTAT`,
-  `ECHO`) — i.e. the same system this repo's `src/` builds from
+  `ECHO`) — i.e. the same system this repo's `src-assem/` builds from
   source, here as DRI's own working binaries, plus live operational
   artifacts not present anywhere in `orig/mpm862sr/`: a `MAIL.CMD`/
   `MAIL.NDX`/`.HLP` internal mail system, `HELPNDX.CMD`/`MPM.HLP`
@@ -853,10 +853,10 @@ inventoried, not analyzed:
   `LDMPM.H86`, `LDBDOS.H86`, `DEBLOCK.LIB`, `SINGLES.LIB`/`.DEF`,
   `SYSTEM.LIB`, alongside a full built MP/M-86 kernel/RSP set — i.e.
   exactly the loader-plus-from-scratch-XIOS problem this repo's own
-  `src/loader/LDBIOS86Q.A86`/`ROM86Q.A86` solve for QEMU, except these
+  `src-assem/loader/LDBIOS86Q.A86`/`ROM86Q.A86` solve for QEMU, except these
   are DRI's *own* original equivalents for whatever real hardware this
   disk set targeted (not yet identified) — likely worth a closer diff
-  against `src/loader/` if the loader work stalls.
+  against `src-assem/loader/` if the loader work stalls.
 - **`15`** — `MPM86SRL.A86`/`.ASM`/`.CMD`/`.CPM`: a serialization
   utility for MP/M-86 distribution disks, the direct 8086-port
   counterpart to `orig/mpm_II/OEM/mpm2srl.asm` documented above.
@@ -878,12 +878,12 @@ inventoried, not analyzed:
   build scripts (`ONE.SUB`, `CLEAN.SUB`, `ALL.SUB`) — the closest thing
   in this repository to a single, coherent, buildable snapshot of the
   full MP/M-86 kernel source tree outside of `orig/mpm862sr/` itself;
-  worth cross-referencing against `src/kernel/` if any kernel module
+  worth cross-referencing against `src-assem/kernel/` if any kernel module
   there is ambiguous or incomplete.
 - **`22`** — mixed: a `CPIP.CMD`/`SID86.CMD`/`VAX86.CMD`-flavored build
   environment plus stray debug artifacts (`JUNK.*`, `RESUME.PRN`), a
   `CACHE.RSP` (disk cache RSP, no equivalent elsewhere in this repo;
-  now baked into the build as `src/rsp/CACHE.RSP` -- docs/bugs.md #124),
+  now baked into the build as `src-assem/rsp/CACHE.RSP` -- docs/bugs.md #124),
   and three `MPMSEM{1,2,3}.TEX` files — internal **"MP/M-86 Seminar
   Notes"** (marked "All Information Herein is Proprietary to Digital
   Research, Inc."), a training/overview document walking through the
@@ -998,7 +998,7 @@ workflow):
   `orig/mpm862sr/06` and `orig/lastdri/`) and `SID`/`ZSID` (the 8080
   and Z80 symbolic debuggers — `ZSID` itself is in `orig/driorig/ZSID/`
   above).
-- **`ED.pdf`** — the `ED` line editor manual (`src/utils/ED.PLM`).
+- **`ED.pdf`** — the `ED` line editor manual (`src-assem/utils/ED.PLM`).
 - **`Despool_Print_Utility_UG.pdf`** — manual for `DESPOOL`, a
   print-spool utility with no source copy currently in this
   repository's `orig/` trees.

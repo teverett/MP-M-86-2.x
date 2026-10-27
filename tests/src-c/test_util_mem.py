@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/util_mem.c (getmd, freemd) against
-src/kernel/UTIL.MEM, on real memory layout. The reference is the whole
-real MEM module (src/kernel/MEM.A86) with SYSDAT at segment 100h; see
+src-assem/kernel/UTIL.MEM, on real memory layout. The reference is the whole
+real MEM module (src-assem/kernel/MEM.A86) with SYSDAT at segment 100h; see
 tests/src-c/memref.py. MDs and `mdul` are SYSDAT-relative; every case
 diffs the whole image.
 """

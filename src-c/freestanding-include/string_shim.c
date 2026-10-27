@@ -7,7 +7,7 @@
  * them. Plain byte-at-a-time bodies, no attempt at the usual
  * libc-style word-at-a-time/`rep movsb`-style optimization: this
  * exists only to make `kernel.elf` link at all, not as a
- * differential-tested port of anything in /src.
+ * differential-tested port of anything in /src-assem.
  */
 #include <stddef.h>
 

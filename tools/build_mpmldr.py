@@ -4,7 +4,7 @@
 LDBIOS86Q.A86 is this project's QEMU-targeted replacement for the real
 LDBIOS.A86 (standard PC UART + NEC765 floppy controller instead of the
 iSBC 86/12's i8251/i8271 hardware -- see that file's own header comment
-for the rationale, which mirrors src/kernel/XIOS86Q.A86's).
+for the rationale, which mirrors src-assem/kernel/XIOS86Q.A86's).
 
 The real DRI build (orig/mpm862sr/04/MKALL.SUB) does this as:
 
@@ -53,7 +53,7 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LOADER_DIR = os.path.join(ROOT, 'src', 'loader')
+LOADER_DIR = os.path.join(ROOT, 'src-assem', 'loader')
 ASM86 = [sys.executable, os.path.join(ROOT, 'tools', 'asm86.py')]
 
 OFFSET_RE = re.compile(
@@ -75,7 +75,7 @@ BDOSOFFSET_RE = re.compile(
 
 
 def assemble(name, out_dir):
-    """Assemble src/loader/<name>.A86, returning its .cseg.bin path and size."""
+    """Assemble src-assem/loader/<name>.A86, returning its .cseg.bin path and size."""
     src = os.path.join(LOADER_DIR, name + '.A86')
     out_base = os.path.join(out_dir, name)
     result = subprocess.run(ASM86 + [src, '-o', out_base],
@@ -153,7 +153,7 @@ def main():
                           '(default: build/loader/MPMLDR.bin)')
     args = ap.parse_args()
 
-    out_dir = os.path.join(ROOT, 'build', 'loader')
+    out_dir = os.path.join(ROOT, 'src-assem', 'build', 'loader')
     os.makedirs(out_dir, exist_ok=True)
 
     # LDMPM's own assembled size doesn't depend on the *value* of

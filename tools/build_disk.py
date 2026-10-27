@@ -6,7 +6,7 @@ outputs: ROM86Q.bin (tools/build_bootsect.py), MPMLDR.bin
 Those three scripts each produce one piece; nothing until now has
 combined them into an actual disk image, or built the one piece none
 of them produce at all: a real on-disk `MPM.SYS` file, in the format
-`src/loader/LDMPM.A86` documents and checks for itself (read directly
+`src-assem/loader/LDMPM.A86` documents and checks for itself (read directly
 from its own code, not just its header comment -- see the `perr:`/
 `hdrok:` logic around line 140 of that file):
 
@@ -51,7 +51,7 @@ no shortcut here, unlike the loader-level header `ROM86Q.A86` reads
 (that one really is just raw bytes at a fixed disk location, no
 filesystem involved). This script builds that CP/M directory (and the
 whole disk image around it) by hand, from the exact DPB both
-`src/kernel/XIOS86Q.A86` and `src/loader/LDBIOS86Q.A86` already carry
+`src-assem/kernel/XIOS86Q.A86` and `src-assem/loader/LDBIOS86Q.A86` already carry
 (SPT=72 128-byte logical records/CP/M-track, 8192-byte/64-record
 allocation blocks, DSM=176, DRM=63 (64 directory entries), AL0=80h/
 AL1=0 (block 0 reserved for the directory), CKS=16, OFF=2 (2 reserved
@@ -89,7 +89,7 @@ segment"): MPMLDR at 0800h (physical 8000h, clear of the boot sector
 and its stack, which both stay below 7C00h), MPM.SYS's code at 1000h,
 its data immediately after at a paragraph-aligned offset.
 
-After MPM.SYS's own blocks, each of the 18 src/utils/ binaries the
+After MPM.SYS's own blocks, each of the 18 src-assem/utils/ binaries the
 Makefile's own PLM_UTILS list builds, plus TMP/ECHO/CLOCK/SUBMIT.A86
 (see RSP_OK in the Makefile) and MPMSTAT, is written as its own CP/M
 directory entry: <NAME>.CMD for the utilities (and for SUBMIT),
@@ -138,7 +138,7 @@ SECTORS_PER_TRACK = 18
 DISK_SIZE = CYLINDERS * HEADS * SECTORS_PER_TRACK * SECTOR_SIZE
 
 # DPB (see docs/build.md's "What's actually needed to boot under
-# QEMU" item 1/2, and src/kernel/XIOS86Q.A86's/src/loader/
+# QEMU" item 1/2, and src-assem/kernel/XIOS86Q.A86's/src-assem/loader/
 # LDBIOS86Q.A86's own identical DPBs).
 RECORDS_PER_TRACK = 72          # SPT: 128-byte logical records/CP/M track
 BLOCK_SIZE = 8192                # BSH=6, BLM=63
@@ -169,7 +169,7 @@ MPM_CODE_SEG = 0x1000            # physical 10000h
 MPM_HEADER_TYPE_CODE = 1         # LDMPM.A86's own `codetype equ 1`
 MPM_HEADER_TYPE_DATA = 2         # LDMPM.A86's own `datatype equ 2`
 
-# Same 18 names as the Makefile's own PLM_UTILS list (src/utils/*.PLM
+# Same 18 names as the Makefile's own PLM_UTILS list (src-assem/utils/*.PLM
 # that assemble cleanly) -- kept here as a plain literal rather than
 # parsed out of the Makefile, same reasoning as every other hand-kept
 # constant in this script.
@@ -182,7 +182,7 @@ UTIL_NAMES = ['ABORT', 'ATTACH', 'CONS', 'DIR', 'DSKRST', 'ED', 'ERA',
 # TMP/ECHO/CLOCK become <NAME>.RSP; SUBMIT becomes SUBMIT.CMD instead
 # (docs/build.md's own mapping -- it's invoked as a CLI command, not
 # attached to a console the way the RSPs are). MPMSTAT is the
-# Makefile's build/rsp/MPMSTAT (STSRSP.PLM as an RSP). build_mpmsys.py
+# Makefile's src-assem/build/rsp/MPMSTAT (STSRSP.PLM as an RSP). build_mpmsys.py
 # bakes TMP, ECHO, CLOCK and MPMSTAT into MPM.SYS itself (standing in
 # for GENSYS, which would read these files); the disk carries them as
 # DRI's distributions do (TMP.RSP, ECHO.RSP, ...), unpatched.
@@ -203,7 +203,7 @@ RSP_EXT = {'TMP': 'RSP', 'ECHO': 'RSP', 'CLOCK': 'RSP', 'SUBMIT': 'CMD', 'MPMSTA
 # Files already in GENCMD form, copied to the disk byte for byte: DRI's
 # CACHE.RSP (orig/lastdri/22; no source exists -- docs/bugs.md #124),
 # which build_mpmsys.py also bakes into MPM.SYS.
-RAW_FILES = [('CACHE', 'RSP', os.path.join('src', 'rsp', 'CACHE.RSP'))]
+RAW_FILES = [('CACHE', 'RSP', os.path.join('src-assem', 'rsp', 'CACHE.RSP'))]
 
 # Disk names that differ from the build's: STSCMD.PLM's own header
 # ("ren mpmstat.cmd=stscmd.cmd") -- with the MPMSTAT RSP resident,
@@ -306,25 +306,24 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('-o', '--output', default=None,
                      help='output path for the disk image '
-                          '(default: build/disk/mpm86q.img)')
+                          '(default: src-assem/build/disk/mpm86q.img)')
     args = ap.parse_args()
 
-    out_dir = os.path.join(ROOT, 'build', 'disk')
+    out_dir = os.path.join(ROOT, 'src-assem', 'build', 'disk')
     os.makedirs(out_dir, exist_ok=True)
 
     run('build_bootsect.py')
     run('build_mpmldr.py')
     run('build_mpmsys.py')
 
-    # The 18 src/utils/ utilities have no single build_*.py of their
+    # The 18 src-assem/utils/ utilities have no single build_*.py of their
     # own (the Makefile compiles+assembles each one directly) -- ask
-    # `src/Makefile` owns the utility/RSP rules and uses paths relative
-    # to src/, so invoke it there and address the shared build directory
-    # one level up.
-    util_targets = [f'../build/utils/{name}.cseg.bin' for name in UTIL_NAMES]
-    rsp_targets = [f'../build/rsp/{name}.cseg.bin' for name in RSP_NAMES]
+    # `src-assem/Makefile` owns the utility/RSP rules and uses paths relative
+    # to src-assem/, so invoke it there, with its build directory, src-assem/build/.
+    util_targets = [f'build/utils/{name}.cseg.bin' for name in UTIL_NAMES]
+    rsp_targets = [f'build/rsp/{name}.cseg.bin' for name in RSP_NAMES]
     result = subprocess.run(['make', *util_targets, *rsp_targets],
-                             cwd=os.path.join(ROOT, 'src'),
+                             cwd=os.path.join(ROOT, 'src-assem'),
                              capture_output=True, text=True)
     if result.returncode != 0:
         sys.stderr.write(result.stdout)
@@ -332,13 +331,13 @@ def main():
         raise SystemExit("make (utils/rsp) failed")
     sys.stdout.write(result.stdout)
 
-    with open(os.path.join(ROOT, 'build', 'loader', 'ROM86Q.bin'), 'rb') as f:
+    with open(os.path.join(ROOT, 'src-assem', 'build', 'loader', 'ROM86Q.bin'), 'rb') as f:
         bootsect = f.read()
-    with open(os.path.join(ROOT, 'build', 'loader', 'MPMLDR.bin'), 'rb') as f:
+    with open(os.path.join(ROOT, 'src-assem', 'build', 'loader', 'MPMLDR.bin'), 'rb') as f:
         mpmldr = f.read()
-    with open(os.path.join(ROOT, 'build', 'kernel', 'MPM.bin.cseg'), 'rb') as f:
+    with open(os.path.join(ROOT, 'src-assem', 'build', 'kernel', 'MPM.bin.cseg'), 'rb') as f:
         mpm_code = f.read()
-    with open(os.path.join(ROOT, 'build', 'kernel', 'MPM.bin.dseg'), 'rb') as f:
+    with open(os.path.join(ROOT, 'src-assem', 'build', 'kernel', 'MPM.bin.dseg'), 'rb') as f:
         mpm_data = f.read()
 
     assert len(bootsect) == SECTOR_SIZE
@@ -373,7 +372,7 @@ def main():
             f"than this disk's DPB has ({TOTAL_BLOCKS - DIR_BLOCKS} "
             "available for data)")
 
-    # -- the 18 src/utils/ utilities (as <NAME>.CMD) and ECHO.RSP/
+    # -- the 18 src-assem/utils/ utilities (as <NAME>.CMD) and ECHO.RSP/
     # CLOCK.RSP/SUBMIT.CMD, each code+data combined the same way as
     # MPM.SYS above, one directory entry per file (more if > 16KB,
     # same multi-extent logic), continuing on from MPM.SYS's own
@@ -383,7 +382,7 @@ def main():
         [(n, 'CMD', 'utils') for n in UTIL_NAMES] +
         [(n, RSP_EXT[n], 'rsp') for n in RSP_NAMES]
     ):
-        stem = os.path.join(ROOT, 'build', build_dir, name)
+        stem = os.path.join(ROOT, 'src-assem', 'build', build_dir, name)
         with open(f'{stem}.cseg.bin', 'rb') as f:
             code = f.read()
         with open(f'{stem}.dseg.bin', 'rb') as f:

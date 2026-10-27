@@ -1,7 +1,7 @@
 # Bugs Found in the Original MP/M-86 2.x Source
 
 While validating the assembler built in `tools/asm86/` against the files
-copied into `src/`, assembly failed on several sources with genuine
+copied into `src-assem/`, assembly failed on several sources with genuine
 defects in the original 1981 Digital Research source itself — not bugs
 in the assembler. These were confirmed by reading the surrounding code,
 not just by the assembler's error message.
@@ -23,7 +23,7 @@ name typos, the `LDBDOS.A86` fixed-offset interaction with
 `tools/asm86`'s raw-binary output, the `tools/asm86` port-truncation
 bug, `ROM86Q.A86`'s own two real runtime bugs, and `LDBIOS86Q.A86`'s
 relative-jump-to-an-absolute-address bug)
-**have been patched** directly in `src/kernel/`/`src/loader/`,
+**have been patched** directly in `src-assem/kernel/`/`src-assem/loader/`,
 `tools/asm86/`, or `tools/build_mpmldr.py` — once a fix is this
 confidently evidence-backed (an exact squashed-name match to a real
 declaration used incorrectly nowhere else, a byte-level confirmation of
@@ -38,7 +38,7 @@ unpatched: either no confident fix exists (an undeclared symbol with no
 same-file candidate), or fixing it isn't a source-level change at all
 (the short-jump-range tooling trade-off).
 
-## 1. `src/rsp/CLOCK.A86` — jump to a label that doesn't exist — FIXED
+## 1. `src-assem/rsp/CLOCK.A86` — jump to a label that doesn't exist — FIXED
 
 The clock-update loop is entered at a label spelled `clockloop:`
 (line 64), but all four jumps back to the top of the loop reference
@@ -60,7 +60,7 @@ RSP cannot assemble at all with any assembler, let alone run.
 matching the real label — no other candidate label exists in the
 file, so there's no ambiguity about intent.
 
-## 2. `src/rsp/TMP.A86` — call to a label that doesn't exist — FIXED
+## 2. `src-assem/rsp/TMP.A86` — call to a label that doesn't exist — FIXED
 
 Line 147 called `print_string`:
 
@@ -78,7 +78,7 @@ file caught up to say so) by changing it to `call printstring` — no
 other candidate label exists in the file, so there's no ambiguity
 about intent.
 
-## 3. `src/rsp/SUBMIT.A86` — two mismatched labels and one missing routine — FIXED
+## 3. `src-assem/rsp/SUBMIT.A86` — two mismatched labels and one missing routine — FIXED
 
 Three separate defects in one file:
 
@@ -110,7 +110,7 @@ Three separate defects in one file:
 third, exact-name) match to a real declaration used correctly
 elsewhere in the file, no other candidate in any of the 3 cases.
 
-## Reclassified: `src/utils/ED.PLM`'s `TIME` is not a bug
+## Reclassified: `src-assem/utils/ED.PLM`'s `TIME` is not a bug
 
 An earlier version of this document flagged `ED.PLM`'s
 `WAIT: PROCEDURE;` (line 1264, a half-second busy-wait delay loop
@@ -127,7 +127,7 @@ an exact match for the delay's own comment, "1/2 SECOND TIME OUT." A
 real, documented PL/M standard-library builtin, not a dropped
 declaration — see `tools/plm/README.md` for the implementation.
 
-## Reclassified: `src/utils/SET.PLM`'s `MOVW` is not a bug
+## Reclassified: `src-assem/utils/SET.PLM`'s `MOVW` is not a bug
 
 An earlier version of this document flagged `SET.PLM` line 929's
 `MOVW(@UDA.DF$PASSWORD,@UDA$PARENT.DF$PASSWORD,4)` as a likely bug, by
@@ -142,7 +142,7 @@ evidence, even without a second call site to cross-reference against, to
 treat it as a genuine (if undocumented) PL/M-86 compiler builtin rather
 than a defect — see `tools/plm/README.md` for the implementation.
 
-## 4. `src/kernel/BDOS.A86` — pervasive dropped/added underscores (45 names) — FIXED
+## 4. `src-assem/kernel/BDOS.A86` — pervasive dropped/added underscores (45 names) — FIXED
 
 Assembling `BDOS.A86` (after the tooling fixes in `tools/README.md` —
 this is genuinely the source, not the assembler) used to stop on a long
@@ -184,7 +184,7 @@ After all of the above, `BDOS.A86` assembles end-to-end cleanly (the
 short-jump-range tooling trade-off that used to block it, see #6, is
 now fixed too).
 
-## 5. `src/kernel/ABORT.RTM` — five more of the same, inside one file — FIXED
+## 5. `src-assem/kernel/ABORT.RTM` — five more of the same, inside one file — FIXED
 
 Within a single file: `snipit`→`snip_it` (declared in the same file);
 `fpdq_nxt_q`→`fpdq_nxtq` (an *added* underscore this time, not dropped);
@@ -214,7 +214,7 @@ mechanism). All five files named above — `BDOS.A86`, `MEM.A86`,
 `RTM.A86`, `SUP.A86`, `LDBIOS.A86` — now assemble end-to-end with no
 remaining blocker at all.
 
-## 7. `src/kernel/XIOS.A86` — two underscore typos — FIXED
+## 7. `src-assem/kernel/XIOS.A86` — two underscore typos — FIXED
 
 Line 611, `mov word ptr .088h,offset tick_int`, used `tick_int` where
 the label actually declared (line 349) is `tickint` (no underscore) —
@@ -223,7 +223,7 @@ the same bug class as everywhere else on this page. **Patched.**
 Separately, line 897's `add ax,offset dp_base` references `dp_base`,
 which is **not** declared anywhere in `XIOS.A86` itself, nor anywhere
 else in the whole 11-disk tree under that spelling. The real
-declaration is `dpbase equ $` in `src/kernel/SINGLES.LIB` line 2 (base
+declaration is `dpbase equ $` in `src-assem/kernel/SINGLES.LIB` line 2 (base
 of the Disk Parameter Blocks), which `XIOS.A86` already pulls in via
 `include singles.lib` (line 1551) — the exact same added-underscore bug
 class as bug #8's `dp_base`/`dpbase` fix in `LDBIOS.A86`, just never
@@ -234,13 +234,13 @@ its own. Cross-confirmed against `LDBIOS.A86`'s own correct usage
 
 With both typos fixed, `XIOS.A86` assembles cleanly on its own
 (confirmed via `tools/asm86`, `dpbase = 0x16d1`) and has been added to
-`src/Makefile`'s `KERNEL_OK` validation list. Since `docs/build.md`
+`src-assem/Makefile`'s `KERNEL_OK` validation list. Since `docs/build.md`
 already excludes `XIOS.A86`/`ROM.A86` from the QEMU-bootable target
 (they're written for the Intel iSBC 86/12 + SBC 204 specifically,
 replaced there by `XIOS86Q.A86`), it is validated standalone but still
 not combined into the actual `MPM.bin`.
 
-## 8. `src/loader/LDBIOS.A86` — four more dropped/added underscores, one file — FIXED
+## 8. `src-assem/loader/LDBIOS.A86` — four more dropped/added underscores, one file — FIXED
 
 `ccpoffset`→`ccp_offset`, `dp_base`→`dpbase`, `seg_table`→`segtable`,
 and `z_ret`→`zret` — the same bug class, all four within this one file,
@@ -252,12 +252,12 @@ Separately (not a bug in this file, noted here only for
 cross-reference): `LDBIOS.A86`'s iSBC 86/12/iSBC 204/8251-specific
 disk and console drivers, like `XIOS.A86`'s own (#7), have no QEMU
 equivalent, so `tools/build_mpmldr.py` builds `MPMLDR.bin` from a new
-`src/loader/LDBIOS86Q.A86` instead — not a fix to this file, a parallel
+`src-assem/loader/LDBIOS86Q.A86` instead — not a fix to this file, a parallel
 replacement targeting different hardware. See `docs/build.md`'s "What's
 actually needed to boot under QEMU" item 1 and that new file's own
 header comment.
 
-## 9. `src/loader/LDMPM.A86` — underscore typo — FIXED
+## 9. `src-assem/loader/LDMPM.A86` — underscore typo — FIXED
 
 Line 57, `abs_zero rw 2*bdosint`, used `bdosint` where `bdos_int` is
 declared earlier in the very same file (line 48, `bdos_int equ 224`,
@@ -270,7 +270,7 @@ dimensionally: `2 * 224` words reserves exactly enough space for an
 8086 interrupt-vector table (2 words per vector) covering vectors `0`
 through `224`. **Patched.**
 
-## 10. `src/loader/ROM.A86` — three more underscore typos — FIXED
+## 10. `src-assem/loader/ROM.A86` — three more underscore typos — FIXED
 
 Three separate instances of the same bug class, all within this one
 file: line 264's `in al,fdc_stat` used `fdc_stat` where `fdcstat` (no
@@ -288,7 +288,7 @@ genuine DRI ASM86 operator — evaluating to the total byte length of a
 that this assembler didn't implement at all. Fixed in `tools/asm86`
 (see `tools/README.md`).
 
-## 11. `src/loader/LDBDOS.A86` — its own fixed-offset EQUs silently broke at runtime under `tools/asm86` — FIXED
+## 11. `src-assem/loader/LDBDOS.A86` — its own fixed-offset EQUs silently broke at runtime under `tools/asm86` — FIXED
 
 Not a dropped/added underscore like the rest of this page, and not
 caught by assembly failing (it assembles cleanly either way) — found
@@ -322,7 +322,7 @@ would have jumped into whatever code happened to be sitting at the
 wrong address instead of the real BIOS functions.
 
 **Fixed**, in two parts:
-- `src/loader/LDBDOS.A86`'s own `bdosoffset` is now permanently `0` —
+- `src-assem/loader/LDBDOS.A86`'s own `bdosoffset` is now permanently `0` —
   this module no longer self-positions via its own `org`; its place in
   the final image is purely `tools/build_mpmldr.py`'s sequential
   concatenation, the same as `LDMPM.A86`/`LDBIOS86Q.A86`.
@@ -342,7 +342,7 @@ entries within it.
 
 ## 12. `tools/asm86` — immediate IN/OUT silently truncated ports >= 256 to 8 bits — FIXED
 
-Found by actually running `src/loader/ROM86Q.A86` in QEMU for the first
+Found by actually running `src-assem/loader/ROM86Q.A86` in QEMU for the first
 time (see docs/build.md's "What's actually needed to boot under QEMU"
 item 3) — the first and only code in this whole project to have
 actually executed, rather than just assembled and been reviewed by
@@ -363,15 +363,15 @@ opcode with its port truncated to `0FBh`, not the 3-byte `mov dx,03FBh
   immediate port `>= 0x100` at assembly time (the 8086's only way to
   address such a port is through `DX`), instead of silently truncating
   it.
-- Every real occurrence this caught — `src/kernel/XIOS86Q.A86`,
-  `src/loader/LDBIOS86Q.A86`, `src/loader/ROM86Q.A86` (all three new,
+- Every real occurrence this caught — `src-assem/kernel/XIOS86Q.A86`,
+  `src-assem/loader/LDBIOS86Q.A86`, `src-assem/loader/ROM86Q.A86` (all three new,
   QEMU-target files using the 8250 UART and/or NEC765 FDC, the only
   ports in this tree above 0xFF) — was changed to `mov dx,port ! in/out
   al,dx`, preserving `DX` across `fdc_out_byte`/`fdc_in_byte` with an
   explicit `push dx`/`pop dx` where their own header comments already
   promised not to disturb any register but `AL`/flags.
 
-## 13. `src/loader/ROM86Q.A86` — a 512-byte sector read into a 9-byte buffer — FIXED
+## 13. `src-assem/loader/ROM86Q.A86` — a 512-byte sector read into a 9-byte buffer — FIXED
 
 Also found by the same first real QEMU boot. `INT 13h` always
 transfers one full 512-byte physical sector regardless of how much of
@@ -393,7 +393,7 @@ resolved to the *immediate* value `0x501`, not a memory dereference —
 `hdr_scratch` is a bare `EQU` constant, not a label backed by reserved
 storage, so there's no way for the assembler to tell "the number 0x500
 used as an address" apart from "the number 0x500 used as a value" from
-that syntax alone (unlike `src/kernel/XIOS86Q.A86`'s own `read_parms+2`
+that syntax alone (unlike `src-assem/kernel/XIOS86Q.A86`'s own `read_parms+2`
 style, which works because `read_parms` *is* a real label). **Fixed**
 by using register-indexed addressing instead (`word ptr 1[bx]`, with
 `BX` already holding `hdr_scratch` from the disk read) — the same
@@ -408,7 +408,7 @@ into `MPMLDR` — the first piece of this entire project confirmed
 running correctly on real (emulated) hardware, not just assembled and
 reviewed by hand.
 
-## 14. `src/loader/LDBIOS86Q.A86` — a relative jump used to reach an absolute cross-module address — FIXED (but booting is still blocked past this point)
+## 14. `src-assem/loader/LDBIOS86Q.A86` — a relative jump used to reach an absolute cross-module address — FIXED (but booting is still blocked past this point)
 
 Found continuing the same QEMU boot testing as #12/#13, after those two
 fixes got the boot sector and `MPMLDR.bin`'s own loading fully working
@@ -448,7 +448,7 @@ made the indirect jump unnecessary in the first place) and #16-#19 for
 everything else this same investigation turned up before the loader
 finally booted past `LDMPM.A86`'s own signon message.
 
-## 15. `src/loader/LDBIOS86Q.A86` — *every* local `offset`/direct
+## 15. `src-assem/loader/LDBIOS86Q.A86` — *every* local `offset`/direct
 reference was wrong the same way as #14, not just the one jump — FIXED
 
 The #14 jump wasn't a one-off: *every* plain `offset <label>` or
@@ -482,11 +482,11 @@ with that. `tools/build_mpmldr.py` strips the resulting leading
 from 0 up to any `org` target) before concatenating this module's real
 content.
 
-## 16. `src/loader/LDBIOS86Q.A86` `INIT` — interrupts left enabled the
+## 16. `src-assem/loader/LDBIOS86Q.A86` `INIT` — interrupts left enabled the
 whole way in, so raw FDC port I/O collided with SeaBIOS's own IRQ6
 handler — FIXED
 
-`src/loader/ROM86Q.A86`'s own boot sector re-enables interrupts (`sti`)
+`src-assem/loader/ROM86Q.A86`'s own boot sector re-enables interrupts (`sti`)
 right after setting up `SS:SP`, and nothing in the loader chain ever
 disabled them again — so by the time `INIT` started doing raw FDC
 register writes, IRQ6 (floppy) was still unmasked and still vectored
@@ -526,7 +526,7 @@ Reproduced in total isolation, outside this project's multi-module
 build entirely: a minimal boot sector that does `jmpf dword ptr
 leap_off` (the exact same idiom `ROM86Q.A86` uses to enter `MPMLDR`,
 and the exact idiom several `callf dword ptr .xiosmod`-style indirect
-calls in `src/kernel/INIT.SUP`/`SUPIF.SUP` use) landed with `CS=0`
+calls in `src-assem/kernel/INIT.SUP`/`SUPIF.SUP` use) landed with `CS=0`
 instead of the real target segment, confirmed by reading back the
 landed `CS` from memory.
 
@@ -554,10 +554,10 @@ constant prescanned with the wrong size, destabilizing jump-size
 relaxation — FIXED
 
 Fixing #17 also corrected several previously-broken `callf dword ptr
-.xiosmod`/`.netmod`-style indirect calls in `src/kernel/SUPIF.SUP`/
+.xiosmod`/`.netmod`-style indirect calls in `src-assem/kernel/SUPIF.SUP`/
 `INIT.SUP` that were silently wrong the same way — but fixing those
 changed code sizes enough to expose this second, independent bug:
-`src/kernel/SUP.A86` started failing to assemble with `LOAD.SUP:78:
+`src-assem/kernel/SUP.A86` started failing to assemble with `LOAD.SUP:78:
 conditional/loop branch out of range (rel=129) after relaxation` —
 `tools/asm86`'s own short-jump relaxation pass (#6) is supposed to
 catch exactly this and grow the jump to its long form, so a relaxed
@@ -599,7 +599,7 @@ and a register read back right after a `call`/`ret` through
 despite every instruction in that call chain checking out byte-for-
 byte correct by hand. Found by disassembling `fdc_out_byte`'s own
 assembled bytes directly: `mov cs:outbyte_tmp,al` (this file's own
-NEC765 driver, shared with `src/kernel/XIOS86Q.A86`) encoded as
+NEC765 driver, shared with `src-assem/kernel/XIOS86Q.A86`) encoded as
 `88 2E 06 ...` — opcode first, *then* the `CS` prefix byte (`0x2E`) —
 instead of `2E 88 06 ...`. A segment-override prefix has to be the
 very first byte of an instruction; with it stuck in the middle, the
@@ -620,7 +620,7 @@ from the operand list and prepends it to whatever the mnemonic-
 specific encoder (now `_encode_body`) returns, for every mnemonic
 uniformly.
 
-## 20. `src/loader/LDBDOS.A86` — the exact same `org 0` addressing bug
+## 20. `src-assem/loader/LDBDOS.A86` — the exact same `org 0` addressing bug
 as #15, the opposite way around — FIXED
 
 With #16-#19 fixed, `INIT`/`LDMPM.A86`'s own handoff worked and the
@@ -669,8 +669,8 @@ wasn't treated as an unknown instruction (which would have raised a
 clear error); `parse_statement` instead read it as a bare, harmless
 label definition with nothing after it, and the assembler silently
 emitted *no bytes* for it at all. Every file using `iret`
-(`LBDOSENT.A86`, `src/kernel/SUPIF.SUP`, `src/kernel/DSPTCH.RTM`, and
-two `src/toolchain/` files) was affected the same way, each one byte
+(`LBDOSENT.A86`, `src-assem/kernel/SUPIF.SUP`, `src-assem/kernel/DSPTCH.RTM`, and
+two `src-assem/toolchain/` files) was affected the same way, each one byte
 short exactly where its own `IRET` should have been.
 
 **Fixed** by adding `'iret': 0xCF` to `NO_OPERAND` in `tools/asm86/
@@ -752,7 +752,7 @@ padding included; skipping the pad would also make the `lenok:` check
 fail falsely whenever a segment isn't already a whole number of
 paragraphs.
 
-## 24. `src/loader/LDBIOS86Q.A86`/`src/kernel/XIOS86Q.A86` --
+## 24. `src-assem/loader/LDBIOS86Q.A86`/`src-assem/kernel/XIOS86Q.A86` --
 `rw_physical` decremented an already-0-based sector number, silently
 reading from one 128-byte logical record too early every time — FIXED
 
@@ -774,7 +774,7 @@ the `E5` bytes) each time, by exactly one 128-byte logical record.
 The cause: `rw_physical`'s very first instruction, `mov al,sect ! dec
 al`, assumed `sect` arrives 1-based and needs converting to 0-based --
 documented as such in `XIOS86Q.A86`'s own header comment for this
-routine. But `src/loader/LBDOSF1.A86`'s `seek` (real, unmodified DRI
+routine. But `src-assem/loader/LBDOSF1.A86`'s `seek` (real, unmodified DRI
 source -- the only caller, via `SETSEC`, that ever sets `sect`) passes
 the raw, already-0-based `DX` remainder from `div sectpt` straight
 through with no `+1` anywhere -- so the extra `dec al` silently
@@ -795,17 +795,17 @@ Address"/"Data Paragraph Address"/"Last Paragraph" memory-map lines it
 only prints after a fully successful load) and jumps into the actual
 MP/M-86 kernel for the first time this project has ever gotten that
 far -- which is also where it currently stops (silently, no further
-output): `src/kernel/SUP.A86`'s own kernel initialization has never
+output): `src-assem/kernel/SUP.A86`'s own kernel initialization has never
 been exercised in any form before this, a new frontier past everything
 #1-#24 covered.
 
-## 25. `src/loader/LDMPM.A86` — `jmpf mpm` read the far pointer to jump
+## 25. `src-assem/loader/LDMPM.A86` — `jmpf mpm` read the far pointer to jump
 to from the wrong segment — FIXED
 
 Found continuing from #24: with `MPM.SYS` loading completely correctly,
 `LDMPM.A86` reached its own final `gompm: jmpf mpm` -- and execution
 never reached `MPM.SYS`'s own `init:` (its very first instruction,
-`src/kernel/INIT.SUP`) at all, confirmed by a debug probe placed at
+`src-assem/kernel/INIT.SUP`) at all, confirmed by a debug probe placed at
 that label never printing.
 
 The cause: `mov ds,dldseg` (a few lines earlier, switching `DS` to
@@ -878,7 +878,7 @@ matching every one of this convention's other users in the tree (every
 `XXXlen equ ... + byte/word/dword` struct-length constant), none of
 which are meant to describe a sized memory reference either.
 
-## 28. `src/loader/LBDOSF1.A86`'s `seek` — read `SECTRAN`'s return
+## 28. `src-assem/loader/LBDOSF1.A86`'s `seek` — read `SECTRAN`'s return
 value from the wrong register, corrupting every physical sector number
 whenever disk sector translation is disabled — FIXED
 
@@ -1644,7 +1644,7 @@ probes across the tree (checked via a quick per-character `grep -rl`
 sweep); pick an unused one before adding a new probe, or two unrelated
 probes' output becomes indistinguishable in the trace.
 
-All fixes from this entry are in `src/kernel/DSPTCH.RTM` and
+All fixes from this entry are in `src-assem/kernel/DSPTCH.RTM` and
 `tools/asm86/expr.py`; the temporary diagnostic probes added and then
 *not* removed (`CHARIO.CIO`'s `cdbg`/`'|'`/`'_'`/`` '`' ``,
 `SYSENT.RTM`'s `','`, `DSPTCH.RTM`'s `'['`/`'<'`/`'>'`) are left in
@@ -1775,7 +1775,7 @@ table index across `getdiskmx`'s own body) to the final `pop si`
 (right before `CALL_BDOS` dispatches through it) using a raw, non-
 printable marker byte (`0x07`/`0x08`, since every printable ASCII
 character is now claimed by some existing probe -- confirmed by a
-`grep -rl "'<char>'"` sweep across the whole `src/kernel/` tree) to
+`grep -rl "'<char>'"` sweep across the whole `src-assem/kernel/` tree) to
 dump `SI` at each end: it changed from a plausible-looking value
 (`4184h`) to obvious garbage (`7580h`) *somewhere in between*, and
 `CALL_BDOS`'s own call target (`cs:btab_addr[si]`) read back `1000h`
@@ -1880,8 +1880,8 @@ name -- the loader's own use was deliberately left untouched, since
 reverting the assembler change already restores its previously-working
 behavior and this session never diagnosed it as actually broken).
 `grep -rn "equ.*(offset.*-.*(offset\|equ.*offset \$-"` across
-`src/kernel/` turned up exactly these four EQU definitions and no
-others; a future session touching `src/loader/` should run the same
+`src-assem/kernel/` turned up exactly these four EQU definitions and no
+others; a future session touching `src-assem/loader/` should run the same
 grep there before assuming the loader's own `dpblist` is safe to leave
 alone forever.
 
@@ -1985,11 +1985,11 @@ since they now dominate the trace at this scale.
 
 All temporary diagnostic probes added and removed during this entry's
 own bisection were cleaned up afterward (`git diff --stat
-src/kernel/PROC.RTM` is empty) -- the only real, permanent fix is the
+src-assem/kernel/PROC.RTM` is empty) -- the only real, permanent fix is the
 one-line `tools/build_mpmsys.py` patch described above, plus its
 `ENDSEG_FIELD_OFFSET` constant and explanatory comment.
 
-## 36. Wiring up `src/rsp/TMP.A86` (the real MP/M-86 shell) as the
+## 36. Wiring up `src-assem/rsp/TMP.A86` (the real MP/M-86 shell) as the
 system's first RSP -- one genuine new kernel bug found and fixed
 (`INIT.SUP`'s own `nrsp:` loop), substantial new build-system support
 added, but one more real bug still blocking `f_createproc` itself,
@@ -2000,12 +2000,12 @@ nothing except `IDLE`/`TICK` ever running, since `INIT` terminates
 without anything to hand off to. Checked `tools/build_disk.py`'s own
 comments first, as asked: confirmed, in its own words, "no CCP/process
 loader exists anywhere in this tree yet to actually read a .CMD/.RSP
-file and run it." But `src/rsp/TMP.A86` -- the *real* MP/M-86 Terminal
+file and run it." But `src-assem/rsp/TMP.A86` -- the *real* MP/M-86 Terminal
 Message Process (its actual console/shell equivalent, not a CP/M-style
 CCP) -- already exists in this tree, just never wired to anything,
 with exactly one known, trivial, already-diagnosed bug (docs/bugs.md
 #2: `call print_string` should be `call printstring`, line 147).
-Fixed directly in `src/rsp/TMP.A86` itself this time (unlike #1/#3,
+Fixed directly in `src-assem/rsp/TMP.A86` itself this time (unlike #1/#3,
 left alone) -- the project's own stated policy for kernel/loader files
 ("once a fix is this confidently evidence-backed... leaving it broken
 forever didn't serve the 'get this booting' goal") applies just as
@@ -2123,16 +2123,16 @@ watchpoints -- worth a fresh, patient attempt, or falling back to more
 marker-byte probes, next time).
 
 All of this round's temporary diagnostic probes remain in place in
-`src/kernel/PROC.RTM`, `src/kernel/SYSENT.RTM`, and `src/kernel/
+`src-assem/kernel/PROC.RTM`, `src-assem/kernel/SYSENT.RTM`, and `src-assem/kernel/
 SUPIF.SUP` (markers `0x19`-`0x1F` as raw, non-printable bytes --
 printable ASCII is now fully exhausted across the tree) alongside the
-two real fixes (`src/kernel/INIT.SUP`, `tools/build_mpmsys.py`) and
-TMP's own one-line fix (`src/rsp/TMP.A86`).
+two real fixes (`src-assem/kernel/INIT.SUP`, `tools/build_mpmsys.py`) and
+TMP's own one-line fix (`src-assem/rsp/TMP.A86`).
 
 ## Status of the kernel/loader sources
 
-`src/kernel/CIO.A86`, `SYSDAT.A86`, `BDOS.A86`, `MEM.A86`, `RTM.A86`,
-`SUP.A86`, and all four of `src/loader/LDBDOS.A86`/`LDBIOS.A86`/
+`src-assem/kernel/CIO.A86`, `SYSDAT.A86`, `BDOS.A86`, `MEM.A86`, `RTM.A86`,
+`SUP.A86`, and all four of `src-assem/loader/LDBDOS.A86`/`LDBIOS.A86`/
 `LDMPM.A86`/`ROM.A86` now compile and assemble cleanly end-to-end. Every
 source-level defect found in `BDOS.A86`, `RTM.A86`, `LDBIOS.A86`,
 `LDMPM.A86`, and `ROM.A86` has been fixed (#4, #5, #8, #9, #10) — what
@@ -2140,7 +2140,7 @@ first looked like two genuinely unresolved symbols in #9/#10 turned out,
 on closer inspection, to be the same underscore-typo bug class as
 everywhere else — and the short-jump-range tooling trade-off that used
 to additionally block several of these is also fixed now that
-`tools/asm86` does real jump-size relaxation (#6). Only `src/kernel/
+`tools/asm86` does real jump-size relaxation (#6). Only `src-assem/kernel/
 XIOS.A86` remains blocked, on one genuinely unresolved symbol
 (`dp_base`, #7) with no confident fix available from evidence in this
 tree even after a second, closer look — its one fixable typo
@@ -2153,7 +2153,7 @@ in `LDBDOS.A86` (disk select, home/recalibrate, DMA sector reads,
 directory scan, `MPM.SYS` file lookup), and a complete, verified-
 correct load of the real on-disk `MPM.SYS` into memory (#15-#24, #28
 above) — no longer hanging or failing anywhere in the loader. It then
-jumps into the actual MP/M-86 kernel (`src/kernel/INIT.SUP`'s own
+jumps into the actual MP/M-86 kernel (`src-assem/kernel/INIT.SUP`'s own
 `init:`, #25) and, for the first time this project has ever gotten
 this far, successfully initializes every kernel module in turn --
 `RTM` (#26, #27), `MEM`, `BDOS`, `CIO`, and `XIOS` -- including `RTM`'s
@@ -2344,7 +2344,7 @@ methodology note below):**
   push dx ! push si / ... / pop dx ! jmp proc_creat` at the very end)
   fires a *second* time for TMP specifically, with a nonzero `dx`
   (observed as `0x04CF` via the existing `0x1F` probe) -- even though
-  TMP's own static PD data (`src/rsp/TMP.A86`'s `pd: dw 0,0 ;link
+  TMP's own static PD data (`src-assem/rsp/TMP.A86`'s `pd: dw 0,0 ;link
   fields`) declares `p_link=0`, which should make this chain
   terminate immediately after the one real creation. This means
   either the copied-in PD's `p_link` field isn't really 0 by the time
@@ -2853,7 +2853,7 @@ idle with no `proc_creat` involvement at all, matching this round's
 re-derivation far better than #41's "second `proc_creat` call"
 framing did. Added one minimal, `0Eh`-probe-style check -- a single
 marker (raw byte `0x15`, confirmed unused via a non-deduped grep
-across the whole `src/kernel/` tree first) right at `abort_spec_entry`'s
+across the whole `src-assem/kernel/` tree first) right at `abort_spec_entry`'s
 own entry, dumping the incoming `DX` (APB address) via `ydbg`. Result,
 repeated 3 times for stability: the marker **never fired**, and
 -- unlike every other probe added successfully this session --
@@ -2992,11 +2992,11 @@ probe above), and re-verify the known-good 2140-byte stopping point
 immediately after adding it, before trusting anything it reports.
 
 The RSP sources (`CLOCK.A86`, `ECHO.A86`, `TMP.A86`, `SUBMIT.A86`) and
-all 22 `.PLM` utilities in `src/utils/`/`src/toolchain/` compile and
+all 22 `.PLM` utilities in `src-assem/utils/`/`src-assem/toolchain/` compile and
 assemble cleanly end-to-end (`ECHO.A86` and every `.PLM` file — see
 `tools/plm/README.md`) except where documented above. See
 `tools/README.md` and `tools/plm/README.md` for how to run the
-assembler/compiler yourself, and `src/Makefile`/
+assembler/compiler yourself, and `src-assem/Makefile`/
 `.github/workflows/build.yml` for the automated, continuously-validated
 build of everything confirmed to work.
 
@@ -3291,7 +3291,7 @@ previous capture this session:
   `17h`/`18h` probes, which still agree with each other, consistent
   with #45's negative result standing) -- takes the `int_disp_exit`/
   `iret` path to actually start running it.
-- Added a brand-new probe (marker `27h`, `src/rsp/TMP.A86`) at `tmp:`,
+- Added a brand-new probe (marker `27h`, `src-assem/rsp/TMP.A86`) at `tmp:`,
   `TMP`'s own real program-entry label (as opposed to `mpm:`, its
   internal `int mpmint!ret` trampoline) -- **it never fires**, in three
   separate rebuilds. The trace goes completely and permanently silent
@@ -4765,7 +4765,7 @@ decide, for each one, whether it needs the same `! cli` guard, rather
 than waiting for probes to find each one by accident.
 
 **Did exactly that.** Grepped every bare `sti` in the whole kernel
-(`src/kernel/*.*` and `src/rsp/*.*`). Only three exist in total,
+(`src-assem/kernel/*.*` and `src-assem/rsp/*.*`). Only three exist in total,
 all in `DSPTCH.RTM`: the one in `dispin` (just fixed above),
 `schedule:`'s own (`"we can enable interrupts now... there MUST be a
 process on the RLR at this point"`), and `drltorlr`'s loop-tail
@@ -5262,7 +5262,7 @@ merely slow.
 
 **Mapped `1000:4D85` to real source.** `build_mpmsys.py`'s own printed
 module bases put this flat offset inside `BDOS` (base `0x447e`, local
-offset `0x907`), and `asm86.py --symbols src/kernel/BDOS.A86` plus a
+offset `0x907`), and `asm86.py --symbols src-assem/kernel/BDOS.A86` plus a
 direct byte dump of `build/kernel/MPM.bin.cseg` at that exact offset
 (`f7 36 48 0c` = `DIV WORD PTR [0C48h]`) pinned it precisely to
 `FILE1.BDO`'s `seek:` routine -- specifically its `DIV SECTPT`
@@ -5291,7 +5291,7 @@ every field BDOS reads back by one word: `dpbaddr` ended up holding
 pulled `csv0`'s zero-initialized 16 bytes instead of the real DPB,
 leaving `sectpt` (and everything else in that struct) permanently
 zero. Confirmed this wasn't a design choice but a genuine divergence:
-`src/loader/LDBIOS86Q.A86`'s own DPH (explicitly commented as needing
+`src-assem/loader/LDBIOS86Q.A86`'s own DPH (explicitly commented as needing
 to stay identical to this one, same physical disk) *does* have the
 DIRBUF word in the right place (`dw dirbuf,dpb0 ! dw csv0,alv0`).
 Fixed by adding a `dirbuf0 rb 128` buffer and wiring it into `dph0` at
@@ -5369,7 +5369,7 @@ bytes (confirmed via `EDI`/`ECX` against `secbuf`'s own symbol
 address) before stalling.
 
 **Recognized this as an already-solved problem, not a new one.**
-`src/loader/LDBIOS86Q.A86`'s own copy of this exact driver has a
+`src-assem/loader/LDBIOS86Q.A86`'s own copy of this exact driver has a
 detailed comment (and `docs/bugs.md` #22) describing the identical
 symptom and its fix: pure PIO for the full `fd_secsize` data phase
 genuinely stalls after a handful of bytes on this QEMU target's
@@ -7166,7 +7166,7 @@ never answered" defaults, same bug class as `pul`/`qul`/`ccb`/`srchdisk`
 above). All three are fixed in `tools/build_mpmsys.py`, plus a large
 mechanical cleanup (described below) of every `TEMP DEBUG PROBE`/`TEMP
 DIAGNOSTIC` instruction this whole investigation has accumulated across
-#43-81, in `src/kernel/*` and `src/rsp/TMP.A86`.
+#43-81, in `src-assem/kernel/*` and `src-assem/rsp/TMP.A86`.
 
 **Starting point this round**: entry #81 left off suspecting the
 mystery nested `f_terminate` was `rsp_out` itself re-executing a second
@@ -8312,7 +8312,7 @@ file turned out wrong under scrutiny. Two ways forward, neither tried:
 (a) a targeted fault-injection test outside QEMU's normal timer path --
 e.g. a one-off patched build that forces a tick IRQ to fire
 synchronously right after `dret`'s `popf` (a debug-only, deliberately
-non-authentic build, not a change to `src/`) and confirms the
+non-authentic build, not a change to `src-assem/`) and confirms the
 predicted stack corruption happens exactly as reasoned; or (b) a
 live GDB session with a breakpoint on `fdisp`'s `do_dispatch` entry
 (not the bail path) that, on each hit, checks whether the *resuming*
@@ -8813,7 +8813,7 @@ and corrupts the real IVT" is now a complete, well-supported causal
 chain, a huge narrowing from #94's own "somewhere in `TMP.A86`'s
 post-`CR` path" vagueness.
 
-**Next step**: read `PROC.RTM`'s `cp_uda` (`src/kernel/PROC.RTM`
+**Next step**: read `PROC.RTM`'s `cp_uda` (`src-assem/kernel/PROC.RTM`
 lines ~70-95, the "set initial segment values"/"set user's stack"
 block already quoted in this file's own #83 write-up for the
 `idle`/`tick` case) side by side with whatever `COMMAND.SUP`/`LOAD.SUP`
@@ -9022,7 +9022,7 @@ first instruction, `jmp init`, the one-time cold-boot entry point**.
 **The `ret` itself identified precisely**: flat `0x1157c` is
 `PROC.RTM`'s own `proc_creat`, at its *own* top-of-routine early-exit
 path -- confirmed byte for byte against the source (`cmp dx,0 ! jne
-cp_doit / sub bx,bx ! ret`, `src/kernel/PROC.RTM` lines 33-34): `BX=0`
+cp_doit / sub bx,bx ! ret`, `src-assem/kernel/PROC.RTM` lines 33-34): `BX=0`
 at the moment of the crash matches the just-executed `sub bx,bx`
 exactly, and `proc_creat` is reached here with **`DX=0`**, taking its
 own documented "no PD address given" immediate-return path. This механ
@@ -9086,7 +9086,7 @@ slot, or simply logging `$sp` at every `stepi`, the same technique
 used in this entry) to catch exactly where the push/pop imbalance is
 introduced.
 
-## 99. `src/kernel/QUE2.RTM` — `remqd` never actually threads a freed QD onto the free list — FIXED
+## 99. `src-assem/kernel/QUE2.RTM` — `remqd` never actually threads a freed QD onto the free list — FIXED
 
 Found while writing `/src-c`'s C port of this routine (`src-c/kernel/
 que2.c`, see `docs/src-c.md`) and differentially testing it against the
@@ -9129,7 +9129,7 @@ was written with the wrong register.
 
 **Patched**: `mov qul,ax` → `mov qul,si`.
 
-## 100. `src/kernel/QUE1.RTM` — `deleteq_entry`'s `qd_noq` path corrupts the stack — FIXED
+## 100. `src-assem/kernel/QUE1.RTM` — `deleteq_entry`'s `qd_noq` path corrupts the stack — FIXED
 
 Found the same way as #99 above, while building `/src-c`'s differential
 test for `deleteq_entry` (`src-c/kernel/que1.c`, `tests/src-c/
@@ -9177,7 +9177,7 @@ of returning normally.
 exit (rather than restoring it via `pop es`, which nothing downstream of
 either path relies on `es` still holding).
 
-## 101. `src/kernel/MEMORY.MEM` — `mfree_entry`'s active-PD check walks the wrong field — FIXED
+## 101. `src-assem/kernel/MEMORY.MEM` — `mfree_entry`'s active-PD check walks the wrong field — FIXED
 
 Found the same way as #99/#100 above, while building `/src-c`'s
 differential test for `mfree_entry` (`src-c/kernel/memory.c`,
@@ -9221,7 +9221,7 @@ both times.
 **Patched**: `mov si,p_link[si]` → `mov si,p_thread[si]`.
 
 `/src-c/kernel/memory.c`'s own translation had two further, separate
-bugs of its own (not `/src` bugs, so not logged here — see
+bugs of its own (not `/src-assem` bugs, so not logged here — see
 `docs/src-c.md`'s own writeup): both `malloc_entry`'s and
 `mfree_entry`'s C ports of this same `(offset thrdrt)-p_thread` bias
 were missing the bias term entirely, and `mfree_it`'s C port had its
@@ -9229,7 +9229,7 @@ were missing the bias term entirely, and `mfree_it`'s C port had its
 return where the real routine always returns its own input `bx`
 unchanged.
 
-## 102. `src/kernel/MAU.MEM` — `maualloc_entry`'s exact-absolute-split path clobbers `BX` before calling `mau_split` — FIXED
+## 102. `src-assem/kernel/MAU.MEM` — `maualloc_entry`'s exact-absolute-split path clobbers `BX` before calling `mau_split` — FIXED
 
 Found while writing `/src-c`'s C port of this file (`src-c/kernel/
 mau.c`, see `docs/src-c.md`) — a logic bug, not a syntax one, and a
@@ -9343,7 +9343,7 @@ kernel/mau.c`'s own `mau_insert` needs a real backward `REP MOVSB`
 overlapping region it's shifting into. **Fixed**: added a tracked
 direction flag (`self.df`), `STD`/`CLD` opcode handlers, and made
 
-## 103. `tools/i86sim.py` — two more gaps found porting `DSPTCH.RTM` as a debugging aid (no `/src` bug) — FIXED
+## 103. `tools/i86sim.py` — two more gaps found porting `DSPTCH.RTM` as a debugging aid (no `/src-assem` bug) — FIXED
 
 `src-c/kernel/dsptch.c` (a C port of `DSPTCH.RTM`, written per request
 as a reading/debugging aid for the still-open scheduler-hang
@@ -9405,7 +9405,7 @@ shifted absolute addresses (`CSEG_BASE + 0x9000`, `CSEG_BASE +
 0x9001`), which it now does.
 `_string_op_once`'s own SI/DI step negative when `self.df` is set.
 
-## 104. `src/kernel/ABORT.RTM` — `findpdq` loses its place after the first queue — FIXED
+## 104. `src-assem/kernel/ABORT.RTM` — `findpdq` loses its place after the first queue — FIXED
 
 Found while moving `tests/src-c/test_abort.py` onto real memory layout
 (`/src-c` real-memory conversion, stage 3) and adding cases for every
@@ -9450,7 +9450,7 @@ balance it. abort.c's `findpdq` already walked the QDs correctly; now
 the asm does too, and test_abort.py's `abtdq`/`abtnq` cases put the
 target on the second QD to cover it.
 
-## 105. `src/kernel/SHARE.MEM` — `share_entry` leaks its new MD on two paths — FIXED
+## 105. `src-assem/kernel/SHARE.MEM` — `share_entry` leaks its new MD on two paths — FIXED
 
 Found while moving `tests/src-c/test_share.py` onto real memory layout
 (`/src-c` real-memory conversion, stage 4). Present in the original DRI
@@ -9479,7 +9479,7 @@ no-owner-segment path jumps to a new `se_free` label, shared with
 `se_err1`, that frees it before `se_err`. `src-c/kernel/share.c` matches.
 `test_share.py` checks that `mdul` gets the MD back on both paths.
 
-## 106. `src/kernel/MAU.MEM` — `mau_collapse` reports a MAU empty while its last segment is still allocated — FIXED
+## 106. `src-assem/kernel/MAU.MEM` — `mau_collapse` reports a MAU empty while its last segment is still allocated — FIXED
 
 Found while moving `tests/src-c/test_mau.py` onto real memory layout
 (stage 4): freeing the first of two allocated SAT entries made
@@ -9518,7 +9518,7 @@ clears `BP` if that entry is allocated. `src-c/kernel/mau.c` matches.
 Covered by `test_mau.py` (both exits) and `test_memory.py` ("last SAT
 still allocated -> MAU kept").
 
-## 107. `src/kernel/CPMMEM.MEM` — `cpmfree_entry`'s free-all walk wipes Load segments' flags, and hangs on a segment it can't free — FIXED
+## 107. `src-assem/kernel/CPMMEM.MEM` — `cpmfree_entry`'s free-all walk wipes Load segments' flags, and hangs on a segment it can't free — FIXED
 
 Found while moving `tests/src-c/test_cpmmem.py` onto real memory layout
 (stage 4). Present in the original DRI source.
@@ -9551,7 +9551,7 @@ before `jmps cpmf_next`, stepping past the segment it couldn't free.
 Load segment's flags survive, and that the walk frees the next segment
 after one whose SAT entry is missing.
 
-## 108. `src/kernel/CONSOLE.CIO` — `mimic_entry` doesn't set BX/CX on success, so ctl-P can report "Printer Busy" after it worked — FIXED
+## 108. `src-assem/kernel/CONSOLE.CIO` — `mimic_entry` doesn't set BX/CX on success, so ctl-P can report "Printer Busy" after it worked — FIXED
 
 Found while moving `tests/src-c/test_cioif_entry.py` onto real memory
 layout (`/src-c` real-memory conversion, stage 5): dispatched through
@@ -9587,7 +9587,7 @@ the asm did). `test_cioif_entry.py` runs ctl-P through `entry` and
 checks that `cf_listcp` gets set; with the original code the reference
 leaves it clear.
 
-## 109. `src/kernel/LOAD.SUP` — `ld_read` resets the FCB's `nxtrec` through DS instead of `u_wrkseg` — FIXED
+## 109. `src-assem/kernel/LOAD.SUP` — `ld_read` resets the FCB's `nxtrec` through DS instead of `u_wrkseg` — FIXED
 
 Found while moving `tests/src-c/test_load.py` onto real memory layout
 (`/src-c` real-memory conversion, stage 7). Present in the original DRI
@@ -9617,7 +9617,7 @@ pop es`. `src-c/kernel/load.c` resets the FCB in u_wrkseg too. With the
 original line, 10 of `test_load.py`'s cases fail (its FCB is in a
 u_wrkseg that isn't SYSDAT).
 
-## 110. `src/rsp/SUBMIT.A86` — the bad-parse `$` scan reads the code segment — FIXED
+## 110. `src-assem/rsp/SUBMIT.A86` — the bad-parse `$` scan reads the code segment — FIXED
 
 Found while moving `tests/src-c/test_submit.py` onto real memory layout
 (`/src-c` real-memory conversion, stage 7). Present in the original DRI
@@ -9648,7 +9648,7 @@ byte in `clicmd`.)
 **Patched**: `push ds ! pop es`. `src-c/kernel/submit.c` scans DS, as
 it always did.
 
-## 111. `src/kernel/XIOS86Q.A86` — the sector copies, the tick ISR and `fdc_out_byte` use the kernel code segment for SYSDAT data — FIXED
+## 111. `src-assem/kernel/XIOS86Q.A86` — the sector copies, the tick ISR and `fdc_out_byte` use the kernel code segment for SYSDAT data — FIXED
 
 Found while moving `tests/src-c/test_xios86q.py` onto real memory layout
 (`/src-c` real-memory conversion, stage 7). XIOS86Q is this project's
@@ -9837,7 +9837,7 @@ piece of work.
   0FEh: FALSE).
 
 Also `tools/i86sim.py` gained `RET imm16` (compiled PL/M uses it
-everywhere). `src/Makefile` now rebuilds the utilities when
+everywhere). `src-assem/Makefile` now rebuilds the utilities when
 `tools/plm/*.py` changes.
 
 **Verified**: in QEMU, `DIR` lists the disk four to a line, `DIR *.RSP`
@@ -9869,7 +9869,7 @@ table, and a time it set landed there too.
 - **`mon4`:** a POINTER-returning EXTERNAL comes back in ES:BX.
 - **Moves:** MOVE/MOVB/MOVW copy between the operands' own segments.
 
-Also, `src/Makefile`'s disk image didn't depend on the utility and RSP
+Also, `src-assem/Makefile`'s disk image didn't depend on the utility and RSP
 binaries, so a rebuilt utility never reached `mpm86q.img`. That cost a
 debugging detour here: QEMU kept running the old TOD.
 
@@ -9884,7 +9884,7 @@ of a non-leap year; the pre-fix compiler fails 7 of its checks.
 ## 117. `tools/build_mpmsys.py` — CLOCK never ran, and the "slack" tables sat on top of DATA.BDO — FIXED
 
 **CLOCK.** The time never advanced: TOD always showed SYSDAT's
-SYSTEM.DAT value. CLOCK.RSP (src/rsp/CLOCK.A86: wait on the seconds
+SYSTEM.DAT value. CLOCK.RSP (src-assem/rsp/CLOCK.A86: wait on the seconds
 flag, BCD-increment SYSDAT's TOD) was on the disk but never loaded --
 nothing loads an RSP from disk; build_mpmsys.py bakes RSPs into the
 image, and it only baked TMP. Now it bakes a list (`BAKED_RSPS`: TMP,
@@ -9936,7 +9936,7 @@ the BDOS's queues never hit this: the CLI queue's QD is already inside
 the system, and the disk MX queue has no buffer.
 
 **Patched**: SAT1.start = the buffer's SYSDAT offset + the table length.
-No kernel change, so /src and /src-c are unchanged. `src-c/boot/kernel_main.c`'s
+No kernel change, so /src-assem and /src-c are unchanged. `src-c/boot/kernel_main.c`'s
 `SYSDAT_SEG` moves to 16F9h (ECHO adds 944 bytes of code).
 
 **Verified** in QEMU: `ECHO hello, world` prints "ECHO Msg Qued" then
@@ -10171,7 +10171,7 @@ Once STSCMD ran, three of its values were wrong:
 consoles and `nccb - (nlst + ncns)` = FDh virtual ones, and
 CONSOLE.CIO's console-number check went by `ncns`. **Patched**: both 1.
 
-**4. `src/kernel/PROC.RTM` (and `src-c/kernel/proc.c`) — TMP's memory
+**4. `src-assem/kernel/PROC.RTM` (and `src-c/kernel/proc.c`) — TMP's memory
 list was `0FFFFh`.** TMP.A86's PD, like DRI's own, has `p_mem` =
 0FFFFh. That keeps `proc_creat` from sharing the creator's memory with
 it (it shares only into a child whose `p_mem` is 0). But nothing ever
@@ -10224,7 +10224,7 @@ DRI behind RSPASM.A86).
   compiled as an RSP with the mon1-4 stub. MPMSTAT follows ECHO. The PD
   pool went from 6 to 8, since each RSP's PD takes a slot. The QD pool
   stays at 4: it has to fit in B67h-BFFh, and ECHO and MPMSTAT leave 2.
-- `src/Makefile`: MPM.bin was rebuilt only for kernel source changes,
+- `src-assem/Makefile`: MPM.bin was rebuilt only for kernel source changes,
   though build_mpmsys assembles the baked-in RSPs itself. It now also
   depends on `rsp/TMP|CLOCK|ECHO.A86`, `utils/STSRSP.PLM`,
   `STSCOM.PLM` and the compiler.
@@ -10246,7 +10246,7 @@ All 56 tests/src-c and tests/plm files pass.
 
 **Request.** "Get the CACHE RSP loaded too." CACHE.RSP exists only as
 a DRI binary on `orig/lastdri/22` (docs/orig.md: "disk cache RSP, no
-equivalent elsewhere"). It's now copied to `src/rsp/CACHE.RSP` and
+equivalent elsewhere"). It's now copied to `src-assem/rsp/CACHE.RSP` and
 baked into MPM.SYS after MPMSTAT.
 
 **What it does** (from disassembling it):
@@ -10303,7 +10303,7 @@ ordinary program. Typing `STSRSP` made the MPMSTAT queue, then read it
 forever, so the console never came back.
 
 **Patched**:
-- `src/Makefile` builds `build/rsp/MPMSTAT.{cseg,dseg}.bin` from
+- `src-assem/Makefile` builds `build/rsp/MPMSTAT.{cseg,dseg}.bin` from
   STSRSP.PLM with `plmc --rsp MPMSTAT` plus the stub, part of
   `RSP_BIN`. STSRSP is off `PLM_UTILS`.
 - `tools/build_disk.py` places it as `MPMSTAT.RSP` beside ECHO.RSP and
@@ -10341,7 +10341,7 @@ to the copy build_mpmsys bakes in, before the patch. `DIR *.RSP` lists
 TMP, ECHO, CLOCK, MPMSTAT and CACHE.
 
 **Follow-up:** RANDOM.CMD is on the disk: DRI's sample random-access
-program, `src/rsp/RANDOM.A86`, copied from orig/mpm862sr/05 (identical
+program, `src-assem/rsp/RANDOM.A86`, copied from orig/mpm862sr/05 (identical
 to orig/lastdri/16's) and built like SUBMIT (Makefile `RSP_OK`;
 build_disk.py `RSP_NAMES` as `.CMD`).
 - Its data group is byte-identical to DRI's RANDOM.CMD. The code group
@@ -10390,7 +10390,7 @@ until the assign wakes them. ATTACH notices, because its
 COMMAND.SUP in orig/ has the same order, so real MP/M-86 had this race
 whenever the printer was slow.
 
-**Patched** (`src/kernel/COMMAND.SUP`, `src-c/kernel/command.c`): print
+**Patched** (`src-assem/kernel/COMMAND.SUP`, `src-c/kernel/command.c`): print
 the CRLF and assign the console first, then create the process
 (`f_conassign` with an explicit PD needs only `p_cns`, set in step 9).
 `cli_err` is saved before `f_createproc`, which clobbers CX.
@@ -10401,7 +10401,7 @@ The regression pass (PIP [V], TYPE, REN, ERA, MPMSTAT, A:MPMSTAT,
 CONSOLE, DSKRESET, SHOW, RANDOM, TOD; SUBMIT with arguments and
 `$INCLUDE`) is correct, and all 56 test files pass.
 
-## 127. `src/Makefile` — kernel include files weren't dependencies — FIXED
+## 127. `src-assem/Makefile` — kernel include files weren't dependencies — FIXED
 
 Both MPM.bin's stamp and the disk image listed only the seven top-level
 kernel `.A86` files, not the ~60 `.SUP/.RTM/.CIO/.BDO/.MEM/.DEF/...`
@@ -10420,7 +10420,7 @@ CALL_BDOS/BDOS_RETURN, GOBACK, REPORT_ERR and the BDOS's XIOS calls are
 ported. See docs/src-c.md, "Running the port".
 
 Running the C SUBMIT and RANDOM from the floppy turned up these bugs.
-All are in the C port; the asm in /src is correct, so nothing changed
+All are in the C port; the asm in /src-assem is correct, so nothing changed
 there.
 - `rddirbuf` didn't fall through into `setdata`.
 - `initialize` passed 1, not 0FFh, as "true" to rddir: the checksum
@@ -10444,3 +10444,58 @@ there.
 - New test_kernel_disk.py boots kernel.elf on the floppy and runs SUBMIT
   and RANDOM, then checks the file RANDOM wrote on the image.
 - All 57 test files pass.
+
+## 129. /src renamed to /src-assem; build output under each tree
+
+**Requests.**
+- "Change /src/Makefile and /src-c/Makefile so that /src/Makefile puts
+  the object files at /src/build and so that /src-c/Makefile puts the
+  object files at /src-c/build."
+- "Rename /src to /src-assem."
+
+**Changes.**
+- src-assem/Makefile builds into src-assem/build/ (it was the top-level
+  build/). The tools follow: build_mpmsys.py, build_mpmldr.py,
+  build_bootsect.py and build_disk.py. So do run.sh (the image, and the
+  printer file), the CI artifact path and .gitignore.
+- src-c/Makefile builds into src-c/build/ (it was obj/).
+- The rename is a `git mv`. References across the tree (paths, Python
+  path components, `make -C`/`cd`, docs, AGENTS.md) were rewritten to
+  src-assem, with src-c left alone and CRLF files kept CRLF.
+
+**One binary change.** XIOS86Q.A86 has `'XIOS86Q for QEMU -- see
+src/kernel/XIOS86Q.A86'` in its code segment. The path now reads
+src-assem/, 6 bytes longer, so the XIOS's later code offsets moved:
+init 3Eh → 44h, entry F7h → FDh. tests/src-c/test_syms.py caught the
+drift, and src-c/gensys/gensys_syms.h follows. The combined code length
+didn't change (the 6 bytes fit in paragraph padding), so SYSDAT stays at
+1A5Dh in src-assem's image.
+
+## 130. src-c builds and boots its own MP/M-86 floppy
+
+**Request.** "We want an MP/M image built from src-c." The decisions
+were src-c's own boot sector, only src-c's output on the disk, and no
+use of src-assem's assembled MPM.bin. The stages are in
+docs/plan-src-c-image.md:
+1. The /src-assem offsets src-c uses are committed headers (rt_syms.h,
+   rsp_syms.h, gensys_syms.h), checked by test_syms.py; there are no
+   generator scripts.
+2. src-c/gensys builds the low-memory image in C at boot, replacing the
+   MPM.bin .incbin. test_gensys.py finds it identical to
+   build_mpmsys.py's image without MPMSTAT: SYSDAT byte for byte, and
+   the code half outside the 8086 code. SYSDAT is at 183Ah.
+3. src-c/boot/bootsect.s, a one-sector loader (int 13h, A20, flat GDT,
+   copy to 1 MB), with `_start` zeroing .bss (test_bootsect.py).
+4. src-c/tools/mkdisk.py → `make disk` → build/mpm86c.img: KERNEL.SYS
+   and the C SUBMIT/RANDOM as CMD files built from their C images, plus
+   DEMO.SUB (test_mkdisk.py).
+5. `make run` boots it; `make run-elf` boots it via -kernel.
+   test_kernel_disk.py runs on it.
+
+No bugs turned up along the way. One portability fix: cache.c's
+pushf/cli is i386-only, so that host tests can build it.
+
+**Verified.**
+- A clean `make disk`, and the boot and disk tests, work with
+  src-assem/build/ removed.
+- All 62 test files pass.

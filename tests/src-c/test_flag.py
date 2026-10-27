@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/kernel/flag.c against src/kernel/FLAG.RTM's
+"""Differential test for src-c/kernel/flag.c against src-assem/kernel/FLAG.RTM's
 flag_set_entry and flag_wait_entry (and, through them, their shared
 internal flag_valid/flag_exit/flag_bexit), both on real memory layout.
 
@@ -61,7 +61,7 @@ def r16(mem, addr):
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src-assem', 'kernel')])
     code = asm.segment_bytes('cseg')
     sym = {name: asm.symtab[name].value for name in
            ('flag_set_entry', 'flag_wait_entry', 'rlr', 'drl', 'nflags', 'flags', 'u_dparam')}

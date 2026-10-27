@@ -14,7 +14,7 @@
 ;*	  - timer: standard PC 8253/8254 PIT (channel 0) + 8259
 ;*	    PIC IRQ0, reprogrammed for 60 ticks/second
 ;*	  - list: standard PC parallel port, LPT1 @ 0378h,
-;*	    polled (run.sh sends QEMU's to build/printer.txt)
+;*	    polled (run.sh sends QEMU's to src-assem/build/printer.txt)
 ;*
 ;*	The real XIOS.A86 (orig/mpm862sr/.../XIOS.A86, also in
 ;*	this tree) targets Intel SBC 204 (8271 FDC) + SBC 534
@@ -186,7 +186,7 @@ dor_drvsel_a	equ	00h	;drive select bits for drive A
 ;	after a handful of bytes on this QEMU target's NEC765/82077
 ;	emulation (confirmed by testing, timing-independent -- see
 ;	docs/bugs.md #22, which fixed the identical problem in
-;	src/loader/LDBIOS86Q.A86's own copy of this driver the same
+;	src-assem/loader/LDBIOS86Q.A86's own copy of this driver the same
 ;	way: DMA for the fd_secsize data phase, PIO only for the
 ;	7-byte result phase every READ/WRITE DATA command ends with
 ;	regardless of DMA vs non-DMA mode).
@@ -250,7 +250,7 @@ supervisor	equ	(offset $)
 mydispatch	equ	(offset $)
 		rw	2	;far ptr: SYSDAT's "dispatcher" field
 
-	db	'XIOS86Q for QEMU -- see src/kernel/XIOS86Q.A86'
+	db	'XIOS86Q for QEMU -- see src-assem/kernel/XIOS86Q.A86'
 
 ;*****************************************************
 ;*	INITIALIZATION
@@ -826,7 +826,7 @@ dma_setup:  ; arm 8237 DMA channel 2 for one fd_secsize-byte transfer
 ;----------  ; into/out of secbuf, before issuing a READ DATA/WRITE
 	    ; DATA command -- see this file's own dma_* equ block (near
 	    ; the FDC port definitions, above) for why this exists at
-	    ; all. Ported from src/loader/LDBIOS86Q.A86's own identical
+	    ; all. Ported from src-assem/loader/LDBIOS86Q.A86's own identical
 	    ; routine (docs/bugs.md #22), with ONE deliberate difference:
 	    ; that file's secbuf lives in its own CSEG (no separate
 	    ; DSEG -- see its own header comment), so its physical
@@ -925,7 +925,7 @@ fdc_do_read:
 					; SENSE INTERRUPT STATUS call after
 					; this: confirmed via testing (see
 					; docs/bugs.md #22's identical finding
-					; for src/loader/LDBIOS86Q.A86's own
+					; for src-assem/loader/LDBIOS86Q.A86's own
 					; copy of this driver) that QEMU hangs
 					; on one here, since there's no
 					; genuine pending interrupt for it to
@@ -1105,7 +1105,7 @@ fdc_pio_in:     ; despite the name, the actual fd_secsize data bytes
 		; call site had to change) both just drain that result
 		; phase now -- there's nothing left that differs between
 		; them. See docs/bugs.md #22 (same fix, originally made in
-		; src/loader/LDBIOS86Q.A86's own copy of this driver):
+		; src-assem/loader/LDBIOS86Q.A86's own copy of this driver):
 		; pure PIO for the full data phase stalls after a handful
 		; of bytes on this QEMU target's NEC765/82077 emulation.
 	mov	cx,7
@@ -1278,7 +1278,7 @@ specify_parms	db	3,cmd_specify,0dfh,02h
 					;driver's real 8237-driven sector
 					;data transfers (dma_setup_read/
 					;_write, below) -- same fix as
-					;src/loader/LDBIOS86Q.A86's own copy
+					;src-assem/loader/LDBIOS86Q.A86's own copy
 					;of this driver (docs/bugs.md #22):
 					;pure PIO for the full fd_secsize
 					;data phase stalls partway through
@@ -1304,7 +1304,7 @@ secbuf		rb	fd_secsize
 	;	entries (fits in block 0 alone, so AL0=80h, AL1=0);
 	;	CKS=16 since this is a removable floppy, not a fixed
 	;	disk. Identical to, and MUST stay identical to,
-	;	src/loader/LDBIOS86Q.A86's own dpb0 -- same physical
+	;	src-assem/loader/LDBIOS86Q.A86's own dpb0 -- same physical
 	;	disk, same on-disk filesystem, read by both the loader
 	;	and the kernel.
 

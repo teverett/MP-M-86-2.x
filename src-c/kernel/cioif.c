@@ -1,5 +1,5 @@
 /*
- * cioif.c -- C port of src/kernel/CIOIF.CIO's `init` AND now `entry`,
+ * cioif.c -- C port of src-assem/kernel/CIOIF.CIO's `init` AND now `entry`,
  * named here `cioif_init`/`cioif_entry` -- every module's own real
  * asm label for these two routines is just `init`/`entry`; see
  * bdosif.c's own header comment for why the C ports need a module
@@ -114,7 +114,7 @@ entry_result cioif_entry(uint8_t *phys, uint16_t sysdat, uint8_t cl, uint16_t dx
  * `sysdat`=6 and `supervisor`=8/0xA for its own offset/segment
  * halves), not harness-chosen scratch addresses -- same reasoning as
  * the BD_ and INIT_ blocks elsewhere in this project; confirmed
- * directly against src/kernel/CIO.A86 via `--symbols`, not assumed
+ * directly against src-assem/kernel/CIO.A86 via `--symbols`, not assumed
  * from the shared header shape with `MEMIF.MEM`/`INIT.SUP` alone.
  *
  * Runs against real memory (defs.h's far_ptr), like the other modules'

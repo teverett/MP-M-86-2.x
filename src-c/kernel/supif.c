@@ -1,5 +1,5 @@
 /*
- * supif.c -- C port of src/kernel/SUPIF.SUP's `func1`, now including
+ * supif.c -- C port of src-assem/kernel/SUPIF.SUP's `func1`, now including
  * its own real `mod == sup` dispatch-through (the real asm's own
  * `inmod:`/`jmp cs:supfunc[si]` tail -- there's no separate real
  * label for "func1 after inmod," it's genuinely one continuous
@@ -51,7 +51,7 @@
  * The real code's network-intercept path (`ent_flag[si]`'s own
  * `ef_network` bit, `callf dword ptr .netmod`) is provably
  * unreachable in this project: no NETWORK module/RSP exists anywhere
- * in `/src`, so `INIT.SUP`'s own RSP-creation loop can never set
+ * in `/src-assem`, so `INIT.SUP`'s own RSP-creation loop can never set
  * `module_map`'s own `netmod_bit`, and `test module_map,netmod_bit !
  * jz nonet` always takes the jump -- same "deterministic outcome
  * under the boundary-stub convention" reasoning as `RPL.SUP`'s own

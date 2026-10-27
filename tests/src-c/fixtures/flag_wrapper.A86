@@ -1,4 +1,4 @@
-; Standalone wrapper for src/kernel/FLAG.RTM: flag_set_entry, flag_wait_entry,
+; Standalone wrapper for src-assem/kernel/FLAG.RTM: flag_set_entry, flag_wait_entry,
 ; and their shared internal helpers flag_valid/flag_exit/flag_bexit (all in
 ; this one file, ported as ordinary internal C calls -- no stub needed for
 ; those). flag_wait_entry's `fw_non` path calls the dispatcher (`call

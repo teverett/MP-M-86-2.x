@@ -1,12 +1,12 @@
-; Standalone wrapper for src/kernel/ABORT.RTM: sysreset_entry,
+; Standalone wrapper for src-assem/kernel/ABORT.RTM: sysreset_entry,
 ; terminate_entry (+ internal abt_chk), abort_spec_entry (+ internal
 ; find_pd, find_pdthrd, findpdnc, findpdq, fflgpd, snip_it,
 ; abt_putdrl, gccba, and the whole abort_tab dispatch). Needs
 ; tools/i86sim.py's `CALL r/m16`/`JMP r/m16` support (see src-c/
 ; kernel/abort.c's own header comment: `call cs:abort_tab[di]`).
 ;
-; Bundled together with src/kernel/QUE2.RTM (for `rlsmx`) and
-; src/kernel/FINDPD.RTM (for `findpdname_entry`), both called as
+; Bundled together with src-assem/kernel/QUE2.RTM (for `rlsmx`) and
+; src-assem/kernel/FINDPD.RTM (for `findpdname_entry`), both called as
 ; ordinary internal calls by ABORT.RTM, not boundary stubs.
 ;
 ; On real memory layout: the real UDA.FMT/SYSDAT.FMT are included, so

@@ -1,5 +1,5 @@
 /*
- * rsp.h -- shared by the C versions of src/rsp/'s programs.
+ * rsp.h -- shared by the C versions of src-assem/rsp/'s programs.
  *
  * Each program's data segment is one packed, initialized C object laid
  * out exactly as its .A86 DSEG is: the same fields at the same offsets
@@ -7,17 +7,17 @@
  * its queue descriptors, buffers, messages). The program runs on the
  * copy at its real segment -- it gets that segment as DS -- so the
  * kernel sees the same bytes it would for the .A86 version. Each image
- * has static asserts on its field offsets (taken from tools/asm86's
- * symbol table for the .A86), and tests/src-c/test_rsp_images.py
+ * has static asserts on its field offsets (rsp_syms.h: the .A86's
+ * label offsets, which tests/src-c/test_syms.py checks against
+ * tools/asm86's symbol table), and tests/src-c/test_rsp_images.py
  * compares the whole image with the assembled DSEG.
  *
  * The one thing that can't be the same is a code address: an RSP's
  * initial stack frame starts at its main label, which is 8086 code
- * only the .A86 has. The C images leave those words 0 and rsp_install
- * keeps the assembled ones (the dispatcher never uses them: the
- * runtime starts a process in its C main). rsp_install also keeps the
- * UDA's u_initcs..u_initss, which aren't in the .A86 at all: the image
- * builder fills them in with the RSP's load segments.
+ * only the .A86 has. The C images leave the frame's IP:CS 0 and
+ * src-c/gensys fills them in as GENSYS does (with u_initcs), when it
+ * places the images (the dispatcher never jumps there: the runtime
+ * starts a process in its C main).
  */
 #ifndef SRC_C_RSP_H
 #define SRC_C_RSP_H
@@ -35,16 +35,6 @@ typedef struct {
     const uint8_t *data;
     uint16_t len;
 } rsp_image;
-
-/* offsets of an RSP's UDA and initial stack frame, as proc_creat
- * finds them: the PD's p_uda (in paragraphs from the RSP's own
- * segment), and the UDA's u_stack_sp */
-static inline uint16_t rsp_uda_off(const uint8_t *rsp) {
-    return (uint16_t)(rd16(rsp + rsp_pd + p_uda) << 4);
-}
-static inline uint16_t rsp_frame_off(const uint8_t *rsp) {
-    return rd16(rsp + rsp_uda_off(rsp) + u_stack_sp);
-}
 
 /* The bytes of a program's data segment rsp_put leaves as they are:
  * those below `base` (an RSP's rsp_link, which INIT gives the SYSDAT;
@@ -85,12 +75,6 @@ static inline void rsp_put(uint8_t *dst, const rsp_image *im, const rsp_keep *k)
     }
 }
 
-/* an RSP, before INIT creates its process */
-static inline void rsp_install(uint8_t *rsp, const rsp_image *im) {
-    rsp_keep k = {2, rsp_frame_off(rsp), (uint16_t)(rsp_uda_off(rsp) + u_initcs)};
-    rsp_put(rsp, im, &k);
-}
-
 /* a transient (a .CMD's data group, as LOAD left it at `ds`), from its
  * own main: everything above the base page */
 static inline void rsp_install_transient(uint16_t ds, const rsp_image *im) {
@@ -101,7 +85,7 @@ static inline void rsp_install_transient(uint16_t ds, const rsp_image *im) {
 /* the program's own data segment, at its real segment */
 #define RSP_DATA(type, ds) ((type *)far_ptr(rt_phys(), (ds), 0))
 
-/* An RSP's Process Descriptor (src/kernel/PD.DEF, 48 bytes) and User
+/* An RSP's Process Descriptor (src-assem/kernel/PD.DEF, 48 bytes) and User
  * Data Area (UDA.FMT, 100h bytes) as the .A86 RSPs lay them out. The
  * PD sits at rsp_pd (10h) and the UDA at rsp_uda (40h); the UDA's only
  * initialized words are u_dma_ofst and u_stack_sp (the initial frame). */
@@ -138,7 +122,7 @@ typedef struct RSP_PACKED {
 #define RSP_UDA(dma_, sp_) { 0, (dma_), {0}, (sp_), {0} }
 
 #ifndef rsp_uda
-#define rsp_uda    0x040 /* src/kernel/RSP.DEF */
+#define rsp_uda    0x040 /* src-assem/kernel/RSP.DEF */
 #define rsp_bottom 0x140
 #endif
 

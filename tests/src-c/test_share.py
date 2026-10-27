@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/share.c (share_entry) against
-src/kernel/SHARE.MEM, on real memory layout.
+src-assem/kernel/SHARE.MEM, on real memory layout.
 
-The reference is the whole real MEM module (src/kernel/MEM.A86); see
+The reference is the whole real MEM module (src-assem/kernel/MEM.A86); see
 tests/src-c/memref.py. PDs, their p_mem MS lists and the MD pool are
 SYSDAT-relative, the SPB is in the running process's u_wrkseg, and the
 SAT scan is in the shared MAU's own segment. Every case diffs the

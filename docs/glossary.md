@@ -41,7 +41,7 @@ pipeline that produces it.
 ## RTM
 
 **R**eal-**T**ime **M**onitor — the process scheduler/dispatcher at the
-core of MP/M-86's multi-tasking (`src/kernel/RTM.A86`, the `.RTM`
+core of MP/M-86's multi-tasking (`src-assem/kernel/RTM.A86`, the `.RTM`
 fragments — see `docs/filetypes.md`). It's the piece of the kernel that
 makes MP/M-86 multi-*programming* rather than just multi-*user*: it
 decides which ready process gets the CPU next, handles process
@@ -56,7 +56,7 @@ decides *when* each process actually gets to run.
 loaded into memory alongside the kernel at boot and scheduled by the
 RTM just like any interactive user's process, but with no console of
 its own (e.g. `CLOCK.RSP`, `ECHO.RSP`, `TMP.RSP` — see the `.RSP` entry
-in `docs/filetypes.md`). Source for one lives in `src/rsp/` as a
+in `docs/filetypes.md`). Source for one lives in `src-assem/rsp/` as a
 `.A86` file; building it produces the loadable `.RSP` image. This is
 the main thing that makes MP/M-86 "multi-programming" rather than just
 "multi-user": several of these can be running continuously, unattended,
@@ -88,7 +88,7 @@ that name — its console/command dispatching role is absorbed into the
 input and routes it to the right process/system call for a multi-user
 system. The term is included here because it's the CP/M concept that
 MP/M-86's Supervisor is the direct descendant of, and because some of
-the command utilities built in this repo (`src/utils/*.PLM` — `DIR`,
+the command utilities built in this repo (`src-assem/utils/*.PLM` — `DIR`,
 `ERA`, `TYPE`, etc.) are the same kind of program a CCP would launch.
 
 ## XIOS
@@ -112,7 +112,7 @@ generation earlier, for MP/M II's own 8080/Z80 systems — see
 `docs/orig.md`'s "Related DRI source: MP/M II" section.
 
 A new, from-scratch replacement targeting QEMU (serial console + floppy
-disk) now exists at `src/kernel/XIOS86Q.A86` — it assembles cleanly and
+disk) now exists at `src-assem/kernel/XIOS86Q.A86` — it assembles cleanly and
 implements the real kernel's exact calling contract, but has never
 actually run anywhere; see `docs/build.md` for its current status and
 the file's own header comment for what it does and doesn't cover.
@@ -123,7 +123,7 @@ the file's own header comment for what it does and doesn't cover.
 interactive machine-code debugger/monitor for CP/M-86 and MP/M-86,
 descended from CP/M-80's `DDT`. It lets a user load a program, set
 breakpoints, single-step, and examine/patch memory and registers. It's
-mentioned here specifically because `src/toolchain/ASS86.PLM` (the
+mentioned here specifically because `src-assem/toolchain/ASS86.PLM` (the
 assembler) declares several `EXTERNAL` procedures — `ddtset`,
 `ddtgetline`, `goddt`, `printm`, `printword`, `conin`, `conout` — that
 are calls *into* a running DDT86, not into the BDOS/MP-M system-call
@@ -156,7 +156,7 @@ An "extended directory" console command from **MP/M II** (Digital
 Research's 8080/Z80 multi-programming monitor, the direct ancestor
 MP/M-86 2.x was ported from — see `docs/orig.md`'s "Related DRI source:
 MP/M II" section), with no equivalent utility anywhere in this repo's
-own `src/utils/` — where plain `DIR.PLM` just lists filenames, SDIR adds
+own `src-assem/utils/` — where plain `DIR.PLM` just lists filenames, SDIR adds
 sorting, searching, printing, and file time-stamp display. Found in
 `orig/mpm_II/CUSPs_5/`, split one module per file (all dated 14 Sept
 1981, by Danny Horovitz):
@@ -173,7 +173,7 @@ sorting, searching, printing, and file time-stamp display. Found in
 - **`dp.plm`** — the print module.
 - **`dts.plm`** — the time-stamp display module — its own header notes
   the date/time-conversion code comes "From MP/M 1.1 TOD program,"
-  i.e. an even earlier ancestor of this repo's own `src/utils/TOD.PLM`.
+  i.e. an even earlier ancestor of this repo's own `src-assem/utils/TOD.PLM`.
 
 `sdir.prl`/`xsdir.prl` (`.PRL` = MP/M II's Page Relocatable binary
 format — see `docs/orig.md`) are two pre-built compiled forms of the

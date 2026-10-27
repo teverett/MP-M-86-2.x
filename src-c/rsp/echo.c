@@ -1,5 +1,5 @@
 /*
- * echo.c -- C version of src/rsp/ECHO.A86, the ECHO resident system
+ * echo.c -- C version of src-assem/rsp/ECHO.A86, the ECHO resident system
  * process: it makes and opens a queue named ECHO, and prints every
  * command tail the CLI writes to it ("ECHO hello") on the console of
  * the process that typed it.

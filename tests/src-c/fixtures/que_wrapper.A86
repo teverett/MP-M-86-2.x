@@ -1,5 +1,5 @@
-; Standalone wrapper for src/kernel/QUE1.RTM (all 10 routines) and
-; src/kernel/QUE2.RTM's rlsmx/getqdaddr/remqd/qspace/qrelease, on real
+; Standalone wrapper for src-assem/kernel/QUE1.RTM (all 10 routines) and
+; src-assem/kernel/QUE2.RTM's rlsmx/getqdaddr/remqd/qspace/qrelease, on real
 ; memory layout. tests/src-c/test_que.py runs this with tools/i86sim.py's
 ; segmented=True: DS = the real SYSDAT segment, ES = the running
 ; process's UDA (the RTM's ambient ES), QPBs and caller buffers in that

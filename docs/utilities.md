@@ -1,9 +1,9 @@
-# The `src/utils/` Utilities
+# The `src-assem/utils/` Utilities
 
-The 19 `src/utils/*.PLM` sources — the user-facing commands shipped
-with MP/M-86 2.0, as opposed to the kernel (`src/kernel/`), the boot
-loader (`src/loader/`), DRI's own dev tools (`src/toolchain/`), or the
-Resident System Processes (`src/rsp/`). Each is PL/M-86 source,
+The 19 `src-assem/utils/*.PLM` sources — the user-facing commands shipped
+with MP/M-86 2.0, as opposed to the kernel (`src-assem/kernel/`), the boot
+loader (`src-assem/loader/`), DRI's own dev tools (`src-assem/toolchain/`), or the
+Resident System Processes (`src-assem/rsp/`). Each is PL/M-86 source,
 compiled by `tools/plmc.py` and assembled by `tools/asm86.py` (see the
 Makefile's own `PLM_UTILS` list) into `build/utils/<NAME>.cseg.bin` +
 `.dseg.bin`, then combined and placed on the bootable disk image as
@@ -14,7 +14,7 @@ yet actually loads and runs a `.CMD` file — these are built and placed
 on disk, not executed).
 
 All 19 assemble cleanly with this repo's from-scratch toolchain; none
-of `src/utils/` needed patching (contrast `src/rsp/`, where three of
+of `src-assem/utils/` needed patching (contrast `src-assem/rsp/`, where three of
 the four sources have genuine unpatched 1981 bugs — see
 `docs/bugs.md`).
 
@@ -85,6 +85,6 @@ any shipped disk.)
 ## Where these come from
 
 See `docs/orig.md` for which of the original 11 disks each source was
-copied from (disks `07`–`09` hold the bulk of `src/utils/`), and
+copied from (disks `07`–`09` hold the bulk of `src-assem/utils/`), and
 `docs/bugs.md` for the one originally-suspected (and since cleared)
 `ED.PLM` issue.

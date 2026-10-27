@@ -1,9 +1,9 @@
 /*
- * ml.c -- C port of the whole of src/kernel/ML.MEM: mlalloc_entry
+ * ml.c -- C port of the whole of src-assem/kernel/ML.MEM: mlalloc_entry
  * (+ internal mla_value, mla_makemau, mla_initmau), mlfree_entry
  * (+ internal ml_insert).
  *
- * `getmd`/`freemd` (src/kernel/UTIL.MEM, already ported in
+ * `getmd`/`freemd` (src-assem/kernel/UTIL.MEM, already ported in
  * util_mem.c) are called as ordinary internal calls, not boundary
  * stubs -- same convention as `memory.c`'s own calls into them.
  *

@@ -1,4 +1,4 @@
-; Wrapper for src/kernel/BDOSIF.BDO's `init` (tests/src-c/
+; Wrapper for src-assem/kernel/BDOSIF.BDO's `init` (tests/src-c/
 ; test_bdosif_init.py), on real memory layout: the whole real BDOS
 ; module, assembled exactly as file1_wrapper.A86 does (BDOS.A86's own
 ; include order), so `init`, `mpmif`, the cseg header (`sysdat` at 6,

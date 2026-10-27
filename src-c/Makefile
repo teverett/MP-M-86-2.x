@@ -1,29 +1,23 @@
-# Builds (syntax/type-checks) every /src-c/<module>/*.c C port file and
-# runs the differential tests under tests/src-c/ that verify each one
-# against its real assembled src/<module> reference (see docs/src-c.md).
-#
-# `kernel.elf` below links the boot stub and all kernel-port objects,
-# and boots under QEMU into the real ported XIOS (xios86q.c's
-# init_entry/xios_conout_entry drive the real UART/PIT/PIC/FDC), then
-# runs the real ported sup_init (init.c) against real low memory. The
-# rest of the kernel isn't called yet, so it is not a working MP/M-86
-# kernel (see docs/src-c.md). The differential tests compile each tested .c file
-# with host `cc` as a ctypes-loadable library; `make build` is a
-# separate cross-compiler pass (`-c`, matching flags) so type errors
-# show up independently of test failures.
+# Builds src-c, the C port of src-assem/ (see docs/src-c.md): every
+# <module>/*.c, kernel.elf (the kernel, the runtime that runs it as
+# MP/M-86 in 32-bit protected mode, the C RSPs and gensys's low-memory
+# image), the boot sector, and a bootable floppy with KERNEL.SYS and the
+# C transients on it -- all from src-c's own sources, nothing from
+# src-assem/'s build. The differential tests under tests/src-c/ check
+# each port against its real assembled src-assem/ reference; they
+# compile the tested .c files with host `cc` as ctypes libraries, and
+# `make build` is a separate cross-compiler pass (`-c`, matching flags)
+# so type errors show up independently of test failures.
 #
 # Usage (from this directory, src-c/):
 #   make            # build, then test
 #   make build      # compile every <module>/*.c to a .o
 #   make test       # run every tests/src-c/test_*.py
-#   make kernel.elf # build boot/'s own stub + every <module>/*.c,
-#                    # then link the whole thing with linker.ld into
-#                    # one real, bootable(ish) image -- see this
-#                    # file's own "kernel.elf:" rule below for what
-#                    # "bootable(ish)" means here
-#   make run        # build kernel.elf, then boot it under QEMU with
-#                    # serial output on stdout (Ctrl-C to stop; it
-#                    # halts after signing on, so QEMU just idles)
+#   make kernel.elf # the kernel (Multiboot, linked at 1MB)
+#   make disk       # build/mpm86c.img, the bootable floppy
+#   make run        # build the floppy and boot it under QEMU: the
+#                    # console on this terminal (Ctrl-A X quits)
+#   make run-elf    # the same, QEMU loading kernel.elf (-kernel)
 #   make clean
 #
 # boot/ has no Makefile of its own -- folded in here (this Makefile
@@ -46,7 +40,7 @@ CFLAGS += -std=c11 -I freestanding-include
 # own defs.h (src-c/kernel/defs.h vs src-c/loader/defs.h) -- see either
 # one's own header comment for why they're not shared.
 MODULES    := kernel loader
-BUILD_DIR  := obj
+BUILD_DIR  := build
 TEST_DIR   := ../tests/src-c
 BOOT_DIR   := boot
 
@@ -64,12 +58,12 @@ KERNEL_OBJS := $(patsubst kernel/%.c,$(BUILD_DIR)/kernel/%.o,$(wildcard kernel/*
 STRING_SHIM_OBJ := $(BUILD_DIR)/freestanding-include/string_shim.o
 # The runtime that runs the kernel as a real multitasking MP/M-86
 # (rt/rt.c's header comment), and the C programs it runs (rsp/).
-# rt_asm.s embeds the /src build's MPM image, so kernel.elf needs it.
-MPM_IMAGE := ../build/kernel/MPM.bin.cseg ../build/kernel/MPM.bin.dseg
+# gensys/ builds the low-memory image they start from.
 RT_OBJS  := $(BUILD_DIR)/rt/rt.o $(BUILD_DIR)/rt/rt_asm.o
 RSP_OBJS := $(patsubst rsp/%.c,$(BUILD_DIR)/rsp/%.o,$(wildcard rsp/*.c))
+GENSYS_OBJS := $(patsubst gensys/%.c,$(BUILD_DIR)/gensys/%.o,$(wildcard gensys/*.c))
 
-.PHONY: all build test boot run clean
+.PHONY: all build test boot run run-elf disk clean
 
 all: build test
 
@@ -83,26 +77,24 @@ endef
 $(foreach m,$(MODULES),$(eval $(call MODULE_RULE,$(m))))
 
 $(foreach m,$(MODULES),$(BUILD_DIR)/$(m)) $(BUILD_DIR)/boot $(BUILD_DIR)/freestanding-include \
-		$(BUILD_DIR)/rt $(BUILD_DIR)/rsp $(BUILD_DIR):
+		$(BUILD_DIR)/rt $(BUILD_DIR)/rsp $(BUILD_DIR)/gensys:
 	mkdir -p $@
 
-$(MPM_IMAGE):
-	$(MAKE) -C ../src
 
-$(BUILD_DIR)/rt/rt_syms.h: rt/gen_syms.py $(wildcard ../src/kernel/*) | $(BUILD_DIR)/rt
-	$(PYTHON) rt/gen_syms.py $@
+# rt/rt_syms.h and rsp/rsp_syms.h hold the /src-assem offsets src-c uses, as
+# constants; tests/src-c/test_syms.py checks them against the asm
+$(BUILD_DIR)/rt/rt.o: rt/rt.c rt/rt.h rt/rt_syms.h gensys/gensys.h kernel/defs.h | $(BUILD_DIR)/rt
+	$(CC) $(CFLAGS) -I kernel -I rt -I gensys -c $< -o $@
 
-$(BUILD_DIR)/rt/rt.o: rt/rt.c rt/rt.h kernel/defs.h $(BUILD_DIR)/rt/rt_syms.h | $(BUILD_DIR)/rt
-	$(CC) $(CFLAGS) -I kernel -I rt -I $(BUILD_DIR)/rt -c $< -o $@
-
-$(BUILD_DIR)/rt/rt_asm.o: rt/rt_asm.s $(MPM_IMAGE) | $(BUILD_DIR)/rt
+$(BUILD_DIR)/rt/rt_asm.o: rt/rt_asm.s | $(BUILD_DIR)/rt
 	$(CC) -c $< -o $@
 
-$(BUILD_DIR)/rsp/rsp_syms.h: rsp/gen_syms.py $(wildcard ../src/rsp/*.A86) | $(BUILD_DIR)/rsp
-	$(PYTHON) rsp/gen_syms.py $@
+$(BUILD_DIR)/rsp/%.o: rsp/%.c rsp/rsp.h rsp/rsp_syms.h rt/rt.h kernel/defs.h gensys/gensys.h | $(BUILD_DIR)/rsp
+	$(CC) $(CFLAGS) -Wno-unterminated-string-initialization -I kernel -I rt -I rsp -I gensys -c $< -o $@
 
-$(BUILD_DIR)/rsp/%.o: rsp/%.c rsp/rsp.h rt/rt.h kernel/defs.h $(BUILD_DIR)/rsp/rsp_syms.h | $(BUILD_DIR)/rsp
-	$(CC) $(CFLAGS) -Wno-unterminated-string-initialization -I kernel -I rt -I rsp -I $(BUILD_DIR)/rsp -c $< -o $@
+# src-c/gensys: the low-memory image, from src-c's own data
+$(BUILD_DIR)/gensys/%.o: gensys/%.c gensys/gensys.h gensys/gensys_syms.h kernel/defs.h | $(BUILD_DIR)/gensys
+	$(CC) $(CFLAGS) -I kernel -I gensys -c $< -o $@
 
 # boot/'s own stub -- boot.s isn't a .c file (no CFLAGS, no defs.h,
 # hence not folded into MODULE_RULE above). kernel_main.c isn't a
@@ -111,8 +103,31 @@ $(BUILD_DIR)/rsp/%.o: rsp/%.c rsp/rsp.h rt/rt.h kernel/defs.h $(BUILD_DIR)/rsp/r
 $(BUILD_DIR)/boot/boot.o: $(BOOT_DIR)/boot.s | $(BUILD_DIR)/boot
 	$(CC) -c $< -o $@
 
-$(BUILD_DIR)/boot/kernel_main.o: $(BOOT_DIR)/kernel_main.c kernel/defs.h | $(BUILD_DIR)/boot
-	$(CC) $(CFLAGS) -I kernel -c $< -o $@
+# The floppy boot sector (16-bit, at 0000:7C00) and the kernel's flat
+# image it loads to 1MB (boot/bootsect.s); src-c/tools/bootsect.py fills
+# in where the image is on the disk.
+$(BUILD_DIR)/boot/bootsect.o: $(BOOT_DIR)/bootsect.s | $(BUILD_DIR)/boot
+	$(CC) -c $< -o $@
+
+$(BUILD_DIR)/boot/bootsect.bin: $(BUILD_DIR)/boot/bootsect.o
+	$(LD) -Ttext=0x7C00 -e start --oformat=binary -o $@ $<
+	@test "$$(wc -c < $@ | tr -d ' ')" = 512 || { echo "$@ isn't 512 bytes"; rm -f $@; exit 1; }
+
+$(BUILD_DIR)/boot/kernel.bin: kernel.elf | $(BUILD_DIR)/boot
+	$(OBJCOPY) -O binary kernel.elf $@
+
+# disk -- src-c's bootable MP/M-86 floppy: the boot sector, KERNEL.SYS,
+# the C transients' CMD files and a sample SUB file (tools/mkdisk.py)
+DISK := $(BUILD_DIR)/mpm86c.img
+
+disk: $(DISK)
+
+$(DISK): tools/mkdisk.py tools/bootsect.py rsp/rsp_syms.h $(BUILD_DIR)/boot/bootsect.bin \
+		$(BUILD_DIR)/boot/kernel.bin $(BUILD_DIR)/rsp/submit.o $(BUILD_DIR)/rsp/random.o
+	$(PYTHON) tools/mkdisk.py -o $@
+
+$(BUILD_DIR)/boot/kernel_main.o: $(BOOT_DIR)/kernel_main.c kernel/defs.h gensys/gensys.h | $(BUILD_DIR)/boot
+	$(CC) $(CFLAGS) -I kernel -I gensys -c $< -o $@
 
 $(STRING_SHIM_OBJ): freestanding-include/string_shim.c | $(BUILD_DIR)/freestanding-include
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -147,16 +162,25 @@ boot: $(BOOT_OBJS)
 # section for the full list and reasoning. `memcpy`/`memcmp` also
 # needed real bodies (not just declarations) once anything actually
 # links against them -- freestanding-include/string_shim.c.
-kernel.elf: $(BOOT_OBJS) $(KERNEL_OBJS) $(RT_OBJS) $(RSP_OBJS) $(STRING_SHIM_OBJ) linker.ld
-	$(LD) -T linker.ld -o kernel.elf $(BOOT_OBJS) $(KERNEL_OBJS) $(RT_OBJS) $(RSP_OBJS) $(STRING_SHIM_OBJ)
+kernel.elf: $(BOOT_OBJS) $(KERNEL_OBJS) $(RT_OBJS) $(RSP_OBJS) $(GENSYS_OBJS) $(STRING_SHIM_OBJ) linker.ld
+	$(LD) -T linker.ld -o kernel.elf $(BOOT_OBJS) $(KERNEL_OBJS) $(RT_OBJS) $(RSP_OBJS) $(GENSYS_OBJS) $(STRING_SHIM_OBJ)
 	i686-elf-grub-file --is-x86-multiboot kernel.elf
 
-# run -- boot kernel.elf under QEMU with serial output on stdout.
-# Halts forever right after the signons and the sup_init report (by
-# design, see boot/kernel_main.c), so this just idles once printed --
-# Ctrl-C to stop.
-run: kernel.elf
-	$(QEMU) -kernel kernel.elf -serial stdio -display none -no-reboot -no-shutdown
+# run -- boot src-c's floppy (`disk`) under QEMU, the way ./run.sh boots
+# src-assem's: the BIOS boots it, src-c's boot sector loads KERNEL.SYS.
+# The console is QEMU's serial port, on this terminal (Ctrl-A X quits,
+# Ctrl-A C is QEMU's monitor); the list device (LPT1) prints to
+# build/printer.txt. What MP/M writes stays on build/mpm86c.img until
+# `make disk` rebuilds it.
+run: $(DISK)
+	$(QEMU) -drive file=$(DISK),format=raw,if=floppy -boot a -serial mon:stdio \
+		-parallel file:$(BUILD_DIR)/printer.txt -display none -no-reboot
+
+# run-elf -- the same, with QEMU loading kernel.elf itself (-kernel,
+# Multiboot) instead of the boot sector: for debugging the kernel
+run-elf: kernel.elf $(DISK)
+	$(QEMU) -kernel kernel.elf -drive file=$(DISK),format=raw,if=floppy -serial mon:stdio \
+		-parallel file:$(BUILD_DIR)/printer.txt -display none -no-reboot
 
 # -- Run every differential test from the repo root, same as a developer
 # invoking `python3 tests/src-c/test_foo.py` by hand -- each test already

@@ -1,4 +1,4 @@
-; Standalone wrapper for src/kernel/INIT.SUP's `init`, laid out like
+; Standalone wrapper for src-assem/kernel/INIT.SUP's `init`, laid out like
 ; the real SUP module: INIT.SUP at the very start of the SUP code
 ; segment (org 0, so `sysdat`/`supervisor`/`ver` sit at their real
 ; offsets), and the real VEC.FMT/UDA.FMT/SYSDAT.FMT included for the

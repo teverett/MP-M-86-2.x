@@ -1,8 +1,8 @@
 # plmc — a PL/M-86 subset compiler for this source tree
 
 `tools/plm/` is a from-scratch PL/M-86 compiler written in Python. It
-compiles the `.PLM` dialect subset used in this tree's `src/utils/` and
-`src/toolchain/` to ASM86-dialect text, which `tools/asm86/` (see its own
+compiles the `.PLM` dialect subset used in this tree's `src-assem/utils/` and
+`src-assem/toolchain/` to ASM86-dialect text, which `tools/asm86/` (see its own
 README) then assembles to machine code. Like `asm86`, it does not aim for
 historical byte-for-byte fidelity to DRI's real PL/M-86 compiler — only
 functionally equivalent 8086 code — and it only handles one source file
@@ -451,8 +451,8 @@ at any statement boundary, dropping the abandoned procedures' frames.
 
 ## Validated so far
 
-**All 22 of the `.PLM` files currently in `src/utils/` and
-`src/toolchain/` compile *and* their output assembles through
+**All 22 of the `.PLM` files currently in `src-assem/utils/` and
+`src-assem/toolchain/` compile *and* their output assembles through
 `tools/asm86` end-to-end**, with zero errors other than the expected
 unresolved external monitor/debugger calls every file depends on but
 none can supply a body for (`pl_mon1`–`pl_mon4`, and in `ASS86.PLM`'s

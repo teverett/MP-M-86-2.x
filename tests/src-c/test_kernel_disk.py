@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""kernel.elf with a disk: the C kernel's BDOS (getdiskmx and the file
-functions, src-c/kernel/bdosif.c and file1-4.c) on the real floppy image,
-through the C XIOS and the C CACHE, running the C SUBMIT and RANDOM
-(src-c/rsp/) as transients LOAD reads from the disk.
+"""src-c's floppy (build/mpm86c.img, `make disk`), booted by itself: the
+C kernel's BDOS (getdiskmx and the file functions, src-c/kernel/bdosif.c
+and file1-4.c) on it, through the C XIOS and the C CACHE, running the C
+SUBMIT and RANDOM (src-c/rsp/) as transients LOAD reads from the disk.
+Nothing from src-assem.
 
-On a copy of build/disk/mpm86q.img (make -C src builds it) with a T.SUB
-added, it types:
+On a copy with a T.SUB added (src-c/tools/mkdisk.py's geometry), it
+types:
   - `SUBMIT T alpha beta` -- T.SUB echoes $1 and $2 and switches user
     numbers: checks each expanded command's output;
   - `RANDOM R.DAT`, then `3W` hello, `5Z` five, `3R`, `5R`, `Q` --
@@ -13,7 +14,7 @@ added, it types:
     it prints back, then reads R.DAT off the image (records 3 and 5).
 
 Needs qemu-system-i386 and the i686-elf toolchain (as test_boot.py);
-skips (exit 0) if they or the disk image are missing.
+skips (exit 0) without them.
 """
 import os
 import shutil
@@ -26,16 +27,17 @@ import time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC_C_DIR = os.path.join(REPO_ROOT, 'src-c')
-DISK = os.path.join(REPO_ROOT, 'build', 'disk', 'mpm86q.img')
-sys.path.insert(0, os.path.join(REPO_ROOT, 'tools'))
+DISK = os.path.join(SRC_C_DIR, 'build', 'mpm86c.img')
+sys.path.insert(0, os.path.join(SRC_C_DIR, 'tools'))
+import mkdisk as md  # noqa: E402
 
-REQUIRED_TOOLS = ('i686-elf-gcc', 'i686-elf-ld', 'qemu-system-i386')
+REQUIRED_TOOLS = ('i686-elf-gcc', 'i686-elf-ld', 'i686-elf-objcopy', 'i686-elf-nm', 'qemu-system-i386')
 
 T_SUB = b'ECHO first $1\r\nUSER 2\r\nECHO second $2\r\nUSER 0\r\n'
 
 # (seconds to wait first, keys)
 SCRIPT = [
-    (6, b'SUBMIT T alpha beta\r'),
+    (8, b'SUBMIT T alpha beta\r'),
     (10, b'RANDOM R.DAT\r'),
     (3, b'3W\r'), (1, b'hello\r'),
     (2, b'5Z\r'), (1, b'five\r'),
@@ -56,36 +58,33 @@ EXPECT = (
 
 
 def cpm_entries(img):
-    import build_disk as bd
-    for i in range(bd.DIR_ENTRIES):
-        off = bd.DIR_START + i * 32
+    for i in range(md.DIR_ENTRIES):
+        off = md.block_offset(0) + i * 32
         yield off, img[off:off + 32]
 
 
 def cpm_put(img, name, ext, data):
     """Add a one-extent file to the image's directory, in free blocks."""
-    import build_disk as bd
-    data = data + b'\x1a' * ((-len(data)) % 128)
-    used = set(range(bd.DIR_BLOCKS))
+    data = data + b'\x1a' * ((-len(data)) % md.RECORD)
+    used = {0}  # the directory
     for _, e in cpm_entries(img):
         if e[0] != 0xE5:
             used.update(b for b in e[16:32] if b)
-    nblk = (len(data) + bd.BLOCK_SIZE - 1) // bd.BLOCK_SIZE
-    blocks = [b for b in range(bd.TOTAL_BLOCKS) if b not in used][:nblk]
+    nblk = (len(data) + md.BLOCK - 1) // md.BLOCK
+    blocks = [b for b in range(md.DSM + 1) if b not in used][:nblk]
     slot = next(off for off, e in cpm_entries(img) if e[0] == 0xE5)
     img[slot:slot + 32] = struct.pack('<B8s3sBBBB16B', 0, name.ljust(8), ext.ljust(3), 0, 0, 0,
-                                      len(data) // 128, *(blocks + [0] * (16 - len(blocks))))
+                                      len(data) // md.RECORD, *(blocks + [0] * (16 - len(blocks))))
     for k, b in enumerate(blocks):
-        chunk = data[k * bd.BLOCK_SIZE:(k + 1) * bd.BLOCK_SIZE]
-        img[bd.block_to_offset(b):bd.block_to_offset(b) + len(chunk)] = chunk
+        chunk = data[k * md.BLOCK:(k + 1) * md.BLOCK]
+        img[md.block_offset(b):md.block_offset(b) + len(chunk)] = chunk
 
 
 def cpm_get(img, name, ext):
-    import build_disk as bd
     for _, e in cpm_entries(img):
-        if e[0] == 0 and e[1:9] == name.ljust(8) and e[9:12] == ext.ljust(3):
-            return b''.join(img[bd.block_to_offset(b):bd.block_to_offset(b) + bd.BLOCK_SIZE]
-                            for b in e[16:32] if b)[:e[15] * 128]
+        if e[0] == 0 and e[1:9] == name.ljust(8) and bytes(b & 0x7F for b in e[9:12]) == ext.ljust(3):
+            return b''.join(img[md.block_offset(b):md.block_offset(b) + md.BLOCK]
+                            for b in e[16:32] if b)[:e[15] * md.RECORD]
     return None
 
 
@@ -94,10 +93,7 @@ def main():
     if missing:
         print(f"skip: missing tool(s) {', '.join(missing)}")
         return 0
-    if not os.path.exists(DISK):
-        print(f"skip: no {DISK} (make -C src builds it)")
-        return 0
-    subprocess.run(['make', 'kernel.elf'], cwd=SRC_C_DIR, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(['make', 'disk'], cwd=SRC_C_DIR, check=True, stdout=subprocess.DEVNULL)
 
     with tempfile.TemporaryDirectory() as tmp:
         disk = os.path.join(tmp, 'disk.img')
@@ -106,9 +102,8 @@ def main():
         open(disk, 'wb').write(img)
 
         qemu = subprocess.Popen(
-            ['qemu-system-i386', '-kernel', os.path.join(SRC_C_DIR, 'kernel.elf'),
-             '-drive', f'file={disk},format=raw,if=floppy,cache=writethrough', '-serial', 'stdio', '-display', 'none',
-             '-no-reboot'],
+            ['qemu-system-i386', '-drive', f'file={disk},format=raw,if=floppy,cache=writethrough', '-boot', 'a',
+             '-serial', 'stdio', '-display', 'none', '-no-reboot'],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         out = bytearray()
 

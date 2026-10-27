@@ -1,5 +1,5 @@
 /*
- * file3.c -- C port of a self-contained subset of src/kernel/
+ * file3.c -- C port of a self-contained subset of src-assem/kernel/
  * FILE3.BDO: PACK_SDCNT, COMPARE, SEARCH_OLIST/SEARCH_LLIST/
  * SEARCHN_LIST (+ internal search_listo), DELETE_ITEM, CREATE_ITEM,
  * SET_OLIST_ITEM, TST_TBL_LMT, REMOVE_LOCKS, FLUSH_FILES/FLUSH_FILE0,
@@ -108,7 +108,7 @@
  * modeled as a side effect of `move` itself (file1.c's own C version
  * doesn't need or track DI), just recomputed directly as `bx+3+5`.
  *
- * This cluster was picked out specifically because `src/kernel/
+ * This cluster was picked out specifically because `src-assem/kernel/
  * FILE1.BDO`'s own deferred `CHECK_FCB` calls `PACK_SDCNT`/
  * `SEARCH_OLIST` -- but `CHECK_FCB` also calls `CLOSE1` (`FILE2.BDO`),
  * which cascades into `CLOSE_FCB`/`GET_DIR_EXT`/`RESTORE_RC`/`srch`/
@@ -444,8 +444,8 @@ extern void func48(uint8_t *phys, uint16_t ds_bdos); /* src-c/kernel/file4.c */
  * loop shape as `flush_file0` above, but walking every olist entry
  * unconditionally (`ch=0`) and filtering by PD address directly
  * (`tst_tbl_lmt` against the item's own pdaddr field, offset 6) --
- * src/kernel/FILE3.BDO's own `call func48` once the loop ends
- * resolves to src/kernel/FILE4.BDO's own `FUNC48` (confirmed by
+ * src-assem/kernel/FILE3.BDO's own `call func48` once the loop ends
+ * resolves to src-assem/kernel/FILE4.BDO's own `FUNC48` (confirmed by
  * grep against `orig/mpm862sr`'s own copy too, after an initial
  * case-sensitive grep for `func48` -- lowercase -- turned up
  * nothing: the real label is `FUNC48`, uppercase).
@@ -878,7 +878,7 @@ void reselectx(uint8_t *phys, uint16_t ds_bdos) {
 }
 
 /*
- * parsave -- src/kernel/BDOSIF.BDO's own `parsave`: copy `cl` bytes
+ * parsave -- src-assem/kernel/BDOSIF.BDO's own `parsave`: copy `cl` bytes
  * of the caller's own incoming parameter block from the user's
  * segment into BDOS's local scratch area (`BD_LOC_PAR_AREA`), then
  * redirect `BD_INFO` to point at the copy instead of the original.
@@ -1971,7 +1971,7 @@ static void lock_err_apply(uint8_t *phys, uint16_t ds_bdos, uint16_t bx, uint8_t
  * get_lockadd -- GET_LOCKADD: seek to the record `lock_`'s own loop
  * is currently processing and compute its actual disk address.
  * `BD_LOCK_SP`/`BD_LOCK_SHELL` are not modeled -- confirmed via a
- * full search of src/ that nothing anywhere ever reads either field
+ * full search of src-assem/ that nothing anywhere ever reads either field
  * back, so their own writes here have no observable effect (a
  * stronger case than the usual "undefined artifact" judgment calls
  * elsewhere in this port: this one's provably dead, not just
@@ -2054,7 +2054,7 @@ static void set_lock(uint8_t *phys, uint16_t ds_bdos) {
  *		(`file4.c`) set `BD_LOCK_UNLOCK` before calling this
  *
  * `lock_`/`LOCK_ERR`'s own stack trick deserves its own callout: a
- * full search of `src/` turned up that `LOCK_PERR` (which restores
+ * full search of `src-assem/` turned up that `LOCK_PERR` (which restores
  * the real SP from `BD_LOCK_SP`) has no caller anywhere -- it's
  * provably dead. Every real path into `LOCK_ERR` goes through the
  * ordinary `pop dx ! pop cx` discard instead, against a stack shape

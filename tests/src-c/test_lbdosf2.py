@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/loader/lbdosf2.c against src/loader/
+"""Differential test for src-c/loader/lbdosf2.c against src-assem/loader/
 LBDOSF2.A86. See lbdosf2.c's own header comment for the full story on
 `ch` threading (scndm/srch/srchn/srchnext/delet) and getblock's own
 unrelated use of rotr.
@@ -52,7 +52,7 @@ JMP_STUBS = {0x21, 0x24}  # setsecf, setdmf
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'loader')])
+    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src-assem', 'loader')])
     code = asm.segment_bytes('cseg')
     names = ('scndm', 'initialize', 'ret8b', 'cpydirloc', 'srch', 'srchn', 'srchfin', 'endsearch',
              'delet', 'getblock', 'copyfcb', 'rename', 'indicators', 'open', 'close', 'make',

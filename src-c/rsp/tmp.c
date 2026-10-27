@@ -1,5 +1,5 @@
 /*
- * tmp.c -- C version of src/rsp/TMP.A86, the Terminal Message
+ * tmp.c -- C version of src-assem/rsp/TMP.A86, the Terminal Message
  * Processor: the console's command interpreter. It prints the prompt,
  * reads a command line, handles the drive change (X:) and the USER and
  * PRINTER built-ins itself, and hands anything else to the CLI

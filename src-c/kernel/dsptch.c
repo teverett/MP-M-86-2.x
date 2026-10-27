@@ -1,5 +1,5 @@
 /*
- * dsptch.c -- C port of src/kernel/DSPTCH.RTM: the process dispatcher
+ * dsptch.c -- C port of src-assem/kernel/DSPTCH.RTM: the process dispatcher
  * (fdisp, int_disp_exit, farpdisp/pdisp, dsptch, insert_process,
  * schedule, switch_, and the whole dsp_table dispatch: sleep_act,
  * poll_act, delay_act, swap_act, flag_act, term_act, disp_act).
@@ -7,9 +7,9 @@
  * First written as a reading/debugging aid for the live scheduler-hang
  * investigation (docs/bugs.md #83-98 and onward), per the user's own
  * request; now also linked into src-c's kernel.elf on real memory.
- * Keep this file and src/kernel/DSPTCH.RTM in sync: whenever one
+ * Keep this file and src-assem/kernel/DSPTCH.RTM in sync: whenever one
  * changes, re-read the other and update both, same as this project's
- * own AGENTS.md instructions for every /src <-> /src-c pair.
+ * own AGENTS.md instructions for every /src-assem <-> /src-c pair.
  *
  * Runs against real memory (defs.h's far_ptr), like proc.c: `phys` is
  * the base of the real 8086 physical address space and `sysdat` the

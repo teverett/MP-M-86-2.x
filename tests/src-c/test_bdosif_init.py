@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/bdosif.c's bdosif_init against
-src/kernel/BDOSIF.BDO's `init`, on real memory layout.
+src-assem/kernel/BDOSIF.BDO's `init`, on real memory layout.
 (tests/src-c/test_bdosif.py covers `entry`.)
 
 tests/src-c/fixtures/bdosif_init_wrapper.A86 assembles the whole real
@@ -72,7 +72,7 @@ def r16(mem, addr):
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src-assem', 'kernel')])
     code = asm.segment_bytes('cseg')
     data = asm.segment_bytes('dseg')
     sym = {name: asm.symtab[name].value for name in

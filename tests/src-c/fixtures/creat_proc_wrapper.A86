@@ -1,4 +1,4 @@
-; Wrapper for src/kernel/SYSENT.RTM's `creat_proc_entry` (`call
+; Wrapper for src-assem/kernel/SYSENT.RTM's `creat_proc_entry` (`call
 ; proc_creat ! jmp pdisp`) run all the way through for real: bundles
 ; the real SYSENT.RTM, DSPTCH.RTM and PROC.RTM, plus the real UDA.FMT/
 ; VEC.FMT/SYSDAT.FMT so every field resolves to its genuine offset.

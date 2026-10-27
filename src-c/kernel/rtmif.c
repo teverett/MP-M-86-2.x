@@ -1,5 +1,5 @@
 /*
- * rtmif.c -- C port of src/kernel/RTMIF.RTM's `init` AND now `entry`,
+ * rtmif.c -- C port of src-assem/kernel/RTMIF.RTM's `init` AND now `entry`,
  * named here `rtmif_init`/`rtmif_entry` -- every module's own real
  * asm label for these two routines is just `init`/`entry`; see
  * bdosif.c's own header comment for why the C ports need a module
@@ -36,7 +36,7 @@
  * `abort_spec_entry` (case 17) needs `RTMIF_ABORT_TERMINATE_OFFSET`
  * -- not a per-call register at all, but a real, fixed address
  * within this same combined module (`ABORT.RTM`'s own `terminate:`
- * label, probed via `--symbols` against `src/kernel/RTM.A86`, same
+ * label, probed via `--symbols` against `src-assem/kernel/RTM.A86`, same
  * convention `tests/src-c/test_abort.py` already established for
  * `abort_spec_entry`'s own direct tests) -- hardcoded here as a
  * `#define`, since every real caller of this combined module shares
@@ -68,7 +68,7 @@
  *      only used to reach the UDA, never stored back into `p_uda`.
  *      Each UDA gets `u_initcs` = the Supervisor's segment (both
  *      processes first run through SUPIF.SUP's `user_entry`) and
- *      `u_initss` = SYSDAT's segment, the already-fixed /src bug the
+ *      `u_initss` = SYSDAT's segment, the already-fixed /src-assem bug the
  *      real asm's own comment documents.
  *
  *   4. `mov dx,offset idlepd ! call proc_creat` -- a real call into
@@ -86,7 +86,7 @@ extern uint16_t proc_creat(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t
 
 /* ABORT.RTM's own real `terminate:` label address within the combined
  * RTM.A86 build -- see this file's own header comment. Probed via
- * `python3 tools/asm86.py src/kernel/RTM.A86 -I src/kernel --symbols`;
+ * `python3 tools/asm86.py src-assem/kernel/RTM.A86 -I src-assem/kernel --symbols`;
  * re-probe if that build's own encoding ever shifts. */
 #define RTMIF_ABORT_TERMINATE_OFFSET 0x0C76
 

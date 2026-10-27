@@ -1,4 +1,4 @@
-; Standalone wrapper for src/kernel/RTMIF.RTM's `init`, laid out like
+; Standalone wrapper for src-assem/kernel/RTMIF.RTM's `init`, laid out like
 ; the real RTM module: RTMIF.RTM at the start of the code segment (org
 ; 0, so `sysdat`/`supervisor` sit at their real offsets 6/8), and the
 ; real UDA.FMT/VEC.FMT/SYSDAT.FMT included so `supmod`/`dispatcher`/

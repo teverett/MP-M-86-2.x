@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/xios86q.c against the whole of
-src/kernel/XIOS86Q.A86: the from-scratch QEMU XIOS actually combined
+src-assem/kernel/XIOS86Q.A86: the from-scratch QEMU XIOS actually combined
 into the real bootable MPM.bin (not DRI source -- see that file's own
 header comment). See xios86q.c's own header comment for exactly what's
 not ported (`entry`/`supif`, `idle`, `tickint`'s own ISR shell, the
@@ -10,12 +10,12 @@ copies/IVT write/`retf`) and why.
 XIOS86Q.A86 has no real DRI include dependencies beyond the standard
 system.def/modfunc.def/xioscb.def/pd.def/sysdat.fmt chain and assembles
 to one fixed layout on its own (confirmed: `python3 tools/asm86.py
-src/kernel/XIOS86Q.A86 -I src/kernel --symbols` needs no other wrapper),
+src-assem/kernel/XIOS86Q.A86 -I src-assem/kernel --symbols` needs no other wrapper),
 so this test assembles it directly, no fixture wrapper needed.
 
 Reuses tests/src-c/fixtures/uart86q.py's `Uart86Q` and fdc86q.py's
 `Fdc86Q` -- the exact same COM1/NEC765 hardware model
-src/loader/LDBIOS86Q.A86's own test already established, since this
+src-assem/loader/LDBIOS86Q.A86's own test already established, since this
 file targets identical QEMU hardware -- plus a small local `PicPit`
 recorder for the PIT (0x40/0x43) and PIC (0x20/0x21) ports `init_entry`
 also touches, which neither existing fixture models. `Device` below
@@ -36,7 +36,7 @@ from i86sim import I86Sim  # noqa: E402
 from uart86q import Uart86Q  # noqa: E402
 from fdc86q import Fdc86Q  # noqa: E402
 
-REAL_FILE = os.path.join(REPO_ROOT, 'src', 'kernel', 'XIOS86Q.A86')
+REAL_FILE = os.path.join(REPO_ROOT, 'src-assem', 'kernel', 'XIOS86Q.A86')
 XIOS86Q_C = os.path.join(REPO_ROOT, 'src-c', 'kernel', 'xios86q.c')
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 
@@ -138,7 +138,7 @@ class Device:
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(REAL_FILE, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+    asm.assemble(REAL_FILE, [os.path.join(REPO_ROOT, 'src-assem', 'kernel')])
     code = asm.segment_bytes('cseg')
     dseg = asm.segment_bytes('dseg')
     entries = {name: asm.symtab[name.lower()].value
@@ -152,7 +152,7 @@ def assemble_reference():
 
 def assemble_symbols():
     asm = Assembler()
-    asm.assemble(REAL_FILE, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+    asm.assemble(REAL_FILE, [os.path.join(REPO_ROOT, 'src-assem', 'kernel')])
     return {k: v.value for k, v in asm.symtab.items()}
 
 

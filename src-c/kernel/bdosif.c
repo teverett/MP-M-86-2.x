@@ -1,5 +1,5 @@
 /*
- * bdosif.c -- C port of src/kernel/BDOSIF.BDO's `init` and `entry`,
+ * bdosif.c -- C port of src-assem/kernel/BDOSIF.BDO's `init` and `entry`,
  * named here `bdosif_init`/`bdosif_entry` -- every module's own real
  * asm label for these two routines is just `init`/`entry` (purely
  * locally/table-relative in the real system, never a globally

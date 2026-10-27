@@ -1,5 +1,5 @@
 /*
- * cache.c -- C version of src/rsp/CACHE.RSP, DRI's disk directory
+ * cache.c -- C version of src-assem/rsp/CACHE.RSP, DRI's disk directory
  * cache. There is no source for it, only the GENCMD binary
  * (orig/lastdri/22, docs/bugs.md #124); this follows its disassembly.
  *
@@ -94,6 +94,9 @@ _Static_assert(sizeof(cache_data) == CACHE_LEN, "len");
 #define GUARD {0xABCD, 0xABCD, 0xABCD, 0xABCD, 0xABCD, 0xABCD, 0xABCD, 0xABCD}
 
 const uint16_t cache_image_len = sizeof(cache_data);
+/* CACHE.RSP's code group: 1Ah paragraphs; its start address, cachinit */
+const uint16_t cache_code_len = 0x01A0;
+const uint16_t cache_start = 0x0009;
 const cache_data cache_image = {
     .pd = RSP_PD(0x40, 0, "Cachinit", 0),
     .uda = RSP_UDA(CACHE_DMA, CACHE_STACK_TOS),
@@ -199,12 +202,16 @@ void cache_main(uint16_t ds) {
     wr16(code + CACHE_CS_XIOS + 2, rd16(sys + SYSDAT_XIOSMOD + 2));
     cache_ds = ds;
     cache_xios_next = rt_xiosmod;
+#if defined(__i386__) /* kernel.elf; the host tests only build the image */
     uint32_t flags;
     __asm__ volatile("pushfl; popl %0; cli" : "=r"(flags) : : "memory"); /* pushf ! cli */
+#endif
     wr16(sys + SYSDAT_XIOSMOD, CACHE_CS_HANDLER);
     wr16(sys + SYSDAT_XIOSMOD + 2, cs);
     rt_xiosmod = cache_xios;
+#if defined(__i386__)
     __asm__ volatile("pushl %0; popfl" : : "r"(flags) : "memory", "cc"); /* popf */
+#endif
 
     (void)rt_mpm(ds, mpm_terminate, 0);
 }

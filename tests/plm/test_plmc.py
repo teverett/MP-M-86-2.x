@@ -7,7 +7,7 @@ the low bit, DO loops, the left-to-right argument order and parameter
 layout (DRI's MCD.A86 mon stub expects func at [bp+6]), BYTE parameters,
 nested-procedure closures, COMPACT-model POINTERs (4 bytes, `@x`, data
 BASED on a POINTER reached through its segment, MOVB between segments)
--- and the real src/utils/DIR.PLM and TOD.PLM, run against a scripted
+-- and the real src-assem/utils/DIR.PLM and TOD.PLM, run against a scripted
 BDOS behind INT 224 (the base page set up as the loader does). See
 docs/bugs.md #115 and #116.
 """
@@ -263,7 +263,7 @@ def run_tod(tail, tod):
     SYSDAT_SEG in ES, the TOD structure is at SYSDAT:7Eh; conin (1)
     answers "Strike key". Returns the console output and SYSDAT's TOD."""
     with tempfile.TemporaryDirectory() as d:
-        a = build(os.path.join(REPO, 'src', 'utils', 'TOD.PLM'), d)
+        a = build(os.path.join(REPO, 'src-assem', 'utils', 'TOD.PLM'), d)
     mem = load(a)
     bp = DS * 16
     t = tail.encode()
@@ -306,7 +306,7 @@ def run_dir(tail):
     search first/next (4 entries per 128-byte record, the index in AL),
     parse filename (for an empty tail: nothing to parse), terminate."""
     with tempfile.TemporaryDirectory() as d:
-        a = build(os.path.join(REPO, 'src', 'utils', 'DIR.PLM'), d)
+        a = build(os.path.join(REPO, 'src-assem', 'utils', 'DIR.PLM'), d)
     mem = load(a)
     bp = DS * 16
     mem[bp + 0x5C:bp + 0x68] = bytes([0]) + tail[0]

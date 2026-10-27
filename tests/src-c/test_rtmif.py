@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/rtmif.c's `rtmif_init` against
-src/kernel/RTMIF.RTM's `init`, both running against real memory layout.
+src-assem/kernel/RTMIF.RTM's `init`, both running against real memory layout.
 `entry` has its own test, tests/src-c/test_rtmif_entry.py.
 
 rtmif_init addresses real memory (defs.h's far_ptr(): seg*16 + off at
@@ -59,7 +59,7 @@ TICK_SP, IDLE_SP = 0x0F00, 0x0F80  # u_stack_sp -> IRET frames on the SYSDAT seg
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src-assem', 'kernel')])
     code = asm.segment_bytes('cseg')
     sym = {name: asm.symtab[name].value for name in (
         'init', 'entry', 'fdisp', 'farpdisp', 'sysdat', 'supervisor', 'supmod',

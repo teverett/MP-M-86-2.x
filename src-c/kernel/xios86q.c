@@ -1,5 +1,5 @@
 /*
- * xios86q.c -- C port of the whole of src/kernel/XIOS86Q.A86: a
+ * xios86q.c -- C port of the whole of src-assem/kernel/XIOS86Q.A86: a
  * from-scratch QEMU XIOS this project wrote (not DRI source -- see
  * that file's own header comment), the file actually combined into
  * the real bootable MPM.bin (unlike the real XIOS.A86, replaced here

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""src-c/rsp/tmp.c against src/rsp/TMP.A86, as whole programs (see
+"""src-c/rsp/tmp.c against src-assem/rsp/TMP.A86, as whole programs (see
 tests/src-c/rspref.py): TMP sets its console's defaults, prints the
 version message, then loops -- prompt, read a command line, handle X:,
 USER and PRINTER itself, hand anything else to the CLI and report its

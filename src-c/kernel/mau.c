@@ -1,5 +1,5 @@
 /*
- * mau.c -- C port of the whole of src/kernel/MAU.MEM: maualloc_entry,
+ * mau.c -- C port of the whole of src-assem/kernel/MAU.MEM: maualloc_entry,
  * maufree_entry (+ internal mau_split, mau_insert, mau_release,
  * mau_collapse).
  *
@@ -33,7 +33,7 @@
  * override onto `u_wrkseg` throughout the real asm (never a bare
  * reference).
  *
- * **Found and fixed a real, 40-year-old /src bug while porting this
+ * **Found and fixed a real, 40-year-old /src-assem bug while porting this
  * file** (present identically in `orig/mpm862sr/02/MAU.MEM` and
  * `orig/lastdri/19/MAU.MEM` -- see docs/bugs.md #102): `maualloc_entry`'s
  * exact-absolute-split path did `mov bx,cx ! call mau_split`,

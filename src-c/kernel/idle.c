@@ -1,5 +1,5 @@
 /*
- * idle.c -- C port of src/kernel/IDLE.SUP's `idle:` routine.
+ * idle.c -- C port of src-assem/kernel/IDLE.SUP's `idle:` routine.
  *
  * `idle:` never returns in the real system: it tail-jumps into the XIOS
  * module's own idle handler (`jmp xiosif`), which is not ported. Per

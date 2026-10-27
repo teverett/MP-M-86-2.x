@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/loader/lbdosio.c against src/loader/
+"""Differential test for src-c/loader/lbdosio.c against src-assem/loader/
 LBDOSIO.A86's conbrk, conout, tabout, crlf, print, func9, staret,
 funcret, setlret1. func1/func3/func6/func7/func8/func10/func11 (and
 func2, an alias for tabout itself) are not ported -- see lbdosio.c's
@@ -26,7 +26,7 @@ LD_KBCHAR, LD_COMPCOL, LD_COLUMN, LD_LISTCP, LD_ARET = 0xB000, 0xB001, 0xB002, 0
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'loader')])
+    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src-assem', 'loader')])
     code = asm.segment_bytes('cseg')
     entries = {name: asm.symtab[name].value for name in (
         'conbrk', 'conout', 'tabout', 'crlf', 'print', 'func9', 'staret', 'funcret', 'setlret1')}

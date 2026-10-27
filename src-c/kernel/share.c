@@ -1,5 +1,5 @@
 /*
- * share.c -- C port of the whole of src/kernel/SHARE.MEM: share_entry.
+ * share.c -- C port of the whole of src-assem/kernel/SHARE.MEM: share_entry.
  *
  * Runs against real memory (defs.h's far_ptr): `phys` is the base of
  * real physical memory and `sysdat` the real SYSDAT segment (the MEM
@@ -11,7 +11,7 @@
  * "leading dot forces a memory operand" convention applied to a
  * literal 0 -- SAT0's own `ents` field, same as mau.c's header explains.
  *
- * `getmd`/`freemd` (src/kernel/UTIL.MEM, already ported in
+ * `getmd`/`freemd` (src-assem/kernel/UTIL.MEM, already ported in
  * util_mem.c) are called as ordinary internal calls, not boundary
  * stubs -- same convention as ml.c's/memory.c's own calls into them.
  *
@@ -19,7 +19,7 @@
  * with oneself (`se_s` went straight to the success exit) and the
  * owner having no segment at the requested start (`se_err`, unlike
  * `se_err1`, skipped `freemd`). Both now free it, here and in
- * src/kernel/SHARE.MEM -- docs/bugs.md #105.
+ * src-assem/kernel/SHARE.MEM -- docs/bugs.md #105.
  */
 #include <stdint.h>
 

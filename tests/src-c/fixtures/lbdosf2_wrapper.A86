@@ -1,4 +1,4 @@
-; Standalone wrapper for src/loader/LBDOSF2.A86 -- see
+; Standalone wrapper for src-assem/loader/LBDOSF2.A86 -- see
 ; src-c/loader/lbdosf2.c's own header comment for exactly what's
 ; ported and what's deferred.
 ;

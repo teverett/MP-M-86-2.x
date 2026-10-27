@@ -9,8 +9,8 @@ tree.
 ```
 orig/           The original 11-disk source tree, byte-for-byte as
                 downloaded (see docs/orig.md for what's on each disk).
-                Never patched -- src/ is where any fixes happen.
-src/            The same source, organized by what it builds:
+                Never patched -- src-assem/ is where any fixes happen.
+src-assem/      The same source, organized by what it builds:
   kernel/         MP/M-86 kernel modules (BDOS, RTM, SUP, MEM, CIO,
                   XIOS, SYSDAT) plus XIOS86Q.A86, a from-scratch
                   replacement XIOS for QEMU.
@@ -22,9 +22,25 @@ src/            The same source, organized by what it builds:
                   INS86).
   utils/          PL/M sources for user-facing utilities (PIP, ED,
                   DIR, TYPE, etc.).
-  Makefile        Build everything with `make -C src` (or `cd src &&
-                  make`); see its own header comment for all targets
-                  (`make disk`, `make run`, ...).
+  Makefile        Build everything with `make -C src-assem` (or `cd
+                  src-assem && make`); see its own header comment for
+                  all targets (`make disk`, `make run`, ...).
+src-c/          A C port of src-assem/ (see docs/src-c.md) that builds
+                and boots its own MP/M-86 floppy, with nothing from
+                src-assem/:
+  kernel/         The kernel modules, routine by routine.
+  loader/         The loader.
+  rsp/            The RSPs (TMP, CLOCK, ECHO, CACHE) and transients
+                  (SUBMIT, RANDOM), as C programs.
+  rt/             The runtime that runs the kernel as MP/M in 32-bit
+                  protected mode.
+  gensys/         System generation: the low-memory image.
+  boot/           The boot sector and the kernel's entry.
+  tools/          The disk builder (mkdisk.py, bootsect.py).
+  Makefile        `make -C src-c run` builds the floppy and boots it;
+                  `make -C src-c test` runs tests/src-c/.
+tests/          The differential and boot tests (tests/src-c/) and the
+                PL/M compiler's (tests/plm/).
 tools/          This project's own from-scratch build tooling (none of
                 it is DRI source):
   asm86/          An ASM86-dialect assembler, since none survived.
@@ -37,13 +53,31 @@ tools/          This project's own from-scratch build tooling (none of
   build_disk.py     Combines everything above into one bootable
                     QEMU floppy image.
 docs/           Documentation -- see "Documentation" below.
-build/          Build output (gitignored, created by `make -C src`).
+src-assem/build/  src-assem's build output (gitignored, created by
+                `make -C src-assem`).
+src-c/build/    src-c's build output, its floppy (mpm86c.img)
+                included (gitignored, created by `make -C src-c`).
 ```
+
+## Building and booting
+
+Two builds, each with its own bootable QEMU floppy:
+
+- **src-assem** (the original assembly, built with tools/):
+  `./run.sh`, or `make -C src-assem disk run`. The floppy is
+  `src-assem/build/disk/mpm86q.img`.
+- **src-c** (the C port, 32-bit, built with i686-elf-gcc):
+  `make -C src-c run`. The floppy is `src-c/build/mpm86c.img`.
+
+Both put MP/M's console on the terminal (QEMU's serial port; Ctrl-A X
+quits). They need `qemu-system-i386`; src-c also needs the i686-elf
+cross toolchain (`i686-elf-gcc`, binutils). See docs/src-c.md, "Building
+and booting src-c".
 
 ## Documentation
 
 - [docs/orig.md](docs/orig.md) — what's in the original 11-disk source
-  tree, disk by disk, and how it maps to `src/`.
+  tree, disk by disk, and how it maps to `src-assem/`.
 - [docs/filetypes.md](docs/filetypes.md) — the file-extension
   conventions this source uses (`.A86`, `.PLM`, `.DEF`, `.FMT`, etc.)
   and what each one means.
@@ -59,7 +93,7 @@ build/          Build output (gitignored, created by `make -C src`).
 - [docs/diskformat.md](docs/diskformat.md) — the exact byte-for-byte
   layout of the bootable QEMU floppy image `make disk` produces.
 - [docs/utilities.md](docs/utilities.md) — the 19 user-facing
-  `src/utils/` commands (`PIP`, `ED`, `DIR`, `TYPE`, etc.), what each
+  `src-assem/utils/` commands (`PIP`, `ED`, `DIR`, `TYPE`, etc.), what each
   one does, and how they're built and placed on disk.
 - [docs/syscalls.md](docs/syscalls.md) — the MP/M-86 kernel's and the
   loader's own system-call tables: every `CL` function number, what it

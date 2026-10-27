@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/loader/ldmpm.c against src/loader/
+"""Differential test for src-c/loader/ldmpm.c against src-assem/loader/
 LDMPM.A86's `start:` (ported as `start_entry`), the loader's own main
 orchestration routine.
 
-`jmp mldbios` -- a near jump into src/loader/LDBIOS86Q.A86's own
+`jmp mldbios` -- a near jump into src-assem/loader/LDBIOS86Q.A86's own
 `INIT`, whose own tail jumps straight back -- is modeled via
 tools/i86sim.py's new `jmp_hooks` on the reference side, replaying
 the exact same UART/FDC register-write sequence
@@ -38,7 +38,7 @@ from i86sim import I86Sim  # noqa: E402
 from iorecorder import IoRecorder  # noqa: E402
 from mpmsysfile import MpmSysFile  # noqa: E402
 
-REAL_FILE = os.path.join(REPO_ROOT, 'src', 'loader', 'LDMPM.A86')
+REAL_FILE = os.path.join(REPO_ROOT, 'src-assem', 'loader', 'LDMPM.A86')
 LDMPM_C = os.path.join(REPO_ROOT, 'src-c', 'loader', 'ldmpm.c')
 LDBIOS86Q_C = os.path.join(REPO_ROOT, 'src-c', 'loader', 'ldbios86q.c')
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'loader')

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/loader/lbdosf1.c against src/loader/
+"""Differential test for src-c/loader/lbdosf1.c against src-assem/loader/
 LBDOSF1.A86. See lbdosf1.c's own header comment for exactly which
 routines are ported and why the rest (selerror/goerr, setallocbit/
 rotr, setdata/setdir/setdma) is deferred.
@@ -47,7 +47,7 @@ ALLOC_AT = 0x4400  # scratch allocation-vector address
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'loader')])
+    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src-assem', 'loader')])
     code = asm.segment_bytes('cseg')
     names = ('selectdisk', 'home', 'rdbuff', 'wrbuff', 'seekdir', 'seek',
              'index', 'alloct', 'atran', 'getfcb', 'setfcb', 'cmpecs',

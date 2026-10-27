@@ -103,23 +103,3 @@ rt_fault_common:
 1:	cli
 	hlt
 	jmp 1b
-
-/*
- * The MP/M-86 image /src builds (build/kernel/MPM.bin.{cseg,dseg}):
- * the combined code segment -- every module's code, then the baked-in
- * RSPs' code and data segments -- and the SYSDAT data segment, laid out
- * by tools/build_mpmsys.py (the GENSYS stand-in). The kernel's code is
- * 8086 code nothing here runs; the image is what puts SYSDAT (its
- * pools, lists, queue descriptors, CCBs), the module table and the RSP
- * chain where the real boot does.
- */
-	.section .rodata
-	.global rt_mpm_cseg, rt_mpm_cseg_end, rt_mpm_dseg, rt_mpm_dseg_end
-	.balign 16
-rt_mpm_cseg:
-	.incbin "../build/kernel/MPM.bin.cseg"
-rt_mpm_cseg_end:
-	.balign 16
-rt_mpm_dseg:
-	.incbin "../build/kernel/MPM.bin.dseg"
-rt_mpm_dseg_end:

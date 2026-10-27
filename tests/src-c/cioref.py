@@ -2,7 +2,7 @@
 tests (test_console.py, test_chario.py, test_cioif.py,
 test_cioif_entry.py).
 
-The reference is src/kernel/CIO.A86 itself -- the whole real module
+The reference is src-assem/kernel/CIO.A86 itself -- the whole real module
 (CIOIF/CONSOLE/CHARIO + the real UDA.FMT/SYSDAT.FMT). It runs the way a
 system call reaches CIO: DS = SYSDAT, ES = the running process's UDA,
 SS:SP = that UDA at `ulen` (see tests/src-c/memref.py, which this
@@ -13,7 +13,7 @@ CIO's two far calls are modeled with tools/i86sim.py's `far_call_hooks`:
 - `mpmif` (`callf cs:dword ptr .supervisor`, into SUPIF.SUP): for
   f_findpdname (conassign_entry's name search) the hook applies SUPIF's
   protocol (u_wrkseg = the caller's DS, DS = SYSDAT) and runs the real
-  src/kernel/FINDPD.RTM -- assembled separately and loaded at FINDPD_BASE
+  src-assem/kernel/FINDPD.RTM -- assembled separately and loaded at FINDPD_BASE
   in the same memory -- in a nested sim. f_sleep/f_wakeup/f_dispatch/
   f_terminate are the usual no-op boundary stubs.
 - `xiosif` (`callf dword ptr .xiosmod`): the XIOS boundary, driven by
@@ -37,7 +37,7 @@ import memref
 from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
-CIO_A86 = os.path.join(REPO_ROOT, 'src', 'kernel', 'CIO.A86')
+CIO_A86 = os.path.join(REPO_ROOT, 'src-assem', 'kernel', 'CIO.A86')
 FINDPD_WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'findpd_wrapper.A86')
 CIO_C = [os.path.join(KERNEL_C, f) for f in ('cioif.c', 'console.c', 'chario.c', 'findpd.c')]
 FINDPD_BASE = 0xF000
@@ -90,7 +90,7 @@ def c_xios(lib, data=b''):
 class CioRef:
     def __init__(self):
         asm = Assembler()
-        asm.assemble(CIO_A86, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+        asm.assemble(CIO_A86, [os.path.join(REPO_ROOT, 'src-assem', 'kernel')])
         self.code = asm.segment_bytes('cseg')
         self.s = {name: asm.symtab[name].value for name in SYMS}
         s = self.s
@@ -110,7 +110,7 @@ class CioRef:
         self.entry_retf = retf[0]
 
         fasm = Assembler()
-        fasm.assemble(FINDPD_WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+        fasm.assemble(FINDPD_WRAPPER, [os.path.join(REPO_ROOT, 'src-assem', 'kernel')])
         assert fasm.symtab['findpdname_entry'].value == 0
         self.findpd = fasm.segment_bytes('cseg')
         assert FINDPD_BASE + len(self.findpd) <= SIM_MEM

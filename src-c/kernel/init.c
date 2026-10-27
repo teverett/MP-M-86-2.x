@@ -1,5 +1,5 @@
 /*
- * init.c -- C port of src/kernel/INIT.SUP's `init` (system
+ * init.c -- C port of src-assem/kernel/INIT.SUP's `init` (system
  * initialization), named here `sup_init` -- every module's own real
  * asm label for this routine is just `init`; see bdosif.c's own
  * header comment for why the C ports need a module prefix instead
@@ -37,7 +37,7 @@
  *   - each RSP's `int mpmint` (f_createproc) and the final one
  *     (f_terminate) are system calls into unported machinery.
  *
- * Three real bugs in /src were found and fixed at this routine's own
+ * Three real bugs in /src-assem were found and fixed at this routine's own
  * sites (see INIT.SUP's own comments): bare `sysdat` reads/writes that
  * landed on SYSDAT's offset 6 instead of this module's `cs:sysdat`
  * cell, a bare `mov u_wrkseg,ds` that hit SYSDAT's offset 2Eh (the

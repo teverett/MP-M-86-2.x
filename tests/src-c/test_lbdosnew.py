@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/loader/lbdosnew.c against src/loader/
+"""Differential test for src-c/loader/lbdosnew.c against src-assem/loader/
 LBDOSNEW.A86's func51 (set segment base for disk I/O).
 func50/func52/func53/func54/func55/func56/func57 are not ported -- see
 lbdosnew.c's own header comment for why (each is just a separate entry
@@ -26,7 +26,7 @@ LD_DMABASE = 0xB043
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'loader')])
+    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src-assem', 'loader')])
     code = asm.segment_bytes('cseg')
     entries = {name: asm.symtab[name].value for name in ('func51',)}
     return code, entries

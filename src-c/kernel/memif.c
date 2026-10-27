@@ -1,5 +1,5 @@
 /*
- * memif.c -- C port of src/kernel/MEMIF.MEM's `init` AND now `entry`,
+ * memif.c -- C port of src-assem/kernel/MEMIF.MEM's `init` AND now `entry`,
  * named here `memif_init`/`memif_entry` -- every module's own real
  * asm label for these two routines is just `init`/`entry`; see
  * bdosif.c's own header comment for why the C ports need a module

@@ -1,8 +1,8 @@
 """Shared real-memory reference harness for the Supervisor (SUP) tests --
 and, through it, a small model of the whole system.
 
-SYSDAT is the real src/kernel/SYSDAT.A86 image (SYSTEM.DAT + DATA.BDO).
-The reference is src/kernel/SUP.A86 itself (INIT/IDLE/TICK/SUPIF/SYSFUNC/
+SYSDAT is the real src-assem/kernel/SYSDAT.A86 image (SYSTEM.DAT + DATA.BDO).
+The reference is src-assem/kernel/SUP.A86 itself (INIT/IDLE/TICK/SUPIF/SYSFUNC/
 COMMAND/LOAD/PARSE/RPL + the real UDA.FMT/SYSDAT.FMT), run the way a
 system call reaches it: DS = SYSDAT (SUPIF's mpmif does `mov
 ds,cs:sysdat`), ES = the running process's UDA, SS:SP = that UDA at `ulen`.
@@ -37,7 +37,7 @@ from memref import (REPO_ROOT, KERNEL_C, SIM_MEM, PHYS_MEM, ULEN, UDA_STACK, phy
 from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
-KDIR = os.path.join(REPO_ROOT, 'src', 'kernel')
+KDIR = os.path.join(REPO_ROOT, 'src-assem', 'kernel')
 CODE_SEG = {'SUP': 0x0000, 'RTM': 0x0140, 'MEM': 0x0240, 'CIO': 0x02F0, 'BDOS': 0x0380}
 MOD_NUM = {'SUP': 1, 'RTM': 2, 'MEM': 3, 'CIO': 4, 'BDOS': 5}
 SYSDAT = 0x0600     # DS of every module
@@ -88,9 +88,9 @@ class SysRef:
         for a, b in zip(order, order[1:]):
             assert a.base + len(a.code) <= b.base, (a.name, b.name)
         assert order[-1].base + len(order[-1].code) <= sd(0)
-        # SYSDAT image: the real src/kernel/SYSDAT.A86 (SYSTEM.DAT's
+        # SYSDAT image: the real src-assem/kernel/SYSDAT.A86 (SYSTEM.DAT's
         # GENSYS-initialized tables -- sysent, flags, the stock PDs -- plus
-        # DATA.BDO), the same bytes the /src build loads
+        # DATA.BDO), the same bytes the /src-assem build loads
         asm = Assembler()
         asm.assemble(os.path.join(KDIR, 'SYSDAT.A86'), [KDIR])
         self.data = asm.segment_bytes('dseg')

@@ -1,5 +1,5 @@
 /*
- * lbdosio.c -- C port of src/loader/LBDOSIO.A86: conbrk, conout, tabout,
+ * lbdosio.c -- C port of src-assem/loader/LBDOSIO.A86: conbrk, conout, tabout,
  * crlf, print, func9, staret, funcret, setlret1.
  *
  * func1/func3/func6/func7/func8/func10/func11 are deferred -- each is
@@ -9,7 +9,7 @@
  * own name.
  *
  * constf/coninf/conouf/listf/wbootf are near CALLs to fixed offsets in
- * the loader's own BIOS jump table (src/loader/LBDOSEQU.A86: `wbootf
+ * the loader's own BIOS jump table (src-assem/loader/LBDOSEQU.A86: `wbootf
  * equ BIOS+3*1`, etc.), not yet ported -- ordinary mid-routine-call
  * boundary stubs per docs/src-c.md's convention (an instant no-op
  * return, AL left unchanged by whatever CALLed it).
@@ -144,7 +144,7 @@ void staret(uint8_t *mem, uint8_t al) {
 
 /*
  * funcret -- bare return point, called directly by name from
- * src/loader/LBDOSF3.A86 (func38/func39)
+ * src-assem/loader/LBDOSF3.A86 (func38/func39)
  */
 void funcret(uint8_t *mem) {
     (void)mem;

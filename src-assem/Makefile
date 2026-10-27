@@ -1,17 +1,17 @@
-# Builds every source file in this directory (src/) that is currently
+# Builds every source file in this directory (src-assem/) that is currently
 # known to compile and/or assemble cleanly with this repo's own
 # from-scratch toolchain (../tools/asm86/, ../tools/plmc.py). See
 # ../docs/bugs.md for exactly which files are deliberately left out and
 # why (genuine 1981 source defects, or a documented ../tools/asm86
-# limitation) -- src/ itself is never patched to make something build;
+# limitation) -- src-assem/ itself is never patched to make something build;
 # only the lists below change as more of the source is validated.
 #
-# Usage (from the repo root: `make -C src <target>`; or `cd src &&
+# Usage (from the repo root: `make -C src-assem <target>`; or `cd src-assem &&
 # make <target>`):
 #   make            # build everything in ALL_GOOD below
 #   make partial    # also compile (but not assemble) the two known-
 #                   # incomplete toolchain files
-#   make disk       # build ../build/disk/mpm86q.img, a bootable floppy
+#   make disk       # build build/disk/mpm86q.img, a bootable floppy
 #                   # image
 #   make run        # boot that image in QEMU (builds it first if needed)
 #   make clean
@@ -21,16 +21,16 @@
 # Makefile works unmodified on Linux/macOS/Windows (see
 # .github/workflows/build.yml's os matrix).
 #
-# This Makefile lives in src/ and is invoked as `make -C src` (or from
-# within src/ directly), so its own source paths below are relative to
-# src/ itself, while tools/ and the build/ output dir -- both outside
-# src/ -- are reached via ../.
+# This Makefile lives in src-assem/ and is invoked as `make -C src-assem` (or from
+# within src-assem/ directly), so its own source paths below are relative to
+# src-assem/ itself, with the build output in src-assem/build/; tools/, outside
+# src-assem/, is reached via ../.
 PYTHON  := $(shell command -v python3 2>/dev/null || command -v python)
 PLMC    := $(PYTHON) ../tools/plmc.py
 ASM86   := $(PYTHON) ../tools/asm86.py
 STUB    := ../tools/plm/runtime_stub.A86
 PLMC_SRC := $(wildcard ../tools/plm/*.py)   # rebuild the utilities when the compiler changes
-BUILD   := ../build
+BUILD   := build
 QEMU    := qemu-system-i386
 
 # --- .PLM utilities: compile with plmc, then concatenate the real

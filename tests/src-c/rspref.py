@@ -1,6 +1,6 @@
 """Shared harness for the src-c/rsp/ program tests (test_tmp.py,
 test_echo.py, test_clock.py, test_submit.py, test_random.py): each runs a
-whole program twice -- the real src/rsp/*.A86 in tools/i86sim.py, and its
+whole program twice -- the real src-assem/rsp/*.A86 in tools/i86sim.py, and its
 C version (src-c/rsp/*.c) on the host -- against the same scripted
 operating system, and compares what they did.
 
@@ -32,7 +32,7 @@ from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
 SRC_C = os.path.join(REPO_ROOT, 'src-c')
-RSP_A86 = os.path.join(REPO_ROOT, 'src', 'rsp')
+RSP_A86 = os.path.join(REPO_ROOT, 'src-assem', 'rsp')
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures')
 
 MEM_SIZE = 0x10000  # i86sim's memory is 64K
@@ -246,7 +246,7 @@ class Mpm:
 
 
 class Program:
-    """One src/rsp program: its assembled code and data, and its C build."""
+    """One src-assem/rsp program: its assembled code and data, and its C build."""
 
     def __init__(self, name, c_main, rsp, stack):
         self.name = name
@@ -256,10 +256,8 @@ class Program:
         self.sym = {k.lower(): v.value for k, v in asm.symtab.items()}
         self.rsp = rsp
         self.stack = stack  # (first, last) DS offsets of the asm's stack
-        subprocess.run(['make', 'obj/rsp/rsp_syms.h'], cwd=SRC_C, check=True, stdout=subprocess.DEVNULL)
         path = compile_lib([os.path.join(SRC_C, 'rsp', name.lower() + '.c'), os.path.join(FIXTURES, 'rt_host.c')],
-                           [KERNEL_C, os.path.join(SRC_C, 'rt'), os.path.join(SRC_C, 'rsp'),
-                            os.path.join(SRC_C, 'obj', 'rsp')])
+                           [KERNEL_C, os.path.join(SRC_C, 'rt'), os.path.join(SRC_C, 'rsp')])
         self.lib = ctypes.CDLL(path)
         os.remove(path)
         self.lib.rt_host_run.argtypes = [c_u8p, ctypes.c_uint16, HANDLER, ctypes.c_void_p, ctypes.c_uint16]

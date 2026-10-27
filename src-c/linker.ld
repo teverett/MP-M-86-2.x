@@ -5,7 +5,7 @@
  * with every compiled src-c/kernel/ object (not src-c/loader/ -- see
  * that Makefile's own "kernel.elf:" rule for why) into one image,
  * same role `tools/build_mpmsys.py`/`tools/build_mpmldr.py` play for
- * /src's own (entirely custom-tooled) boot path, but via a real
+ * /src-assem's own (entirely custom-tooled) boot path, but via a real
  * cross-linker instead of hand-rolled Python. Lives here, not under
  * boot/ -- boot/ has no Makefile of its own at all, src-c/Makefile
  * builds its two files directly.
@@ -43,9 +43,13 @@ SECTIONS
 		*(.data)
 	}
 
+	/* __bss_start/__bss_end: boot.s's _start zeroes it (src-c's boot
+	 * sector loads only the file's bytes, unlike a Multiboot loader) */
 	.bss BLOCK(4K) : ALIGN(4K)
 	{
+		__bss_start = .;
 		*(COMMON)
 		*(.bss)
+		__bss_end = .;
 	}
 }

@@ -1,7 +1,7 @@
 /*
- * defs.h -- field offsets translated from the .DEF files under src/kernel/.
+ * defs.h -- field offsets translated from the .DEF files under src-assem/kernel/.
  *
- * /src-c is a routine-by-routine C port of /src's hand-written ASM86,
+ * /src-c is a routine-by-routine C port of /src-assem's hand-written ASM86,
  * verified by differential testing (see docs/src-c.md), not a byte-for-byte
  * recompilation. Each offset here must match the value the real EQU chain
  * in the named .DEF file resolves to -- checked against
@@ -70,12 +70,12 @@ typedef struct {
     uint8_t dl;
 } get_dir_ext_result;
 
-/* src/kernel/SYSTEM.DEF */
+/* src-assem/kernel/SYSTEM.DEF */
 #define pnamsiz 8  /* size of process/queue/file name fields */
-#define qnamsiz pnamsiz /* src/kernel/SYSTEM.DEF: qnamsiz equ pnamsiz */
-#define pdlen   0x30 /* size of one Process Descriptor (src/kernel/PD.DEF diagram) */
+#define qnamsiz pnamsiz /* src-assem/kernel/SYSTEM.DEF: qnamsiz equ pnamsiz */
+#define pdlen   0x30 /* size of one Process Descriptor (src-assem/kernel/PD.DEF diagram) */
 
-/* src/kernel/PD.DEF -- Process Descriptor field offsets (relative to a PD's
+/* src-assem/kernel/PD.DEF -- Process Descriptor field offsets (relative to a PD's
  * own address, same as the real EQU chain -- these never collide with
  * anything since the test harness places each PD at an address of its own
  * choosing and these are only ever used added to that base). */
@@ -86,21 +86,21 @@ typedef struct {
 #define p_flag    0x06 /* word: process state flags (see pf_* below) */
 #define p_name    0x08 /* byte[pnamsiz]: process name */
 #define p_uda     0x10 /* word: segment address of this PD's UDA */
-/* src/kernel/UDA.FMT */
+/* src-assem/kernel/UDA.FMT */
 #define u_wrkseg  0x2E /* word: current segment addr of buf */
 #define u_retseg  0x30 /* word: usr ES return */
-/* src/kernel/RSP.DEF */
+/* src-assem/kernel/RSP.DEF */
 #define rsp_pd    0x10 /* byte: offset of the Process Descriptor within an RSP's own data segment */
 #define rsp_link  0x00 /* word, es-relative: next RSP's own segment address (linked list) */
-/* src/kernel/SYSTEM.DEF */
+/* src-assem/kernel/SYSTEM.DEF */
 #define mpmint    224  /* int vec for mpm ent. */
-/* src/kernel/MODFUNC.DEF */
+/* src-assem/kernel/MODFUNC.DEF */
 #define bdosmod_bit 0x08
 #define ciomod_bit  0x10
 #define xiosmod_bit 0x20
-/* src/kernel/MODTAB.DEF */
+/* src-assem/kernel/MODTAB.DEF */
 #define mod_init  4 /* dword offset of a module table entry's own "initialize" far pointer */
-/* src/kernel/XIOSCB.DEF */
+/* src-assem/kernel/XIOSCB.DEF */
 #define io_maxconsole 20
 #define io_maxlist    21
 #define p_mem     0x16 /* word: head of this PD's own MD list */
@@ -135,7 +135,7 @@ typedef struct {
 #define ps_flagwait 0x08
 #define ps_ciowait  0x09
 
-/* src/kernel/FLG.DEF -- one Flag Table entry */
+/* src-assem/kernel/FLG.DEF -- one Flag Table entry */
 #define flg_pd     0x00 /* word */
 #define flg_ignore 0x02 /* byte */
 #define flglen     3
@@ -143,7 +143,7 @@ typedef struct {
 #define flag_on    0xFFFE
 #define flag_zig   0xFF
 
-/* src/kernel/ERR.DEF */
+/* src-assem/kernel/ERR.DEF */
 #define e_not_implemented 0x01
 #define e_bad_entry        0x02
 #define e_ill_flag         0x04
@@ -171,10 +171,10 @@ typedef struct {
 #define e_nullcmd          31 /* null command */
 #define e_abort            40 /* external termination occurred */
 
-/* src/kernel/XIOSCB.DEF */
+/* src-assem/kernel/XIOSCB.DEF */
 #define io_idle 0x17
 
-/* src/kernel/INIT.SUP's own `sysdat`/`supervisor` cseg cells -- the
+/* src-assem/kernel/INIT.SUP's own `sysdat`/`supervisor` cseg cells -- the
  * module's own real, already-resolved cseg offsets, same
  * reasoning as the BD_* block in this file: INIT.SUP itself declares
  * them at its own cseg's very start, right after its own 2 `jmp`s
@@ -187,7 +187,7 @@ typedef struct {
 #define INIT_SYSDAT          0x0006 /* word: INIT.SUP's own saved sysdat segment (cs:sysdat) */
 #define INIT_SUPERVISOR_SEG  0x000A /* word: INIT.SUP's own `supervisor` far-ptr segment half */
 
-/* src/kernel/CIOIF.CIO/MEMIF.MEM own the exact same cseg header shape
+/* src-assem/kernel/CIOIF.CIO/MEMIF.MEM own the exact same cseg header shape
  * as INIT.SUP (`jmp init ! jmp entry ! sysdat dw 0 ! supervisor equ
  * (offset $) ! rw 2`), so `sysdat`=6/`supervisor`=8 land at the same
  * offsets -- confirmed directly against both real files, not just
@@ -211,7 +211,7 @@ typedef struct {
 #define BDOSIF_SUPERVISOR_OFF  0x0008 /* word: BDOSIF.BDO's own `supervisor` far-ptr offset half */
 #define BDOSIF_SUPERVISOR_SEG  0x000A /* word: BDOSIF.BDO's own `supervisor` far-ptr segment half */
 
-/* src/kernel/SYSDAT.FMT -- real SYSDAT offsets (the SYSDAT segment is
+/* src-assem/kernel/SYSDAT.FMT -- real SYSDAT offsets (the SYSDAT segment is
  * every module's DS). `dispatcher`/`rtm_pdisp` are 4-byte far pointers,
  * set by RTMIF.RTM's own `init` to DSPTCH.RTM's own `fdisp`/`farpdisp`;
  * `idlepd`/`tickpd` are real PDs, `pdlen` bytes each. */
@@ -257,7 +257,7 @@ typedef struct {
 #define SYSDAT_LOAD_CHAIN     0x04B8 /* byte: true (0FFh) on a chain load */
 #define SYSDAT_LDTAB          0x04B9 /* ldtab[], ldtablen bytes per entry */
 #define ldtabsiz              0x00AA /* LDTAB.DEF: 10 entries */
-/* src/kernel/XIOSCB.DEF's character I/O function numbers (xiosif's AL) */
+/* src-assem/kernel/XIOSCB.DEF's character I/O function numbers (xiosif's AL) */
 #define io_const   0
 #define io_conin   1
 #define io_conout  2
@@ -307,12 +307,12 @@ typedef struct {
 #define UDA_STK_QMPB      0x00C0 /* word[5]: que2.c qspace's MPB (f_maualloc) */
 #define UDA_STK_QMAF      0x00CA /* word[3]: que2.c qrelease's MAF (f_maufree) */
 #define UDA_STK_QPB       0x00D0 /* byte[qpblen]: que2.c rlsmx's QPB (f_cqwrite) */
-/* src/kernel/DATA.BDO's mxdiskqd/mxdiskqpb, BDOS module data in the
+/* src-assem/kernel/DATA.BDO's mxdiskqd/mxdiskqpb, BDOS module data in the
  * combined SYSDAT+DATA.BDO data segment (BDOS.A86's --symbols) */
 #define SYSDAT_MXDISKQD   0x0F92 /* byte[qdlen]: the MX disk queue's QD */
 #define SYSDAT_MXDISKQPB  0x0FAE /* byte[qpblen]: its QPB */
 
-/* src/kernel/CHAR.DEF */
+/* src-assem/kernel/CHAR.DEF */
 #define ctlc   0x03
 #define ctld   0x04
 #define ctle   0x05
@@ -330,11 +330,11 @@ typedef struct {
 #define cr  0x0D
 #define lf  0x0A
 
-/* src/kernel/PCB.DEF -- Parse Control Block (parse_entry's own input) */
+/* src-assem/kernel/PCB.DEF -- Parse Control Block (parse_entry's own input) */
 #define pcb_flnmptr 0x00 /* word: offset of string to parse */
 #define pcb_fcbptr  0x02 /* word: offset of FCB in u_wrkseg */
 
-/* src/kernel/FCB.DEF -- File Control Block. Only the fields PARSE.SUP
+/* src-assem/kernel/FCB.DEF -- File Control Block. Only the fields PARSE.SUP
  * touches are listed. */
 #define fcb_dr     0x00 /* byte: drive, 0=default, 1=A, 2=B, ... */
 #define fcb_name   0x01 /* byte[fnamsiz] */
@@ -347,14 +347,14 @@ typedef struct {
 #define fcb_reccnt 0x0F /* byte: record count field */
 #define fcb_dskmap 0x10 /* byte: disk map field */
 #define fcb_nxtrec 0x20 /* byte: next record field (= fcblen) */
-#define fcblen 0x20 /* size of one FCB (src/kernel/EQU.BDO) */
-#define namlen 15 /* name+type length, for a SEARCH's own CL (src/kernel/EQU.BDO) */
+#define fcblen 0x20 /* size of one FCB (src-assem/kernel/EQU.BDO) */
+#define namlen 15 /* name+type length, for a SEARCH's own CL (src-assem/kernel/EQU.BDO) */
 #define fcb_ranrec 0x21 /* word: random record field */
 #define fwfmsk     0x80 /* bit in fcb_modnum: file write flag */
-/* src/kernel/EQU.BDO: rofile equ 9 -- same offset as fcb_type above;
+/* src-assem/kernel/EQU.BDO: rofile equ 9 -- same offset as fcb_type above;
  * the read-only attribute bit lives in the high bit of fcb_type[0] */
 
-/* src/kernel/QD.DEF -- Queue Descriptor */
+/* src-assem/kernel/QD.DEF -- Queue Descriptor */
 #define q_link    0x00 /* word */
 #define q_flags   0x04 /* word */
 #define q_name    0x06 /* byte[qnamsiz] */
@@ -370,17 +370,17 @@ typedef struct {
 #define qf_mx    0x01 /* Mutual Exclusion */
 #define qf_table 0x10 /* from the qd table (vs. caller-supplied) */
 
-/* src/kernel/QD.DEF -- Queue Parameter Block */
+/* src-assem/kernel/QD.DEF -- Queue Parameter Block */
 #define qpb_qaddr   0x02 /* word: address of QD */
 #define qpb_nmsgs   0x04 /* word: number of messages to read/write */
 #define qpb_buffptr 0x06 /* word */
 #define qpb_name    0x08 /* byte[qnamsiz] */
 
-/* src/kernel/MPB.DEF -- Memory Parameter Block (only the field
+/* src-assem/kernel/MPB.DEF -- Memory Parameter Block (only the field
  * qspace/qrelease touch) */
 #define mpb_start 0x00 /* word */
 
-/* src/kernel/ERR.DEF */
+/* src-assem/kernel/ERR.DEF */
 #define e_no_qd        0x07
 #define e_q_empty      0x0E
 #define e_q_full       0x0F
@@ -388,10 +388,10 @@ typedef struct {
 #define e_q_inuse      0x0A
 #define e_q_notactive  0x0B
 
-/* src/kernel/MODFUNC.DEF -- mpmif function codes QUE1.RTM/QUE2.RTM use.
+/* src-assem/kernel/MODFUNC.DEF -- mpmif function codes QUE1.RTM/QUE2.RTM use.
  * (user*0x100)+140, (rtm*0x100)+18/19, (mem*0x100)+9/10 resolved via
  * `python3 tools/asm86.py tests/src-c/fixtures/que_wrapper.A86 -I
- * src/kernel --symbols`.) */
+ * src-assem/kernel --symbols`.) */
 #define f_cqwrite    0x8C
 #define f_maualloc   0x309
 #define f_maufree    0x30A
@@ -400,7 +400,7 @@ typedef struct {
 #define f_findpdname 0x214
 #define f_share      0x308
 
-/* src/kernel/CCB.DEF -- Console Control Block */
+/* src-assem/kernel/CCB.DEF -- Console Control Block */
 #define c_attach  0x00 /* word */
 #define c_queue   0x02 /* word */
 #define c_flag    0x04 /* byte: run-time flags (see cf_* below) */
@@ -414,24 +414,24 @@ typedef struct {
 #define cf_listcp 0x01 /* control P toggle */
 #define cf_compc  0x02 /* suppress output */
 
-/* src/kernel/ACB.DEF -- Assign Console Control Block */
+/* src-assem/kernel/ACB.DEF -- Assign Console Control Block */
 #define acb_cns   0x00 /* byte */
 #define acb_match 0x01 /* byte */
 #define acb_pd    0x02 /* word */
 #define acb_name  0x04 /* byte[pnamsiz] */
 
-/* src/kernel/MPB.DEF -- the rest of the fields src-c/kernel/que2.c's
+/* src-assem/kernel/MPB.DEF -- the rest of the fields src-c/kernel/que2.c's
  * own mpb_start (0x00) didn't already need */
 #define mpb_min   0x02 /* word */
 #define mpb_max   0x04 /* word */
 #define mpb_pdadr 0x06 /* word */
 #define mpb_flags 0x08 /* word */
 
-/* src/kernel/MPB.DEF -- Memory Free Parameter Block */
+/* src-assem/kernel/MPB.DEF -- Memory Free Parameter Block */
 #define mfpb_start 0x00 /* word */
 #define mfpb_pd    0x02 /* word */
 
-/* src/kernel/MEM.DEF -- one Memory Descriptor, under two different names
+/* src-assem/kernel/MEM.DEF -- one Memory Descriptor, under two different names
  * depending which list it's on. m_* while on the MFL/MAL (free MAUs);
  * ms_* while linked onto a PD's own p_mem list (an allocated memory
  * segment) -- same 5-word layout either way, just an aliased 4th/5th
@@ -442,7 +442,7 @@ typedef struct {
 #define m_plist   0x06 /* word */
 #define m_unused  0x08 /* word */
 #define mdlen     0x0A
-/* src/kernel/MEM.DEF -- Share Parameter Block (share_entry's own input,
+/* src-assem/kernel/MEM.DEF -- Share Parameter Block (share_entry's own input,
  * reached through u_wrkseg same as every other *PB above) */
 #define spb_opd   0x00 /* word: Owner PD */
 #define spb_rpd   0x02 /* word: Requestor PD */
@@ -455,19 +455,19 @@ typedef struct {
 #define ms_flags  0x06 /* word (same bits as mpb_flags) */
 #define ms_mau    0x08 /* word */
 
-/* src/kernel/CPMMEM.MEM's own Memory Control Block (MCB), the CP/M-86
+/* src-assem/kernel/CPMMEM.MEM's own Memory Control Block (MCB), the CP/M-86
  * compatibility counterpart to MPB.DEF's MPB above */
 #define mcb_base   0x00 /* word */
 #define mcb_length 0x02 /* word */
 #define mcb_ext    0x04 /* byte */
 #define mcblen     0x05
 
-/* src/kernel/MPB.DEF */
+/* src-assem/kernel/MPB.DEF */
 #define mf_load 0x01 /* bit in ms_flags/mpb_flags: loaded from a disk file */
 #define mf_share 0x02 /* bit in mpb_flags: share an existing allocation */
 #define mf_code  0x04 /* bit in mpb_flags/ms_flags: a Code segment */
 
-/* src/kernel/CMDH.DEF -- Command Header Entry Format, src-c/kernel/
+/* src-assem/kernel/CMDH.DEF -- Command Header Entry Format, src-c/kernel/
  * load.c's own get_ch_info */
 #define ch_form   0x00 /* byte */
 #define ch_length 0x01 /* word */
@@ -477,28 +477,28 @@ typedef struct {
 #define chlen     0x09
 #define ch_entmax 8
 
-/* src/kernel/MPB.DEF -- Memory Alloc Free parameter block (maufree_entry's
+/* src-assem/kernel/MPB.DEF -- Memory Alloc Free parameter block (maufree_entry's
  * own input, reached through u_wrkseg same as every other *PB above) */
 #define maf_mau   0x00 /* word: MD address of the MAU to free from */
 #define maf_sat   0x02 /* word: the SAT entry's own sat_start value */
 #define maf_start 0x04 /* word: start of the region actually being freed */
 #define maflen    0x06
 
-/* src/kernel/MODFUNC.DEF -- mpmif function codes CPMMEM.MEM's own
+/* src-assem/kernel/MODFUNC.DEF -- mpmif function codes CPMMEM.MEM's own
  * getmemory/free_memory use ((user*0x100)+128/130, user=0) */
 #define f_malloc    0x80
 #define f_memfree   0x82
 #define f_terminate 0x8F
 
-/* src/kernel/DATA.BDO -- the subset of BDOS-wide scratch fields
+/* src-assem/kernel/DATA.BDO -- the subset of BDOS-wide scratch fields
  * src-c/kernel/file1.c's own ported routines touch. Unlike every
  * other scratch constant in this file, these are NOT independently
  * chosen addresses -- tests/src-c/fixtures/file1_wrapper.A86 includes
  * the real DATA.BDO (along with FILE1-4.BDO/BDOSIF.BDO, the same
- * bundle src/kernel/BDOS.A86 itself assembles, since FILE1.BDO isn't
+ * bundle src-assem/kernel/BDOS.A86 itself assembles, since FILE1.BDO isn't
  * self-contained -- see file1.c's own header comment), so these are
  * DATA.BDO's own real resulting addresses, checked against `python3
- * tools/asm86.py tests/src-c/fixtures/file1_wrapper.A86 -I src/kernel
+ * tools/asm86.py tests/src-c/fixtures/file1_wrapper.A86 -I src-assem/kernel
  * --symbols`. `PD_CNT`/`HIGH_EXT`/`XFCB_READ_ONLY`/`CURDSK` land as 4
  * contiguous bytes (0xC33-0xC36), matching CHKSUM_FCB's own 4-byte
  * checksum read -- confirmed, not just assumed. */
@@ -553,7 +553,7 @@ typedef struct {
                                   only ever OR'd into a boundary-stub's
                                   own input, see wrbuff's header comment) */
 
-/* src/kernel/DATA.BDO -- the subset of BDOS-wide scratch fields
+/* src-assem/kernel/DATA.BDO -- the subset of BDOS-wide scratch fields
  * src-c/kernel/file4.c's own ported routines touch, at their own real
  * resulting addresses (same reasoning/method as the BD_* block above) */
 #define BD_DLOG        0x0C03 /* word: disk login vector */
@@ -562,7 +562,7 @@ typedef struct {
 #define BD_DIRBLK      0x0C51 /* word: reserved directory block count */
 #define BD_RETURNSEG   0x0CBB /* word: user return segment (func27/31/52) */
 
-/* src/kernel/DATA.BDO -- the subset of BDOS-wide scratch fields
+/* src-assem/kernel/DATA.BDO -- the subset of BDOS-wide scratch fields
  * src-c/kernel/file3.c's own ported routines touch, at their own real
  * resulting addresses (same reasoning/method as the BD_* block above --
  * checked against the same wrapper, tests/src-c/fixtures/
@@ -579,7 +579,7 @@ typedef struct {
 #define BD_CUR_POS     0x0C79 /* word: current position in olist/llist */
 #define BD_PRV_POS     0x0C7B /* word: previous position in olist/llist */
 
-/* src/kernel/DATA.BDO -- the subset of BDOS-wide scratch fields
+/* src-assem/kernel/DATA.BDO -- the subset of BDOS-wide scratch fields
  * src-c/kernel/file2.c's own `srch`/`SEARCH`/`SEARCHN` port touches,
  * at their own real resulting addresses (same reasoning/method as the
  * BD_* block above, checked against the same `file1_wrapper.A86`
@@ -610,8 +610,8 @@ typedef struct {
 #define BD_SRCHABASE      0x0C23 /* word: func17's own saved user parameter segment */
 #define BD_SRCHAOFST      0x0C21 /* word: func17's own saved user fcb offset */
 #define BD_DMINX          0x0C9C /* byte: diskwrite's own saved disk-map index */
-#define BD_LOCK_SP        0x0C72 /* word: LOCK's own saved real SP -- never read anywhere in src/, see lock_'s own header comment */
-#define BD_LOCK_SHELL     0x0C74 /* byte: LOCK's own shell flag -- never read anywhere in src/, see lock_'s own header comment */
+#define BD_LOCK_SP        0x0C72 /* word: LOCK's own saved real SP -- never read anywhere in src-assem/, see lock_'s own header comment */
+#define BD_LOCK_SHELL     0x0C74 /* byte: LOCK's own shell flag -- never read anywhere in src-assem/, see lock_'s own header comment */
 #define BD_LOCK_UNLOCK    0x0C76 /* byte: true=lock, false=unlock (func42/func43's own input) */
 #define BD_SHELL_RR       0x0CB4 /* byte[3]: BDOSIF.BDO's own SAVE_RR/RESET_RR scratch for fcb_ranrec */
 #define BD_NTLOG          0x0C09 /* word: diskreset's own "newly logged in" accumulator */
@@ -621,7 +621,7 @@ typedef struct {
 #define BD_DENIEDCNS      0x0DFB /* byte: diskreset's own denied-process error message console # */
 #define BD_DENIEDPRC      0x0E05 /* byte[8]: diskreset's own denied-process error message process name */
 
-/* src/kernel/DATA.BDO -- the subset of BDOS-wide scratch fields
+/* src-assem/kernel/DATA.BDO -- the subset of BDOS-wide scratch fields
  * src-c/kernel/file3.c's own `reselect`/`parsave`/`COUNT_OPENS`/
  * `CREATE_OLIST_ITEM` and src-c/kernel/file2.c's own `open`/`OPEN1`/
  * `opencopy` port touches, at their own real resulting addresses
@@ -642,7 +642,7 @@ typedef struct {
 #define BD_COMMON_DMA  0x0C57 /* byte: parsave33's own "use the common dma area" flag */
 #define BD_LOC_PAR_AREA 0x0E0E /* byte: parsave's own local (ds-relative) parameter-area scratch byte */
 
-/* src/kernel/SYSDAT.FMT -- free_root/open_max, system-wide constants
+/* src-assem/kernel/SYSDAT.FMT -- free_root/open_max, system-wide constants
  * src-c/kernel/file3.c's own olist/llist and COUNT_OPENS code touches
  * (free_root: delete_item/create_item; open_max: COUNT_OPENS' own
  * limit check). Unlike every BD_* constant above (FILE1-4.BDO's own
@@ -765,7 +765,7 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
     seg_w16(far_ptr(phys, rlr_uda(far_ptr(phys, sysdat, 0)), 0), u_wrkseg, ds);
 }
 
-/* src/kernel/MAU.MEM's own SAT (suballocation table) header offsets,
+/* src-assem/kernel/MAU.MEM's own SAT (suballocation table) header offsets,
  * needed by src-c/kernel/ml.c's own mla_initmau (the first entry of
  * a brand-new MAU's own SAT, at offset `satlen` within the MAU's own
  * segment -- see that file's own header comment). */
@@ -774,11 +774,11 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 #define sat_nall   4 /* byte */
 #define satlen     5
 
-/* src/kernel/QD.DEF -- the one bit src-c/kernel/command.c's own
+/* src-assem/kernel/QD.DEF -- the one bit src-c/kernel/command.c's own
  * cli_checkque touches (ms_flags/mpb_flags' own q_flags alias) */
 #define qf_rsp 0x08
 
-/* src/kernel/UDA.FMT -- real field offsets (NOT fixed scratch
+/* src-assem/kernel/UDA.FMT -- real field offsets (NOT fixed scratch
  * addresses -- unlike UDA_WRKSEG/UDA_DMA_SEG/etc. above, which stand
  * in for "the one ambient current process's own UDA field" when a
  * routine never needs more than one UDA at a time). src-c/kernel/
@@ -821,18 +821,18 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 #define u_insys       0x60 /* byte: # times through user_entry */
 #define u_stat_sav    0x61 /* byte: p_stat save, used during interrupts */
 
-/* src/kernel/VEC.FMT -- i_mpm_ip, overlaying the real (absolute,
- * segment-0) interrupt vector table at mpmint*4 (src/kernel/
+/* src-assem/kernel/VEC.FMT -- i_mpm_ip, overlaying the real (absolute,
+ * segment-0) interrupt vector table at mpmint*4 (src-assem/kernel/
  * SYSTEM.DEF: mpmint equ 224) -- see that file's own header comment
  * for why this doesn't just equal mpmint*4 when assembled inline (it
  * does here: this is the already-resolved real address, confirmed
  * against `--symbols` when VEC.FMT is assembled on its own, org 0) */
 #define i_mpm_ip      0x380
-#define i_mpm_cs      0x382 /* word: immediately follows i_mpm_ip -- src/kernel/
+#define i_mpm_cs      0x382 /* word: immediately follows i_mpm_ip -- src-assem/kernel/
                                INIT.SUP's own `init` writes both as one real
                                interrupt-vector-table entry (ip then cs) */
 
-/* src/kernel/MODFUNC.DEF -- mpmif function codes src-c/kernel/command.c
+/* src-assem/kernel/MODFUNC.DEF -- mpmif function codes src-c/kernel/command.c
  * uses ((user*0x100)+n unless noted) */
 #define f_conout         0x02
 #define f_constat        0x0B
@@ -851,15 +851,15 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 #define f_cload          0x10E /* (sup*0x100)+14 */
 #define f_conprint       0x40E /* (cio*0x100)+14 */
 
-/* src/kernel/SYSDAT.FMT -- the tod structure's length (tod_entry's
+/* src-assem/kernel/SYSDAT.FMT -- the tod structure's length (tod_entry's
  * copy); the structure itself is at SYSDAT_TOD */
 #define todlen     5
 
-/* src/kernel/SYSTEM.DEF */
+/* src-assem/kernel/SYSTEM.DEF */
 #define ulen    0x100 /* size of uda */
 #define lstklen 96    /* size of load stack */
 
-/* src/kernel/EQU.BDO -- fixed build-time constants (not scratch) */
+/* src-assem/kernel/EQU.BDO -- fixed build-time constants (not scratch) */
 #define fcbshf  5 /* log2(fcblen) */
 #define dskmsk  3 /* dirrec-1 = (recsiz/fcblen)-1 = directory elements per record, minus 1 */
 #define bdos_empty  0xE5 /* empty directory entry marker (EQU.BDO's own `empty` -- renamed
@@ -869,7 +869,7 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 #define maxmod  0x3F /* largest module number (EQU.BDO) */
 #define lstrec  0x7F /* last record number in an extent (EQU.BDO) */
 
-/* src/kernel/LDTAB.DEF -- one Load Table entry (src-c/kernel/load.c's
+/* src-assem/kernel/LDTAB.DEF -- one Load Table entry (src-c/kernel/load.c's
  * own load_finish) */
 #define ldtab_start  0x00 /* word */
 #define ldtab_min    0x02 /* word */
@@ -882,7 +882,7 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 #define ldtab_id     0x0F /* word */
 #define ldtablen     0x11
 
-/* src/kernel/BASEP.FMT -- Base Page Format offsets (real, small,
+/* src-assem/kernel/BASEP.FMT -- Base Page Format offsets (real, small,
  * dynamically-segment-relative like UDA.FMT's own u_* block above --
  * reached through load_basep's own dynamically-computed segment) */
 #define bpg_cseg 0x03 /* word */
@@ -897,7 +897,7 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 #define bpg_fcb1    0x6C /* byte[16] */
 #define bpg_dma  0x80 /* offset constant, not a field read/written here */
 
-/* src/kernel/LSTK.FMT -- Load Stack Format offsets, relative to the
+/* src-assem/kernel/LSTK.FMT -- Load Stack Format offsets, relative to the
  * same dynamically-computed segment as u_initss/load_lstk (ls_sp is
  * zero-width, coinciding with ls_offset's own start -- see src-c/
  * kernel/load.c's own header comment for how this ties into src-c/
@@ -909,7 +909,7 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 #define ls_roffset  0x5C /* word */
 #define ls_rcseg    0x5E /* word */
 
-/* src/kernel/APB.DEF -- Abort Parameter Block (abort_spec_entry's own
+/* src-assem/kernel/APB.DEF -- Abort Parameter Block (abort_spec_entry's own
  * input, reached through u_wrkseg same as every other *PB above) */
 #define abt_prior   32
 #define apb_pd      0x00 /* word */
@@ -919,13 +919,13 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 #define apb_pdname  0x06 /* byte[pnamsiz] */
 #define apb_len     0x0E
 
-/* src/kernel/MODFUNC.DEF -- mpmif function code src-c/kernel/abort.c's
+/* src-assem/kernel/MODFUNC.DEF -- mpmif function code src-c/kernel/abort.c's
  * own terminate_entry uses (bdos*0x100)+46 */
 #define f_bdosterm 0x52E
 
-#define fcb_pptr 0x18 /* word: password-length word's own address, src/kernel/FCB.DEF */
+#define fcb_pptr 0x18 /* word: password-length word's own address, src-assem/kernel/FCB.DEF */
 
-/* src/kernel/SYSDAT.FMT -- COMMAND.SUP's cli_* fields (real SYSDAT
+/* src-assem/kernel/SYSDAT.FMT -- COMMAND.SUP's cli_* fields (real SYSDAT
  * offsets). SYSTEM.DAT initializes cli_pcb (flnmptr = cli_cmdtail,
  * fcbptr = cli_fcb) and cli_cuspqpb (buffptr = cli_ppd: an RSP's queue
  * message is the parent PD followed by the command tail); COMMAND.SUP
@@ -954,7 +954,7 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 #define SYSDAT_CLI_ERR_MODE 0x06BB /* byte */
 #define SYSDAT_CLI_DFIL     0x06BC /* byte: true if showing dayfile info */
 
-/* src/kernel/XIOS.A86's fields: real offsets in its segment (XIOS.A86
+/* src-assem/kernel/XIOS.A86's fields: real offsets in its segment (XIOS.A86
  * includes sysdat.lib and orgs past it -- the DRI XIOS lives in the
  * SYSDAT segment, CS = DS = SYSDAT) */
 #define XIOS_DMA_ADR 0x16A4 /* word: current DMA offset (SETDMA) */
@@ -966,13 +966,13 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 #define XIOS_DPBASE  0x16D1 /* the Disk Parameter Header table (singles.lib) */
 #define XIOS_CLOCKON 0x182A /* byte: tick flag enable (STRTCLK/STOPCLK) */
 
-/* src/kernel/ENTTAB.DEF -- one `sysent` entry's own field layout */
+/* src-assem/kernel/ENTTAB.DEF -- one `sysent` entry's own field layout */
 #define ENT_MOD  0 /* byte */
 #define ENT_FUNC 1 /* byte */
 #define ENT_FLAG 2 /* byte */
 #define entlen   3
 
-/* src/kernel/CLICB.DEF -- the UDA_WRKSEG-relative command buffer
+/* src-assem/kernel/CLICB.DEF -- the UDA_WRKSEG-relative command buffer
  * clicmd_entry's own `cli_copy` reads from (via mem_r8_seg). Named
  * cmdcb_* (not clicb_*) because tmp.c already uses `clicb_cmd` as a
  * local pointer variable name of its own (TMP.A86's own, unrelated,
@@ -981,13 +981,13 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 #define cmdcb_cmd  1 /* byte */
 #define cmdcblen   130 /* byte: cmdcb_cmd + 129 */
 
-/* src/kernel/XIOS86Q.A86 -- not DRI source (a from-scratch QEMU
+/* src-assem/kernel/XIOS86Q.A86 -- not DRI source (a from-scratch QEMU
  * driver this project wrote), but the file actually combined into
  * the real bootable MPM.bin, unlike the real XIOS.A86. It has no
  * `INCLUDE`s beyond the standard system.def/modfunc.def/xioscb.def/
  * pd.def/sysdat.fmt chain and assembles to one fixed layout, so
  * these are real, probed addresses (`python3 tools/asm86.py
- * src/kernel/XIOS86Q.A86 -I src/kernel --symbols`), same reasoning
+ * src-assem/kernel/XIOS86Q.A86 -I src-assem/kernel --symbols`), same reasoning
  * as src-c/loader/defs.h's own LDB86Q_ block -- not harness-chosen
  * scratch addresses. */
 #define XQ_TICK_COUNT    0x1000 /* byte */
@@ -1013,7 +1013,7 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 #define XQ_DPH0          0x1250 /* word: SELDSK's own DPH address */
 #define XQ_SIGNON        0x135A /* byte[...]: init's own signon message */
 
-/* src/kernel/MODFUNC.DEF -- the rest of the mpmif function codes the
+/* src-assem/kernel/MODFUNC.DEF -- the rest of the mpmif function codes the
  * boundary hooks below make (user functions are (user*0x100)+n) */
 #define f_sleep      0x212 /* (rtm*0x100)+18 */
 #define f_wakeup     0x213 /* (rtm*0x100)+19 */
@@ -1031,7 +1031,7 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 #define f_mimic      0x415 /* (cio*0x100)+21 */
 #define f_unmimic    0x416 /* (cio*0x100)+22 */
 
-/* src/kernel/XIOSCB.DEF -- XIOS function numbers (AL into the XIOS
+/* src-assem/kernel/XIOSCB.DEF -- XIOS function numbers (AL into the XIOS
  * entry) the runtime's XIOS dispatch serves, beyond io_* above */
 #define io_reader   5
 #define io_home     6

@@ -6,21 +6,20 @@
  *
  * XIOS: all of xios86q.c's port I/O goes through the io_in8/io_out8
  * callbacks, so the real inb/outb below satisfy it directly. Its data
- * is SYSDAT's, from offset 1000h (just past SYSDAT.A86's own dseg), as
- * in the /src build, so init_entry gets real memory and SYSDAT_SEG;
- * the signon text it prints is copied to SYSDAT:XQ_SIGNON first (the
- * /src image carries it in XIOS86Q's dseg tail).
+ * is SYSDAT's, from offset 1000h (just past SYSDAT.A86's own dseg), so
+ * kernel_main first builds the low-memory image with src-c/gensys (the
+ * signon it prints is there, at XQ_SIGNON) and takes SYSDAT's segment
+ * from it.
  *
  * sup_init: runs on real memory (defs.h's far_ptr), so it gets the
  * physical base (0 -- multiboot leaves us in flat 32-bit mode with
  * base-0 segments, so linear == physical) and real segments, laid out
- * the way the real /src boot lays them out: the SUP code segment at
- * MPM_CODE_SEG (1000h, tools/build_mpmsys.py) and SYSDAT just past the
- * combined kernel code (1A5Dh for the current /src build). Nothing
- * loads MPM.SYS here, so kernel_main builds the minimal SYSDAT image
+ * the way the real boot lays them out: the SUP code segment at
+ * GENSYS_CODE_SEG (1000h) and SYSDAT past the code and the RSPs, where
+ * gensys put it. This check replaces SYSDAT with the minimal image
  * sup_init reads (module_table[SUP]'s entry segment, an empty RSP
- * list) in that space first. The notick/idle/user_entry offsets are
- * the real ones from src/kernel/SUP.A86; sup_init only stores them,
+ * list); rt_boot builds the real one again afterwards. The notick/idle/user_entry offsets are
+ * the real ones from src-assem/kernel/SUP.A86; sup_init only stores them,
  * nothing jumps to them in protected mode.
  *
  * Then every field sup_init should have written is read back from real
@@ -30,13 +29,14 @@
 #include <stdint.h>
 
 #include "defs.h"
+#include "gensys.h"
 
-#define SUP_CS          0x1000 /* tools/build_mpmsys.py's MPM_CODE_SEG */
-#define SYSDAT_SEG      0x1A5D /* MPM_CODE_SEG + combined code paragraphs */
+#define SUP_CS          GENSYS_CODE_SEG
+static uint16_t SYSDAT_SEG; /* from gensys */
 #define SYSDAT_LEN      0x1000 /* SYSDAT.A86's own 4096-byte dseg */
-#define SUP_NOTICK      0x018C /* src/kernel/SUP.A86: notick */
-#define SUP_IDLE        0x0178 /* src/kernel/SUP.A86: idle */
-#define SUP_USER_ENTRY  0x01EC /* src/kernel/SUP.A86: user_entry */
+#define SUP_NOTICK      0x018C /* src-assem/kernel/SUP.A86: notick */
+#define SUP_IDLE        0x0178 /* src-assem/kernel/SUP.A86: idle */
+#define SUP_USER_ENTRY  0x01EC /* src-assem/kernel/SUP.A86: user_entry */
 #define SYSDAT_XIOS_INIT_SEG 0x002E /* the old bare `mov u_wrkseg,ds` bug's target */
 
 typedef uint8_t (*io_in8_fn)(uint16_t port);
@@ -48,9 +48,6 @@ extern void rt_boot(void);
 extern void sup_init(uint8_t *phys, uint16_t ds_sysdat, uint16_t cs,
                      uint16_t notick_offset, uint16_t idle_offset,
                      uint16_t user_entry_offset);
-
-static const char xq_signon[] =
-    "\r\nMP/M-86 XIOS86Q -- QEMU target (serial console, floppy disk)\r\n";
 
 static void outb(uint16_t port, uint8_t val) {
     __asm__ volatile("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -132,10 +129,9 @@ static int run_sup_init(void) {
 }
 
 void kernel_main(void) {
-    uint8_t *xq = far_ptr(phys_base, SYSDAT_SEG, 0);
-    for (unsigned i = 0; i < sizeof xq_signon; i++) {
-        xq[XQ_SIGNON + i] = (uint8_t)xq_signon[i];
-    }
+    unsigned nrsps;
+    const gensys_rsp *rsps = gensys_rsps(&nrsps);
+    SYSDAT_SEG = gensys(phys_base, rsps, nrsps).sysdat;
     init_entry(phys_base, SYSDAT_SEG, inb, outb);
     puts_con("MP/M-86 src-c image-builder: pipeline ok\r\n");
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/cioif.c's cioif_init against
-src/kernel/CIOIF.CIO's `init`, on real memory layout -- see
+src-assem/kernel/CIOIF.CIO's `init`, on real memory layout -- see
 tests/src-c/cioref.py. (`entry` is covered by test_cioif_entry.py.)
 `init` saves DS (SYSDAT) in cs:sysdat and copies SYSDAT's
 module_table[SUP] far pointer (`supmod`) into cs:supervisor; the code

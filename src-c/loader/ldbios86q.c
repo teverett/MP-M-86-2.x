@@ -1,5 +1,5 @@
 /*
- * ldbios86q.c -- C port of the whole of src/loader/LDBIOS86Q.A86:
+ * ldbios86q.c -- C port of the whole of src-assem/loader/LDBIOS86Q.A86:
  * the console-I/O subset (CONST, CONIN, CONOUT, PUNCH, READER,
  * GETIOBF), INIT, and every disk-I/O entry point (SELDSK, HOME,
  * SETTRK, SETSEC, SECTRAN, SETDMA, SETDMAB, GETSEGT, READ, WRITE)

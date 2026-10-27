@@ -1,6 +1,6 @@
-; Standalone wrapper for src/kernel/DSPTCH.RTM: fdisp, int_disp_exit,
+; Standalone wrapper for src-assem/kernel/DSPTCH.RTM: fdisp, int_disp_exit,
 ; farpdisp/pdisp, dsptch, insert_process, schedule, switch (+ the
-; whole dsp_table dispatch), bundled with src/kernel/PROC.RTM for
+; whole dsp_table dispatch), bundled with src-assem/kernel/PROC.RTM for
 ; `freepd` (called by `term_act` as an ordinary internal call). The
 ; real UDA.FMT/VEC.FMT/SYSDAT.FMT are included, so every field
 ; resolves to its genuine offset -- the same ones src-c/kernel/

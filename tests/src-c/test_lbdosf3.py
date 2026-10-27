@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/loader/lbdosf3.c against src/loader/
+"""Differential test for src-c/loader/lbdosf3.c against src-assem/loader/
 LBDOSF3.A86. See lbdosf3.c's own header comment for exactly what's
 ported (including the borrowed LBDOSENT.A86 parsave33/parunsave) and
 why slect's own CALL selerror branch is deferred.
@@ -50,7 +50,7 @@ RET4_ADDR = None  # likewise -- selectdisk's own shared early-return point
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'loader')])
+    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src-assem', 'loader')])
     code = asm.segment_bytes('cseg')
     names = ('sqread', 'diskread', 'diskeof', 'slect', 'curselect', 'reselect',
              'func13', 'parsave33', 'parunsave', 'func15', 'func20', 'func26', 'goback',

@@ -1,5 +1,5 @@
 """Shared test-only simulated NEC 765/8272 floppy controller
-(@ 0x3F0, the ISA port block src/loader/LDBIOS86Q.A86's own
+(@ 0x3F0, the ISA port block src-assem/loader/LDBIOS86Q.A86's own
 fdc_out_byte/fdc_in_byte poll) backing both tools/i86sim.py's
 `io_in_hook`/`io_out_hook` and src-c/loader/ldbios86q.c's own
 `io_in8`/`io_out8` C callbacks, for tests/src-c/test_ldbios86q.py's

@@ -1,17 +1,14 @@
 /*
- * boot.s -- the one hand-written asm stub in this whole pipeline.
+ * boot.s -- kernel.elf's entry, _start: zero .bss, set up a stack,
+ * call kernel_main (kernel_main.c).
  *
- * This is NOT a port of anything in /src -- MP/M-86's own real boot
- * chain (ROM.A86 -> LDBIOS.A86/LDMPM.A86 -> the kernel) is a 16-bit
- * real-mode sequence with no C compiler involved anywhere, and stays
- * exactly as-is; it isn't touched by this file. This is instead the
- * proof-of-pipeline for a *second*, parallel boot path: a real
- * `ld`-linked, 32-bit protected-mode image built from C via
- * i686-elf-gcc, multiboot-loadable directly by QEMU's own `-kernel`
- * flag (no GRUB/ISO step needed for this). See this directory's own
- * README.md for why 32-bit protected mode is a deliberately
- * different execution model than MP/M-86's real one, and what that
- * means for ever wiring the real ported kernel logic in here.
+ * Two loaders start it, both in 32-bit protected mode with flat
+ * segments: src-c's own boot sector (bootsect.s), which loads the
+ * file's bytes from the floppy -- hence _start zeroing .bss itself --
+ * and QEMU's -kernel (`make run-elf`), through the Multiboot header
+ * below. Neither is MP/M-86's own 16-bit boot chain (src-assem's
+ * ROM86Q.A86 -> MPMLDR -> MPM.SYS); docs/src-c.md, "Running the port",
+ * has how the C kernel runs MP/M from here.
  *
  * Multiboot1 requires a small header (magic/flags/checksum) within
  * the first 8KB of the image, found by the bootloader scanning for
@@ -46,6 +43,14 @@ stack_top:
 	.global _start
 	.type _start, @function
 _start:
+	/* zero .bss: a Multiboot loader does, src-c's boot sector
+	 * (bootsect.s) loads only the file's bytes */
+	mov $__bss_start, %edi
+	mov $__bss_end, %ecx
+	sub %edi, %ecx
+	xor %eax, %eax
+	cld
+	rep stosb
 	mov $stack_top, %esp
 	call kernel_main
 	/* kernel_main never returns, but if it somehow did: stop for

@@ -130,9 +130,9 @@ Shared includes pulled in by the modules above:
 
    The real `04/LDBIOS.A86` (iSBC 86/12 + iSBC 204 FDC + 8251 UART) has
    no QEMU equivalent, so `MPMLDR.bin` is built from a new
-   `src/loader/LDBIOS86Q.A86` instead -- same classic CP/M BIOS
+   `src-assem/loader/LDBIOS86Q.A86` instead -- same classic CP/M BIOS
    jump-vector calling convention as the real file (so `LDBDOS.A86` is
-   unchanged), but reusing `src/kernel/XIOS86Q.A86`'s own NEC765/8250
+   unchanged), but reusing `src-assem/kernel/XIOS86Q.A86`'s own NEC765/8250
    driver code for the actual hardware access, and a from-scratch Disk
    Parameter Block computed for the 80-cylinder/2-head/18-sector(512B),
    4:1-deblocked floppy geometry both files now target (`SPT=72`,
@@ -170,7 +170,7 @@ Shared includes pulled in by the modules above:
    unrecognized `ESEG` directive fell through to being parsed as a
    harmless label). Fixed; see `tools/README.md`.
 2. A **new XIOS** replacing `04/XIOS.A86` — **a first version now
-   exists**: `src/kernel/XIOS86Q.A86`, targeting a standard PC UART
+   exists**: `src-assem/kernel/XIOS86Q.A86`, targeting a standard PC UART
    (8250, polled, COM1) for the console and the standard PC floppy
    controller (NEC 765/8272, PIO, CP/M-style 128-byte sectors deblocked
    4:1 over 512-byte physical sectors) for disk, plus the 8253/8254 PIT
@@ -186,10 +186,10 @@ Shared includes pulled in by the modules above:
    one floppy drive). Its disk parameter block, initially a flagged
    placeholder, has since been computed properly for the target
    geometry and kept in sync with `LDBIOS86Q.A86`'s own (see item 1;
-   also noted in `src/Makefile`'s own `KERNEL_NEW := XIOS86Q`
+   also noted in `src-assem/Makefile`'s own `KERNEL_NEW := XIOS86Q`
    comment).
 3. A **new boot sector** replacing `04/ROM.A86` — **done and verified
-   working in QEMU**: `src/loader/ROM86Q.A86`, a 512-byte PC boot
+   working in QEMU**: `src-assem/loader/ROM86Q.A86`, a 512-byte PC boot
    sector (built by `tools/build_bootsect.py` into
    `build/loader/ROM86Q.bin`), since QEMU's SeaBIOS plays the role the
    real iSBC 86/12's EPROM played and hands off to exactly this kind of

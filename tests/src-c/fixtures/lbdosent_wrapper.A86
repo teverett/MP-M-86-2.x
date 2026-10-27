@@ -1,4 +1,4 @@
-; Standalone wrapper for src/loader/LBDOSENT.A86 -- see
+; Standalone wrapper for src-assem/loader/LBDOSENT.A86 -- see
 ; src-c/loader/lbdosent.c's own header comment for exactly what's
 ; ported. Same minimal-wrapper approach as lbdosf3_wrapper.A86's own
 ; (same scratch dseg layout, verbatim), extended with LBDOSENT.A86
@@ -80,7 +80,7 @@ loc_par_area	rb	258
 	cseg
 ; LBDOSENT.A86 own `org bdosoffset` (=0 here) resets the cseg write
 ; cursor back to this module's own base -- same real include order
-; src/loader/LDBDOS.A86 itself uses (LBDOSENT.A86 first), since
+; src-assem/loader/LDBDOS.A86 itself uses (LBDOSENT.A86 first), since
 ; including it AFTER the others would silently overwrite their own
 ; code at this same address (confirmed by hitting exactly that
 ; while writing this wrapper: `return`'s own real "ret" byte came

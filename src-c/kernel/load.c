@@ -1,5 +1,5 @@
 /*
- * load.c -- C port of src/kernel/LOAD.SUP's `load:`/`load_entry`/
+ * load.c -- C port of src-assem/kernel/LOAD.SUP's `load:`/`load_entry`/
  * `cload_entry`, plus the real disk I/O and memory allocation it
  * depends on: `diskread`, `load_group`, `get_ch_info`, and the tail
  * portion (`lb_more` through `load_exit`) ported as `load_finish`.

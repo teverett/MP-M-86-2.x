@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/que1.c + que2.c against all 10 of
-src/kernel/QUE1.RTM's routines (makeq_entry, openq_entry,
+src-assem/kernel/QUE1.RTM's routines (makeq_entry, openq_entry,
 deleteq_entry, queverify, readq_entry, creadq_entry, readq,
-writeq_entry, cwriteq_entry, writeq) and 5 of src/kernel/QUE2.RTM's 6
+writeq_entry, cwriteq_entry, writeq) and 5 of src-assem/kernel/QUE2.RTM's 6
 (rlsmx, getqdaddr, remqd, qspace, qrelease), on real memory layout.
 
 que1.c/que2.c address real memory (defs.h's far_ptr), so the reference
@@ -81,7 +81,7 @@ def pad(name):
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+    asm.assemble(WRAPPER, [os.path.join(REPO_ROOT, 'src-assem', 'kernel')])
     code = asm.segment_bytes('cseg')
     sym = {name: asm.symtab[name].value for name in
            ENTRIES + ('sysdat', 'rlr', 'qlr', 'qul', 'endseg', 'u_wrkseg')}

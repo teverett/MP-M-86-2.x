@@ -3,7 +3,7 @@
 inter-module MEM dispatch, wrapped in its binary-semaphore acquire/
 release) against the real MEM module, on real memory layout.
 
-The reference is src/kernel/MEM.A86 itself; see tests/src-c/memref.py.
+The reference is src-assem/kernel/MEM.A86 itself; see tests/src-c/memref.py.
 The SUPIF hook re-enters `entry` for the targets' own nested mpmif calls
 (recursively, as the real system does -- the caller already owns the
 mutex by then), and treats `entry`'s f_qread/f_qwrite (acquire/release

@@ -12,13 +12,13 @@ what *is* directly evidenced in the tree:
     MEM, CIO, BDOS, XIOS) are each assembled and GENCMD'd separately,
     then "combined" into MPM.SYS -- same two-stage shape as the loader,
     just without a surviving recipe for the combining step itself.
-  - src/loader/LDMPM.A86's own comments describe the MPM.SYS file
+  - src-assem/loader/LDMPM.A86's own comments describe the MPM.SYS file
     format it expects: a 128-byte header (type/length/absolute
     segment/min/max) for a combined CODE blob, then the code itself,
     then the same for a combined DATA blob -- i.e. every module's code
     concatenated into ONE code segment and every module's data into
     ONE data segment, not one segment per module.
-  - src/kernel/SYSDAT.FMT's own "Module Table" (supmod/rtmmod/memmod/
+  - src-assem/kernel/SYSDAT.FMT's own "Module Table" (supmod/rtmmod/memmod/
     ciomod/bdosmod/xiosmod/netmod, each an 8-byte {entry far ptr,
     init far ptr} pair, "initialized by GENSYS") is how modules actually
     reach each other at runtime -- every "xiosif"/"mpmif"/"supif"-style
@@ -53,7 +53,7 @@ Given that, this script:
      in-memory copy of SYSDAT's dseg.bin before writing it out.
 
 KNOWN LIMITATIONS (also see tools/build_mpmldr.py and
-src/kernel/XIOS86Q.A86's own "KNOWN LIMITATIONS" -- this inherits
+src-assem/kernel/XIOS86Q.A86's own "KNOWN LIMITATIONS" -- this inherits
 theirs):
   - `dispatcher` (SYSDAT.FMT offset 0x38, used directly by XIOS86Q's
     tick ISR) is set to RTM's own general "entry" dispatch address,
@@ -82,7 +82,7 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-KERNEL_DIR = os.path.join(ROOT, 'src', 'kernel')
+KERNEL_DIR = os.path.join(ROOT, 'src-assem', 'kernel')
 ASM86 = [sys.executable, os.path.join(ROOT, 'tools', 'asm86.py')]
 
 # Must match tools/build_disk.py's own MPM_CODE_SEG -- that script
@@ -254,7 +254,7 @@ FREE_MEM_END = 0x9000
 
 # `endseg` (SYSTEM.DAT: "dw 0 ;1st parag. outside of MP/M") is GENSYS-
 # computed data in the original 1981 build -- this tree's own
-# SYSTEM.DAT just declares it statically as 0 and nothing in src/
+# SYSTEM.DAT just declares it statically as 0 and nothing in src-assem/
 # kernel/ ever writes to it afterward (confirmed: grep -rn "endseg,"
 # across the whole tree turns up nothing). `PROC.RTM`'s `getpdadr`
 # (used by `proc_creat` to validate a PD address, e.g. when creating
@@ -318,7 +318,7 @@ FLGLEN = 3             # flg_pd (word, FLG.DEF) + flg_ignore (byte)
 # each RSP's own header `LINK` field doubling as "next RSP segment"
 # before `INIT.SUP` overwrites it with sysdat's own segment, as the
 # real MP/M-86 Programmer's Guide describes) and was never exercised
-# because nothing ever set it -- `src/rsp/TMP.A86` (the real MP/M-86
+# because nothing ever set it -- `src-assem/rsp/TMP.A86` (the real MP/M-86
 # Terminal Message Process, i.e. its console command-line shell; see
 # docs/bugs.md #2, now fixed) exists in this tree already but was
 # never wired up to anything (confirmed: `tools/build_disk.py`'s own
@@ -372,7 +372,7 @@ QMAU_SAT_ENTRIES = 10  # generous capacity -- see the fix's own comment
 SYSDAT_DSEG_SIZE = 4096  # see XIOS86Q.A86's own comment on this number
 
 # RSPs baked into the image: (name, its initial-stack-frame label,
-# source). An .A86 source is src/rsp/<name>.A86; a .PLM one is compiled
+# source). An .A86 source is src-assem/rsp/<name>.A86; a .PLM one is compiled
 # by plmc as an RSP (its RSPASM.A86-style shell, PD named <name>) plus
 # the mon1-4 stub. MPMSTAT is DRI's status RSP (STSRSP.PLM, sharing
 # STSCOM.PLM with the transient STSCMD): typing MPMSTAT queues the
@@ -388,8 +388,8 @@ SYSDAT_DSEG_SIZE = 4096  # see XIOS86Q.A86's own comment on this number
 # segment -- the BDOS passes the absolute record in CH:DX
 # (FILE1.BDO's PASS_ARECORD), as the cache expects.
 BAKED_RSPS = [('TMP', 'stack_top', None), ('CLOCK', 'stack_tos', None), ('ECHO', 'stack_tos', None),
-              ('MPMSTAT', 'rsp_stack_top', os.path.join('src', 'utils', 'STSRSP.PLM')),
-              ('CACHE', None, os.path.join('src', 'rsp', 'CACHE.RSP'))]
+              ('MPMSTAT', 'rsp_stack_top', os.path.join('src-assem', 'utils', 'STSRSP.PLM')),
+              ('CACHE', None, os.path.join('src-assem', 'rsp', 'CACHE.RSP'))]
 PLMC = [sys.executable, os.path.join(ROOT, 'tools', 'plmc.py')]
 PLM_STUB = os.path.join(ROOT, 'tools', 'plm', 'runtime_stub.A86')
 
@@ -413,7 +413,7 @@ def binary_rsp(path):
 def rsp_source(name, plm_src, out_dir):
     """The .A86 to assemble for a baked-in RSP."""
     if plm_src is None:
-        return os.path.join(ROOT, 'src', 'rsp', name + '.A86')
+        return os.path.join(ROOT, 'src-assem', 'rsp', name + '.A86')
     gen = os.path.join(out_dir, name + '.gen.A86')
     result = subprocess.run(PLMC + [os.path.join(ROOT, plm_src), '--rsp', name, '-o', gen],
                             capture_output=True, text=True)
@@ -480,10 +480,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('-o', '--output', default=None,
                      help='output path for the combined image '
-                          '(default: build/kernel/MPM.bin)')
+                          '(default: src-assem/build/kernel/MPM.bin)')
     args = ap.parse_args()
 
-    out_dir = os.path.join(ROOT, 'build', 'kernel')
+    out_dir = os.path.join(ROOT, 'src-assem', 'build', 'kernel')
     os.makedirs(out_dir, exist_ok=True)
 
     sysdat_base = run_asm86('SYSDAT', out_dir)
@@ -649,7 +649,7 @@ def main():
     # generous room for that; only the first slot starts non-zero (one
     # real entry covering the whole buffer past the table itself).
     # Bake in TMP (see RSPSEG_FIELD_OFFSET's own comment for what/why)
-    # -- assembled standalone since it lives in src/rsp/, not src/
+    # -- assembled standalone since it lives in src-assem/rsp/, not src-assem/
     # kernel/ (run_asm86 hard-codes KERNEL_DIR), and its code+data
     # appended onto `cseg` *before* `sysdat_segment` is computed below,
     # not after: `sysdat_segment`'s own formula (and build_disk.py's

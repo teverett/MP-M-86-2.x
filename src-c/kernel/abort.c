@@ -1,13 +1,13 @@
 /*
- * abort.c -- C port of src/kernel/ABORT.RTM: sysreset_entry,
+ * abort.c -- C port of src-assem/kernel/ABORT.RTM: sysreset_entry,
  * terminate_entry (+ internal abt_chk), abort_spec_entry (+ internal
  * find_pd, find_pdthrd, findpdnc, findpdq, fflgpd, snip_it,
  * abt_putdrl, gccba, and the whole abort_tab dispatch: abtrun,
  * abtpol, abtdly, abtswp, abtdq, abtnq, abtflg, abtcns, abtdrl,
  * abt_common).
  *
- * `rlsmx` (src/kernel/QUE2.RTM, already ported in que2.c) and
- * `findpdname_entry` (src/kernel/FINDPD.RTM, already ported in
+ * `rlsmx` (src-assem/kernel/QUE2.RTM, already ported in que2.c) and
+ * `findpdname_entry` (src-assem/kernel/FINDPD.RTM, already ported in
  * findpd.c) are called as ordinary internal calls, not boundary
  * stubs -- same convention as ml.c's/memory.c's own calls into
  * getmd/freemd.
@@ -51,7 +51,7 @@
  *
  * `findpdq` walks every QD on qlr. The asm saved the DQ/NQ list root
  * instead of the QD across `find_pd`, so it only ever searched the first
- * QD -- docs/bugs.md #104, fixed in src/kernel/ABORT.RTM to match.
+ * QD -- docs/bugs.md #104, fixed in src-assem/kernel/ABORT.RTM to match.
  */
 #include <stdint.h>
 

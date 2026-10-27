@@ -1,5 +1,5 @@
 /*
- * flag.c -- C port of src/kernel/FLAG.RTM.
+ * flag.c -- C port of src-assem/kernel/FLAG.RTM.
  *
  * flag_set_entry and flag_wait_entry both call the file's own flag_valid,
  * an ordinary internal call/return here (unlike SYSENT.RTM/IDLE.SUP, no

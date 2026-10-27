@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/kernel/idle.c against src/kernel/IDLE.SUP's
+"""Differential test for src-c/kernel/idle.c against src-assem/kernel/IDLE.SUP's
 `idle:`, on real memory layout -- see tests/src-c/supref.py. `idle:` ends
 in `jmp xiosif` (the XIOS's idle routine); the reference's XIOS hook
 captures the DS/ES/AX handed to it, which is what idle.c returns. `rlr`

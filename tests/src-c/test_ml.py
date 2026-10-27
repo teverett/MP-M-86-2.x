@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/ml.c (mlalloc_entry + internal
 mla_value/mla_makemau/mla_initmau, mlfree_entry + internal ml_insert)
-against src/kernel/ML.MEM, on real memory layout.
+against src-assem/kernel/ML.MEM, on real memory layout.
 
-The reference is the whole real MEM module (src/kernel/MEM.A86); see
+The reference is the whole real MEM module (src-assem/kernel/MEM.A86); see
 tests/src-c/memref.py. The Memory List (rooted at SYSDAT's real `mfl`)
 and its MDs are SYSDAT-relative, the MPB is in the running process's
 u_wrkseg, and a new MAU's SAT is written in that MAU's own segment.

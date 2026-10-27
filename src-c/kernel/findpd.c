@@ -1,5 +1,5 @@
 /*
- * findpd.c -- C port of src/kernel/FINDPD.RTM.
+ * findpd.c -- C port of src-assem/kernel/FINDPD.RTM.
  *
  * Routine-by-routine port (see docs/src-c.md and the top-level plan):
  * same names, same control flow (gotos included), verified against the

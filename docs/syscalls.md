@@ -2,14 +2,14 @@
 
 "Commands" here means the MP/M-86 2.x system calls: the function
 numbers a program puts in `CL` before calling the kernel's public
-entry point (`INT 224`/`user_entry`, the same convention `src/kernel/
+entry point (`INT 224`/`user_entry`, the same convention `src-assem/kernel/
 MODFUNC.DEF`'s `f_xxx` constants are built from — e.g. `f_conout equ
 (user*0100h)+2`). There are two separate tables in this tree, used at
 two different points in the boot process:
 
-- **The real kernel's table** (`src/kernel/`) — what every MP/M-86
+- **The real kernel's table** (`src-assem/kernel/`) — what every MP/M-86
   program calls once the kernel (`MPM.SYS`) is running.
-- **The loader's own, much smaller table** (`src/loader/`) — a
+- **The loader's own, much smaller table** (`src-assem/loader/`) — a
   CP/M-1.4/2.2-style BDOS built into `LDBDOS.A86`, used only during
   boot, before the real kernel above even exists yet.
 
@@ -18,13 +18,13 @@ Numbers not listed, or marked "unimplemented", dispatch to a
 a lot of reserved-but-never-finished slots, consistent with this
 project's documented provenance (see `README.md`).
 
-## Kernel-level function table (`src/kernel/`)
+## Kernel-level function table (`src-assem/kernel/`)
 
-Source of truth: the `SYSENT` dispatch table in `src/kernel/
+Source of truth: the `SYSENT` dispatch table in `src-assem/kernel/
 SYSTEM.DAT` (lines 154–430, one `db module, func#, flags` entry per
-`CL` value, 3 bytes each — layout in `src/kernel/ENTTAB.DEF`), walked
-by `user_entry` in `src/kernel/SUPIF.SUP` (lines 9–101). `module` is
-one of `src/kernel/MODFUNC.DEF`'s module constants (`sup`, `rtm`,
+`CL` value, 3 bytes each — layout in `src-assem/kernel/ENTTAB.DEF`), walked
+by `user_entry` in `src-assem/kernel/SUPIF.SUP` (lines 9–101). `module` is
+one of `src-assem/kernel/MODFUNC.DEF`'s module constants (`sup`, `rtm`,
 `mem`, `cio`, `bdos`, `xios`, `net`); each module resolves its own
 `func#` through its own local table (`CIOIF.CIO`, `RTMIF.RTM`,
 `MEMIF.MEM`, `SUPIF.SUP`, `BDOSIF.BDO`).
@@ -188,7 +188,7 @@ table still lists them.)
 
 ### Internal-only functions (not reachable via `CL`)
 
-A handful of `src/kernel/MODFUNC.DEF`'s `f_xxx` constants are
+A handful of `src-assem/kernel/MODFUNC.DEF`'s `f_xxx` constants are
 module-to-module calls (one kernel module calling another directly,
 via `mpmif`/`callf`) and are never dispatched through the public
 `SYSENT` table above:
@@ -206,12 +206,12 @@ via `mpmif`/`callf`) and are never dispatched through the public
 | `f_mimic`, `f_unmimic` | cio,21–22 | console mimic/un-mimic |
 | `f_bdosterm` | bdos,46 | Terminate Process, BDOS's own internal function-table entry 46 |
 
-## Loader-level function table (`src/loader/`)
+## Loader-level function table (`src-assem/loader/`)
 
 This is the separate, much smaller CP/M-1.4/2.2-style BDOS built into
 `LDBDOS.A86` — used only while `MPMLDR` is loading the real kernel, not
 reachable once `MPM.SYS` is running. Dispatch table: `functab` in
-`src/loader/LBDOSENT.A86` (lines 94–111). `CL` 0–40 are the "8080"
+`src-assem/loader/LBDOSENT.A86` (lines 94–111). `CL` 0–40 are the "8080"
 functions; `CL` 50–57 (offset by `sfunc86 equ 50`) are the "8086"
 extensions appended after them — `CL` 41–49 is a gap, not dispatched.
 Most slots are unimplemented stubs (`ret`/`return`) left over from the
@@ -268,14 +268,14 @@ file (`MPM.SYS`) off the boot disk.
 
 ## Sources
 
-- `src/kernel/SYSTEM.DAT` lines 154–430 — the master `SYSENT` dispatch
+- `src-assem/kernel/SYSTEM.DAT` lines 154–430 — the master `SYSENT` dispatch
   table, with an inline comment naming every `CL` slot.
-- `src/kernel/SUPIF.SUP` lines 9–153 — the `user_entry` dispatcher.
-- `src/kernel/CIOIF.CIO`, `RTMIF.RTM`, `MEMIF.MEM`, `BDOSIF.BDO` — each
+- `src-assem/kernel/SUPIF.SUP` lines 9–153 — the `user_entry` dispatcher.
+- `src-assem/kernel/CIOIF.CIO`, `RTMIF.RTM`, `MEMIF.MEM`, `BDOSIF.BDO` — each
   module's own local function table that `SYSENT` resolves into.
-- `src/kernel/MODFUNC.DEF` — the symbolic `f_xxx` EQU mirror of the
+- `src-assem/kernel/MODFUNC.DEF` — the symbolic `f_xxx` EQU mirror of the
   same numbering, used by caller code throughout the kernel.
-- `src/kernel/ENTTAB.DEF` — the byte layout of one `SYSENT` entry.
-- `src/loader/LBDOSENT.A86` lines 79–111 — the loader-level dispatch
+- `src-assem/kernel/ENTTAB.DEF` — the byte layout of one `SYSENT` entry.
+- `src-assem/loader/LBDOSENT.A86` lines 79–111 — the loader-level dispatch
   table, and `LBDOSIO.A86`/`LBDOSF3.A86`/`LBDOSNEW.A86` for its
   functions' actual implementations.

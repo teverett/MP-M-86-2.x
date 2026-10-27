@@ -1,5 +1,5 @@
 /*
- * submit.c -- C version of src/rsp/SUBMIT.A86 (a transient,
+ * submit.c -- C version of src-assem/rsp/SUBMIT.A86 (a transient,
  * SUBMIT.CMD): it runs the commands in a .SUB file one line at a time,
  * putting the command tail's arguments in for $1..$99, printing each
  * command before handing it to the CLI, and handling X:, USER, PRINTER

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/tick.c (`notick:`/`tick:`) against
-src/kernel/TICK.SUP, on real memory layout -- see tests/src-c/supref.py.
+src-assem/kernel/TICK.SUP, on real memory layout -- see tests/src-c/supref.py.
 `dlr`/`drl` and the PDs are SYSDAT-relative; notick's `mov u_wrkseg,ds`
 writes the running process's UDA.
 

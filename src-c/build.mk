@@ -48,6 +48,7 @@
 # code never does and would just be dead weight in the final image.
 CC := i686-elf-gcc
 LD := i686-elf-ld
+OBJCOPY := i686-elf-objcopy
 CFLAGS := -m32 -march=i686 -mgeneral-regs-only -ffreestanding -fno-pie \
           -fno-stack-protector -fcf-protection=none \
           -fno-asynchronous-unwind-tables -O2 -Wall -Wextra -Werror

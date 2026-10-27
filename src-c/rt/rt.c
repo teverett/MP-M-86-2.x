@@ -10,12 +10,12 @@
  * interrupt. This file supplies those, as the real hardware and the
  * asm's own glue do:
  *
- *   - Memory: the boot copies the MP/M image /src builds
- *     (build/kernel/MPM.bin, tools/build_mpmsys.py -- the GENSYS
- *     stand-in) to its real place, the combined code segment at 1000h
- *     and SYSDAT right after it, so SYSDAT's tables, the module table
- *     and the RSP chain are where the real boot puts them. The kernel
- *     works on them through far_ptr(phys, seg, off) with phys = 0.
+ *   - Memory: src-c/gensys builds MP/M's low-memory image where the
+ *     real boot puts it -- the modules' code segments from 1000h, the
+ *     RSPs, SYSDAT after them with its tables, pools and the RSP chain
+ *     -- from src-c's own data (the same bytes as src-assem's build,
+ *     tests/src-c/test_gensys.py). The kernel works on it through
+ *     far_ptr(phys, seg, off) with phys = 0.
  *   - System calls: rt_int224 is SUPIF.SUP's user_entry (u_wrkseg = the
  *     caller's DS, u_retseg = its ES, u_insys), then `func`: func1
  *     (supif.c) resolves the function, and the router below plays
@@ -52,6 +52,7 @@
 #include "defs.h"
 #include "rt.h"
 #include "rt_syms.h"
+#include "gensys.h"
 
 /* -- the kernel's entry points, and their result layouts ---------------- */
 
@@ -152,11 +153,10 @@ extern void rt_ctx_switch(uint32_t *save_esp, uint32_t new_esp);
 extern void rt_ctx_start(void);
 extern void rt_irq0_stub(void);
 extern void rt_spurious_stub(void);
-extern const uint8_t rt_mpm_cseg[], rt_mpm_cseg_end[], rt_mpm_dseg[], rt_mpm_dseg_end[];
 
 /* -- machine ------------------------------------------------------------ */
 
-#define MPM_CODE_SEG 0x1000 /* tools/build_mpmsys.py */
+#define MPM_CODE_SEG GENSYS_CODE_SEG
 #define tick_flag 1         /* XIOS86Q.A86 */
 #define sec_flag  2
 
@@ -667,24 +667,24 @@ static void rt_module_init(uint8_t *phys, uint16_t sysdat, uint8_t mod) {
     }
 }
 
-static void copy(uint8_t *dst, const uint8_t *src, uint32_t n) {
-    for (uint32_t i = 0; i < n; i++) dst[i] = src[i];
-}
-
-extern void rt_rsp_images(uint8_t *phys, uint16_t sysdat); /* src-c/rsp/programs.c */
-
 void rt_boot(void) {
-    uint32_t clen = (uint32_t)(rt_mpm_cseg_end - rt_mpm_cseg);
-    uint32_t dlen = (uint32_t)(rt_mpm_dseg_end - rt_mpm_dseg);
-    sysdat_seg = (uint16_t)(MPM_CODE_SEG + (clen + 15) / 16);
-    copy(far_ptr(phys_base, MPM_CODE_SEG, 0), rt_mpm_cseg, clen);
-    copy(far_ptr(phys_base, sysdat_seg, 0), rt_mpm_dseg, dlen);
+    unsigned nrsps;
+    const gensys_rsp *rsps = gensys_rsps(&nrsps);
+    gensys_layout layout = gensys(phys_base, rsps, nrsps);
+    sysdat_seg = layout.sysdat;
 
     rt_puts("\r\nrt: MP/M-86 on the C kernel: code at 1000, SYSDAT at ");
     rt_puthex(sysdat_seg);
+    rt_puts(", RSPs");
+    for (unsigned i = 0; i < nrsps; i++) {
+        char name[pnamsiz + 1];
+        unsigned n = 0;
+        for (; n < pnamsiz && rsps[i].name[n] != ' '; n++) name[n] = rsps[i].name[n];
+        name[n] = 0;
+        rt_puts(" ");
+        rt_puts(name);
+    }
     rt_puts("\r\n");
-
-    rt_rsp_images(phys_base, sysdat_seg);
 
     idt_init();
 

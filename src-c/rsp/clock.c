@@ -1,5 +1,5 @@
 /*
- * clock.c -- C version of src/rsp/CLOCK.A86, the CLOCK resident system
+ * clock.c -- C version of src-assem/rsp/CLOCK.A86, the CLOCK resident system
  * process: each time it returns from waiting for the Second flag (2) it
  * adds a second to SYSDAT's time of day, setting the Minute flag (3)
  * as each minute ends.

@@ -160,7 +160,7 @@ def encode(mnemonic, ops, ctx):
     `encode_rm` returned inline used to land stuck in the middle of the
     instruction instead (opcode, then prefix, then ModRM/disp),
     corrupting it and everything decoded after it. Confirmed by testing
-    in QEMU: `mov cs:outbyte_tmp,al` (src/loader/LDBIOS86Q.A86's own
+    in QEMU: `mov cs:outbyte_tmp,al` (src-assem/loader/LDBIOS86Q.A86's own
     fdc_out_byte) silently became `MOV [outbyte_tmp],CH` plus a stray
     extra byte feeding into whatever came next. Fixed by having
     `encode_rm` leave the prefix out entirely and computing/prepending
@@ -391,7 +391,7 @@ def _encode_alu(name, ops, ctx):
         # AL, idx*8+5 for AX -- e.g. AND AL,imm8 = 0x24, 2 bytes, vs the
         # generic group1 r/m8,imm8 form (0x80 /4 ib) this function used
         # to always emit, 3 bytes). A real DRI source's own `$+N`-style
-        # literal byte-offset ("JNZ $+4 ! AND AL,3Fh", src/kernel/
+        # literal byte-offset ("JNZ $+4 ! AND AL,3Fh", src-assem/kernel/
         # FILE2.BDO's SEARCHN) is calibrated against the *real*
         # assembler's own choice -- the short form here -- so always
         # emitting the longer encoding silently breaks that jump's own

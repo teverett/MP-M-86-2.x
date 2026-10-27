@@ -7,7 +7,7 @@
 ;*	Not DRI source. Written for this project, replacing the
 ;*	real LDBIOS.A86's "LDBIOS for LDMPM Configured for iSBC
 ;*	86/12 with the iSBC 204 Floppy Disk Controller" (its own
-;*	title line) the same way src/kernel/XIOS86Q.A86 replaces
+;*	title line) the same way src-assem/kernel/XIOS86Q.A86 replaces
 ;*	XIOS.A86 -- same QEMU target (standard PC UART @ 03F8h for
 ;*	the console, standard PC floppy controller, NEC 765/8272,
 ;*	@ 03F0h for disk, PIO, no DMA), and in fact the exact same

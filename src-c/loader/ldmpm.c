@@ -1,12 +1,12 @@
 /*
- * ldmpm.c -- C port of the whole of src/loader/LDMPM.A86's `start:`
+ * ldmpm.c -- C port of the whole of src-assem/loader/LDMPM.A86's `start:`
  * (ported here as `start_entry`), plus its internal subroutines
  * `phex`/`pnib`/`putchar` (`initlbdos`/`openfnc`/`setdma`/`setdmab`/
  * `read`/`msg`/`pcrlf` are each just a one- or two-line trampoline
  * into `sys_vec`, i.e. a particular `(cl, dx)` pair -- see below).
  *
  * `start:`'s own very first instruction is `jmp mldbios` -- a near
- * jump into src/loader/LDBIOS86Q.A86's own `INIT` (concatenated
+ * jump into src-assem/loader/LDBIOS86Q.A86's own `INIT` (concatenated
  * right after this module in the real combined MPMLDR.bin), whose
  * own real tail (`jmp ccp_offset`) jumps straight back to right
  * after this `jmp`. This is the first genuinely wired-together call
@@ -66,7 +66,7 @@
  * header-consistency arithmetic itself: `cldseg+clen==dldseg` only
  * makes dimensional sense if `clen` is paragraphs, since `cldseg`/
  * `dldseg` are themselves real-mode segment values) -- a different
- * convention from `src/loader/ROM86Q.A86`'s own unrelated MPMLDR.bin
+ * convention from `src-assem/loader/ROM86Q.A86`'s own unrelated MPMLDR.bin
  * disk-layout header, whose own `Len` field genuinely is bytes; two
  * separate header formats, not a bug.
  *

@@ -509,7 +509,7 @@ def parse_operand(text, ctx, branch_context=False):
     # direct (absolute) memory addressing, not an immediate -- seen
     # setting up the interrupt-vector table in XIOS.A86 ("mov .0,offset
     # int_trap" / "mov .2,cs", storing through absolute addresses 0/2)
-    # and the same idiom in src/kernel/MAU.MEM/ML.MEM/SHARE.MEM. This is
+    # and the same idiom in src-assem/kernel/MAU.MEM/ML.MEM/SHARE.MEM. This is
     # unambiguous wherever the operand position requires memory/register
     # (MUL has no immediate form at all -- "mul byte ptr .0" only makes
     # sense as a memory operand), and is applied uniformly here rather

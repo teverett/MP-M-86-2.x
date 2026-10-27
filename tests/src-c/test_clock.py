@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""src-c/rsp/clock.c against src/rsp/CLOCK.A86, as whole programs (see
+"""src-c/rsp/clock.c against src-assem/rsp/CLOCK.A86, as whole programs (see
 tests/src-c/rspref.py): CLOCK waits on the seconds flag and adds a second
 to SYSDAT's time of day each time, BCD, setting the minute flag as each
 minute ends. Each case starts from a time of day and lets some seconds

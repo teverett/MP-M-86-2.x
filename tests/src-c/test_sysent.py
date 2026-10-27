@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/sysent.c against all 8 of
-src/kernel/SYSENT.RTM's entries, both on real memory layout.
+src-assem/kernel/SYSENT.RTM's entries, both on real memory layout.
 
 poll_entry/delay_entry/dispatch_entry/set_prior_entry/sleep_entry tail-
 jump into the dispatcher and never return -- per docs/src-c.md's
@@ -33,7 +33,7 @@ from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures')
-KERNEL_DIR = os.path.join(REPO_ROOT, 'src', 'kernel')
+KERNEL_DIR = os.path.join(REPO_ROOT, 'src-assem', 'kernel')
 SYSENT_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f) for f in ('sysent.c', 'proc.c', 'dsptch.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 

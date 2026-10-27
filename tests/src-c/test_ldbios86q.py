@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Differential test for src-c/loader/ldbios86q.c against the whole
-of src/loader/LDBIOS86Q.A86: the console-I/O subset (CONST, CONIN,
+of src-assem/loader/LDBIOS86Q.A86: the console-I/O subset (CONST, CONIN,
 CONOUT, PUNCH, READER, GETIOBF), INIT, and every disk-I/O entry point
 (SELDSK, HOME, SETTRK, SETSEC, SECTRAN, SETDMA, SETDMAB, GETSEGT,
 READ, WRITE). LISTOUT/LISTST/SETIOBF are not ported -- see
@@ -34,7 +34,7 @@ from uart86q import Uart86Q  # noqa: E402
 from fdc86q import Fdc86Q  # noqa: E402
 from iorecorder import IoRecorder  # noqa: E402
 
-REAL_FILE = os.path.join(REPO_ROOT, 'src', 'loader', 'LDBIOS86Q.A86')
+REAL_FILE = os.path.join(REPO_ROOT, 'src-assem', 'loader', 'LDBIOS86Q.A86')
 LDBIOS86Q_C = os.path.join(REPO_ROOT, 'src-c', 'loader', 'ldbios86q.c')
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'loader')
 

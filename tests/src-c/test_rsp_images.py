@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""The C versions of src/rsp/'s programs (src-c/rsp/*.c) each carry
+"""The C versions of src-assem/rsp/'s programs (src-c/rsp/*.c) each carry
 their data segment as one initialized C object, laid out as the .A86's
 DSEG (src-c/rsp/rsp.h). This compares each of those objects, as
 i686-elf-gcc compiled it (the symbol's bytes in the .o's .rodata), with
 the assembled data segment: the .A86 assembled with tools/asm86 here,
-or for CACHE (no source) the data group of src/rsp/CACHE.RSP.
+or for CACHE (no source) the data group of src-assem/rsp/CACHE.RSP.
 
 The only bytes allowed to differ are an RSP's start IP (the first word
 of its initial stack frame, at the UDA's u_stack_sp): a code address
@@ -23,7 +23,7 @@ import tempfile
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC_C_DIR = os.path.join(REPO_ROOT, 'src-c')
-RSP_DIR = os.path.join(REPO_ROOT, 'src', 'rsp')
+RSP_DIR = os.path.join(REPO_ROOT, 'src-assem', 'rsp')
 sys.path.insert(0, os.path.join(REPO_ROOT, 'tools'))
 
 REQUIRED_TOOLS = ('i686-elf-gcc', 'i686-elf-objcopy', 'i686-elf-nm')
@@ -40,8 +40,8 @@ PROGRAMS = (
 
 
 def c_image(name):
-    """The bytes of <name>_image in obj/rsp/<name>.o."""
-    obj = os.path.join(SRC_C_DIR, 'obj', 'rsp', name + '.o')
+    """The bytes of <name>_image in build/rsp/<name>.o."""
+    obj = os.path.join(SRC_C_DIR, 'build', 'rsp', name + '.o')
     nm = subprocess.run(['i686-elf-nm', '-S', obj], capture_output=True, text=True, check=True).stdout
     for line in nm.splitlines():
         parts = line.split()
@@ -58,7 +58,7 @@ def c_image(name):
 
 
 def asm_dseg(source, tmp):
-    """The assembled data segment of src/rsp/<source>."""
+    """The assembled data segment of src-assem/rsp/<source>."""
     if source.upper().endswith('.RSP'):
         from build_mpmsys import binary_rsp
         return binary_rsp(os.path.join(RSP_DIR, source))[1]
@@ -74,7 +74,7 @@ def main():
     if missing:
         print(f"skip: missing tool(s) {', '.join(missing)}")
         return 0
-    objs = [os.path.join('obj', 'rsp', name + '.o') for name, _, _ in PROGRAMS]
+    objs = [os.path.join('build', 'rsp', name + '.o') for name, _, _ in PROGRAMS]
     subprocess.run(['make'] + objs, cwd=SRC_C_DIR, check=True, stdout=subprocess.DEVNULL)
 
     failures = []

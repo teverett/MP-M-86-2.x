@@ -2,7 +2,7 @@
 tests (test_util_mem.py, test_ml.py, test_mau.py, test_share.py,
 test_memory.py, test_cpmmem.py, test_memif.py, test_memif_entry.py).
 
-The reference is src/kernel/MEM.A86 itself -- the whole real module
+The reference is src-assem/kernel/MEM.A86 itself -- the whole real module
 (MEMIF/CPMMEM/MEMORY/SHARE/MAU/ML/UTIL + the real UDA.FMT/SYSDAT.FMT), so
 every field offset and code path is the genuine one. It runs with
 tools/i86sim.py's segmented=True, set up the way a system call reaches
@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, 'tools'))
 from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
-MEM_A86 = os.path.join(REPO_ROOT, 'src', 'kernel', 'MEM.A86')
+MEM_A86 = os.path.join(REPO_ROOT, 'src-assem', 'kernel', 'MEM.A86')
 KERNEL_C = os.path.join(REPO_ROOT, 'src-c', 'kernel')
 MEM_C = [os.path.join(KERNEL_C, f) for f in
          ('memif.c', 'cpmmem.c', 'memory.c', 'share.c', 'mau.c', 'ml.c', 'util_mem.c')]
@@ -92,7 +92,7 @@ def r16(mem, addr):
 class MemRef:
     def __init__(self):
         asm = Assembler()
-        asm.assemble(MEM_A86, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+        asm.assemble(MEM_A86, [os.path.join(REPO_ROOT, 'src-assem', 'kernel')])
         self.code = asm.segment_bytes('cseg')
         self.s = {name: asm.symtab[name].value for name in SYMS}
         s = self.s

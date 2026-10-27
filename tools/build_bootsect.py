@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Produce a real 512-byte boot sector from src/loader/ROM86Q.A86.
+"""Produce a real 512-byte boot sector from src-assem/loader/ROM86Q.A86.
 
 ROM86Q.A86 (see its own header comment) has to assemble as if loaded at
 its real runtime address, 0000:7C00h -- `org 7c00h` -- so that every
@@ -24,7 +24,7 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LOADER_DIR = os.path.join(ROOT, 'src', 'loader')
+LOADER_DIR = os.path.join(ROOT, 'src-assem', 'loader')
 ASM86 = [sys.executable, os.path.join(ROOT, 'tools', 'asm86.py')]
 
 SECTOR_SIZE = 512
@@ -38,7 +38,7 @@ def main():
                           '(default: build/loader/ROM86Q.bin)')
     args = ap.parse_args()
 
-    out_dir = os.path.join(ROOT, 'build', 'loader')
+    out_dir = os.path.join(ROOT, 'src-assem', 'build', 'loader')
     os.makedirs(out_dir, exist_ok=True)
 
     src = os.path.join(LOADER_DIR, 'ROM86Q.A86')

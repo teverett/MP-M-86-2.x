@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/kernel/xios.c against src/kernel/XIOS.A86's
+"""Differential test for src-c/kernel/xios.c against src-assem/kernel/XIOS.A86's
 portable function-set routines: SETTRK/SETSEC/SETDMA/SETDMAB/SECTRAN/
 SELDSK/MAXCONSOLE/MAXLIST/GETSEGT/SELMEMORY/FLUSHBUF/STRTCLK/STOPCLK. See
 xios.c's own header comment for why the rest of the file (real `in`/`out`
@@ -21,7 +21,7 @@ from memref import REPO_ROOT, KERNEL_C, build_lib, c_buffer, phys, w16  # noqa: 
 from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
-XIOS_A86 = os.path.join(REPO_ROOT, 'src', 'kernel', 'XIOS.A86')
+XIOS_A86 = os.path.join(REPO_ROOT, 'src-assem', 'kernel', 'XIOS.A86')
 XSEG = 0x0080                       # the XIOS's segment (SYSDAT): CS = DS
 STACK_SEG, STACK_TOP = 0x0F00, 0x0100
 RET_IP = 0xFFF0
@@ -34,7 +34,7 @@ c_u8p = ctypes.POINTER(ctypes.c_uint8)
 
 def main():
     asm = Assembler()
-    asm.assemble(XIOS_A86, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+    asm.assemble(XIOS_A86, [os.path.join(REPO_ROOT, 'src-assem', 'kernel')])
     code, dseg = asm.segment_bytes('cseg'), asm.segment_bytes('dseg')
     sym = {k: v.value for k, v in asm.symtab.items()}
     stack = set(range(phys(STACK_SEG, STACK_TOP - 4), phys(STACK_SEG, STACK_TOP)))

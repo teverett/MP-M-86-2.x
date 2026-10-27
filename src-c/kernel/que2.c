@@ -1,5 +1,5 @@
 /*
- * que2.c -- C port of 5 of src/kernel/QUE2.RTM's 6 routines: rlsmx,
+ * que2.c -- C port of 5 of src-assem/kernel/QUE2.RTM's 6 routines: rlsmx,
  * getqdaddr, remqd, qspace, qrelease.
  *
  * Every real allocator/scheduler call here goes through the unported
@@ -13,7 +13,7 @@
  * (exercised the same way by both tools/i86sim.py and this port, so the
  * differential test still agrees, it's just never testing that path).
  *
- * `remqd` below matches src/kernel/QUE2.RTM as it now reads after
+ * `remqd` below matches src-assem/kernel/QUE2.RTM as it now reads after
  * docs/bugs.md #99's fix (`mov qul,si`, not the original's `mov qul,ax`,
  * which left `qul` set to its own unchanged value -- a no-op that meant
  * a freed QD was never actually threaded onto the free list).

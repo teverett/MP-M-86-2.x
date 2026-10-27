@@ -1,5 +1,5 @@
 /*
- * parse.c -- C port of src/kernel/PARSE.SUP.
+ * parse.c -- C port of src-assem/kernel/PARSE.SUP.
  *
  * Fully self-contained: parse_entry and its internal helpers (setfld,
  * delim, deblank, fcbinit) never call into any unported module, so unlike

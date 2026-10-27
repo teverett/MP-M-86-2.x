@@ -2,7 +2,7 @@
 
 `tools/asm86/` is a from-scratch, two-pass 8086 assembler written in
 Python, covering the specific dialect and instruction/directive subset
-used by the files in `src/`. It is **not** a general-purpose, fully
+used by the files in `src-assem/`. It is **not** a general-purpose, fully
 MASM/ASM86-compatible assembler, and it does not aim to produce
 byte-identical output to the original DRI `ASM86`/`GENCMD` toolchain —
 only functionally equivalent 8086 machine code. See `docs/build.md` for
@@ -102,7 +102,7 @@ file's own directory, then in any `-I` directories given.
   2 reuses it unchanged and just re-emits bytes.
 - `PUBLIC`/`EXTRN`/`GLOBAL` are accepted but produce no cross-module
   linking — this assembler only handles one `.A86` file (plus its
-  `INCLUDE`s) at a time, matching how the files in `src/` are mostly
+  `INCLUDE`s) at a time, matching how the files in `src-assem/` are mostly
   self-contained per RSP/module.
 
 ## Bugs found and fixed in this assembler
@@ -119,7 +119,7 @@ file's own directory, then in any `-I` directories given.
   implementation" section.
 
 The following were all found validating the kernel sources
-(`src/kernel/`) — see `docs/bugs.md` for which kernel modules now
+(`src-assem/kernel/`) — see `docs/bugs.md` for which kernel modules now
 assemble end-to-end and which remain blocked by genuine 1981 source
 defects rather than any of this:
 
@@ -177,7 +177,7 @@ defects rather than any of this:
   contribution and returns to whichever file (or the top level) included
   it, rather than aborting the whole assembly.
 - `DD` (define doubleword, alongside `DB`/`DW`) wasn't recognized at
-  all — found validating `src/loader/LDMPM.A86`'s `mpm dd abs_zero`
+  all — found validating `src-assem/loader/LDMPM.A86`'s `mpm dd abs_zero`
   (a placeholder immediately overlaid by two `DW`s via `org offset
   mpm`). Implemented like `JMPF`/`CALLF`'s direct-label form elsewhere
   in this assembler: offset word from the operand's value, then a
@@ -188,7 +188,7 @@ defects rather than any of this:
   the forward-reference prescan — fixed alongside it.
 - `LENGTH name`, a real DRI ASM86 operator evaluating to the total byte
   length of a `DB`/`DW`/`DD`/`RB`/`RW`/`RS` declaration, wasn't
-  implemented at all — found validating `src/loader/ROM.A86`'s `er0 rb
+  implemented at all — found validating `src-assem/loader/ROM.A86`'s `er0 rb
   length cer0` (and nine more like it), where `cer0` is a `DB` string
   constant declared elsewhere in the same file; confirmed against the
   file's own `;16`-style length comments next to each use. Implemented
@@ -221,7 +221,7 @@ defects rather than any of this:
 
 - Not every ASM86 directive is implemented (no `MACRO`, `STRUC`, `DUP`,
   `PROC`/`ENDP`, `ASSUME`, `EVEN` — none of these are used by the files
-  currently in `src/`; if a file needs one, the assembler will raise a
+  currently in `src-assem/`; if a file needs one, the assembler will raise a
   clear "unsupported" error rather than mis-assembling it).
 - No listing file, no cross-reference output, no Intel-HEX output (only
   raw per-segment binaries).
@@ -229,15 +229,15 @@ defects rather than any of this:
 
 ## Validated so far
 
-`python3 tools/asm86.py src/rsp/ECHO.A86` assembles cleanly end-to-end.
+`python3 tools/asm86.py src-assem/rsp/ECHO.A86` assembles cleanly end-to-end.
 Testing the other RSPs surfaced **real bugs in the original 1981 source**
 (not assembler bugs — confirmed by reading the surrounding source):
 
-- `src/rsp/CLOCK.A86`: every `jmp clock_loop` (4 places) references a
+- `src-assem/rsp/CLOCK.A86`: every `jmp clock_loop` (4 places) references a
   label that doesn't exist; the label actually defined is `clockloop:`.
-- `src/rsp/TMP.A86`: `call print_string` (line 147) references a label
+- `src-assem/rsp/TMP.A86`: `call print_string` (line 147) references a label
   that doesn't exist; the label actually defined is `printstring:`.
-- `src/rsp/SUBMIT.A86`: `jmp not_builtin` references `notbuiltin:`, and
+- `src-assem/rsp/SUBMIT.A86`: `jmp not_builtin` references `notbuiltin:`, and
   `mov dx,offset sopen_err` references `sopenerr`, both similarly
   mismatched. `call conwrite` (in the `showerr:` routine) calls a
   routine that is never defined anywhere in the file at all.
@@ -245,17 +245,17 @@ Testing the other RSPs surfaced **real bugs in the original 1981 source**
 These are consistent with this tree's own provenance note in the top
 level `README.md` ("hand written labels... probably work disks") —
 these RSPs likely never finished debugging on the original hardware
-either. They have **not** been patched here; `src/` remains an unmodified
+either. They have **not** been patched here; `src-assem/` remains an unmodified
 copy of `orig/`.
 
-### Kernel sources (`src/kernel/`)
+### Kernel sources (`src-assem/kernel/`)
 
-`src/kernel/CIO.A86`, `SYSDAT.A86`, `BDOS.A86`, `MEM.A86`, `RTM.A86`,
+`src-assem/kernel/CIO.A86`, `SYSDAT.A86`, `BDOS.A86`, `MEM.A86`, `RTM.A86`,
 and `SUP.A86` all compile and assemble cleanly end-to-end now. Every
 source-level name-mismatch bug in `BDOS.A86`/`RTM.A86` (45 + 6 names —
-see `docs/bugs.md` bugs #4/#5) was **patched directly in `src/`** (at
+see `docs/bugs.md` bugs #4/#5) was **patched directly in `src-assem/`** (at
 the user's explicit request — this is the one place in this tree where
-`src/` is no longer an unmodified copy of `orig/`); `MEM.A86` and
+`src-assem/` is no longer an unmodified copy of `orig/`); `MEM.A86` and
 `SUP.A86` had no name-mismatch bugs of their own to begin with, only the
 short-jump-range issue below. The short-jump-range trade-off that used
 to additionally block all four of `BDOS.A86`/`MEM.A86`/`RTM.A86`/
@@ -265,9 +265,9 @@ patch needed for that part. `XIOS.A86` had its one fixable typo patched
 too, but still has one genuinely unresolved symbol (`dp_base`) with no
 fix available from evidence in this tree (bug #7).
 
-### Loader sources (`src/loader/`)
+### Loader sources (`src-assem/loader/`)
 
-All four of `src/loader/LDBDOS.A86`/`LDBIOS.A86`/`LDMPM.A86`/`ROM.A86`
+All four of `src-assem/loader/LDBDOS.A86`/`LDBIOS.A86`/`LDMPM.A86`/`ROM.A86`
 compile and assemble cleanly end-to-end now. `LDBIOS.A86`'s four
 name-mismatch bugs and `LDMPM.A86`/`ROM.A86`'s four more (bugs #8, #9,
 #10 — what first looked like genuinely unresolved symbols in the latter
@@ -277,10 +277,10 @@ additionally block some of these is fixed the same way as the kernel
 files above (real relaxation, no source patch needed). `ROM.A86` also
 needed the new `LENGTH` operator support described above.
 
-`src/loader/LDBIOS86Q.A86` is a new file, not DRI source: a QEMU-target
+`src-assem/loader/LDBIOS86Q.A86` is a new file, not DRI source: a QEMU-target
 replacement for `LDBIOS.A86` (standard PC UART + NEC765 floppy
 controller instead of the iSBC 86/12's i8251/i8271 hardware), reusing
-`src/kernel/XIOS86Q.A86`'s own NEC765/UART driver code behind
+`src-assem/kernel/XIOS86Q.A86`'s own NEC765/UART driver code behind
 `LDBIOS.A86`'s own classic CP/M BIOS jump-vector calling convention, so
 `LDBDOS.A86`'s own *calling* logic needs no changes. Wiring it in did
 surface a real bug in `LDBDOS.A86`'s own fixed-offset EQUs, though --
@@ -289,7 +289,7 @@ the rationale and limitations, and `docs/build.md`'s "What's actually
 needed to boot under QEMU" item 1 for how it's wired into
 `tools/build_mpmldr.py`.
 
-`src/loader/ROM86Q.A86` is also a new file, not DRI source: a 512-byte
+`src-assem/loader/ROM86Q.A86` is also a new file, not DRI source: a 512-byte
 PC boot sector replacing `04/ROM.A86`'s EPROM bootstrap, since QEMU's
 SeaBIOS plays the role the real EPROM played and hands off to exactly
 this kind of boot sector instead. It uses BIOS INT 13h for disk I/O

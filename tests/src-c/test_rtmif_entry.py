@@ -4,7 +4,7 @@ inter-module RTM dispatch) against the real RTM module, on real memory
 layout. See rtmif.c's own header comment for the register-convention
 mapping this test checks.
 
-The reference is src/kernel/RTM.A86 itself -- the whole real module
+The reference is src-assem/kernel/RTM.A86 itself -- the whole real module
 (RTMIF/SYSENT/PROC/DSPTCH/FLAG/QUE1/QUE2/FINDPD/ABORT + the real
 UDA.FMT/SYSDAT.FMT), so every field offset and code address is the
 genuine one, including ABORT.RTM's `terminate:` (rtmif.c's
@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, 'tools'))
 from asm86 import Assembler  # noqa: E402
 from i86sim import I86Sim  # noqa: E402
 
-RTM_A86 = os.path.join(REPO_ROOT, 'src', 'kernel', 'RTM.A86')
+RTM_A86 = os.path.join(REPO_ROOT, 'src-assem', 'kernel', 'RTM.A86')
 RTMIF_ENTRY_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', f)
                  for f in ('rtmif.c', 'sysent.c', 'proc.c', 'dsptch.c', 'flag.c',
                            'que1.c', 'que2.c', 'findpd.c', 'abort.c')]
@@ -95,7 +95,7 @@ def r16(mem, addr):
 
 def assemble_reference():
     asm = Assembler()
-    asm.assemble(RTM_A86, [os.path.join(REPO_ROOT, 'src', 'kernel')])
+    asm.assemble(RTM_A86, [os.path.join(REPO_ROOT, 'src-assem', 'kernel')])
     code = asm.segment_bytes('cseg')
     s = {name: asm.symtab[name].value for name in SYMS}
     assert code[s['rtm_ret']] == 0xCB, f"expected retf at {hex(s['rtm_ret'])}"

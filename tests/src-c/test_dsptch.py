@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test for src-c/kernel/dsptch.c against src/kernel/
+"""Differential test for src-c/kernel/dsptch.c against src-assem/kernel/
 DSPTCH.RTM, both on real memory layout. dsptch.c was first written as
 a reading/debugging aid for the scheduler-hang investigation (docs/
 bugs.md #83-98); see its header comment for what has no C equivalent
@@ -39,7 +39,7 @@ WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', '
 DSPTCH_C = [os.path.join(REPO_ROOT, 'src-c', 'kernel', 'dsptch.c'),
             os.path.join(REPO_ROOT, 'src-c', 'kernel', 'proc.c')]
 INCLUDE_DIR = os.path.join(REPO_ROOT, 'src-c', 'kernel')
-KERNEL_DIR = os.path.join(REPO_ROOT, 'src', 'kernel')
+KERNEL_DIR = os.path.join(REPO_ROOT, 'src-assem', 'kernel')
 
 SIM_MEM = 0x10000
 PHYS_MEM = 0x100000

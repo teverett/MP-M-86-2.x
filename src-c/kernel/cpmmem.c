@@ -1,5 +1,5 @@
 /*
- * cpmmem.c -- C port of src/kernel/CPMMEM.MEM: maxmem_entry,
+ * cpmmem.c -- C port of src-assem/kernel/CPMMEM.MEM: maxmem_entry,
  * absmax_entry, cpmalloc_entry, cpmabsa_entry, cpmfree_entry (+
  * internal getmemory, free_memory).
  *
@@ -200,7 +200,7 @@ mem_bxcx cpmabsa_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
  * The free-all walk used to `and` each segment's flags with mf_load
  * (wiping a kept Load segment's other flag bits) where a test was
  * meant, and retried a segment that failed to free forever; both are
- * fixed here and in src/kernel/CPMMEM.MEM (docs/bugs.md #107).
+ * fixed here and in src-assem/kernel/CPMMEM.MEM (docs/bugs.md #107).
  */
 mem_bxcx cpmfree_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
     uint8_t *sd = far_ptr(phys, sysdat, 0);

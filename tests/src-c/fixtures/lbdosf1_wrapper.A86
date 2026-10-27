@@ -1,4 +1,4 @@
-; Standalone wrapper for src/loader/LBDOSF1.A86: a near-full standalone
+; Standalone wrapper for src-assem/loader/LBDOSF1.A86: a near-full standalone
 ; copy of FILE1.BDO's own disk-I/O/FCB-arithmetic/checksum/rddir/
 ; getallocbit logic, used by the boot-time loader before the real BDOS
 ; is running. Unlike the real FILE1.BDO, its checksum/rddir/wrdir chain

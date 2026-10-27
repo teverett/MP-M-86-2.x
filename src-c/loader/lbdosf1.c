@@ -1,8 +1,8 @@
 /*
- * lbdosf1.c -- C port of src/loader/LBDOSF1.A86: a near-full standalone
+ * lbdosf1.c -- C port of src-assem/loader/LBDOSF1.A86: a near-full standalone
  * copy of the kernel's own FILE1.BDO disk-I/O/FCB-arithmetic/checksum/
  * rddir/getallocbit logic, used by the boot-time loader before the
- * real BDOS (src/kernel/FILE1-4.BDO) is running.
+ * real BDOS (src-assem/kernel/FILE1-4.BDO) is running.
  *
  * Unlike the kernel's FILE1.BDO (see src-c/kernel/file1.c's own header
  * comment), this module's checksum/rddir/wrdir chain is entirely

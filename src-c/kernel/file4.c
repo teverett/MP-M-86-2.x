@@ -1,5 +1,5 @@
 /*
- * file4.c -- C port of a clean, self-contained subset of src/kernel/
+ * file4.c -- C port of a clean, self-contained subset of src-assem/kernel/
  * FILE4.BDO (the BDOS function-dispatch table): func24, func25,
  * func26, func29, func32, FUNC44, FUNC45, func51, func52, SET_ARET/openx06,
  * func15 (BDOS OPEN) + its own OPENX/OPENX0-OPENX09 cascade, func16

@@ -1,5 +1,5 @@
 /*
- * file2.c -- C port of a self-contained subset of src/kernel/
+ * file2.c -- C port of a self-contained subset of src-assem/kernel/
  * FILE2.BDO: GET_NALBS, getblock (+ internal lefttst/righttst/rblok/
  * rblok0), SEARCH/SEARCHN (`search`/`search1`/`searchn`, + internal
  * `searchi`/`searchi1`/`compext`/`swap_sdcnt`), CLOSE/CLOSE1
@@ -119,7 +119,7 @@
  * `srchfin`'s own `jmp staret` (with `al=255`) sets `BD_LRET=255` for
  * real -- same inlined-effect convention `file1.c`'s own `tst_inv_fcb`
  * uses, not a boundary stub (`staret`'s own real body, `mov lret,al !
- * ret`, is trivially self-contained, see `src/kernel/BDOSIF.BDO`).
+ * ret`, is trivially self-contained, see `src-assem/kernel/BDOSIF.BDO`).
  *
  * `search`/`search1`/`searchn` return the real `ch` register's own
  * final value (0 on an unsuccessful search, matching the comment at
@@ -135,7 +135,7 @@
  * a first for this project, worth spelling out why. `searchn`'s own
  * real cseg footprint, in the combined `tests/src-c/fixtures/
  * file1_wrapper.A86`/`file2_wrapper.A86` bundle (FILE1-4.BDO +
- * BDOSIF.BDO + DATA.BDO, the same one `src/kernel/BDOS.A86` itself
+ * BDOSIF.BDO + DATA.BDO, the same one `src-assem/kernel/BDOS.A86` itself
  * assembles), runs from `searchn` (0xbfe) well past where DATA.BDO's
  * own dseg-relative field offsets start (0xc00) -- confirmed via
  * `--symbols`: `SRCHN1`, one of `searchn`'s own internal branch
@@ -223,7 +223,7 @@ extern void fix_olist_item(uint8_t *phys, uint16_t ds_bdos);
 /*
  * rotr -- rotate al right by dh positions and store the result at
  * [bx]. The same tiny shared helper getallocbit's own callers use in
- * the real asm (src/kernel/FILE1.BDO's own setallocbit inlines the
+ * the real asm (src-assem/kernel/FILE1.BDO's own setallocbit inlines the
  * identical logic rather than calling a separate function) --
  * duplicated here rather than exposed from file1.c, since it's a
  * 1-line rotate with no real translation risk either way.

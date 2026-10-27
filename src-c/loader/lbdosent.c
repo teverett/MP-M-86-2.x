@@ -1,5 +1,5 @@
 /*
- * lbdosent.c -- C port of src/loader/LBDOSENT.A86: `oldbdos`'s own
+ * lbdosent.c -- C port of src-assem/loader/LBDOSENT.A86: `oldbdos`'s own
  * function-number dispatch (ported as `oldbdos`), and the error-
  * reporting tail it can reach (`persub`/`selsub`/`rodsub`/`rofsub`,
  * + internal `errflg`). `parsave`/`parsave33`/`parunsave` are this
@@ -21,7 +21,7 @@
  * overwhelming majority (`func1`/`func3`/`func6`-`func8`/`func10`-
  * `func12`/`func16`-`func19`/`func21`-`func25`/`func27`-`func37`/
  * `func40`/`func50`/`func52`-`func57`) are each just an `EQU` alias
- * for the bare `return:` label (confirmed in `src/loader/
+ * for the bare `return:` label (confirmed in `src-assem/loader/
  * LBDOSF3.A86`'s own docs row) -- translated as the `default` case,
  * a real call to `funcret` (src-c/loader/lbdosio.c), not skipped
  * outright, since `funcret` is itself a genuine already-ported
@@ -71,7 +71,7 @@
  *
  * `selsub`/`rodsub`/`rofsub` all end in an unconditional `JMP
  * wbootf` after `errflg` -- a real boundary exit (reboot), nothing
- * to port past the message. `src/loader/LBDOSF1.A86`'s own
+ * to port past the message. `src-assem/loader/LBDOSF1.A86`'s own
  * `selerror`/`goerr` call sites (`diocomp`/`ckrofile`/`checkwrite`)
  * are NOT updated to call these for real: they're already
  * unreachable under `src-c/loader/lbdosf1.c`'s own pre-existing,

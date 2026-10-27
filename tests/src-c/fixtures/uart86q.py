@@ -7,9 +7,9 @@ other fixture in this directory feeding the same memory image to both
 the reference run and the C port.
 
 Deliberately NOT a general 8250 emulation: only the two registers (LSR,
-RXTX) src/loader/LDBIOS86Q.A86's own CONST/CONIN/CONOUT touch, plus the
+RXTX) src-assem/loader/LDBIOS86Q.A86's own CONST/CONIN/CONOUT touch, plus the
 three one-time setup registers (LCR/IER/MCR) both LDBIOS86Q.A86's own
-INIT and src/loader/ROM86Q.A86's own `start:` write and never read back
+INIT and src-assem/loader/ROM86Q.A86's own `start:` write and never read back
 -- recorded (in `setup_writes`) but otherwise ignored, same "don't
 raise" job tests/src-c/fixtures/fdc86q.py's own Fdc86Q gives the 8237
 DMA ports. TXRDY (LSR bit 5) is always reported set -- this model's own

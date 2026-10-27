@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""src-c/rsp/echo.c against src/rsp/ECHO.A86, as whole programs (see
+"""src-c/rsp/echo.c against src-assem/rsp/ECHO.A86, as whole programs (see
 tests/src-c/rspref.py): ECHO makes and opens its queue, then prints each
 message the CLI writes to it -- the sender's PD, then the command tail
 -- on the sender's console. Each case sends messages, and the run ends

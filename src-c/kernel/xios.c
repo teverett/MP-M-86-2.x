@@ -1,12 +1,12 @@
 /*
- * xios.c -- C port of src/kernel/XIOS.A86's portable function-set
+ * xios.c -- C port of src-assem/kernel/XIOS.A86's portable function-set
  * routines (the real driver's "logic" half: disk-parameter bookkeeping
  * and a handful of fixed-answer status functions).
  *
  * XIOS.A86 is docs/bugs.md #7's file (fixed now that its own last
  * typo, `dp_base`/`dpbase`, is patched) and the real Intel SBC
  * 204/534-specific hardware driver for MP/M-86's XIOS module -- see
- * src/Makefile's own KERNEL_OK comment. Most of the file is genuine
+ * src-assem/Makefile's own KERNEL_OK comment. Most of the file is genuine
  * port-level hardware I/O (`in`/`out` against the 8271 floppy
  * controller and the console/list UARTs) or interrupt-service code,
  * neither of which has a C equivalent under this project's flat-memory

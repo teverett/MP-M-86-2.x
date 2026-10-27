@@ -10,8 +10,8 @@ initialization (sup_init) against real low memory, then reads every
 field sup_init should have written back from memory and reports
 "sup_init: ok" or which field was wrong. Then src-c/rt runs the whole
 ported kernel as MP/M with the C RSPs (src-c/rsp/): this checks that
-each C RSP image matched the assembled one, and that the C TMP prints
-the version and its prompt. This is not /src's own real MP/M-86 boot
+src-c/gensys built the image with the four C RSPs, and that the C TMP prints
+the version and its prompt. This is not /src-assem's own real MP/M-86 boot
 chain -- see src-c/boot/boot.s's own header comment for why 32-bit
 protected mode is a different execution model from MP/M-86's own real
 16-bit one.
@@ -22,7 +22,7 @@ scratch toolchain (tools/asm86.py/tools/i86sim.py), so unlike every
 other tests/src-c/test_*.py this one depends on external tools; skips
 with a clear message (exit 0) rather than failing if they're missing,
 since src-c isn't wired into this repo's own CI yet either (see
-.github/workflows/ -- it only builds/tests /src).
+.github/workflows/ -- it only builds/tests /src-assem).
 """
 import os
 import shutil
@@ -39,10 +39,8 @@ SIGNONS = (
     ("pipeline signon via xios_conout_entry", b"MP/M-86 src-c image-builder: pipeline ok"),
     ("sup_init on real memory, all fields verified", b"sup_init: ok"),
     # src-c/rt runs the kernel as MP/M, with src-c/rsp's C RSPs
-    ("C TMP image installed", b"rt: Tmp      data segment: C image identical"),
-    ("C CLOCK image installed", b"rt: CLOCK    data segment: C image identical"),
-    ("C ECHO image installed", b"rt: ECHO     data segment: C image identical"),
-    ("C CACHE image installed", b"rt: Cachinit data segment: C image identical"),
+    ("gensys built the image, with the C RSPs",
+     b"rt: MP/M-86 on the C kernel: code at 1000, SYSDAT at 183A, RSPs Tmp CLOCK ECHO Cachinit"),
     ("C TMP prints the version", b"MP/M-86 2.0 [5 Oct 81]"),
     ("C TMP prompts", b"0A>"),
 )

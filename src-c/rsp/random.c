@@ -1,5 +1,5 @@
 /*
- * random.c -- C version of src/rsp/RANDOM.A86, DRI's sample random
+ * random.c -- C version of src-assem/rsp/RANDOM.A86, DRI's sample random
  * access program (a transient, RANDOM.CMD). It opens (or makes) the
  * file named on its command line, then takes commands: `nW` writes a
  * typed line to record n, `nZ` does the same with write random zero

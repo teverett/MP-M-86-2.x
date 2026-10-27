@@ -1,5 +1,5 @@
 /*
- * lbdosf2.c -- C port of src/loader/LBDOSF2.A86: the loader's own
+ * lbdosf2.c -- C port of src-assem/loader/LBDOSF2.A86: the loader's own
  * search/open/close/make/rename/delete logic, built on top of
  * src-c/loader/lbdosf1.c's own rddir/checksum/getdptra/etc.
  *

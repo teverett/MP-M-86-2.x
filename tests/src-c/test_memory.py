@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Differential test for src-c/kernel/memory.c (malloc_entry +
-mall_try_mau, mfree_entry + mfree_it) against src/kernel/MEMORY.MEM, on
+mall_try_mau, mfree_entry + mfree_it) against src-assem/kernel/MEMORY.MEM, on
 real memory layout.
 
-The reference is the whole real MEM module (src/kernel/MEM.A86); see
+The reference is the whole real MEM module (src-assem/kernel/MEM.A86); see
 tests/src-c/memref.py. Its `mpmif` calls (f_maualloc/f_mlalloc/
 f_maufree/f_mlfree) re-enter MEM's real `entry` through the SUPIF hook,
 so allocation/free run through the real MAU.MEM/ML.MEM end to end on

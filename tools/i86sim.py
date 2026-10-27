@@ -113,7 +113,7 @@ class I86Sim:
     are treated the same way `call_stub_addrs` treats a CALL -- an instant
     no-op, continuing with the very next instruction. Some modules invoke
     the dispatcher via a software interrupt instead of an ordinary near
-    CALL (e.g. `src/rsp/CLOCK.A86`'s own `int mpmint`); unlike a real
+    CALL (e.g. `src-assem/rsp/CLOCK.A86`'s own `int mpmint`); unlike a real
     `INT`, this never pushes flags/CS/IP or consults the interrupt vector
     table -- there's no multi-segment model here for a real IRET to
     unwind, and the same "doesn't return, or resumes exactly here" calling
@@ -133,8 +133,8 @@ class I86Sim:
     `jmp_hooks`: like `call_hooks`, but keyed by a near JMP's own
     target address instead of a CALL's -- for a routine whose own
     real tail is a JMP (not a CALL) into another module that itself
-    eventually jumps back to right after this JMP (e.g. `src/loader/
-    LDMPM.A86`'s own `jmp mldbios`, which jumps into `src/loader/
+    eventually jumps back to right after this JMP (e.g. `src-assem/loader/
+    LDMPM.A86`'s own `jmp mldbios`, which jumps into `src-assem/loader/
     LDBIOS86Q.A86`'s own `INIT`, whose own real tail `jmp ccp_offset`
     lands right back after LDMPM's own `jmp mldbios`), the same
     "boundary has to actually be modeled" reasoning as `call_hooks`,
@@ -147,7 +147,7 @@ class I86Sim:
     routine whose own real tail end is a JMP (not a CALL) into an
     unported boundary that the real hardware eventually returns
     through normally, so the *caller who did a plain CALL into this
-    routine* still gets a normal return (e.g. `src/kernel/FILE1.BDO`'s
+    routine* still gets a normal return (e.g. `src-assem/kernel/FILE1.BDO`'s
     own `seek`, reached via `seekdir`'s own `call seekdir` from
     `rddir0`: `seek`'s own last I/O dispatch, `jmps setsecf`, is a
     tail JMP, not a CALL, so `call_stub_addrs` alone can't catch it --
@@ -175,7 +175,7 @@ class I86Sim:
     stack -- `_modrm()` has already consumed the whole instruction's
     own mod/rm/displacement bytes by the time this fires, so doing
     nothing further is exactly "continue with the very next
-    instruction." First needed by `src/kernel/INIT.SUP`'s own `init:`,
+    instruction." First needed by `src-assem/kernel/INIT.SUP`'s own `init:`,
     which `callf`s into five other modules' own `init:` entry points
     through `SYSDAT.FMT`'s module table.
 
@@ -183,7 +183,7 @@ class I86Sim:
     [mem]` instruction's own address, no push, continue with the next
     instruction), but a Python callable (`hook(sim)`) runs first -- the
     far-call counterpart of `call_hooks`, for a far boundary call whose
-    real effect has to be modeled. First needed by `src/kernel/
+    real effect has to be modeled. First needed by `src-assem/kernel/
     BDOSIF.BDO`'s own `mpmif` (`callf cs:dword ptr .supervisor`), whose
     `init`-time queue calls tests/src-c/test_bdosif_init.py runs for real.
 
@@ -192,7 +192,7 @@ class I86Sim:
     `CALL FAR [mem]` -- there's no caller to return to for a JMP, so
     this halts the sim outright (same as `stop_addrs`) rather than
     continuing with the next instruction. First needed by
-    `src/loader/ROM86Q.A86`'s own final `jmpf dword ptr leap_off`,
+    `src-assem/loader/ROM86Q.A86`'s own final `jmpf dword ptr leap_off`,
     the boot sector's own real exit into MPMLDR.bin.
 
     `int_hooks`: like `call_hooks`, but keyed by interrupt number
@@ -208,7 +208,7 @@ class I86Sim:
     continues with the very next instruction, so a hook that needs
     to report failure (e.g. `INT 13h`'s own CF-on-error convention)
     sets `sim.cf` directly rather than anything IRET would normally
-    restore. First needed by `src/loader/ROM86Q.A86`'s own boot-
+    restore. First needed by `src-assem/loader/ROM86Q.A86`'s own boot-
     sector `INT 13h` floppy reads.
 
     `io_in_hook`/`io_out_hook`: optional callables backing the real
@@ -224,7 +224,7 @@ class I86Sim:
     unimplemented opcode -- there's deliberately no silent default
     device (e.g. always-0) that could paper over a real driver's own
     polling loop never seeing the response it's waiting for. First
-    needed by `src/loader/LDBIOS86Q.A86`'s own UART driver (console
+    needed by `src-assem/loader/LDBIOS86Q.A86`'s own UART driver (console
     I/O at port 0x3F8) and NEC765 floppy controller driver (port
     0x3F0) -- real port-mapped hardware, not a boundary stub this
     port can skip the way `xiosif`/`mpmif` elsewhere are.
@@ -405,7 +405,7 @@ class I86Sim:
         elif op == 0x9D:  # POPF
             self._set_flags_word(self._pop16())
         elif op == 0x9E:  # SAHF -- flags (low byte) <- AH. First needed by
-            # src/kernel/FILE2.BDO's own SEARCHN (`LAHF`...`SAHF`, saving
+            # src-assem/kernel/FILE2.BDO's own SEARCHN (`LAHF`...`SAHF`, saving
             # `compext`'s own ZF result across two intervening MOVs that
             # don't touch it), tests/src-c/test_file2.py. Reuses
             # `_flags_word`'s own existing ZF/CF-only packing -- the same

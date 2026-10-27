@@ -1,5 +1,5 @@
 /*
- * rpl.c -- C port of src/kernel/RPL.SUP: rpl_entry (Call Resident
+ * rpl.c -- C port of src-assem/kernel/RPL.SUP: rpl_entry (Call Resident
  * System Procedure).
  *
  * `rpl_entry`'s real job is to look up a named message queue (the

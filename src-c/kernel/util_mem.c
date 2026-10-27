@@ -1,5 +1,5 @@
 /*
- * util_mem.c -- C port of src/kernel/UTIL.MEM: getmd, freemd.
+ * util_mem.c -- C port of src-assem/kernel/UTIL.MEM: getmd, freemd.
  *
  * Both fully self-contained -- no calls into any other module.
  *

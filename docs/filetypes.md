@@ -67,7 +67,7 @@ by the loader into `MPM.SYS`:
 MP/M II is Digital Research's 8080/Z80 predecessor — the direct
 ancestor MP/M-86 2.x was ported from (see `docs/orig.md`'s "Related DRI
 source: MP/M II"). None of these formats are used anywhere in
-`orig/mpm862sr/` or `src/`; they're kept here only because they're the
+`orig/mpm862sr/` or `src-assem/`; they're kept here only because they're the
 historical ancestors of several conventions already in this table.
 
 | Ext | Meaning |
@@ -88,7 +88,7 @@ dialect is interchangeable with the other:
 | Ext | Meaning |
 |---|---|
 | **`.MAC`** | Only in `orig/cpnet80s/` — DRI's MAC/M80-style 8080/Z80 macro-assembler source (`CPNETLDR.MAC`, `NDOS.MAC`, `SNIOS.MAC`, etc., the original 1982 CP/NET for 8080/Z80). A different CPU *and* a different assembler dialect from everything `tools/asm86/` targets — not assemblable with this repo's tools. |
-| **`.A86`** | Only in `orig/cpn86src/` — real ASM86 source (`CCPN.A86`, `NDOS.A86`, `SNIOS.A86`, etc., the 1983 CP/NET-86 port), the same dialect as `src/`'s own `.A86` files and already covered under "Source languages" above. Most of these files use MASM-style `SEGMENT`/`ASSUME` (and `NDOS.A86`/`NDOSO.A86` also `MACRO`), which `tools/asm86/` doesn't implement — see `docs/orig.md` for exactly which files that affects. |
+| **`.A86`** | Only in `orig/cpn86src/` — real ASM86 source (`CCPN.A86`, `NDOS.A86`, `SNIOS.A86`, etc., the 1983 CP/NET-86 port), the same dialect as `src-assem/`'s own `.A86` files and already covered under "Source languages" above. Most of these files use MASM-style `SEGMENT`/`ASSUME` (and `NDOS.A86`/`NDOSO.A86` also `MACRO`), which `tools/asm86/` doesn't implement — see `docs/orig.md` for exactly which files that affects. |
 
 ## Build scripts / documentation
 

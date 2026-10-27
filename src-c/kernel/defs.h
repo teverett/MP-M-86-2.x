@@ -712,8 +712,8 @@ static inline void mem_w8_seg(uint8_t *mem, uint16_t seg, uint16_t offset, uint8
 }
 
 /* Real-memory addressing -- what every src-c/kernel file runs on. (The
- * flat 64KB mem_* helpers above are for src-c/loader, which still uses
- * that model.)
+ * flat 64KB mem_* helpers above are the earlier model's; nothing in
+ * src-c uses them now.)
  * `phys` is the base of the real 8086 physical address space: the
  * linked kernel passes the start of physical memory, a test passes a
  * host buffer standing in for it. seg:off is the real 8086 address
@@ -987,9 +987,8 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
  * `INCLUDE`s beyond the standard system.def/modfunc.def/xioscb.def/
  * pd.def/sysdat.fmt chain and assembles to one fixed layout, so
  * these are real, probed addresses (`python3 tools/asm86.py
- * src-assem/kernel/XIOS86Q.A86 -I src-assem/kernel --symbols`), same reasoning
- * as src-c/loader/defs.h's own LDB86Q_ block -- not harness-chosen
- * scratch addresses. */
+ * src-assem/kernel/XIOS86Q.A86 -I src-assem/kernel --symbols`) -- not
+ * harness-chosen scratch addresses. */
 #define XQ_TICK_COUNT    0x1000 /* byte */
 #define XQ_CLOCKON       0x1001 /* byte */
 #define XQ_STOPPOLL      0x1002 /* word */

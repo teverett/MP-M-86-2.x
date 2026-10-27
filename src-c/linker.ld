@@ -2,8 +2,7 @@
  * linker.ld -- the real `ld` link script for src-c/Makefile's own
  * `kernel.elf` target: links src-c/boot/'s own boot stub (boot.s's
  * multiboot header/`_start`, kernel_main.c's hand-off into the XIOS) together
- * with every compiled src-c/kernel/ object (not src-c/loader/ -- see
- * that Makefile's own "kernel.elf:" rule for why) into one image,
+ * with every compiled src-c/kernel/ object into one image,
  * same role `tools/build_mpmsys.py`/`tools/build_mpmldr.py` play for
  * /src-assem's own (entirely custom-tooled) boot path, but via a real
  * cross-linker instead of hand-rolled Python. Lives here, not under

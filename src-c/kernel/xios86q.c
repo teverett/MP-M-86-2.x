@@ -4,9 +4,8 @@
  * that file's own header comment), the file actually combined into
  * the real bootable MPM.bin (unlike the real XIOS.A86, replaced here
  * for QEMU the same way LDBIOS86Q.A86 replaces LDBIOS.A86 for
- * MPMLDR.bin -- see src-c/loader/ldbios86q.c, whose architecture this
- * file follows closely: same NEC 765/8272 FDC + 8237 DMA + 8250 UART
- * hardware, same `io_in8`/`io_out8` callback convention).
+ * MPMLDR.bin: the same NEC 765/8272 FDC + 8237 DMA + 8250 UART
+ * hardware, driven through `io_in8`/`io_out8` callbacks).
  *
  * Not ported, same conventions already established elsewhere in this
  * project:

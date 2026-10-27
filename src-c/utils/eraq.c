@@ -208,7 +208,7 @@ static void file_err(uint8_t code) {
 }
 
 void eraq_main(uint16_t ds) {
-    rsp_install_transient(ds, &(rsp_image){"ERAQ    ", (const uint8_t *)&eraq_image, eraq_image_len});
+    rsp_install_transient(ds, &eraq_image, eraq_image_len);
     g_ds = ds;
     g = RSP_DATA(eraq_data, ds);
     bp = g->base;

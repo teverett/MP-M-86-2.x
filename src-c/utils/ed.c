@@ -1460,7 +1460,7 @@ static void command(void) {
 }
 
 void ed_main(uint16_t ds) {
-    rsp_install_transient(ds, &(rsp_image){"ED      ", (const uint8_t *)&ed_image, ed_image_len});
+    rsp_install_transient(ds, &ed_image, ed_image_len);
     g_ds = ds;
     g = RSP_DATA(ed_data, ds);
     bp = far_ptr(rt_phys(), ds, 0);

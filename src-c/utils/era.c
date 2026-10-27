@@ -259,7 +259,7 @@ static void single_file(void) {
 }
 
 void era_main(uint16_t ds) {
-    rsp_install_transient(ds, &(rsp_image){"ERA     ", (const uint8_t *)&era_image, era_image_len});
+    rsp_install_transient(ds, &era_image, era_image_len);
     g_ds = ds;
     g = RSP_DATA(era_data, ds);
     bp = g->base;

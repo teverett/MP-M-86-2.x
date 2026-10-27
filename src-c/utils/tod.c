@@ -368,7 +368,7 @@ static void display_tod(void) {
   Main Program
 */
 void tod_main(uint16_t ds) {
-    rsp_install_transient(ds, &(rsp_image){"TOD     ", (const uint8_t *)&tod_image, tod_image_len});
+    rsp_install_transient(ds, &tod_image, tod_image_len);
     g_ds = ds;
     g = RSP_DATA(tod_data, ds);
     bp = g->base;

@@ -1,7 +1,7 @@
 """Shared test-only simulated UART (8250/16450 @ 0x3F8, COM1) backing
-both tools/i86sim.py's `io_in_hook`/`io_out_hook` and
-src-c/loader/ldbios86q.c's own `io_in8`/`io_out8` C callbacks, for
-tests/src-c/test_ldbios86q.py's differential test -- one real device
+both tools/i86sim.py's `io_in_hook`/`io_out_hook` and the C port's
+`io_in8`/`io_out8` callbacks (src-c/kernel/xios86q.c), for
+tests/src-c/test_xios86q.py's differential test -- one real device
 model driving both sides of the same comparison, same spirit as every
 other fixture in this directory feeding the same memory image to both
 the reference run and the C port.

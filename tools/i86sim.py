@@ -418,7 +418,7 @@ class I86Sim:
             self.regs['ax'] = (self.regs['ax'] & 0x00FF) | ((self._flags_word() & 0xFF) << 8)
         elif op == 0xF8:  # CLC
             self.cf = 0
-        elif op == 0xF9:  # STC -- src-c/loader/rom86q.c's own read_sector
+        elif op == 0xF9:  # STC -- the C ROM86Q port's (since removed) read_sector
                           # is the first to need it (every earlier CF set
                           # came from an arithmetic/shift op, not STC
                           # directly)
@@ -576,7 +576,7 @@ class I86Sim:
                 raise I86SimError(f"LEA with a register operand at {start_ip:#06x}")
             self.regs[_R16[reg]] = self._last_ea_offset
         elif 0xB0 <= op <= 0xB7:  # MOV r8, imm8 (short form) --
-                                  # src-c/loader/lbdosent.c's own
+                                  # the C LBDOSENT port's (since removed)
                                   # differential test is the first to
                                   # need this (every earlier immediate-
                                   # to-register MOV used 0xC6/0xC7's
@@ -683,7 +683,7 @@ class I86Sim:
         elif op == 0x0B:  # OR r16, r/m16
             _, reg, rm = self._modrm()
             self.regs[_R16[reg]] = self._bitwise('or', self.regs[_R16[reg]], self._load(rm, 16), 16)
-        elif op == 0x08:  # OR r/m8, r8 -- src-c/loader/lbdosent.c's own
+        elif op == 0x08:  # OR r/m8, r8 -- the C LBDOSENT port's (since removed)
                           # differential test is the first to need this
                           # direction (every earlier OR used 0x0A/0x0B)
             _, reg, rm = self._modrm()

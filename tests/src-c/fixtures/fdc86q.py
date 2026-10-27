@@ -1,8 +1,8 @@
 """Shared test-only simulated NEC 765/8272 floppy controller
 (@ 0x3F0, the ISA port block src-assem/loader/LDBIOS86Q.A86's own
 fdc_out_byte/fdc_in_byte poll) backing both tools/i86sim.py's
-`io_in_hook`/`io_out_hook` and src-c/loader/ldbios86q.c's own
-`io_in8`/`io_out8` C callbacks, for tests/src-c/test_ldbios86q.py's
+`io_in_hook`/`io_out_hook` and the C port's `io_in8`/`io_out8`
+callbacks (src-c/kernel/xios86q.c), for tests/src-c/test_xios86q.py's
 differential test -- same "one real model, two call sites" shape as
 tests/src-c/fixtures/uart86q.py's own Uart86Q.
 
@@ -16,7 +16,7 @@ command in progress has been fully sent). Not a real controller
 model: no seek/recalibrate/read/write state, no interrupt, no media.
 
 Also records (without validating) the 8237 DMA channel-2 register
-writes `dma_setup` (src-c/loader/ldbios86q.c) makes -- the actual
+writes the XIOS's DMA setup makes -- the actual
 disk<->secbuf transfer those program is never modeled on either side
 of the differential test (see that file's own header comment), so
 this fixture's own job for them is just "don't raise."

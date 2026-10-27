@@ -1226,7 +1226,7 @@ static void is_there_more(void) {
 }
 
 void set_main(uint16_t ds) {
-    rsp_install_transient(ds, &(rsp_image){"SET     ", (const uint8_t *)&set_image, set_image_len});
+    rsp_install_transient(ds, &set_image, set_image_len);
     g_ds = ds;
     g = RSP_DATA(set_data, ds);
     bp = g->base;

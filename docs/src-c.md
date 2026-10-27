@@ -133,8 +133,7 @@ normally without needing a stub at all.
 
 *(How the port started. Every `src-c/kernel` file now runs on real
 memory with real segments -- see the "Real pointers" sections below;
-the flat scratch addresses are gone from the kernel. `src-c/loader`
-still uses this model.)*
+the flat scratch addresses are gone from the kernel.)*
 
 `src-assem/kernel/SYSDAT.FMT` (System Data Area) and `UDA.FMT` (one process's
 User Data Area) are each their own segment on real hardware, with small
@@ -161,8 +160,7 @@ booting src-c" above and "Running the port" below.
 `src-c/boot/` supplies the hand-written multiboot entry and serial
 signon used by the `kernel.elf` target. The target links that stub
 with every compiled `src-c/kernel/` object and boots under QEMU, but
-the stub does not call any ported routines, and `src-c/loader/` is
-not part of this image. It is not a replacement for or change to
+the stub does not call any ported routines. It is not a replacement for or change to
 `/src-assem`'s own real MP/M-86 boot chain (`ROM.A86` ->
 `LDBIOS.A86`/`LDMPM.A86` -> the kernel, built by `tools/asm86.py` +
 `tools/build_mpmsys.py`/`build_mpmldr.py` — entirely untouched by any
@@ -209,7 +207,7 @@ wired into this repo's own CI yet either (`.github/workflows/` only
 builds/tests `/src-assem`), so this doesn't affect CI either way.
 
 `src-c/Makefile`'s own `make build` (the compile-only, no-link
-type-check pass across every `src-c/kernel/`/`src-c/loader/` file)
+type-check pass across every `src-c/kernel/` file)
 now also uses this same real cross toolchain (`CC := i686-elf-gcc`,
 `LD := i686-elf-ld`, both now also actually invoked by the real
 `kernel.elf` link target, see below) instead of the host `cc` --
@@ -262,11 +260,7 @@ compile needed two small fixes, both worth remembering:
 `src-c/Makefile`'s `kernel.elf` target (`linker.ld` now lives in
 `src-c/` itself, not under `boot/`, since it's no longer that
 directory's own private concern) links `src-c/boot/`'s own stub
-together with *every* compiled `src-c/kernel/` object (deliberately
-not `src-c/loader/` -- in the real system the loader and the kernel
-are two separate executables that never coexist in one linked image
-either, so linking them together here would be wrong even by the
-real architecture's own design, not just inconvenient) into one real
+together with *every* compiled `src-c/kernel/` object into one real
 ELF via `i686-elf-ld`. This **succeeds** -- `kernel.elf` links, passes
 `i686-elf-grub-file --is-x86-multiboot`, and boots under QEMU (as
 first linked, `kernel_main.c` still called none of these routines --
@@ -935,11 +929,13 @@ memory at physical 0). After `sup_init`'s check, `kernel_main` calls
   runtime's few SUP/RTM code offsets in rt/rt_syms.h), so the build needs
   nothing from /src-assem for them; tests/src-c/test_syms.py checks every one
   against the assembled source.
-  gensys places the four RSP images (`gensys_rsps()` in
+  gensys places the five RSP images (`gensys_rsps()` in
   rsp/programs.c), filling in the start IP:CS and u_initcs and chaining
-  them through rsp_link. MPMSTAT (PL/M, no C version) isn't among them.
-  A transient installs its own image above the base page when it starts
-  (`rsp_install_transient`).
+  them through rsp_link. A transient installs its own image above the
+  base page when it starts (`rsp_install_transient`, a plain copy: the
+  images are checked offline, by test_rsp_images.py and the programs'
+  own tests -- the runtime's old "C image identical" check compared
+  them with a CMD file mkdisk had written from the same image).
 - **The image: src-c/gensys.** This replaces the MPM.bin image that
   /src-assem's tools/build_mpmsys.py builds.
   - gensys/sysdat.c holds SYSDAT's initial data, written as C: SYSTEM.DAT,
@@ -1056,8 +1052,8 @@ memory at physical 0). After `sup_init`'s check, `kernel_main` calls
     MP/M (tests/src-c/rspref.py). They compare the system calls, the
     output and memory. These replaced the one-pass partial ports
     src-c/kernel/{tmp,echo,clock,submit}.c and their tests.
-  - test_boot.py checks the four "identical" lines, TMP's version
-    message and the `0A>` prompt.
+  - test_boot.py checks the RSPs gensys placed, TMP's version message
+    and the `0A>` prompt.
 - **The BDOS.** BDOSIF.BDO's `getdiskmx` is ported (bdosif.c):
   - the MXdisk queue, with pf_tempkeep held across the call;
   - the UDA <-> BDOS state copies and the DMA reload;
@@ -1176,23 +1172,9 @@ memory at physical 0). After `sup_init`'s check, `kernel_main` calls
 | `src-assem/kernel/LOAD.SUP` | `load_finish`, `diskread`, `load_group`, `get_ch_info`, `load`/`load_entry`/`cload_entry` — see below | — (every real routine in this file is ported) Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
 | `src-assem/kernel/MEMORY.MEM` | `malloc_entry`, `mfree_entry` (+ internal `mall_try_mau`, `mfree_it`) | — (the whole file is ported; `malloc_entry`'s own `mpmif(f_maualloc)`/`mpmif(f_mlalloc)` and `mfree_entry`'s own `mpmif(f_maufree)`/`mpmif(f_mlfree)` are all now real internal calls into `mau.c`'s `maualloc_entry`/`maufree_entry` and `ml.c`'s `mlalloc_entry`/`mlfree_entry` — see below) Runs on real memory, see "Real pointers: the MEM module, stage 4" |
 | `src-assem/kernel/CPMMEM.MEM` | `maxmem_entry`, `absmax_entry`, `cpmalloc_entry`, `cpmabsa_entry`, `cpmfree_entry` (+ internal `getmemory`/`free_memory`, both now real calls into `memory.c`'s `malloc_entry`/`mfree_entry` — see below) | `freeall_entry` — one line (`mov cx,f_terminate ! sub dx,dx ! jmp mpmif`), same as `SYSENT.RTM`'s `creat_proc_entry`: nothing to port Runs on real memory, see "Real pointers: the MEM module, stage 4" |
-| `src-assem/loader/LBDOSIO.A86` | `conbrk`, `conout`, `tabout`, `crlf`, `print`, `func9`, `staret`, `funcret`, `setlret1` | `func1`/`func3`/`func6`/`func7`/`func8`/`func10`/`func11` — each just an `EQU` alias for the bare `return:` label: nothing to port. `func2` is likewise just an alias for `tabout` itself, already ported under its own name |
-| `src-assem/loader/LBDOSNEW.A86` | `func51` (set segment base for disk I/O) | `func50`/`func52`/`func53`/`func54`/`func55`/`func56`/`func57` — each just a separate entry point into the same bare `ret` at the end of this file (`func51`'s own tail falls through all of them), nothing to port |
-| `src-assem/loader/LBDOSDAT.A86` | — | pure data declarations (`DB`/`DW`/`RB`), zero real code — nothing to port, same as `DATA.BDO` |
-| `src-assem/loader/LDBDOS.A86` | — | pure `INCLUDE` glue (assembles the loader's own BDOS by concatenating `LBDOSEQU`/`LBDOSENT`/`LBDOSNEW`/`LBDOSIO`/`LBDOSF1`-`3`/`LBDOSDAT`) — zero real code of its own, nothing to port |
-| `src-assem/loader/LDBIOS86Q.A86` | the whole file: `CONST`, `CONIN`, `CONOUT`, `PUNCH`/`READER` (same body, one label falls through to the other), `GETIOBF`, `INIT`, `SELDSK`, `HOME`, `SETTRK`, `SETSEC`, `SECTRAN`, `SETDMA`, `SETDMAB`, `GETSEGT`, `READ`, `WRITE`, plus the FDC/DMA utilities they all share (`fdc_send_cmd`/`fdc_out_byte`/`fdc_in_byte`/`fdc_sense_int`/`fdc_wait_seek`/`fdc_pio_in`/`rw_physical`/`fdc_fill_rw_parms`/`fdc_seek_to`/`dma_setup`) | `LISTOUT`/`LISTST`/`SETIOBF` — bare `ret`, no observable effect, nothing to port; `WBOOT` — nothing but the same hardcoded jump back into `LDMPM.A86` `INIT` itself ends with, nothing to port; `motor_delay` — no caller anywhere in this file, dead code, nothing to port |
-| `src-assem/loader/ROM86Q.A86` | the whole file: `start:` (ported as `start_entry`), `advance_chs`, `read_sector`, `pmsg`, `putc` | — (every real routine in this file is ported) |
-| `src-assem/loader/LDBIOS.A86` | the whole file: `CONST`, `CONIN`, `CONOUT`, `PUNCH`/`READER`, `GETIOBF`, `SELDSK` (2 real drives, unlike `LDBIOS86Q.A86`'s own single-drive restriction), `HOME`, `SETTRK`, `SETSEC`, `SECTRAN`, `SETDMA`, `SETDMAB`, `GETSEGT`, `READ`, `WRITE`, plus the real iSBC 204/8271+8257 FDC/DMA utilities they share (`send_com`/`execute`/`dma_setup`) | `INIT` — no hardware setup of its own at all (confirmed directly against the real asm; `src-assem/loader/ROM.A86`'s own boot sequence already does it before `LDBIOS.A86` is loaded), just the usual stack/segment switch, nothing to port; `WBOOT` — nothing but `jmp ccp+6`, nothing to port; `LISTOUT`/`LISTST`/`SETIOBF` — bare `ret`s, no observable effect; the real error-retry-with-console-interaction tail `execute`'s own error path would otherwise need — not modeled, same simplification `LDBIOS86Q.A86`'s own `read_entry`/`write_entry` already make, kept for consistency with that sibling (see `ldbios.c`'s own header comment) |
-| `src-assem/loader/ROM.A86` | the whole file: `start:` (ported as `start_entry`), plus the real iSBC 204/8271+8257 FDC/DMA/UART/PIC-init utilities it uses (`send_com`/`execute`/`setupdma`) | `conin`/`conout`/`pmsg` and the fatal-error-with-console-retry tail they only otherwise exist for — not modeled, armed but never used on the happy path this port models; the initial EPROM-to-RAM data copy — a deterministic byte copy with no transformation, ported as the already-copied VALUES themselves (`specs1`/`specs2`/`specs3`/`home_cmd`/`read0`/`read1`/`read2`, static C arrays) rather than modeled mechanically; the final `jmpf dword ptr leap_offset` — no C equivalent, same as every other real OS entry point in this port; see `rom.c`'s own header comment for all of the above, plus a real, previously-uncaught `tools/asm86` quirk this port's own differential test found and worked around rather than fixed (a bare "offset $"-rooted EQU used without `offset` at the use site, e.g. `mov SI,drombegin`/`mov bx,sector1`, assembles as a direct memory read instead of the immediate load every call site obviously intends — a one-line `is_addr` fix cleanly resolves it for `MOV`, but also breaks `LBDOSENT.A86`'s own `lea sp,endstack`, which genuinely needs the mem-shaped operand `is_addr` provides; properly separating those two cases needs LEA's own operand parsing to force that shape regardless, not attempted here) |
-| `src-assem/loader/LDMPM.A86` | the whole file: `start:` (ported as `start_entry`), `phex`, `pnib`, `putchar` (`initlbdos`/`openfnc`/`setdma`/`setdmab`/`read`/`msg`/`pcrlf` are each just a one- or two-line trampoline into `sys_vec`, folded into the `bdos_fn`/`msg_fn`/`read_fn` boundary-call parameters they resolve to — see `ldmpm.c`'s own header comment) | — (every real routine in this file is ported) |
-| `src-assem/loader/LBDOSENT.A86` | `oldbdos` (the `jmp cs:functab[bx]` dispatch, ported as a plain C switch, same convention as `src-c/kernel/dsptch.c`), `persub`, `selsub`, `rodsub`, `rofsub` (+ internal `errflg`); `parsave`/`parsave33`/`parunsave` ported earlier, in `src-c/loader/lbdosf3.c` (borrowed there, see that file's own header comment) | `bdose` (the real `INT bdos_int` interrupt-entry prologue/epilogue) — no C equivalent, same as every other real OS/interrupt entry point in this port |
-| `src-assem/loader/LBDOSF1.A86` | `selectdisk`, `home`, `rdbuff`, `wrbuff`, `seekdir`, `seek`, `dmposition`, `getdm`/`getdmd`, `bdos_index`, `alloct`, `atran`, `getexta`, `gtfcba`, `getfcb`, `setfcb`/`setfc1`, `cmpecs`/`cmpec0`, `setcdisk`, `nowrite`, `setro`, `ckrodir`/`ckrofile`, `checkwrite`, `getdptra`, `getmodnum`, `clrmodnum`, `setfwf`, `compcdr`, `setcdr`, `subdh`, `newchecksum`/`checksum`, `wrdir`, `rddirbuf`, `dirtouser`, `endofdir`, `setenddir`, `rddir`/`rddir0`, `getallocbit`, `setallocbit`, `rotr` | `selerror`/`goerr` — a pure boundary-stub tail (`JMP w[bx]`) into `LBDOSENT.A86`'s own error-reporting table, now ported for real (see that file's own row above) but NOT wired up here: these 3 call sites (`diocomp`/`ckrofile`/`checkwrite`) are already unreachable under this file's own, separate, independently-documented choice to fix `readf`/`writef`/`nowrite`'s own boundary-stub results at "always succeeds" — true whether or not `persub`/`selsub`/`rodsub`/`rofsub` exist, so wiring them up here wouldn't change anything observable; `setdata`/`setdir`/`setdma` — pure boundary-stub setup, no observable effect, not even defined as functions |
-| `src-assem/loader/LBDOSF2.A86` | the whole file: `scndm`, `initialize`, `cpydirloc`, `compext`, `srch`/`srchn`/`srchnext`, `delet`/`delet0`, `getblock`, `copyfcb`/`copydir`/`seekcopy`, `rename`, `indicators`, `open`/`opencopy`, `mergezero`, `close`, `make`, `openreel`/`openmod`/`openr0`-`openr2`/`openerr` | — (every routine in this file is ported) |
-| `src-assem/loader/LBDOSF3.A86` | `sqread`/`diskread`, `slect`/`curselect`/`reselect`, `func13`/`func15`/`func20`/`func26`, `goback`/`retmon`, plus `parsave`/`parsave33`/`parunsave` (borrowed from the otherwise-deferred `LBDOSENT.A86`, needed by `func15`/`func20`/`goback`) | over half the real file is already dead, commented-out code from an earlier rewrite (its own old `rseek`/`rdread`/`rdwrite`/`cmperr`/`getfilesize` family) — never assembled, nothing to port; `func12`/`func16`-`func19`/`func21`-`func25`/`func27`-`func37`/`func40` are each just an `EQU` alias for the bare `return:` label, nothing to port; `func14` aliases `curselect`, `func38`/`func39` alias `funcret` (`src-c/loader/lbdosio.c`), both already ported under their own names; `LBDOSENT.A86`'s own dispatch (`oldbdos`) and `func50`-`func57` (all bare-`return:` aliases) are now ported too, see that file's own row above |
+| `src-assem/loader/*` (ROM, ROM86Q, LDMPM, LDBIOS, LDBIOS86Q, LBDOS*) | — (removed) | src-c's C ports of the boot chain, with their tests, were removed: src-c boots from its own boot sector (src-c/boot/bootsect.s), and gensys builds the image the loader would have read from MPM.SYS, so nothing ran them. src-assem's loader is unchanged; git history has the ports. |
 
-Current validation: `make -C src-c build` compiles all 50 C files, and
-`make -C src-c test` passes. The `test_lbdosf2.py` reference harness
-models BIOS targets reached by both near calls and tail jumps.
+Current validation: `make -C src-c test` passes.
 
 Each is backed by a `tests/src-c/test_<file>.py` differential test — see
 each one's own header comment for exactly what it covers.
@@ -1404,14 +1386,14 @@ routine translation — revisit once that machinery exists):
   Tier-3-plus-sized on their own.
 
 The table above is the current per-file status. Files and routines
-listed there include work in `src-assem/kernel/`, `src-assem/loader/`, and
-`src-assem/rsp/`; use each row's deferred column for the remaining scope.
+listed there include work in `src-assem/kernel/`, `src-assem/rsp/` and
+`src-assem/utils/`; use each row's deferred column for the remaining scope.
 
 ### Scope notes
 
-- `src-assem/toolchain/` and `src-assem/utils/` (PL/M source) are out of scope for now —
-  PL/M is already a C-like high-level language and a different kind of
-  problem (`tools/plmc.py` already compiles it).
+- `src-assem/toolchain/` (PL/M source: DRI's ASM86, DIS86, INS86) is out
+  of scope for now. `src-assem/utils/`, PL/M too, is ported:
+  src-c/utils/ and the MPMSTAT RSP (see "The PL/M utilities").
 - Only files that currently assemble cleanly (the `*_OK` lists in the
   `Makefile`) are candidates. `XIOS.A86` (bug #7) and the three broken RSPs
   (`CLOCK`/`TMP`/`SUBMIT`, bugs #1–#3, see `docs/bugs.md`) were kept out
@@ -1432,7 +1414,8 @@ listed there include work in `src-assem/kernel/`, `src-assem/loader/`, and
 
 The notes below preserve the original rollout plan and intermediate
 status snapshots. They are historical; the status table above is
-authoritative for what is ported and deferred now.
+authoritative for what is ported and deferred now. (The `src-c/loader/`
+ports and their tests they describe have since been removed.)
 
 - **Tier 1 (<100 lines): done**, except where noted above —
   `SYSENT.RTM`, `SYSFUNC.SUP`, `FLAG.RTM`, `IDLE.SUP` are ported and

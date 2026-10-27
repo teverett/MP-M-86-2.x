@@ -8,8 +8,7 @@
  * missing-symbol problem.
  *
  * Declares only the handful of functions src-c/kernel's own
- * submit.c/tmp.c/xios86q.c and src-c/loader's own ldbios86q.c
- * actually call (`memcpy`/`memcmp`) -- just enough for `make build`'s
+ * submit.c/tmp.c/xios86q.c actually call (`memcpy`/`memcmp`) -- just enough for `make build`'s
  * own compile-only (`-c`, no link) type-check pass to succeed; there
  * are no definitions anywhere, so this would need real ones (a few
  * lines each) before any future link step could use these files.

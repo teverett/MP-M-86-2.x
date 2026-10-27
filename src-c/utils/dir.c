@@ -198,7 +198,7 @@ static void parse_option(void) {
 }
 
 void dir_main(uint16_t ds) {
-    rsp_install_transient(ds, &(rsp_image){"DIR     ", (const uint8_t *)&dir_image, dir_image_len});
+    rsp_install_transient(ds, &dir_image, dir_image_len);
     g_ds = ds;
     g = RSP_DATA(dir_data, ds);
     bp = g->base;

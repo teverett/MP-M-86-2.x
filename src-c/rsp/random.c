@@ -129,7 +129,7 @@ static void readdata(uint16_t ds, random_data *d) {
 
 void random_main(uint16_t ds) {
     random_data *d = RSP_DATA(random_data, ds);
-    rsp_install_transient(ds, &(rsp_image){"RANDOM  ", (const uint8_t *)&random_image, random_image_len});
+    rsp_install_transient(ds, &random_image, random_image_len);
 
     if ((uint8_t)bdos(ds, version, 0).bx < 0x20) {
         print(ds, RANDOM_BADVER);

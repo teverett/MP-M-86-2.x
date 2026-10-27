@@ -70,7 +70,7 @@ static void terminate(void) { mon1(143, 0); }
 static uint8_t rel(int c) { return c ? 0xFF : 0; } /* a PL/M relation */
 
 void dskrst_main(uint16_t ds) {
-    rsp_install_transient(ds, &(rsp_image){"DSKRESET", (const uint8_t *)&dskrst_image, dskrst_image_len});
+    rsp_install_transient(ds, &dskrst_image, dskrst_image_len);
     g_ds = ds;
     g = RSP_DATA(dskrst_data, ds);
     tbuff = (uint8_t *)g + bp_tbuff;

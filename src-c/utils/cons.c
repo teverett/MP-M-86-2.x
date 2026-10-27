@@ -79,7 +79,7 @@ static void pdecimal(uint16_t v, uint16_t prec, uint8_t zerosup) {
 }
 
 void cons_main(uint16_t ds) {
-    rsp_install_transient(ds, &(rsp_image){"CONSOLE ", (const uint8_t *)&cons_image, cons_image_len});
+    rsp_install_transient(ds, &cons_image, cons_image_len);
     g_ds = ds;
     g = RSP_DATA(cons_data, ds);
 

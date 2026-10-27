@@ -83,7 +83,7 @@ static void move(uint16_t n, uint16_t src, uint16_t dst) {
 
 void attach_main(uint16_t ds) {
     uint16_t ret;
-    rsp_install_transient(ds, &(rsp_image){"ATTACH  ", (const uint8_t *)&attach_image, attach_image_len});
+    rsp_install_transient(ds, &attach_image, attach_image_len);
     g_ds = ds;
     g = RSP_DATA(attach_data, ds);
     bp = (uint8_t *)g;

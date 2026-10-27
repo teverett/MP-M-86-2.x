@@ -117,7 +117,7 @@ const stscmd_data stscmd_image = {
 };
 
 void stscmd_main(uint16_t ds) {
-    rsp_install_transient(ds, &(rsp_image){"MPMSTAT ", (const uint8_t *)&stscmd_image, stscmd_image_len});
+    rsp_install_transient(ds, &stscmd_image, stscmd_image_len);
     stscmd_data *g = RSP_DATA(stscmd_data, ds);
     stscom_vars *v = &g->com;
     uint8_t *bp = g->base;

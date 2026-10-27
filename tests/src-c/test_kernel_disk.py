@@ -47,11 +47,11 @@ SCRIPT = [
 ]
 
 EXPECT = (
-    ("SUBMIT loaded from the disk, C image identical", b"rt: SUBMIT   data segment: C image identical"),
+    ("SUBMIT loaded from the disk", b"A:SUBMIT.CMD"),
     ("SUBMIT: $1 expanded, ECHO ran", b" first ALPHA"),
     ("SUBMIT: USER built-in", b"User Number = 2"),
     ("SUBMIT: $2 expanded, ECHO ran", b" second BETA"),
-    ("RANDOM loaded from the disk, C image identical", b"rt: RANDOM   data segment: C image identical"),
+    ("RANDOM loaded from the disk", b"A:RANDOM.CMD"),
     ("RANDOM: record 3 read back", b"next command? 3R\r\r\nhello"),
     ("RANDOM: record 5 (zero fill write) read back", b"next command? 5R\r\r\nfive"),
 )

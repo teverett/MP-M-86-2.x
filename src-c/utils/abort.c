@@ -89,7 +89,7 @@ static void move(uint16_t n, uint16_t src, uint16_t dst) {
 }
 
 void abort_main(uint16_t ds) {
-    rsp_install_transient(ds, &(rsp_image){"ABORT   ", (const uint8_t *)&abort_image, abort_image_len});
+    rsp_install_transient(ds, &abort_image, abort_image_len);
     g_ds = ds;
     g = RSP_DATA(abort_data, ds);
     bp = (uint8_t *)g;

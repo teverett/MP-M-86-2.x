@@ -1496,7 +1496,7 @@ static void scaneql(void) {
 }
 
 void pip_main(uint16_t ds) {
-    rsp_install_transient(ds, &(rsp_image){"PIP     ", (const uint8_t *)&pip_image, pip_image_len});
+    rsp_install_transient(ds, &pip_image, pip_image_len);
     g_ds = ds;
     g = RSP_DATA(pip_data, ds);
     bp = g->base;

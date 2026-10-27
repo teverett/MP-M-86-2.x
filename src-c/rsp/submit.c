@@ -465,7 +465,7 @@ static int do_command(const submit_t *s) {
 
 void submit_main(uint16_t ds) {
     submit_data *d = RSP_DATA(submit_data, ds);
-    rsp_install_transient(ds, &(rsp_image){"SUBMIT  ", (const uint8_t *)&submit_image, submit_image_len});
+    rsp_install_transient(ds, &submit_image, submit_image_len);
     submit_t st = {d, ds};
     const submit_t *s = &st;
 

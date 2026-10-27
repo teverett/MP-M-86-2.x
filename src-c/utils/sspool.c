@@ -77,7 +77,7 @@ static uint8_t abort_process(uint16_t a) { return mon2(157, a); }
 static uint8_t rel(int c) { return c ? 0xFF : 0; } /* a PL/M relation */
 
 void sspool_main(uint16_t ds) {
-    rsp_install_transient(ds, &(rsp_image){"SSPOOL  ", (const uint8_t *)&sspool_image, sspool_image_len});
+    rsp_install_transient(ds, &sspool_image, sspool_image_len);
     g_ds = ds;
     g = RSP_DATA(sspool_data, ds);
     fcb = g->base + bp_fcb;

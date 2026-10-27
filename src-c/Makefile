@@ -36,10 +36,10 @@
 include build.mk
 CFLAGS += -std=c11 -I freestanding-include
 
-# Each module directory under src-c/ is a separate symbol space with its
-# own defs.h (src-c/kernel/defs.h vs src-c/loader/defs.h) -- see either
-# one's own header comment for why they're not shared.
-MODULES    := kernel loader
+# The module directories `make build` compiles. (src-c/loader/, the C
+# port of src-assem's ROM/MPMLDR boot chain, was removed: src-c boots
+# through its own boot sector and gensys instead.)
+MODULES    := kernel
 BUILD_DIR  := build
 TEST_DIR   := ../tests/src-c
 BOOT_DIR   := boot
@@ -48,12 +48,6 @@ ALL_SRCS := $(foreach m,$(MODULES),$(wildcard $(m)/*.c))
 ALL_OBJS := $(foreach m,$(MODULES),$(patsubst $(m)/%.c,$(BUILD_DIR)/$(m)/%.o,$(wildcard $(m)/*.c)))
 TESTS    := $(wildcard $(TEST_DIR)/test_*.py)
 BOOT_OBJS := $(BUILD_DIR)/boot/boot.o $(BUILD_DIR)/boot/kernel_main.o
-# kernel.elf links src-c/kernel/ only, not src-c/loader/ -- in the
-# real system these are two separate executables (the loader runs
-# first, then jumps to the kernel; they never coexist in one linked
-# image either), so `make build`/`make test`'s own "MODULES" grouping
-# doesn't apply here the same way. See that target's own comment
-# below for what actually happened trying to link even just this.
 KERNEL_OBJS := $(patsubst kernel/%.c,$(BUILD_DIR)/kernel/%.o,$(wildcard kernel/*.c))
 STRING_SHIM_OBJ := $(BUILD_DIR)/freestanding-include/string_shim.o
 # The runtime that runs the kernel as a real multitasking MP/M-86
@@ -143,8 +137,7 @@ $(STRING_SHIM_OBJ): freestanding-include/string_shim.c | $(BUILD_DIR)/freestandi
 boot: $(BOOT_OBJS)
 
 # kernel.elf -- the real deliverable: boot/'s own stub linked
-# together with every compiled src-c/kernel/ object (not
-# src-c/loader/ -- see KERNEL_OBJS's own comment above) into one
+# together with every compiled src-c/kernel/ object into one
 # image via the real `ld` + linker.ld. This links successfully and
 # boots under QEMU into the real ported XIOS (kernel_main.c calls
 # xios86q.c's init_entry/xios_conout_entry with real inb/outb) and

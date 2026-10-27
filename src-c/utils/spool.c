@@ -170,7 +170,7 @@ static void copy_file(void) {
 }
 
 void spool_main(uint16_t ds) {
-    rsp_install_transient(ds, &(rsp_image){"SPOOL   ", (const uint8_t *)&spool_image, spool_image_len});
+    rsp_install_transient(ds, &spool_image, spool_image_len);
     g_ds = ds;
     g = RSP_DATA(spool_data, ds);
     fcb = g->base + bp_fcb;

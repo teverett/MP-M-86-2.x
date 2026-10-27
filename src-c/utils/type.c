@@ -142,7 +142,7 @@ exit:
 }
 
 void type_main(uint16_t ds) {
-    rsp_install_transient(ds, &(rsp_image){"TYPE    ", (const uint8_t *)&type_image, type_image_len});
+    rsp_install_transient(ds, &type_image, type_image_len);
     g_ds = ds;
     g = RSP_DATA(type_data, ds);
     bp = g->base;

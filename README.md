@@ -29,7 +29,6 @@ src-c/          A C port of src-assem/ (see docs/src-c.md) that builds
                 and boots its own MP/M-86 floppy, with nothing from
                 src-assem/:
   kernel/         The kernel modules, routine by routine.
-  loader/         The loader.
   rsp/            The RSPs (TMP, CLOCK, ECHO, MPMSTAT, CACHE) and
                   transients (SUBMIT, RANDOM), as C programs.
   utils/          All of src-assem/utils/'s PL/M utilities (PIP, ED,

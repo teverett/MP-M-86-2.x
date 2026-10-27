@@ -1039,7 +1039,7 @@ static void parse_next(void) {
  */
 
 void show_main(uint16_t ds) {
-    rsp_install_transient(ds, &(rsp_image){"SHOW    ", (const uint8_t *)&show_image, show_image_len});
+    rsp_install_transient(ds, &show_image, show_image_len);
     g_ds = ds;
     g = RSP_DATA(show_data, ds);
     bp = g->base;

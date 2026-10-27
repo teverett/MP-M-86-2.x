@@ -30,56 +30,12 @@
 
 #define RSP_PACKED __attribute__((packed))
 
-typedef struct {
-    const char *name; /* the PD name, 8 characters */
-    const uint8_t *data;
-    uint16_t len;
-} rsp_image;
-
-/* The bytes of a program's data segment rsp_put leaves as they are:
- * those below `base` (an RSP's rsp_link, which INIT gives the SYSDAT;
- * a transient's base page, which LOAD and the CLI fill in), and for an
- * RSP the start IP:CS and u_initcs..u_initss (0FFFFh: none). */
-typedef struct {
-    uint16_t base, frame, initsegs;
-} rsp_keep;
-
-static inline int rsp_kept(uint16_t i, const rsp_keep *k) {
-    return i < k->base || (i >= k->frame && i < k->frame + 4) ||
-           (i >= k->initsegs && i < k->initsegs + 8);
-}
-
-/* compare a C image with the assembled data it replaces (the bytes at
- * `dst`), report the result, then install it */
-static inline void rsp_put(uint8_t *dst, const rsp_image *im, const rsp_keep *k) {
-    uint16_t diffs = 0, first = 0;
-    for (uint16_t i = 0; i < im->len; i++) {
-        if (rsp_kept(i, k)) continue;
-        if (dst[i] != im->data[i]) {
-            if (diffs++ == 0) first = i;
-        }
-    }
-    rt_puts("rt: ");
-    rt_puts(im->name);
-    if (diffs == 0) {
-        rt_puts(" data segment: C image identical\r\n");
-    } else {
-        rt_puts(" data segment: C image differs at ");
-        rt_puthex(diffs);
-        rt_puts(" bytes, first at ");
-        rt_puthex(first);
-        rt_puts("\r\n");
-    }
-    for (uint16_t i = 0; i < im->len; i++) {
-        if (!rsp_kept(i, k)) dst[i] = im->data[i];
-    }
-}
-
 /* a transient (a .CMD's data group, as LOAD left it at `ds`), from its
- * own main: everything above the base page */
-static inline void rsp_install_transient(uint16_t ds, const rsp_image *im) {
-    rsp_keep k = {0x100, 0xFFFF, 0xFFFF};
-    rsp_put(far_ptr(rt_phys(), ds, 0), im, &k);
+ * own main: its data image, everything above the base page (which LOAD
+ * and the CLI fill in) */
+static inline void rsp_install_transient(uint16_t ds, const void *image, uint16_t len) {
+    uint8_t *dst = far_ptr(rt_phys(), ds, 0);
+    for (uint16_t i = 0x100; i < len; i++) dst[i] = ((const uint8_t *)image)[i];
 }
 
 /* the program's own data segment, at its real segment */

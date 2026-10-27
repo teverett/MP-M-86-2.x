@@ -10,8 +10,7 @@
  * project:
  *   - `user_entry` -- the real `INT 224` entry prologue/epilogue
  *     (critical-section stack switch, `u_insys` nesting count, `iret`
- *     back to the caller) -- no C equivalent, same class as
- *     `src-c/loader/lbdosent.c`'s own `bdose`.
+ *     back to the caller) -- no C equivalent.
  *   - `func` -- a one-line `mov u_func,cl ! call func1` wrapper.
  *     `u_func` is UDA-relative state read back only by `mpmif`'s own
  *     save/restore (`user_entry`/`mpmif` are both deferred above), so

@@ -103,35 +103,299 @@ extern void func45_entry(uint8_t *phys, uint16_t ds_bdos, uint8_t dl, uint16_t *
 extern void func51_entry(uint8_t *phys, uint16_t ds_bdos, uint16_t dx, uint16_t *bx_out, uint16_t *cx_out);
 extern uint16_t func52_entry(uint8_t *phys, uint16_t ds_bdos, uint16_t *cx_out);
 
+/* the getdiskmx functions (file1-4.c) */
+typedef void (*bdos_fn)(uint8_t *phys, uint16_t ds_bdos);
+extern void func13(uint8_t *, uint16_t), func14(uint8_t *, uint16_t), func15(uint8_t *, uint16_t),
+    func16(uint8_t *, uint16_t), func17(uint8_t *, uint16_t), func18(uint8_t *, uint16_t),
+    func19(uint8_t *, uint16_t), func20(uint8_t *, uint16_t), func21(uint8_t *, uint16_t),
+    func22(uint8_t *, uint16_t), func23(uint8_t *, uint16_t), func27(uint8_t *, uint16_t),
+    func28(uint8_t *, uint16_t), func30(uint8_t *, uint16_t), func31(uint8_t *, uint16_t),
+    func33(uint8_t *, uint16_t), func34(uint8_t *, uint16_t), func35(uint8_t *, uint16_t),
+    func36(uint8_t *, uint16_t), func37(uint8_t *, uint16_t), func40(uint8_t *, uint16_t),
+    func42(uint8_t *, uint16_t), func43(uint8_t *, uint16_t), func48(uint8_t *, uint16_t),
+    func100(uint8_t *, uint16_t), func102(uint8_t *, uint16_t), func103(uint8_t *, uint16_t),
+    func104(uint8_t *, uint16_t), func106(uint8_t *, uint16_t), pr_term(uint8_t *, uint16_t);
+extern void func46(uint8_t *phys, uint16_t ds_bdos, uint8_t dl);
+extern void func101(uint8_t *phys, uint16_t ds_bdos, uint8_t dl);
+extern void func105(uint8_t *phys, uint16_t ds_bdos, uint16_t dx);
+extern void setdata(uint8_t *phys, uint16_t ds_bdos);
+extern void setdir(uint8_t *phys, uint16_t ds_bdos);
+extern void inc_pdcnt(uint8_t *phys, uint16_t ds_bdos);
+extern void parsave33(uint8_t *phys, uint16_t ds_bdos);
+extern void parsave36(uint8_t *phys, uint16_t ds_bdos);
+extern void incr_rr(uint8_t *phys, uint16_t ds_bdos);
+extern void save_rr(uint8_t *phys, uint16_t ds_bdos);
+extern void reset_rr(uint8_t *phys, uint16_t ds_bdos);
+extern void set_chksum_fcb(uint8_t *phys, uint16_t ds_bdos);
+extern void parunsave(uint8_t *phys, uint16_t ds_bdos);
+extern uint16_t getexta(uint8_t *phys, uint16_t ds_bdos);
+extern uint16_t get_rcnta(uint8_t *phys, uint16_t ds_bdos);
+
+/* functab's btab_flag bits */
+#define bf_getmx  0x01 /* get mxdisk queue */
+#define bf_cshell 0x02 /* conditional shell function */
+#define bf_tandw  0x04 /* test & write function */
+#define bf_fcb36  0x08 /* shell 36 byte fcb flag */
+
+#define functab  0x74 /* BDOSIF.BDO's functab, in its code segment */
+#define btablen  3
+#define rdran_fn 20 /* RDRAN_OFF: functab's read random */
+#define wrran_fn 21 /* WRRAN_OFF: write random */
+#define nfuncs   47
+
+/* functab's btab_flag column, by BDOS module function (0-46) */
+static const uint8_t btab_flag[nfuncs] = {
+    1, 1, 1, 1, 1, 1, 1, 3, 3, 1, 1, 0, 0, 0, 1, 1, /*  0-15 */
+    0, 1, 1, 0, 11, 11, 1, 1, 1, 1, 1, 3, 13, 1, 1, 0, /* 16-31 */
+    0, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1,       /* 32-46 */
+};
+
 typedef struct {
     uint16_t bx, cx;
-    uint8_t reached_getdiskmx; /* 1 = real asm would call getdiskmx
-        (critical-section switch + possibly SHELL + CALL_BDOS) --
-        not modeled, see this file's own header comment; bx is just
-        this call's own ambient input in that case, not a real
-        answer, and cx is cl zero-extended (see below) */
 } entry_result;
 
+/* GOBACK's save point (file4.c) */
+extern void *bdos_save_sp[5];
+extern int bdos_save_sp_armed;
+
+/* the BDOS's mpmif: DS = SYSDAT */
+static mpm_regs bdos_call(uint8_t *phys, uint16_t sysdat, uint16_t cx, uint16_t dx) {
+    return MPMIF(bdos, phys, sysdat, cx, dx, 0, sysdat);
+}
+
+/* `call cs:btab_addr[si]` for a getdiskmx function: dx = the argument */
+static void call_target(uint8_t *phys, uint16_t ds_bdos, uint8_t fn, uint16_t dx) {
+    static const bdos_fn targets[nfuncs] = {
+        [0] = func13, [1] = func14, [2] = func15, [3] = func16, [4] = func17, [5] = func18,
+        [6] = func19, [7] = func20, [8] = func21, [9] = func22, [10] = func23, [14] = func27,
+        [15] = func28, [17] = func30, [18] = func31, [20] = func33, [21] = func34, [22] = func35,
+        [23] = func36, [24] = func37, [27] = func40, [29] = func42, [30] = func43, [35] = func48,
+        [38] = func100, [40] = func102, [41] = func103, [42] = func104, [44] = func106,
+        [46] = pr_term,
+    };
+    switch (fn) {
+    case 33: func46(phys, ds_bdos, (uint8_t)dx); return;
+    case 39: func101(phys, ds_bdos, (uint8_t)dx); return;
+    case 43: func105(phys, ds_bdos, dx); return;
+    default:
+        if (targets[fn]) targets[fn](phys, ds_bdos);
+        /* else funcret: 25 access drive, 26 free drive, 28 test & write,
+         * 34 chain to program */
+        return;
+    }
+}
+
+/* BDOS_RETURN: put back what reselect changed in the FCB (checksum,
+ * the r/o and extent bits, the drive), and copy a saved parameter
+ * block back to the caller */
+static void bdos_return(uint8_t *phys, uint16_t ds_bdos) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    if (seg_r8(ds, BD_RESEL) != 0) {
+        if (seg_r8(ds, BD_COMP_FCB_CKS) == 0xFF) set_chksum_fcb(phys, ds_bdos);
+        uint16_t info = seg_r16(ds, BD_INFO);
+        uint8_t al = seg_r8(ds, BD_XFCB_READ_ONLY);
+        if (al) ds[(uint16_t)(info + 7)] |= al;
+        uint16_t bx = getexta(phys, ds_bdos);
+        al = seg_r8(ds, BD_HIGH_EXT);
+        if (al == 0x60) {
+            bx = (uint16_t)(bx - 4);
+            al = 0x80;
+        }
+        ds[bx] |= al;
+        al = seg_r8(ds, BD_ACTUAL_RC);
+        if (al) ds[get_rcnta(phys, ds_bdos)] |= al;
+        ds[info] = seg_r8(ds, BD_FCBDSK);
+    }
+    if (seg_r8(ds, BD_PARCOPFL) == 0xFF) parunsave(phys, ds_bdos);
+}
+
+/* CALL_BDOS: run the function, to its return or a GOBACK, then
+ * BDOS_RETURN */
+static void __attribute__((noinline)) call_bdos(uint8_t *phys, uint16_t ds_bdos, uint8_t fn, uint16_t dx) {
+#if BDOS_GOBACK
+    if (__builtin_setjmp(bdos_save_sp) == 0) {
+        bdos_save_sp_armed = 1;
+        call_target(phys, ds_bdos, fn, dx);
+    }
+    bdos_save_sp_armed = 0;
+#else
+    call_target(phys, ds_bdos, fn, dx);
+#endif
+    bdos_return(phys, ds_bdos);
+}
+
+/* CBDOS/CBDOS1: one call of the SHELL's function; returns low(aret) */
+static uint8_t cbdos(uint8_t *phys, uint16_t ds_bdos, uint8_t fn) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    call_bdos(phys, ds_bdos, fn, seg_r16(ds, BD_INFO));
+    return seg_r8(ds, BD_ARET);
+}
+
+/* SHELL_ERR: aret, with the number of records done (mult_cnt - the
+ * remaining count) in its top 4 bits */
+static uint16_t shell_err(uint8_t *phys, uint16_t ds_bdos, uint8_t remaining) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    uint16_t bx = seg_r16(ds, BD_ARET);
+    uint8_t dl = (uint8_t)(seg_r8(ds, BD_MULT_CNT) - remaining);
+    return (uint16_t)(bx | ((uint16_t)(uint8_t)(dl << 4) << 8));
+}
+
+/* the next record of the shell: dmaad += 80h */
+static void next_dma(uint8_t *phys, uint16_t ds_bdos) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    seg_w16(ds, BD_DMAAD, (uint16_t)(seg_r16(ds, BD_DMAAD) + 0x80));
+}
+
+/* MULT_IO: the function mult_cnt times, one record further each time */
+static uint16_t mult_io(uint8_t *phys, uint16_t ds_bdos, uint8_t ah) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    uint8_t al = seg_r8(ds, BD_MULT_CNT);
+    do {
+        uint8_t fn = (uint8_t)((seg_r16(ds, BD_SHELL_SI) - functab) / btablen);
+        if (cbdos(phys, ds_bdos, fn) != 0) return shell_err(phys, ds_bdos, al);
+        if (ah & bf_fcb36) incr_rr(phys, ds_bdos);
+        next_dma(phys, ds_bdos);
+        setdata(phys, ds_bdos);
+    } while (--al != 0);
+    return 0;
+}
+
+/* TST_WRT: read each record (into the directory buffer) and compare it
+ * with the caller's data; if they all match, write them (MULT_IO with
+ * write random) */
+static uint16_t tst_wrt(uint8_t *phys, uint16_t ds_bdos, uint8_t ah) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    uint8_t al = seg_r8(ds, BD_MULT_CNT);
+    setdir(phys, ds_bdos);
+    do {
+        if (cbdos(phys, ds_bdos, rdran_fn) != 0) return shell_err(phys, ds_bdos, al);
+        /* COMPARE_RECS: es:dmaad (dmabase) against buffa, 64 words */
+        const uint8_t *user = far_ptr(phys, seg_r16(ds, BD_DMABASE), seg_r16(ds, BD_DMAAD));
+        const uint8_t *buf = ds + seg_r16(ds, BD_BUFFA);
+        for (int i = 0; i < 128; i++) {
+            if (user[i] != buf[i]) return shell_err(phys, ds_bdos, al); /* (its bx = 7 is lost) */
+        }
+        incr_rr(phys, ds_bdos);
+        next_dma(phys, ds_bdos);
+    } while (--al != 0);
+    setdata(phys, ds_bdos);
+    reset_rr(phys, ds_bdos);
+    seg_w16(ds, BD_SHELL_SI, functab + wrran_fn * btablen); /* WRRAN_OFF */
+    return mult_io(phys, ds_bdos, ah);
+}
+
+/* SHELL: a multi-sector (or test & write) function as mult_cnt calls
+ * of the single-record one, then SHELL_RTN */
+static void shell(uint8_t *phys, uint16_t ds_bdos, uint8_t fn, uint8_t ah) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    seg_w16(ds, BD_SHELL_SI, (uint16_t)(functab + fn * btablen)); /* its functab entry */
+    seg_w16(ds, BD_SHELL_DMA, seg_r16(ds, BD_DMAAD));
+    if (ah & bf_fcb36) {
+        parsave36(phys, ds_bdos);
+        save_rr(phys, ds_bdos);
+    } else {
+        parsave33(phys, ds_bdos);
+    }
+    seg_w8(ds, BD_SHELL_FLAG, 0xFF);
+    uint16_t bx = (ah & bf_tandw) ? tst_wrt(phys, ds_bdos, ah) : mult_io(phys, ds_bdos, ah);
+    /* SHELL_RTN */
+    seg_w16(ds, BD_ARET, bx);
+    if (ah & bf_fcb36) reset_rr(phys, ds_bdos);
+    seg_w16(ds, BD_DMAAD, seg_r16(ds, BD_SHELL_DMA));
+    setdata(phys, ds_bdos);
+    seg_w8(ds, BD_SHELL_FLAG, 0);
+    parunsave(phys, ds_bdos);
+}
+
+/*
+ * getdiskmx -- a function that uses the disk: take the MXdisk queue
+ * (with pf_tempkeep on, so a ^C can't terminate the process inside the
+ * BDOS), load the BDOS's copy of the caller's state (its UDA's BDOS
+ * variables, user, disk, DMA), run the function (through the SHELL for
+ * multi-sector I/O), copy the state back, release the queue, and
+ * terminate now if a ^C came in meanwhile.
+ *
+ * The asm also switches to the BDOS's own stack in SYSDAT (bdosstack)
+ * for the call; the C runs on the process's own stack.
+ */
+static entry_result getdiskmx(uint8_t *phys, uint16_t sysdat, uint8_t fn, uint16_t dx) {
+    uint8_t *ds = far_ptr(phys, sysdat, 0);
+    (void)bdos_call(phys, sysdat, f_constat, dx);
+
+    /* do not allow ctrl c while in bdos */
+    uint16_t rlr = seg_r16(ds, SYSDAT_RLR);
+    uint16_t tempkeep = (uint16_t)(seg_r16(ds, (uint16_t)(rlr + p_flag)) & pf_tempkeep);
+    seg_w16(ds, (uint16_t)(rlr + p_flag), (uint16_t)(seg_r16(ds, (uint16_t)(rlr + p_flag)) | pf_tempkeep));
+    (void)bdos_call(phys, sysdat, f_qread, SYSDAT_MXDISKQPB);
+
+    rlr = seg_r16(ds, SYSDAT_RLR);
+    uint16_t bx = rlr;
+    if (!(seg_r16(ds, (uint16_t)(rlr + p_flag)) & pf_ctlc)) {
+        /* initialize the bdos data area for the user */
+        uint8_t *uda = far_ptr(phys, seg_r16(ds, (uint16_t)(rlr + p_uda)), 0);
+        seg_w16(ds, BD_PARAMETERSEGMENT, seg_r16(uda, u_wrkseg));
+        seg_w16(ds, BD_RETURNSEG, seg_r16(uda, u_retseg));
+        seg_w16(ds, BD_PDADDR, rlr);
+        seg_w8(ds, BD_USRCODE, seg_r8(ds, (uint16_t)(rlr + p_user))); /* default user code */
+        seg_w8(ds, BD_SELDSK, seg_r8(ds, (uint16_t)(rlr + p_dsk)));   /* default disk */
+        /* default dma: setdata if the UDA's differs from ours */
+        uint8_t setbf = 0;
+        if (seg_r16(uda, u_dma_ofst) != seg_r16(ds, BD_DMAAD)) setbf = 0xFF;
+        if (seg_r16(uda, u_dma_seg) != seg_r16(ds, BD_DMABASE)) setbf = 0xFF;
+        seg_w8(ds, BD_SETBF, setbf);
+        /* copy the uda's bdos vars to the local area */
+        for (int i = 0; i < uda_ovl_len; i++) ds[BD_DMAAD + i] = uda[u_dma_ofst + i];
+        if (seg_r8(ds, BD_PD_CNT) & 1) inc_pdcnt(phys, sysdat); /* reset pd_cnt if its low bit is set */
+
+        seg_w16(ds, BD_INFO, dx);
+        seg_w8(ds, BD_LINFO, (uint8_t)dx);
+        for (int i = 0; i < 9; i++) ds[BD_FCBDSK + i] = 0; /* entryzero: fcbdsk .. zerolength */
+        if (seg_r8(ds, BD_SETBF) == 0xFF) setdata(phys, sysdat);
+
+        /* ready to go to the function */
+        uint8_t ah = btab_flag[fn];
+        if ((ah & bf_tandw) || (seg_r8(ds, BD_MULT_CNT) != 1 && (ah & bf_cshell))) {
+            shell(phys, sysdat, fn, ah);
+        } else {
+            call_bdos(phys, sysdat, fn, dx);
+        }
+
+        /* RETMON: copy the local vars back to the uda, set the return
+         * registers */
+        uda = far_ptr(phys, seg_r16(ds, (uint16_t)(seg_r16(ds, SYSDAT_RLR) + p_uda)), 0);
+        for (int i = 0; i < uda_ovl_len; i++) uda[u_dma_ofst + i] = ds[BD_DMAAD + i];
+        seg_w16(uda, u_retseg, seg_r16(ds, BD_RETURNSEG));
+        bx = seg_r16(ds, BD_ARET);
+    }
+
+    /* RETMONX: release the mxdisk queue; see if control c occurred */
+    mpm_regs r = bdos_call(phys, sysdat, f_qwrite, SYSDAT_MXDISKQPB);
+    rlr = seg_r16(ds, SYSDAT_RLR);
+    uint16_t keep = (uint16_t)(~tempkeep ^ pf_tempkeep); /* clears pf_tempkeep unless it was on */
+    seg_w16(ds, (uint16_t)(rlr + p_flag), (uint16_t)(seg_r16(ds, (uint16_t)(rlr + p_flag)) & keep));
+    if (seg_r16(ds, (uint16_t)(rlr + p_flag)) & pf_ctlc) {
+        r = bdos_call(phys, sysdat, f_terminate, 0);
+    }
+    return (entry_result){bx, r.cx};
+}
+
 /* entry -- resolve cl (BDOS function #, 0-46) into functab's own
- * entry, then (btab_flag == 0 only) dispatch for real into that
- * function's own already-ported C target. See this file's own
- * header comment for exactly which 10 functions that is and why the
- * other 37 are a documented boundary.
+ * entry: the btab_flag == 0 functions run directly (`nomx`), the rest
+ * through getdiskmx. Returns BX (= AX) and CX.
  *
  * Real `entry`'s own prologue (`mov ch,0 ! ... ! mul cx ! ...`) only
  * ever clears `ch` -- `cl` (the function # this call was made with)
  * stays in `cx` for the rest of the routine, including into
  * whichever target it dispatches to, unless that target's own body
- * explicitly overwrites it. There's no genuinely independent
- * "ambient cx" input here the way there is for `bx`/`dx` -- so
- * `entry` has no `cx` parameter of its own; `r.cx` starts as `cl`
- * zero-extended (func107/FUNCRET's real no-op return, case 45,
- * leaves it at exactly that) and each other case overwrites it with
- * its own target's real result, same as every other dispatcher in
- * this tree. */
+ * explicitly overwrites it. So `r.cx` starts as `cl` zero-extended
+ * (func107/FUNCRET's real no-op return, case 45, leaves it at exactly
+ * that) and each other case overwrites it with its own target's real
+ * result. */
 entry_result bdosif_entry(uint8_t *phys, uint16_t sysdat, uint8_t cl, uint16_t dx, uint16_t bx) {
-    entry_result r = {bx, cl, 0};
+    entry_result r = {bx, cl};
     uint8_t dl = (uint8_t)dx;
+    if (cl >= nfuncs) return r;
+    if (btab_flag[cl] & bf_getmx) return getdiskmx(phys, sysdat, cl, dx);
     switch (cl) {
     case 11: r.bx = func24_entry(phys, sysdat, &r.cx); break;
     case 12: r.bx = func25_entry(phys, sysdat, &r.cx); break;
@@ -142,8 +406,7 @@ entry_result bdosif_entry(uint8_t *phys, uint16_t sysdat, uint8_t cl, uint16_t d
     case 32: func45_entry(phys, sysdat, dl, &r.bx, &r.cx); break;
     case 36: func51_entry(phys, sysdat, dx, &r.bx, &r.cx); break;
     case 37: r.bx = func52_entry(phys, sysdat, &r.cx); break;
-    case 45: break; /* func107/funcret: pure no-op, bx/cx stay ambient */
-    default: r.reached_getdiskmx = 1; break;
+    default: break; /* 45: func107/funcret, bx/cx stay ambient */
     }
     return r;
 }

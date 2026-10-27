@@ -51,6 +51,8 @@
 
 #include "defs.h"
 
+MPMIF_HOOK(memif) /* the MX memory queue, f_terminate (defs.h) */
+
 typedef struct {
     uint16_t bx, cx;
 } entry_result;
@@ -88,8 +90,11 @@ entry_result memif_entry(uint8_t *phys, uint16_t sysdat, uint8_t cl, uint16_t dx
     uint16_t saved_pflag = 0;
     int reacquired = 0;
     if (seg_r16(sd, SYSDAT_MXMEMOWNER) != rlr) {
-        /* mpmif(f_qread, mxmemqpb) -- boundary stub, acquire always
-         * succeeds immediately */
+        /* mov dx,offset mxmemqpb ! mov cx,f_qread ! call mpmif: take the
+         * MX memory queue (waits while another process holds it; with no
+         * hook -- a differential test -- it's taken at once) */
+        (void)MPMIF(memif, phys, sysdat, f_qread, SYSDAT_MXMEMQPB, 0, sysdat);
+        rlr = seg_r16(sd, SYSDAT_RLR);
         seg_w16(sd, SYSDAT_MXMEMOWNER, rlr);
         seg_w8(sd, SYSDAT_MXMEMCOUNT, 0);
         saved_pflag = seg_r16(sd, (uint16_t)(rlr + p_flag));
@@ -105,11 +110,13 @@ entry_result memif_entry(uint8_t *phys, uint16_t sysdat, uint8_t cl, uint16_t dx
     case 2: r = cpmalloc_entry(phys, sysdat, dx); break;
     case 3: r = cpmabsa_entry(phys, sysdat, dx); break;
     case 4: r = cpmfree_entry(phys, sysdat, dx); break;
-    case 5: /* freeall_entry -- "mov cx,f_terminate ! sub dx,dx ! jmp
-             * mpmif", a boundary stub: bx is untouched, cx keeps the code */
-        r.bx = bx;
-        r.cx = f_terminate;
+    case 5: { /* freeall_entry -- "mov cx,f_terminate ! sub dx,dx ! jmp
+             * mpmif"; with no hook bx is untouched, cx keeps the code */
+        mpm_regs t = MPMIF(memif, phys, sysdat, f_terminate, 0, bx, sysdat);
+        r.bx = memif_mpmif ? t.bx : bx;
+        r.cx = memif_mpmif ? t.cx : f_terminate;
         break;
+    }
     case 6: r = malloc_entry(phys, sysdat, dx); break;
     case 7: r = mfree_entry(phys, sysdat, dx); break;
     case 8: r = share_entry(phys, sysdat, dx); break;
@@ -127,10 +134,12 @@ entry_result memif_entry(uint8_t *phys, uint16_t sysdat, uint8_t cl, uint16_t dx
             uint16_t pflag = seg_r16(sd, (uint16_t)(rlr + p_flag));
             seg_w16(sd, (uint16_t)(rlr + p_flag), (uint16_t)(pflag & (uint16_t)~pf_tempkeep));
         }
-        /* mpmif(f_qwrite, mxmemqpb) -- boundary stub, release always
-         * succeeds immediately */
-        /* if p_flag & pf_ctlc: mpmif(f_terminate) -- boundary stub,
-         * falls through to entry_out either way */
+        /* mov dx,offset mxmemqpb ! mov cx,f_qwrite ! call mpmif */
+        (void)MPMIF(memif, phys, sysdat, f_qwrite, SYSDAT_MXMEMQPB, 0, sysdat);
+        if (seg_r16(sd, (uint16_t)(seg_r16(sd, SYSDAT_RLR) + p_flag)) & pf_ctlc) {
+            /* sub dx,dx ! mov cx,f_terminate ! call mpmif */
+            (void)MPMIF(memif, phys, sysdat, f_terminate, 0, 0, sysdat);
+        }
     }
     return r;
 }

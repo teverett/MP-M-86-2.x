@@ -49,6 +49,24 @@
 
 #include "defs.h"
 
+/* Boundary hooks (defs.h) the runtime fills in at boot. Unset -- a
+ * differential test -- each is the old stub. `init_module` is the
+ * `callf dword ptr <mod>mod[bx]` far call to module `mod`'s own init
+ * (MODFUNC.DEF's rtm/mem/bdos/cio/xios numbers); `init_mpmif` takes the
+ * `int mpmint` system calls, with `ds` the caller's DS. */
+MPMIF_HOOK(init)
+XIOSIF_HOOK(init)
+typedef void (*init_module_fn)(uint8_t *phys, uint16_t sysdat, uint8_t mod);
+static init_module_fn init_module;
+void init_set_module_init(init_module_fn fn) { init_module = fn; }
+
+#define SYSDAT_MODULE_MAP 0x46 /* byte: which modules are present */
+#define mod_rtm  2
+#define mod_mem  3
+#define mod_cio  4
+#define mod_bdos 5
+#define mod_xios 6
+
 /*
  * sup_init -- system initialization.
  *	input:	phys = base of real physical memory; ds_sysdat = DS at
@@ -84,7 +102,15 @@ void sup_init(uint8_t *phys, uint16_t ds_sysdat, uint16_t cs,
     wr16(sysdat + SYSDAT_INITPD + p_uda, uda_seg);
     wr16(far_ptr(phys, uda_seg, u_wrkseg), ds_sysdat);
 
-    /* initialize modules -- 5 far-call boundary stubs */
+    /* initialize modules: RTM, MEM, then BDOS/CIO/XIOS if present */
+    if (init_module) {
+        uint8_t map = sysdat[SYSDAT_MODULE_MAP];
+        init_module(phys, ds_sysdat, mod_rtm);
+        init_module(phys, ds_sysdat, mod_mem);
+        if (map & bdosmod_bit) init_module(phys, ds_sysdat, mod_bdos);
+        if (map & ciomod_bit) init_module(phys, ds_sysdat, mod_cio);
+        if (map & xiosmod_bit) init_module(phys, ds_sysdat, mod_xios);
+    }
 
     sysdat[SYSDAT_INTFLAG] = 0xFF;
 
@@ -92,10 +118,13 @@ void sup_init(uint8_t *phys, uint16_t ds_sysdat, uint16_t cs,
     wr16(ivt + i_mpm_ip, user_entry_offset);
     wr16(ivt + i_mpm_cs, cs);
 
-    /* get character dev info from XIOS -- xiosif stubbed, bl = 0 */
-    sysdat[SYSDAT_NCONDEV] = 0;
-    sysdat[SYSDAT_NCIODEV] = 0;
-    sysdat[SYSDAT_NLSTDEV] = 0;
+    /* get character dev info from XIOS (bl = 0 with no hook) */
+    uint8_t bl = (uint8_t)XIOSIF(init, phys, ds_sysdat, io_maxconsole, 0, 0);
+    sysdat[SYSDAT_NCONDEV] = bl;
+    sysdat[SYSDAT_NCIODEV] = bl;
+    bl = (uint8_t)XIOSIF(init, phys, ds_sysdat, io_maxlist, 0, 0);
+    sysdat[SYSDAT_NLSTDEV] = bl;
+    sysdat[SYSDAT_NCIODEV] = (uint8_t)(sysdat[SYSDAT_NCIODEV] + bl);
 
     /* start RSPs: walk the list, giving each RSP the sysdat segment */
     for (;;) {
@@ -108,8 +137,12 @@ void sup_init(uint8_t *phys, uint16_t ds_sysdat, uint16_t cs,
         uint8_t *rsp = far_ptr(phys, rspseg, 0);
         wr16(sd + SYSDAT_RSPSEG, rd16(rsp + rsp_link));
         wr16(rsp + rsp_link, ds);
-        /* int mpmint, f_createproc -- boundary stub */
+        /* mov si,rsp_pd ! mov ds,cx ! mov cx,f_createproc ! mov dx,si !
+         * int mpmint */
+        (void)MPMIF(init, phys, ds, f_createproc, rsp_pd, 0, rspseg);
     }
 
-    /* terminate init process -- int mpmint, f_terminate, boundary stub */
+    /* terminate init process: mov cl,f_terminate ! mov dl,0ffh ! int
+     * mpmint (never returns with the runtime's hook) */
+    (void)MPMIF(init, phys, ds_sysdat, f_terminate, 0xFF, 0, ds_sysdat);
 }

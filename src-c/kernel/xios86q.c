@@ -138,11 +138,21 @@ uint8_t polldev_entry(io_in8_fn io_in8, uint8_t cl) {
     return 0xFF;
 }
 
-/* rtm_poll -- block (conceptually) until `device` is ready. See this
- * file's own header comment for why the real "yield via Supervisor"
- * tail collapses to an immediate return here. */
+/* rtm_poll -- block until `device` is ready: poll it, and if it isn't
+ * (and stoppoll is off) make the real "yield via Supervisor" tail call,
+ * f_polldev with DX = the device, through the runtime's hook (it puts
+ * the process on the poll list; the dispatcher polls the device again
+ * and resumes it once ready). With no hook -- a differential test --
+ * the tail collapses to an immediate return, see this file's own header
+ * comment. */
+typedef void (*xios86q_poll_fn)(uint8_t device);
+static xios86q_poll_fn xios86q_poll;
+void xios86q_set_poll(xios86q_poll_fn fn) { xios86q_poll = fn; }
+
 static void rtm_poll(io_in8_fn io_in8, uint8_t device) {
-    (void)polldev_entry(io_in8, device);
+    if (polldev_entry(io_in8, device) != 0xFF && xios86q_poll) {
+        xios86q_poll(device);
+    }
 }
 
 /* -- CHARACTER I/O ---------------------------------------------------- */

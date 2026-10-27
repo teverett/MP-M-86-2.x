@@ -34,6 +34,8 @@
 
 #include "defs.h"
 
+MPMIF_HOOK(console) /* f_sleep/f_wakeup on a CCB queue (defs.h) */
+
 extern uint16_t findpdname_entry(uint8_t *phys, uint16_t sysdat, uint16_t bx, uint16_t dx, uint16_t *cx_out);
 
 /*
@@ -88,9 +90,11 @@ cio_bxcx cioattach(uint8_t *phys, uint16_t sysdat, uint16_t pd_field_off, uint16
             cio_bxcx r = {0xFFFF, e_no_attach};
             return r;
         }
-        /* ca_sleep -- see header comment: not exercised by the test */
+        /* ca_sleep: lea dx,c_queue[si] ! ... ! mov cx,f_sleep ! call
+         * mpmif, then try again (see header comment: not exercised by
+         * the test, which has no hook) */
         seg_w8(sd, (uint16_t)(bx + p_stat), ps_ciowait);
-        /* call mpmif(f_sleep) -- boundary stub, no-op */
+        (void)MPMIF(console, phys, sysdat, f_sleep, (uint16_t)(si + c_queue), 0, sysdat);
     }
 }
 
@@ -109,7 +113,8 @@ cio_bxcx ciodetach(uint8_t *phys, uint16_t sysdat, uint16_t pd_field_off) {
             return r;
         }
         seg_w16(sd, (uint16_t)(si + c_attach), seg_r16(sd, (uint16_t)(si + c_queue)));
-        /* call mpmif(f_wakeup) -- boundary stub, no-op */
+        /* lea dx,c_queue[si] ! mov cx,f_wakeup ! call mpmif */
+        (void)MPMIF(console, phys, sysdat, f_wakeup, (uint16_t)(si + c_queue), 0, sysdat);
     }
     cio_bxcx r = {0, 0};
     return r;
@@ -237,7 +242,8 @@ cio_bxcx conassign_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
             uint16_t bp2 = seg_r16(sd, (uint16_t)(bp + c_queue));
             seg_w16(sd, (uint16_t)(bp + c_queue), si);
             seg_w16(sd, (uint16_t)(si + p_link), bp2);
-            /* call mpmif(f_wakeup) -- boundary stub, no-op */
+            /* lea dx,c_queue[bx] ! mov cx,f_wakeup ! call mpmif */
+            (void)MPMIF(console, phys, sysdat, f_wakeup, (uint16_t)(bp + c_queue), 0, sysdat);
             cio_bxcx r = {0, 0};
             return r;
         }

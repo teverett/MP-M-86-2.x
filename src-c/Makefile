@@ -62,6 +62,12 @@ BOOT_OBJS := $(BUILD_DIR)/boot/boot.o $(BUILD_DIR)/boot/kernel_main.o
 # below for what actually happened trying to link even just this.
 KERNEL_OBJS := $(patsubst kernel/%.c,$(BUILD_DIR)/kernel/%.o,$(wildcard kernel/*.c))
 STRING_SHIM_OBJ := $(BUILD_DIR)/freestanding-include/string_shim.o
+# The runtime that runs the kernel as a real multitasking MP/M-86
+# (rt/rt.c's header comment), and the C programs it runs (rsp/).
+# rt_asm.s embeds the /src build's MPM image, so kernel.elf needs it.
+MPM_IMAGE := ../build/kernel/MPM.bin.cseg ../build/kernel/MPM.bin.dseg
+RT_OBJS  := $(BUILD_DIR)/rt/rt.o $(BUILD_DIR)/rt/rt_asm.o
+RSP_OBJS := $(patsubst rsp/%.c,$(BUILD_DIR)/rsp/%.o,$(wildcard rsp/*.c))
 
 .PHONY: all build test boot run clean
 
@@ -76,8 +82,27 @@ $(BUILD_DIR)/$(1)/%.o: $(1)/%.c $(1)/defs.h | $(BUILD_DIR)/$(1)
 endef
 $(foreach m,$(MODULES),$(eval $(call MODULE_RULE,$(m))))
 
-$(foreach m,$(MODULES),$(BUILD_DIR)/$(m)) $(BUILD_DIR)/boot $(BUILD_DIR)/freestanding-include:
+$(foreach m,$(MODULES),$(BUILD_DIR)/$(m)) $(BUILD_DIR)/boot $(BUILD_DIR)/freestanding-include \
+		$(BUILD_DIR)/rt $(BUILD_DIR)/rsp $(BUILD_DIR):
 	mkdir -p $@
+
+$(MPM_IMAGE):
+	$(MAKE) -C ../src
+
+$(BUILD_DIR)/rt/rt_syms.h: rt/gen_syms.py $(wildcard ../src/kernel/*) | $(BUILD_DIR)/rt
+	$(PYTHON) rt/gen_syms.py $@
+
+$(BUILD_DIR)/rt/rt.o: rt/rt.c rt/rt.h kernel/defs.h $(BUILD_DIR)/rt/rt_syms.h | $(BUILD_DIR)/rt
+	$(CC) $(CFLAGS) -I kernel -I rt -I $(BUILD_DIR)/rt -c $< -o $@
+
+$(BUILD_DIR)/rt/rt_asm.o: rt/rt_asm.s $(MPM_IMAGE) | $(BUILD_DIR)/rt
+	$(CC) -c $< -o $@
+
+$(BUILD_DIR)/rsp/rsp_syms.h: rsp/gen_syms.py $(wildcard ../src/rsp/*.A86) | $(BUILD_DIR)/rsp
+	$(PYTHON) rsp/gen_syms.py $@
+
+$(BUILD_DIR)/rsp/%.o: rsp/%.c rsp/rsp.h rt/rt.h kernel/defs.h $(BUILD_DIR)/rsp/rsp_syms.h | $(BUILD_DIR)/rsp
+	$(CC) $(CFLAGS) -Wno-unterminated-string-initialization -I kernel -I rt -I rsp -I $(BUILD_DIR)/rsp -c $< -o $@
 
 # boot/'s own stub -- boot.s isn't a .c file (no CFLAGS, no defs.h,
 # hence not folded into MODULE_RULE above). kernel_main.c isn't a
@@ -122,8 +147,8 @@ boot: $(BOOT_OBJS)
 # section for the full list and reasoning. `memcpy`/`memcmp` also
 # needed real bodies (not just declarations) once anything actually
 # links against them -- freestanding-include/string_shim.c.
-kernel.elf: $(BOOT_OBJS) $(KERNEL_OBJS) $(STRING_SHIM_OBJ) linker.ld
-	$(LD) -T linker.ld -o kernel.elf $(BOOT_OBJS) $(KERNEL_OBJS) $(STRING_SHIM_OBJ)
+kernel.elf: $(BOOT_OBJS) $(KERNEL_OBJS) $(RT_OBJS) $(RSP_OBJS) $(STRING_SHIM_OBJ) linker.ld
+	$(LD) -T linker.ld -o kernel.elf $(BOOT_OBJS) $(KERNEL_OBJS) $(RT_OBJS) $(RSP_OBJS) $(STRING_SHIM_OBJ)
 	i686-elf-grub-file --is-x86-multiboot kernel.elf
 
 # run -- boot kernel.elf under QEMU with serial output on stdout.

@@ -41,6 +41,8 @@
 
 #include "defs.h"
 
+MPMIF_HOOK(chario) /* f_terminate/f_dispatch (defs.h) */
+
 extern uint16_t getccbadr(uint8_t *phys, uint16_t sysdat, uint8_t dh, uint16_t *bx_out);
 extern cio_bxcx conattach_entry(uint8_t *phys, uint16_t sysdat);
 extern cio_bxcx condetach_entry(uint8_t *phys, uint16_t sysdat);
@@ -261,7 +263,7 @@ chkc1:
             uint16_t rlr = seg_r16(sd, SYSDAT_RLR);
             seg_w16(sd, (uint16_t)(rlr + p_flag),
                     (uint16_t)(seg_r16(sd, (uint16_t)(rlr + p_flag)) | pf_ctlc));
-            /* mov cx,f_terminate!sub dx,dx!call mpmif -- boundary stub, no-op */
+            (void)MPMIF(chario, phys, sysdat, f_terminate, 0, 0, sysdat); /* sub dx,dx */
         }
     }
     /* ctlc_r */
@@ -511,9 +513,9 @@ uint8_t constat_entry(uint8_t *phys, uint16_t sysdat) {
     if (rlr == seg_r16(sd, (uint16_t)(si + c_attach))) {
         return conbrk(phys, sysdat, si); /* cse_cl */
     }
-    /* mov cx,f_dispatch!call mpmif -- boundary stub, no-op (also the
-     * real DRI "mov cl,f_dispatch" 8-bit-move typo noted in the asm's
-     * own comment -- irrelevant here either way) */
+    /* mov cx,f_dispatch!call mpmif (the real DRI "mov cl,f_dispatch"
+     * 8-bit-move typo noted in the asm's own comment is fixed there) */
+    (void)MPMIF(chario, phys, sysdat, f_dispatch, 0, 0, sysdat);
     return 0;
 }
 
@@ -548,7 +550,7 @@ uint8_t dirio_entry(uint8_t *phys, uint16_t sysdat, uint8_t dl) {
     if (bl != 0) {
         return conin(phys, sysdat, si); /* jne conin */
     }
-    /* mov cx,f_dispatch!call mpmif -- boundary stub, no-op */
+    (void)MPMIF(chario, phys, sysdat, f_dispatch, 0, 0, sysdat); /* mov cx,f_dispatch!call mpmif */
     return 0;
 }
 

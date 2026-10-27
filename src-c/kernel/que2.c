@@ -30,6 +30,8 @@
 
 #include "defs.h"
 
+MPMIF_HOOK(que2) /* f_cqwrite/f_maualloc/f_maufree (defs.h) */
+
 uint16_t getqdaddr(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t *cx_out);
 void qspace(uint8_t *phys, uint16_t sysdat, uint16_t si, uint16_t *cx_out);
 void qrelease(uint8_t *phys, uint16_t sysdat, uint16_t si);
@@ -45,8 +47,15 @@ void rlsmx(uint8_t *phys, uint16_t sysdat, uint16_t si) {
         uint16_t bx = seg_r16(sd, (uint16_t)(di + q_link));
         if (bx == 0) break;
         if ((seg_r16(sd, (uint16_t)(bx + q_flags)) & qf_mx) &&
-            si == seg_r16(sd, (uint16_t)(bx + q_buf))) {
-            /* call mpmif(f_cqwrite) -- boundary stub, no-op */
+            si == seg_r16(sd, (uint16_t)(bx + q_buf)) && que2_mpmif) {
+            /* push bx ! sub ax,ax ! push ax: a QPB {flags 0, qaddr bx} on
+             * the stack, DS = SS; mov cx,f_cqwrite ! call mpmif (with no
+             * hook -- a differential test -- there's nothing to call) */
+            uint16_t uda_seg = rlr_uda(sd);
+            uint8_t *uda = far_ptr(phys, uda_seg, 0);
+            seg_w16(uda, UDA_STK_QPB, 0);
+            seg_w16(uda, (uint16_t)(UDA_STK_QPB + qpb_qaddr), bx);
+            (void)MPMIF(que2, phys, sysdat, f_cqwrite, UDA_STK_QPB, 0, uda_seg);
         }
         di = bx;
     }
@@ -123,11 +132,29 @@ void remqd(uint8_t *phys, uint16_t sysdat, uint16_t si) {
  *	output:	*cx_out = error code (always nonzero here -- see header comment)
  */
 void qspace(uint8_t *phys, uint16_t sysdat, uint16_t si, uint16_t *cx_out) {
-    (void)phys;
-    (void)sysdat;
-    (void)si;
-    /* mov cx,f_maualloc ! call mpmif -- boundary stub, no-op */
-    *cx_out = f_maualloc;
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    if (!que2_mpmif) {
+        /* no MEM to call (a differential test): the old stub, which
+         * leaves CX = f_maualloc -- see header comment */
+        *cx_out = f_maualloc;
+        return;
+    }
+    /* mov ax,q_msglen[si] ! mul q_nmsgs[si]: the buffer size; an MPB
+     * {start 0, min = max = size, pdadr 0, flags 0} on the stack (DS =
+     * SS), bx = offset qmau; mov cx,f_maualloc ! call mpmif */
+    uint16_t size = (uint16_t)(seg_r16(sd, (uint16_t)(si + q_msglen)) * seg_r16(sd, (uint16_t)(si + q_nmsgs)));
+    uint16_t uda_seg = rlr_uda(sd);
+    uint8_t *uda = far_ptr(phys, uda_seg, 0);
+    seg_w16(uda, (uint16_t)(UDA_STK_QMPB + mpb_start), 0);
+    seg_w16(uda, (uint16_t)(UDA_STK_QMPB + mpb_min), size);
+    seg_w16(uda, (uint16_t)(UDA_STK_QMPB + mpb_max), size);
+    seg_w16(uda, (uint16_t)(UDA_STK_QMPB + mpb_pdadr), 0);
+    seg_w16(uda, (uint16_t)(UDA_STK_QMPB + mpb_flags), 0);
+    mpm_regs r = MPMIF(que2, phys, sysdat, f_maualloc, UDA_STK_QMPB, SYSDAT_QMAU, uda_seg);
+    *cx_out = r.cx;
+    if (r.cx == 0) {
+        seg_w16(sd, (uint16_t)(si + q_buf), seg_r16(uda, (uint16_t)(UDA_STK_QMPB + mpb_start)));
+    }
 }
 
 /*
@@ -135,9 +162,16 @@ void qspace(uint8_t *phys, uint16_t sysdat, uint16_t si, uint16_t *cx_out) {
  *	input:	si = QD address
  */
 void qrelease(uint8_t *phys, uint16_t sysdat, uint16_t si) {
-    (void)phys;
-    (void)sysdat;
-    (void)si;
-    /* mov cx,f_maufree ! call mpmif -- boundary stub, no-op; qrelease never
-     * reads anything back afterward, so there's nothing else to do here */
+    uint8_t *sd = far_ptr(phys, sysdat, 0);
+    /* push ax ! push ax ! push cx: a MAF {mau = qmau, sat = start =
+     * q_buf} on the stack (DS = SS); mov cx,f_maufree ! call mpmif.
+     * Nothing is read back. */
+    uint16_t buf = seg_r16(sd, (uint16_t)(si + q_buf));
+    uint16_t uda_seg = rlr_uda(sd);
+    uint8_t *uda = far_ptr(phys, uda_seg, 0);
+    if (!que2_mpmif) return;
+    seg_w16(uda, (uint16_t)(UDA_STK_QMAF + maf_mau), SYSDAT_QMAU);
+    seg_w16(uda, (uint16_t)(UDA_STK_QMAF + maf_sat), buf);
+    seg_w16(uda, (uint16_t)(UDA_STK_QMAF + maf_start), buf);
+    (void)MPMIF(que2, phys, sysdat, f_maufree, UDA_STK_QMAF, 0, uda_seg);
 }

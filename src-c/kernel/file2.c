@@ -593,8 +593,8 @@ get_de1:
         if (ah < al) {
             goto get_de1;
         }
-        uint16_t bx2 = getexta(phys, ds_bdos);
-        uint8_t fcb_ext = ds[bx2];
+        bx = getexta(phys, ds_bdos); /* bx = .fcb(ext), the result */
+        uint8_t fcb_ext = ds[bx];
         ah = (uint8_t)(~ah & maxext);
         ah = (uint8_t)(ah & fcb_ext);
         al = (uint8_t)(al | ah);
@@ -678,7 +678,8 @@ static uint8_t merge_byte(uint8_t *phys, uint16_t ds_bdos, uint16_t bx, uint16_t
     }
     uint8_t al = ds[dx];
     if (al == 0) {
-        ds[dx] = ds[bx];
+        al = ds[bx]; /* buff(i) = fcb(i) */
+        ds[dx] = al;
     }
     return al == ds[bx];
 }
@@ -902,7 +903,7 @@ void initialize(uint8_t *phys, uint16_t ds_bdos) {
     seg_w16(ds, seg_r16(ds, BD_CDRMAXA), 3);
     setenddir(phys, ds_bdos);
     for (;;) {
-        rddir(phys, ds_bdos, 1); /* true -- initializing */
+        rddir(phys, ds_bdos, 0xFF); /* true -- initializing */
         if (endofdir(phys, ds_bdos)) {
             return; /* ret8b */
         }

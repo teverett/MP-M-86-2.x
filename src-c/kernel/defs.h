@@ -304,6 +304,9 @@ typedef struct {
 #define UDA_STK_MPB       0x00A0 /* word[5]: cpmmem.c getmemory's MPB.DEF block */
 #define UDA_STK_LOAD_MCB  0x00B0 /* byte[5]: load.c ld_freeit's MCB (f_freemem) */
 #define UDA_STK_LOAD_MFPB 0x00B8 /* word[2]: load.c's MFPB (f_memfree) */
+#define UDA_STK_QMPB      0x00C0 /* word[5]: que2.c qspace's MPB (f_maualloc) */
+#define UDA_STK_QMAF      0x00CA /* word[3]: que2.c qrelease's MAF (f_maufree) */
+#define UDA_STK_QPB       0x00D0 /* byte[qpblen]: que2.c rlsmx's QPB (f_cqwrite) */
 /* src/kernel/DATA.BDO's mxdiskqd/mxdiskqpb, BDOS module data in the
  * combined SYSDAT+DATA.BDO data segment (BDOS.A86's --symbols) */
 #define SYSDAT_MXDISKQD   0x0F92 /* byte[qdlen]: the MX disk queue's QD */
@@ -653,6 +656,28 @@ typedef struct {
 #define BD_OPEN_MAX    0x008C /* byte: max simultaneous open files/locks allowed */
 #define BD_LOCK_MAX    0x008A /* byte: max simultaneous locked records allowed */
 
+/* DATA.BDO/BDOSIF.BDO fields getdiskmx, the SHELL and REPORT_ERR use
+ * (BDOS.A86's symbol table) */
+#define BD_SHELL_SI    0x0CAF /* word: the SHELL's functab entry */
+#define BD_SHELL_DMA   0x0CB1 /* word: dmaad when the SHELL started */
+#define BD_SETBF       0x0F8F /* byte: getdiskmx's "call setdata" flag */
+#define BD_DSKMSG      0x0CBE /* "Bdos Err On " */
+#define BD_DSKERR      0x0CCA /* byte: its "D" */
+#define BD_PERMSG      0x0CCE /* "Bad Sector$" */
+#define BD_SELMSG      0x0CD9 /* "Select$" */
+#define BD_ROFMSG      0x0CE0 /* "File " (+ "R/O$") */
+#define BD_RODMSG      0x0CE5 /* "R/O$" */
+#define BD_XERR_LIST   0x0CE9 /* word[]: extended error messages, from error 3 */
+#define BD_CRLFSTR     0x0DAB /* cr,lf,'$' */
+#define BD_PR_FX       0x0DAE /* "Bdos Function = " */
+#define BD_PR_FX1      0x0DBD /* its digits */
+#define BD_PR_FCB      0x0DC0 /* " File = " (0 = end of message) */
+#define BD_PR_FCB1     0x0DC8 /* its name.typ */
+#define BD_DENIEDMSG   0x0DD5 /* "Disk reset denied, Drive ..." */
+#define bd_addlist     8      /* DATA.BDO's addlist: buffa..alloca's length */
+#define uda_ovl_len    0x19   /* UDA.FMT: u_dma_ofst..u_pd_cnt */
+
+
 static inline uint16_t mem_r16(const uint8_t *mem, uint16_t addr) {
     return (uint16_t)(mem[addr] | (mem[(uint16_t)(addr + 1)] << 8));
 }
@@ -766,6 +791,7 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 #define u_dparam      0x00 /* word: arg to dispatch */
 #define u_dma_ofst    0x02 /* word: BDOS dma offset */
 #define u_dma_seg     0x04 /* word: BDOS dma segment */
+#define u_func        0x06 /* byte: actual function number (SUPIF's func sets it) */
 #define u_error_mode  0x10 /* byte: BDOS error mode */
 #define u_mult_cnt    0x11 /* byte: BDOS multi-sector count */
 #define u_df_password 0x12 /* byte[8]: BDOS default password */
@@ -809,8 +835,10 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 /* src/kernel/MODFUNC.DEF -- mpmif function codes src-c/kernel/command.c
  * uses ((user*0x100)+n unless noted) */
 #define f_conout         0x02
+#define f_constat        0x0B
 #define f_fopen          0x0F
 #define f_fclose         0x10
+#define f_freadseq       0x14
 #define f_qopen          0x87
 #define f_qread          0x89
 #define f_qwrite         0x8B
@@ -893,7 +921,7 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 
 /* src/kernel/MODFUNC.DEF -- mpmif function code src-c/kernel/abort.c's
  * own terminate_entry uses (bdos*0x100)+46 */
-#define f_bdosterm 0x12E
+#define f_bdosterm 0x52E
 
 #define fcb_pptr 0x18 /* word: password-length word's own address, src/kernel/FCB.DEF */
 
@@ -984,5 +1012,108 @@ static inline void user_enter(uint8_t *phys, uint16_t sysdat, uint16_t ds) {
 #define XQ_SECBUF        0x104C /* byte[fd_secsize=512] */
 #define XQ_DPH0          0x1250 /* word: SELDSK's own DPH address */
 #define XQ_SIGNON        0x135A /* byte[...]: init's own signon message */
+
+/* src/kernel/MODFUNC.DEF -- the rest of the mpmif function codes the
+ * boundary hooks below make (user functions are (user*0x100)+n) */
+#define f_sleep      0x212 /* (rtm*0x100)+18 */
+#define f_wakeup     0x213 /* (rtm*0x100)+19 */
+#define f_inflagset  0x203 /* (rtm*0x100)+3 */
+#define f_flagwait   0x84
+#define f_flagset    0x85
+#define f_qmake      0x86
+#define f_cqread     0x8A
+#define f_dispatch   0x8E
+#define f_polldev    0x83
+#define f_conattach  0x92
+#define f_condetach  0x93
+#define f_lstattach  0x9E
+#define f_lstdetach  0x9F
+#define f_mimic      0x415 /* (cio*0x100)+21 */
+#define f_unmimic    0x416 /* (cio*0x100)+22 */
+
+/* src/kernel/XIOSCB.DEF -- XIOS function numbers (AL into the XIOS
+ * entry) the runtime's XIOS dispatch serves, beyond io_* above */
+#define io_reader   5
+#define io_home     6
+#define io_seldsk   7
+#define io_settrk   8
+#define io_setsec   9
+#define io_setdma   10
+#define io_read     11
+#define io_write    12
+#define io_listst   13
+#define io_sectran  14
+#define io_setdmab  15
+#define io_getsegt  16
+#define io_polldev  17
+#define io_strtclk  18
+#define io_stopclk  19
+#define io_selmemory 22
+#define io_flush    24
+
+/*
+ * Boundary hooks for src-c/boot/'s runtime (docs/src-c.md, "Running the
+ * port"). In the asm these are real calls: `call mpmif` (a far call
+ * through the Supervisor, `cx` = function, `dx`/`bx` = parameters, DS
+ * = the caller's data segment, which the SUP saves as u_wrkseg for the
+ * call) or `call dsptch`/`pdisp` inside the RTM. In a single file built
+ * for a differential test nothing is linked to take them, so each file
+ * that makes one keeps a private hook, unset (the old no-op stub), and
+ * a setter the runtime calls at boot.
+ */
+typedef struct {
+    uint16_t ax, bx, cx, dx, es;
+} mpm_regs;
+
+typedef mpm_regs (*mpmif_fn)(uint8_t *phys, uint16_t sysdat, uint16_t cx, uint16_t dx, uint16_t bx,
+                             uint16_t ds);
+/* pdisp != 0: `pdisp` (the caller goes back on the ready list as is);
+ * 0: `dsptch` (dispatch on the caller's p_stat) */
+typedef void (*dsptch_fn)(uint8_t *phys, uint16_t sysdat, int pdisp);
+
+#define MPMIF_HOOK(file) \
+    static mpmif_fn file##_mpmif; \
+    void file##_set_mpmif(mpmif_fn fn) { file##_mpmif = fn; }
+#define MPMIF(file, phys, sysdat, cx, dx, bx, ds) \
+    (file##_mpmif ? file##_mpmif((phys), (sysdat), (cx), (dx), (bx), (ds)) : (mpm_regs){0, 0, 0, 0, 0})
+/* `call xiosif` from inside a module: AL = the XIOS function, CX/DX
+ * its parameters; returns AX (= BX). Unset: 0. */
+typedef uint16_t (*xiosif_fn)(uint8_t *phys, uint16_t sysdat, uint8_t al, uint16_t cx, uint16_t dx);
+#define XIOSIF_HOOK(file) \
+    static xiosif_fn file##_xiosif; \
+    void file##_set_xiosif(xiosif_fn fn) { file##_xiosif = fn; }
+#define XIOSIF(file, phys, sysdat, al, cx, dx) \
+    (file##_xiosif ? file##_xiosif((phys), (sysdat), (al), (cx), (dx)) : (uint16_t)0)
+
+/* The BDOS's own exits, shared by bdosif.c and file1-4.c:
+ *  - bdos_xiosif: BDOSIF.BDO's xiosif (seldskf, homef, readf, ...);
+ *  - bdos_mpmif: its mpmif (getdiskmx's queue calls, XCRLF/XPRINT);
+ *  - bdos_goback: FILE4.BDO's GOBACK, `mov sp,save_sp ! jmp
+ *    bdos_return` -- back out of the running function to CALL_BDOS's
+ *    exit. Outside a real BDOS call (the host differential tests) it
+ *    just returns, and the function carries on as it did before.
+ * Unset hooks give the old boundary-stub results (XIOSIF/MPMIF). */
+extern xiosif_fn bdos_xiosif;
+extern mpmif_fn bdos_mpmif;
+void bdos_set_xiosif(xiosif_fn fn);
+void bdos_set_mpmif(mpmif_fn fn);
+void bdos_goback(void);
+#if defined(__i386__) && defined(__GNUC__) && !defined(__clang__)
+#define BDOS_GOBACK 1
+#else
+#define BDOS_GOBACK 0
+#endif
+
+/* the dispatcher's own stack top in SYSDAT (RTM.A86's dsptchtos); the
+ * asm's term_act builds its MFPB on that stack, so the C port puts it
+ * just below */
+#define SYSDAT_DSPTCHTOS  0x0B5E
+#define SYSDAT_MXMEMQPB   0x0414 /* RTM.A86's mxmemqpb */
+
+#define DSPTCH_HOOK(file) \
+    static dsptch_fn file##_dsptch; \
+    void file##_set_dsptch(dsptch_fn fn) { file##_dsptch = fn; }
+#define DSPTCH(file, phys, sysdat, pd) \
+    do { if (file##_dsptch) file##_dsptch((phys), (sysdat), (pd)); } while (0)
 
 #endif

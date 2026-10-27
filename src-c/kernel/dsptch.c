@@ -80,6 +80,20 @@
 
 extern void freepd(uint8_t *phys, uint16_t sysdat, uint16_t si);
 
+/* Boundary hooks (defs.h) the runtime fills in at boot; unset, each is
+ * the old stub: no-op mpmif, an XIOS that reports "not ready", and no
+ * context switch. */
+MPMIF_HOOK(dsptch)
+XIOSIF_HOOK(dsptch)
+
+/* The context switch itself (header comment, gaps 2 and 3): called at
+ * the end of every dispatch with the PD that was running when it began;
+ * the runtime resumes the new rlr's own stack there and returns when
+ * `from` is dispatched again. */
+typedef void (*dsptch_switch_fn)(uint8_t *phys, uint16_t sysdat, uint16_t from);
+static dsptch_switch_fn dsptch_switch;
+void dsptch_set_switch(dsptch_switch_fn fn) { dsptch_switch = fn; }
+
 static void insert_process(uint8_t *sd, uint16_t bx, uint16_t si) {
     uint16_t cx = (uint16_t)(seg_r16(sd, (uint16_t)(si + p_flag)) & pf_resource);
     uint16_t di;
@@ -178,14 +192,16 @@ static switch_result switch_(uint8_t *phys, uint8_t *sd) {
  * not-ready, see header comment), drain the Dispatch Ready List onto
  * the Ready List, then switch to the first ready process.
  */
-static switch_result schedule(uint8_t *phys, uint8_t *sd) {
+static switch_result schedule(uint8_t *phys, uint8_t *sd, uint16_t sysdat) {
     uint16_t di = (uint16_t)(SYSDAT_PLR - p_link);
     for (;;) {
         uint16_t si = seg_r16(sd, (uint16_t)(di + p_link));
         if (si == 0) {
             break; /* drltorlr */
         }
-        uint8_t al = 0; /* xiosif(io_polldev) -- boundary stub, fixed not-ready */
+        /* mov cx,p_wait[si] ! mov al,io_polldev ! call xiosif */
+        uint8_t al = (uint8_t)XIOSIF(dsptch, phys, sysdat, io_polldev,
+                                     seg_r16(sd, (uint16_t)(si + p_wait)), 0);
         if (al != 0) {
             seg_w16(sd, (uint16_t)(di + p_link), seg_r16(sd, (uint16_t)(si + p_link)));
             seg_w8(sd, (uint16_t)(si + p_stat), ps_run);
@@ -207,22 +223,22 @@ static switch_result schedule(uint8_t *phys, uint8_t *sd) {
     return switch_(phys, sd);
 }
 
-static switch_result sleep_act(uint8_t *phys, uint8_t *sd, uint16_t si, const uint8_t *si_uda) {
+static switch_result sleep_act(uint8_t *phys, uint8_t *sd, uint16_t sysdat, uint16_t si, const uint8_t *si_uda) {
     insert_process(sd, seg_r16(si_uda, u_dparam), si);
     seg_w16(sd, (uint16_t)(si + p_flag), (uint16_t)(seg_r16(sd, (uint16_t)(si + p_flag)) | pf_resource));
     seg_w8(sd, (uint16_t)(si + p_stat), seg_r8(sd, (uint16_t)(si + p_scratch)));
-    return schedule(phys, sd);
+    return schedule(phys, sd, sysdat);
 }
 
-static switch_result poll_act(uint8_t *phys, uint8_t *sd, uint16_t si, const uint8_t *si_uda) {
+static switch_result poll_act(uint8_t *phys, uint8_t *sd, uint16_t sysdat, uint16_t si, const uint8_t *si_uda) {
     seg_w16(sd, (uint16_t)(si + p_wait), seg_r16(si_uda, u_dparam));
     seg_w16(sd, (uint16_t)(si + p_link), seg_r16(sd, SYSDAT_PLR));
     seg_w16(sd, SYSDAT_PLR, si);
-    return schedule(phys, sd);
+    return schedule(phys, sd, sysdat);
 }
 
-static switch_result delay_act(uint8_t *phys, uint8_t *sd, uint16_t si, const uint8_t *si_uda) {
-    /* xiosif(io_strtclk) -- boundary stub, no-op (result unused) */
+static switch_result delay_act(uint8_t *phys, uint8_t *sd, uint16_t sysdat, uint16_t si, const uint8_t *si_uda) {
+    (void)XIOSIF(dsptch, phys, sysdat, io_strtclk, 0, 0);
     uint16_t bx = (uint16_t)(SYSDAT_DLR - p_link);
     uint16_t cx = (uint16_t)(seg_r16(si_uda, u_dparam) + 1);
     if (cx == 0) {
@@ -247,29 +263,29 @@ static switch_result delay_act(uint8_t *phys, uint8_t *sd, uint16_t si, const ui
     if (di != 0) {
         seg_w16(sd, (uint16_t)(di + p_wait), (uint16_t)(seg_r16(sd, (uint16_t)(di + p_wait)) - cx));
     }
-    return schedule(phys, sd);
+    return schedule(phys, sd, sysdat);
 }
 
-static switch_result swap_act(uint8_t *phys, uint8_t *sd, uint16_t si) {
+static switch_result swap_act(uint8_t *phys, uint8_t *sd, uint16_t sysdat, uint16_t si) {
     insert_process(sd, (uint16_t)(SYSDAT_SLR - p_link), si);
-    return schedule(phys, sd);
+    return schedule(phys, sd, sysdat);
 }
 
-static switch_result disp_act(uint8_t *phys, uint8_t *sd, uint16_t si) {
+static switch_result disp_act(uint8_t *phys, uint8_t *sd, uint16_t sysdat, uint16_t si) {
     seg_w8(sd, (uint16_t)(si + p_stat), ps_run);
     insert_process(sd, (uint16_t)(SYSDAT_RLR - p_link), si);
-    return schedule(phys, sd);
+    return schedule(phys, sd, sysdat);
 }
 
-static switch_result flag_act(uint8_t *phys, uint8_t *sd, uint16_t si, const uint8_t *si_uda) {
+static switch_result flag_act(uint8_t *phys, uint8_t *sd, uint16_t sysdat, uint16_t si, const uint8_t *si_uda) {
     uint16_t bx = seg_r16(si_uda, u_dparam);
     if (seg_r16(sd, (uint16_t)(bx + flg_pd)) == flag_on) {
         seg_w16(sd, (uint16_t)(bx + flg_pd), flag_off);
-        return disp_act(phys, sd, si);
+        return disp_act(phys, sd, sysdat, si);
     }
     seg_w16(sd, (uint16_t)(bx + flg_pd), si);
     seg_w16(sd, (uint16_t)(si + p_link), 0);
-    return schedule(phys, sd);
+    return schedule(phys, sd, sysdat);
 }
 
 static switch_result term_act(uint8_t *phys, uint8_t *sd, uint16_t sysdat, uint16_t si) {
@@ -279,43 +295,55 @@ static switch_result term_act(uint8_t *phys, uint8_t *sd, uint16_t sysdat, uint1
     uint8_t ncondev = seg_r8(sd, SYSDAT_NCONDEV);
     for (int16_t cl = (int16_t)ncondev - 1; cl >= 0; cl--) {
         seg_w8(sd, (uint16_t)(si + p_cns), (uint8_t)cl);
-        /* mpmif(f_condetach) -- boundary stub, no-op */
+        (void)MPMIF(dsptch, phys, sysdat, f_condetach, 0, 0, sysdat);
     }
     uint8_t nlstdev = seg_r8(sd, SYSDAT_NLSTDEV);
     for (int16_t cl = (int16_t)nlstdev - 1; cl >= 0; cl--) {
         seg_w8(sd, (uint16_t)(si + p_lst), (uint8_t)(cl + ncondev));
-        /* mpmif(f_lstdetach) -- boundary stub, no-op */
+        (void)MPMIF(dsptch, phys, sysdat, f_lstdetach, 0, 0, sysdat);
     }
 
-    /* free this process's own memory list -- see header comment on
-     * why this diverges from the real asm's own loop shape */
-    uint16_t seg = seg_r16(sd, (uint16_t)(si + p_mem));
-    while (seg != 0) {
-        uint16_t next = seg_r16(sd, (uint16_t)(seg + ms_link));
-        /* mpmif(f_memfree) -- boundary stub, no-op */
-        seg = next;
+    if (dsptch_mpmif) {
+        /* free_nxt: the asm's own loop -- f_memfree takes the head MD off
+         * p_mem, so p_mem is re-read each time. Its MFPB {start, pd=0}
+         * is on the dispatcher's stack (SS = DS = SYSDAT). */
+        for (;;) {
+            uint16_t md = seg_r16(sd, (uint16_t)(si + p_mem));
+            if (md == 0) break;
+            uint16_t mfpb = (uint16_t)(SYSDAT_DSPTCHTOS - 4);
+            seg_w16(sd, (uint16_t)(mfpb + mfpb_start), seg_r16(sd, (uint16_t)(md + ms_start)));
+            seg_w16(sd, (uint16_t)(mfpb + mfpb_pd), 0);
+            (void)MPMIF(dsptch, phys, sysdat, f_memfree, mfpb, 0, sysdat);
+        }
+    } else {
+        /* no MEM to call (a differential test): a plain forward walk of
+         * the same chain -- see header comment */
+        uint16_t seg = seg_r16(sd, (uint16_t)(si + p_mem));
+        while (seg != 0) {
+            seg = seg_r16(sd, (uint16_t)(seg + ms_link));
+        }
     }
 
     seg_w16(sd, SYSDAT_MXMEMOWNER, 0);
-    /* mpmif(f_qwrite, mxmemqpb) -- boundary stub, no-op */
+    (void)MPMIF(dsptch, phys, sysdat, f_qwrite, SYSDAT_MXMEMQPB, 0, sysdat);
 
     seg_w16(sd, SYSDAT_RLR, seg_r16(sd, (uint16_t)(si + p_link)));
     seg_w16(sd, (uint16_t)(si + p_link), 0);
     freepd(phys, sysdat, si);
-    return schedule(phys, sd);
+    return schedule(phys, sd, sysdat);
 }
 
 static switch_result dispatch_action(uint8_t *phys, uint8_t *sd, uint16_t sysdat, uint16_t si,
                                      const uint8_t *si_uda, uint8_t stat) {
     switch (stat) {
-        case 0: case 6: case 7: return disp_act(phys, sd, si); /* run, (nop)-dq, (nop)-nq */
-        case 1: return poll_act(phys, sd, si, si_uda);
-        case 2: return delay_act(phys, sd, si, si_uda);
-        case 3: return swap_act(phys, sd, si);
+        case 0: case 6: case 7: return disp_act(phys, sd, sysdat, si); /* run, (nop)-dq, (nop)-nq */
+        case 1: return poll_act(phys, sd, sysdat, si, si_uda);
+        case 2: return delay_act(phys, sd, sysdat, si, si_uda);
+        case 3: return swap_act(phys, sd, sysdat, si);
         case 4: return term_act(phys, sd, sysdat, si);
-        case 5: return sleep_act(phys, sd, si, si_uda);
-        case 8: return flag_act(phys, sd, si, si_uda);
-        default: return disp_act(phys, sd, si); /* 9 = ciowait: no real table entry */
+        case 5: return sleep_act(phys, sd, sysdat, si, si_uda);
+        case 8: return flag_act(phys, sd, sysdat, si, si_uda);
+        default: return disp_act(phys, sd, sysdat, si); /* 9 = ciowait: no real table entry */
     }
 }
 
@@ -363,7 +391,11 @@ switch_result dsptch(uint8_t *phys, uint16_t sysdat, uint16_t ax, uint16_t bx, u
     seg_w16(sd, SYSDAT_RLR, seg_r16(sd, (uint16_t)(cur + p_link)));
     seg_w16(sd, (uint16_t)(cur + p_link), 0);
 
-    return dispatch_action(phys, sd, sysdat, cur, cur_uda, seg_r8(sd, (uint16_t)(cur + p_stat)));
+    switch_result r = dispatch_action(phys, sd, sysdat, cur, cur_uda, seg_r8(sd, (uint16_t)(cur + p_stat)));
+    if (dsptch_switch) {
+        dsptch_switch(phys, sysdat, cur);
+    }
+    return r;
 }
 
 /* pdisp/farpdisp -- call the dispatcher with no special action (the

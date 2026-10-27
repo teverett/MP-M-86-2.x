@@ -847,6 +847,113 @@ The combined `/src` kernel code grew to 26960 bytes, so SYSDAT moved
 from 1694h to 1695h; `kernel_main.c` follows. (Then 1697h: docs/bugs.md
 #112 gives each module its own paragraph-aligned code segment.)
 
+## Running the port: `src-c/rt/` and `src-c/rsp/`
+
+`kernel.elf` now runs the ported kernel as MP/M (32-bit flat mode, real
+memory at physical 0). After `sup_init`'s check, `kernel_main` calls
+`rt_boot` (src-c/rt/rt.c):
+
+- **Image and boot.** It copies the assembled MPM.bin image to 1000h
+  and SYSDAT (it `.incbin`s build/kernel/MPM.bin.cseg/.dseg) and
+  installs the hooks each kernel file exposes:
+  - `*_set_mpmif`: SUPIF's mpmif, with u_wrkseg = DS around the call.
+  - `*_set_xiosif`.
+  - The dispatcher's switch hook.
+  - The PIC remap, IRQ0 (tick) and an IDT.
+
+  Then it runs the real `sup_init`, so INIT.SUP's module inits and RSP
+  creation run as they do in /src.
+- **Processes.** Each process gets its own C stack. A process starts in
+  the C program named for its PD (`rt_programs[]` in
+  src-c/rsp/programs.c), or the tick or idle loop. `int 224` is
+  `rt_int224`, and module calls go through `rt_func` to `rtmif_entry`,
+  `memif_entry`, `cioif_entry`, `bdosif_entry` or the XIOS
+  (`rt_xiosmod`).
+- **The C programs.** There is one C file for each file in src/rsp:
+  - RSPs: tmp.c, clock.c, echo.c and cache.c (CACHE.RSP has no source;
+    cache.c follows its disassembly, docs/bugs.md #124).
+  - Transients: submit.c and random.c.
+
+  Each program's data segment is one packed, initialized C object laid
+  out as the .A86's DSEG. Its field offsets are static-asserted against
+  the assembler's symbols (rsp/gen_syms.py → obj/rsp/rsp_syms.h).
+  `rt_rsp_images` installs the four RSP images over the assembled RSPs
+  before INIT runs. It keeps rsp_link, the start IP:CS and
+  u_initcs..u_initss, and reports "C image identical" or the first
+  difference. It takes MPMSTAT (PL/M, no C version) out of the RSP
+  chain. A transient installs its own image above the base page when it
+  starts (`rsp_install_transient`).
+- **CACHE.** cache.c hooks `rt_xiosmod` and writes the bytes the binary
+  writes: its DS at CS:0, the old XIOS entry at CS:2, and SYSDAT's
+  xiosmod = CS:0038. Verified in QEMU: 1920:0038, with 193Ah and
+  15D7:00F7 at 1920:0000, the same as /src.
+- **Tests.**
+  - tests/src-c/test_rsp_images.py compares all six C images (from the
+    compiled .o) with the assembled data segments, byte for byte; only
+    an RSP's start IP may differ.
+  - test_tmp/echo/clock/submit/random.py run each whole program both as
+    the .A86 (in i86sim) and as its src-c/rsp C version (on the host,
+    fixtures/rt_host.c standing in for src-c/rt), against one scripted
+    MP/M (tests/src-c/rspref.py). They compare the system calls, the
+    output and memory. These replaced the one-pass partial ports
+    src-c/kernel/{tmp,echo,clock,submit}.c and their tests.
+  - test_boot.py checks the four "identical" lines, TMP's version
+    message and the `0A>` prompt.
+- **The BDOS.** BDOSIF.BDO's `getdiskmx` is ported (bdosif.c):
+  - the MXdisk queue, with pf_tempkeep held across the call;
+  - the UDA <-> BDOS state copies and the DMA reload;
+  - the SHELL, for multi-sector and test-and-write;
+  - CALL_BDOS / BDOS_RETURN;
+  - PARUNSAVE;
+  - the ^C terminate.
+
+  GOBACK, the BDOS's non-local error exit (`mov sp,save_sp`), is
+  `__builtin_setjmp`/`__builtin_longjmp`. It is armed only inside a real
+  call and built only for kernel.elf, so the host tests, which call BDOS
+  functions directly, carry on as before. The BDOS's own exits are
+  hooks (defs.h):
+  - `bdos_set_xiosif`: SELDSK, HOME, SETTRK, SECTRAN, SETSEC, SETDMA,
+    SETDMAB, READ, WRITE, FLUSH;
+  - `bdos_set_mpmif`: getdiskmx's queue calls, and REPORT_ERR's and
+    DISKRESET's messages (now ported).
+
+  The internal BDOS stack switch has no C equivalent: the call runs on
+  the process's own stack. Also new are FUNC27, 28, 31 and 100-106;
+  FUNC38, 39, 41 and 47 are FUNCRET.
+- **The calls into the BDOS.** The CLI's f_fopen/f_fclose
+  (`cli_set_bdos`), LOAD's f_freadseq (`load_set_readseq`), terminate's
+  f_bdosterm and f_qread(MXmem) (`abort_set_mpmif`), and the CLI's
+  f_createproc/f_terminate (`command_set_mpmif`) are all real calls in
+  kernel.elf. The runtime sets u_func on every call (SUPIF's `func`), so
+  the BDOS sees the function number (FX).
+- **Bugs this turned up** (all C-port deviations; the asm is right):
+  - `rddirbuf` didn't fall through into `setdata`, so every directory
+    read left the DMA on the directory buffer;
+  - `initialize` passed `cl = 1` for true: the checksum vector was never
+    filled, and the first check set the drive R/O;
+  - `single` was stored as 1, not 0FFh;
+  - `selectdisk` didn't copy the DPH's addlist;
+  - FUNC40's zero fill wrote over the `buffa` *pointer* (and the fields
+    after it) instead of the buffer, and ignored wflag;
+  - CLOSE: `get_dir_ext` returned its disk-map scan pointer instead of
+    .fcb(ext), so close stored the extent number over the last block;
+    and `merge_byte` compared against the old directory byte, so a new
+    block always failed the merge;
+  - SET_PW0 encrypted from a fixed offset (wrong for FUNC106);
+  - `f_bdosterm` was 12Eh, not 52Eh;
+  - the CLI never created its process (f_createproc was a no-op).
+  - In the runtime, a terminating process's context could be resumed by
+    the next process given the same PD.
+- **What works.** In QEMU, kernel.elf with the floppy runs:
+  - TMP, ECHO, USER, PRINTER, X:, and the CLI's errors;
+  - SUBMIT.CMD, loaded from the disk: it runs a .SUB with $n arguments
+    and built-ins;
+  - RANDOM.CMD: make, random write, write with zero fill, random read,
+    close. The file is on the image afterwards.
+
+  CACHE caches drive A's directory (its table entry goes valid).
+  tests/src-c/test_kernel_disk.py runs all of this.
+
 ## Status
 
 | File | Routines ported | Routines deferred (and why) |
@@ -861,10 +968,10 @@ from 1694h to 1695h; `kernel_main.c` follows. (Then 1697h: docs/bugs.md
 | `src/kernel/DSPTCH.RTM` | `fdisp`, `int_disp_exit`, `farpdisp`/`pdisp`, `dsptch` (+ internal `insert_process`, `schedule`, `switch_`, and the whole `dsp_table` dispatch: `disp_act`/`poll_act`/`delay_act`/`swap_act`/`term_act`/`sleep_act`/`flag_act`) | — (the whole file is ported, but **as a reading/debugging aid for the live scheduler-hang investigation, #83-#98, not a kernel-build component** — see the file's own header comment; a real interrupt return and a real context switch's register/stack resumption have no C equivalent, modeled as explicit output parameters instead; needed two more `tools/i86sim.py` fixes, `SS`-aware `PUSH`/`POP` and a `CS`-base fix for near indirect `CALL r/m16`/`JMP r/m16` — see #103) Runs on real memory, see "Real pointers: the RTM, stage 1" |
 | `src/kernel/PARSE.SUP` | `parse_entry` (+ internal `setfld`/`delim`/`deblank`/`fcbinit`) | — Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
 | `src/kernel/RPL.SUP` | `rpl_entry` | — (the file's one routine is ported, but collapses to its single deterministic `rpl_err` outcome under the boundary-stub convention — `mpmif(f_qopen)`'s own function code, MODFUNC.DEF's `(user*0100h)+135`, is never 0, so `cmp cx,0 ! jne rpl_err` is always taken; the real success path — a hand-built fake far-return stack frame and a `retf` transferring control into a queue-delivered RSP entry point, with no C equivalent at all — is provably unreachable, same reasoning as `CONSOLE.CIO`'s/`CPMMEM.MEM`'s own unreachable branches, see `src-c/kernel/rpl.c`'s own header comment) Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
-| `src/rsp/ECHO.A86` | `main`/`loop` (one full pass — see below) | — Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
-| `src/rsp/CLOCK.A86` | `clockloop` (one full pass — see below) | — (`clock`'s one-time setup, `mov ds,sysdat ! mov bx,tod_offset`, is the state `clockloop` runs under: DS = SYSDAT, BX -> tod) Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
-| `src/rsp/TMP.A86` | `nextcommand_once` (one full pass through `nextcommand:`/`clicall:`/`goodparse:`/`try_builtin:`/`not_builtin:`/`clierror:`) | `tmp:`'s one-time setup — console/disk/user calls and the banner, no memory effect; the console/disk/user/list calls inside the loop are boundaries (f_parsefilename and the CLI call are real) Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
-| `src/rsp/SUBMIT.A86` | `deblank`+`fill_argtable` (unlabeled code after `submit:`'s own `call openfile`), `expand_command`, `readbuffer`, `readchar`, `topofcmdloop_once` (one full pass through `topofcmdloop:` to `getnxtcmd`/`submitexit`, including the USER/PRINTER/`$INCLUDE` builtins and the CLI call) | `submit:`'s one-time version-check/PD/priority/DMA/FCB-open setup — system calls whose results the tests preset; conin/getdefdisk/get user code and the SUB file's open/read are boundaries whose results are parameters. Bad-parse scan bug fixed in the asm, docs/bugs.md #110 Runs on real memory, see "Real pointers: the SUP, the RSPs and the XIOS, stage 7" |
+| `src/rsp/ECHO.A86` | the whole program, `src-c/rsp/echo.c` | — (tests/src-c/test_echo.py) |
+| `src/rsp/CLOCK.A86` | the whole program, `src-c/rsp/clock.c` | — (tests/src-c/test_clock.py) |
+| `src/rsp/TMP.A86` | the whole program, `src-c/rsp/tmp.c` | — (tests/src-c/test_tmp.py) |
+| `src/rsp/SUBMIT.A86` | the whole program, `src-c/rsp/submit.c` | — (tests/src-c/test_submit.py) |
 | `src/kernel/CIOIF.CIO` | `init` and `entry` (inter-module CIO dispatch -- `src-c/kernel/cioif.c`; `tests/src-c/test_cioif_entry.py` runs it against the whole real `src/kernel/CIO.A86`) | — (the whole file is ported) Runs on real memory, see "Real pointers: the CIO module, stage 5" |
 | `src/kernel/RTMIF.RTM` | `init` and `entry` (21-way inter-module RTM dispatch -- `src-c/kernel/rtmif.c`; `tests/src-c/test_rtmif_entry.py` runs it against the whole real `src/kernel/RTM.A86`) | — (the whole file is ported now; 20 of the 21 dispatched targets' own `bx`/`cx`/etc. and memory effects are independently verified through this dispatcher, with the dispatcher (`dsptch`/`pdisp`) and `proc_creat` stubbed at their real addresses. `creat_proc_entry` (case 14) is dispatch-only: the C port's own `creat_proc_entry` runs the real `proc.c`/`dsptch.c`, which a stubbed reference can't match — same "known, documented gap" class as `MEMIF.MEM`'s own `entry` row above; see `test_rtmif_entry.py`'s header comment). `init` and `entry` both run on real memory, see "Real pointers: `rtmif_init`" and "Real pointers: the RTM, stage 3" |
 | `src/kernel/MEMIF.MEM` | `init` and `entry` (inter-module MEM dispatch, wrapped in a real binary-semaphore acquire/release -- `src-c/kernel/memif.c`; `tests/src-c/test_memif_entry.py` runs it against the whole real `src/kernel/MEM.A86`, with the targets' own nested `mpmif` calls re-entering the real `entry`) | — (the whole file is ported; all 13 dispatched functions are checked end to end through this dispatcher, along with the mutex state and the reference's boundary calls) Runs on real memory, see "Real pointers: the MEM module, stage 4" |

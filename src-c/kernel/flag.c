@@ -30,6 +30,8 @@
 
 #include "defs.h"
 
+DSPTCH_HOOK(flag) /* call dsptch, inside the RTM (defs.h) */
+
 typedef struct {
     uint16_t bx, cx;
 } flag_bxcx;
@@ -109,7 +111,7 @@ flag_bxcx flag_wait_entry(uint8_t *phys, uint16_t sysdat, uint8_t dl) {
     if (bx == flag_off) {
         seg_w8(sd, (uint16_t)(seg_r16(sd, SYSDAT_RLR) + p_stat), ps_flagwait);
         seg_w16(far_ptr(phys, rlr_uda(sd), 0), u_dparam, si);
-        /* call dsptch -- boundary stub, modeled as an instant no-op return */
+        DSPTCH(flag, phys, sysdat, 0); /* call dsptch: wait for the set */
         return flag_exit();
     }
     /* fw_noff: someone else is already waiting on this flag */

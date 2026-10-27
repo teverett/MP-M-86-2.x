@@ -247,7 +247,11 @@ uint8_t searchn_list(uint8_t *phys, uint16_t ds_bdos, uint8_t ch) {
 
 extern void move(uint8_t *phys, uint16_t ds_bdos, uint16_t dx, uint16_t bx, uint8_t cl);
 extern uint16_t test_vector(uint8_t *phys, uint16_t ds_bdos, uint16_t dx);
-extern void selectdisk(uint8_t *phys, uint16_t ds_bdos);
+extern uint8_t selectdisk(uint8_t *phys, uint16_t ds_bdos, uint8_t dl);
+extern void setdata(uint8_t *phys, uint16_t ds_bdos);
+extern void setdir(uint8_t *phys, uint16_t ds_bdos);
+extern void initialize(uint8_t *phys, uint16_t ds_bdos);
+extern uint16_t setcdisk(uint8_t *phys, uint16_t ds_bdos, uint16_t cx);
 extern void selerror(uint8_t *phys, uint16_t ds_bdos);
 extern void openx06(uint8_t *phys, uint16_t ds_bdos);
 extern void set_aret(uint8_t *phys, uint16_t ds_bdos, uint8_t al);
@@ -466,22 +470,34 @@ void pr_term(uint8_t *phys, uint16_t ds_bdos) {
 
 /*
  * select_ -- SELECT: select the disk at BD_SELDSK for subsequent I/O.
- * `selectdisk`'s own real BDOS-disk-header lookup is a fixed, always-
- * failing boundary stub (see `file1.c`'s own header comment on it,
- * and `curselect`'s own below) -- under that convention this always
- * ends in `selerror`. The rest of `SELECT`'s own real body (logging
- * the drive in for real, re-initializing it, and the final `jmp
- * initialize`) is real, well-shaped code that's simply never reached
- * under that fix, same class as `selectdisk`'s own documented
- * unreachable success path -- not translated further, same choice
- * `command.c`'s own `cli_gopen` makes for an analogous "stop right
- * past the last real boundary" case.
+ * If it isn't logged in yet, log it in (dlog; rlog too if its
+ * checksum vector says it's removable) and initialize it.
+ * `selectdisk` fails when the XIOS has no such drive (and always with
+ * no XIOS hook, the host tests): selerror, which doesn't return in a
+ * real BDOS call.
  */
 static void select_(uint8_t *phys, uint16_t ds_bdos) {
     uint8_t *ds = far_ptr(phys, ds_bdos, 0);
-    (void)test_vector(phys, ds_bdos, seg_r16(ds, BD_DLOG)); /* dl = 1 if drive logged in */
-    selectdisk(phys, ds_bdos);
-    selerror(phys, ds_bdos);
+    uint8_t dl = (uint8_t)test_vector(phys, ds_bdos, seg_r16(ds, BD_DLOG)); /* dl = 1 if drive logged in */
+    if (!selectdisk(phys, ds_bdos, dl)) {
+        selerror(phys, ds_bdos);
+        return;
+    }
+    if (dl & 1) { /* logged in: rem_drv from rlog */
+        seg_w8(ds, BD_REM_DRV, (uint8_t)test_vector(phys, ds_bdos, seg_r16(ds, BD_RLOG)));
+        return;
+    }
+    /* not logged in: set its bit and initialize */
+    seg_w16(ds, BD_DLOG, setcdisk(phys, ds_bdos, seg_r16(ds, BD_DLOG)));
+    uint8_t al = 0;
+    if (!(seg_r8(ds, (uint16_t)(BD_CHKSIZ + 1)) & 0x80)) {
+        /* high order bit of the checksum vector size is zero: the
+         * drive is removable */
+        seg_w16(ds, BD_RLOG, setcdisk(phys, ds_bdos, seg_r16(ds, BD_RLOG)));
+        al = 1;
+    }
+    seg_w8(ds, BD_REM_DRV, al);
+    initialize(phys, ds_bdos);
 }
 
 /*
@@ -890,6 +906,20 @@ void parsave(uint8_t *phys, uint16_t ds_bdos, uint8_t cl) {
     }
 }
 
+/* parunsave -- copy the local parameter block back to the user's
+ * segment (BDOSIF.BDO), unless the SHELL is running */
+void parunsave(uint8_t *phys, uint16_t ds_bdos) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    if (seg_r8(ds, BD_SHELL_FLAG)) return; /* parret */
+    uint8_t cl = seg_r8(ds, BD_PARLG);
+    uint8_t *user = far_ptr(phys, seg_r16(ds, BD_PARAMETERSEGMENT), 0);
+    uint16_t di = seg_r16(ds, BD_INFOSAVE);
+    seg_w16(ds, BD_INFO, di);
+    for (uint8_t i = 0; i < cl; i++) {
+        seg_w8(user, (uint16_t)(di + i), ds[(uint16_t)(BD_LOC_PAR_AREA + i)]);
+    }
+}
+
 /* parsave33 -- BDOSIF.BDO's own `parsave33`: parsave a 33-byte fcb */
 void parsave33(uint8_t *phys, uint16_t ds_bdos) {
     parsave(phys, ds_bdos, 33);
@@ -1286,12 +1316,15 @@ dskwr1:
     atran(phys, ds_bdos);
 
 diskwr10:
-    if (seg_r8(ds, BD_SEQIO) == 2) {
-        /* random write with zero fill (FUNC40) */
+    if (seg_r8(ds, BD_SEQIO) == 2 && seg_r8(ds, BD_WFLAG) == 2) {
+        /* random write with zero fill (FUNC40), new allocation: zero
+         * the directory buffer (at buffa, the address it holds) and
+         * write it over the whole block */
+        uint16_t buf = seg_r16(ds, BD_BUFFA);
         for (int i = 0; i < 128; i++) {
-            seg_w8(ds, (uint16_t)(BD_BUFFA + i), 0);
+            seg_w8(ds, (uint16_t)(buf + i), 0);
         }
-        /* call setdir -- boundary stub, no-op */
+        setdir(phys, ds_bdos);
         uint16_t saved_arecord = seg_r16(ds, BD_ARECORD);
         uint16_t bx = seg_r16(ds, BD_ABLOCK);
         for (;;) {
@@ -1308,7 +1341,7 @@ diskwr10:
         }
         seg_w16(ds, BD_ARECORD, saved_arecord);
         seg_w8(ds, BD_WFLAG, 2);
-        /* call setdata -- boundary stub, no-op */
+        setdata(phys, ds_bdos);
     }
 
     seek(phys, ds_bdos);
@@ -1401,7 +1434,7 @@ uint8_t chk_xfcb_password1(uint8_t *phys, uint16_t ds_bdos, uint16_t bx, uint8_t
  * `file3.c`) is not modeled -- the zero-fill's own start address is
  * recomputed directly instead.
  */
-static void init_xfcb0(uint8_t *phys, uint16_t ds_bdos, uint8_t ch, uint8_t cl) {
+void init_xfcb0(uint8_t *phys, uint16_t ds_bdos, uint8_t ch, uint8_t cl) {
     uint8_t *ds = far_ptr(phys, ds_bdos, 0);
     uint16_t bx = getdptra(phys, ds_bdos);
     uint16_t si = seg_r16(ds, BD_INFO);
@@ -1431,11 +1464,20 @@ void init_xfcb(uint8_t *phys, uint16_t ds_bdos) {
  *		*bx_out = bx+1 (the real asm's own final `bx`, its own
  *		xfcb(13) checksum-byte address)
  */
+uint8_t set_pw0(uint8_t *phys, uint16_t ds_bdos, uint16_t saved_bx, uint16_t si, uint16_t src,
+                uint16_t *bx_out);
+
 uint8_t set_pw(uint8_t *phys, uint16_t ds_bdos, uint16_t bx, uint16_t *bx_out) {
     uint8_t *ds = far_ptr(phys, ds_bdos, 0);
-    uint16_t saved_bx = bx;
-    uint16_t si = (uint16_t)(bx + 11);
-    uint16_t src = seg_r16(ds, BD_XDMAAD);
+    return set_pw0(phys, ds_bdos, bx, (uint16_t)(bx + 11), seg_r16(ds, BD_XDMAAD), bx_out);
+}
+
+/* SET_PW0: copy the 8 characters at src backwards from si, the mode
+ * byte at saved_bx zeroed if they're a null password, and encrypt them
+ * (FUNC106 enters here for the default password) */
+uint8_t set_pw0(uint8_t *phys, uint16_t ds_bdos, uint16_t saved_bx, uint16_t si, uint16_t src,
+                uint16_t *bx_out) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
     uint8_t ch = 0;
     uint8_t ah = 0;
     for (uint8_t cl = 8; cl > 0; cl--) {
@@ -1451,7 +1493,7 @@ uint8_t set_pw(uint8_t *phys, uint16_t ds_bdos, uint16_t bx, uint16_t *bx_out) {
     if ((uint8_t)(ah | ch) == 0) {
         ds[saved_bx] = ah; /* ah==0 here -- zero password mode */
     }
-    si = (uint16_t)(saved_bx + 4);
+    si = (uint16_t)(si + 1); /* set_pw3: back to the first character */
     for (uint8_t cl = 8; cl > 0; cl--) {
         ds[si] = (uint8_t)(ds[si] ^ ch);
         si++;
@@ -1464,8 +1506,8 @@ uint8_t set_pw(uint8_t *phys, uint16_t ds_bdos, uint16_t bx, uint16_t *bx_out) {
  * diskreset -- DISKRESET: for each disk bit set in BD_INFO, check
  * whether some other process has a file open on it in a removable/
  * read-only-forced way; if so, report "denied" (`BD_ARET=0xFFFF`,
- * the denied-process display itself a boundary-stub no-op, see
- * `file1.c`'s own header comment on `XCRLF`/`XPRINT`) and stop.
+ * printing "Disk reset denied" with the drive, console and process
+ * unless the error mode is 0FFh) and stop.
  * Otherwise bump `BD_TLOG` with the disks actually reset.
  *	output: returns 1 only when there was nothing open anywhere to
  *		begin with (`BD_OPEN_ROOT==0`) -- `FILE4.BDO`'s own
@@ -1485,12 +1527,19 @@ uint8_t set_pw(uint8_t *phys, uint16_t ds_bdos, uint16_t bx, uint16_t *bx_out) {
  * calls into `TEST_VECTOR1`/`SET_CDISK1` (`file1.c`), which don't --
  * see that file's own header comment -- so no new differential test.
  */
+uint8_t intrnl_disk_reset(uint8_t *phys, uint16_t ds_bdos, uint16_t bx);
+
 uint8_t diskreset(uint8_t *phys, uint16_t ds_bdos) {
     uint8_t *ds = far_ptr(phys, ds_bdos, 0);
     seg_w16(ds, BD_NTLOG, 0);
     seg_w8(ds, BD_SET_RO_FLAG, 0);
-    uint16_t bx = seg_r16(ds, BD_INFO);
+    return intrnl_disk_reset(phys, ds_bdos, seg_r16(ds, BD_INFO));
+}
 
+/* intrnl_disk_reset -- DISKRESET's body, for the drives in bx (FUNC28
+ * enters here too, with set_ro_flag on) */
+uint8_t intrnl_disk_reset(uint8_t *phys, uint16_t ds_bdos, uint16_t bx) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
     if (seg_r16(ds, BD_OPEN_ROOT) == 0) {
         return 1; /* retl8 */
     }
@@ -1546,7 +1595,7 @@ dskrst1:
                 uint16_t pd = seg_r16(ds, (uint16_t)(conflict_item + 6));
                 seg_w8(ds, BD_DENIEDCNS, (uint8_t)(ds[(uint16_t)(pd + p_cns)] + 0x30));
                 move(phys, ds_bdos, (uint16_t)(pd + p_name),(BD_DENIEDPRC), 8);
-                /* call xprint -- boundary stub, no-op */
+                (void)MPMIF(bdos, phys, ds_bdos, f_conprint, BD_DENIEDMSG, 0, ds_bdos); /* call xprint */
             }
             seg_w16(ds, BD_ARET, 0xFFFF);
             return 0; /* dskrst7 */
@@ -1829,7 +1878,7 @@ void setrandom(uint8_t *phys, uint16_t ds_bdos, uint16_t base) {
  * incr_rr -- BDOSIF.BDO's own INCR_RR: increment the current fcb's
  * own 3-byte `ranrec` field by 1 (word + carry into the high byte).
  */
-static void incr_rr(uint8_t *phys, uint16_t ds_bdos) {
+void incr_rr(uint8_t *phys, uint16_t ds_bdos) {
     uint8_t *ds = far_ptr(phys, ds_bdos, 0);
     uint16_t bx = get_rra(phys, ds_bdos);
     uint16_t val = (uint16_t)(seg_r16(ds, bx) + 1);
@@ -1845,11 +1894,11 @@ static void incr_rr(uint8_t *phys, uint16_t ds_bdos) {
  * DATA.BDO scratch field (confirmed via `--symbols`, not a new
  * scratch choice).
  */
-static void save_rr(uint8_t *phys, uint16_t ds_bdos) {
+void save_rr(uint8_t *phys, uint16_t ds_bdos) {
     move(phys, ds_bdos, get_rra(phys, ds_bdos),(BD_SHELL_RR), 3);
 }
 
-static void reset_rr(uint8_t *phys, uint16_t ds_bdos) {
+void reset_rr(uint8_t *phys, uint16_t ds_bdos) {
     move(phys, ds_bdos, (BD_SHELL_RR), get_rra(phys, ds_bdos), 3);
 }
 

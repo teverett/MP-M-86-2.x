@@ -44,6 +44,7 @@ typedef void (*io_out8_fn)(uint16_t port, uint8_t value);
 
 extern void init_entry(uint8_t *phys, uint16_t sysdat, io_in8_fn io_in8, io_out8_fn io_out8);
 extern void xios_conout_entry(io_in8_fn io_in8, io_out8_fn io_out8, uint8_t cl);
+extern void rt_boot(void);
 extern void sup_init(uint8_t *phys, uint16_t ds_sysdat, uint16_t cs,
                      uint16_t notick_offset, uint16_t idle_offset,
                      uint16_t user_entry_offset);
@@ -146,7 +147,6 @@ void kernel_main(void) {
         puts_con(")\r\n");
     }
 
-    for (;;) {
-        __asm__ volatile("hlt");
-    }
+    /* then run MP/M-86 itself on the C kernel (src-c/rt/rt.c) */
+    rt_boot();
 }

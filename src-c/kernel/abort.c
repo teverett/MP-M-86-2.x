@@ -61,6 +61,8 @@ typedef struct {
     uint16_t bx, cx;
 } term_bxcx;
 
+MPMIF_HOOK(abort)
+
 extern void rlsmx(uint8_t *phys, uint16_t sysdat, uint16_t si);
 extern uint16_t findpdname_entry(uint8_t *phys, uint16_t sysdat, uint16_t bx, uint16_t dx, uint16_t *cx_out);
 
@@ -137,14 +139,18 @@ term_bxcx terminate_entry(uint8_t *phys, uint16_t sysdat, uint16_t dx) {
 
     rlsmx(phys, sysdat, seg_r16(sd, SYSDAT_RLR));
     seg_w8(far_ptr(phys, rlr_uda(sd), 0), u_error_mode, 0xFE);
-    /* mpmif(f_bdosterm), mpmif(f_qread, mxmemqpb) -- boundary stubs, no
-     * real effect, but CX is left holding f_qread's own value: nothing
-     * resets it before the real asm's own "jmp dsptch" */
+    /* the BDOS releases the process's files and locks (PR_TERM); then
+     * take the MXmem queue for term_act's memory release. CX is left
+     * holding f_qread's result: nothing resets it before the real asm's
+     * own "jmp dsptch". (No hook: f_qread itself.) */
+    (void)MPMIF(abort, phys, sysdat, f_bdosterm, dx, 0, sysdat);
+    mpm_regs q = MPMIF(abort, phys, sysdat, f_qread, SYSDAT_MXMEMQPB, 0, sysdat);
+    uint16_t cx = abort_mpmif ? q.cx : f_qread;
     bx = seg_r16(sd, SYSDAT_RLR);
     seg_w16(sd, SYSDAT_MXMEMOWNER, bx);
     seg_w8(sd, SYSDAT_MXMEMCOUNT, 1);
     seg_w8(sd, (uint16_t)(bx + p_stat), ps_term);
-    return (term_bxcx){bx, f_qread};
+    return (term_bxcx){bx, cx};
 }
 
 uint16_t sysreset_entry(uint8_t *phys, uint16_t sysdat) {

@@ -10411,3 +10411,36 @@ include-file fixes got rebuilt only because build_mpmsys.py changed in
 the same step.) **Patched**: `KERNEL_SRC := $(wildcard kernel/*)` is a
 dependency of both.
 
+
+## 128. src-c: the BDOS connected (getdiskmx) — C-port bugs FIXED
+
+**Request.** "Connect the BDOS getdiskmx." kernel.elf's BDOS calls that
+used the disk returned "not connected". Now getdiskmx, the SHELL,
+CALL_BDOS/BDOS_RETURN, GOBACK, REPORT_ERR and the BDOS's XIOS calls are
+ported. See docs/src-c.md, "Running the port".
+
+Running the C SUBMIT and RANDOM from the floppy turned up these bugs.
+All are in the C port; the asm in /src is correct, so nothing changed
+there.
+- `rddirbuf` didn't fall through into `setdata`.
+- `initialize` passed 1, not 0FFh, as "true" to rddir: the checksum
+  vector was never filled, and the drive went R/O.
+- `single` was set to 1, not 0FFh.
+- `selectdisk` didn't copy the DPH's addlist into buffa..alloca.
+- FUNC40's zero fill zeroed the `buffa` word (and DATA.BDO after it), not
+  the buffer, and ignored `wflag`.
+- `get_dir_ext` returned the disk-map scan pointer, not .fcb(ext).
+- `merge_byte` compared against the pre-merge directory byte.
+- SET_PW0 encrypted from a fixed offset.
+- `f_bdosterm` was 12Eh (SUP), not 52Eh (BDOS).
+- The CLI's f_createproc/f_terminate were no-ops.
+- The runtime could resume a terminated context for a new process with
+  the same PD.
+
+**Tests:**
+- test_bdosif.py now runs getdiskmx itself against BDOSIF.BDO: seven
+  cases, comparing the image and the mpmif/XIOS call sequence
+  (fixtures/bdos_hooks.c).
+- New test_kernel_disk.py boots kernel.elf on the floppy and runs SUBMIT
+  and RANDOM, then checks the file RANDOM wrote on the image.
+- All 57 test files pass.

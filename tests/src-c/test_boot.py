@@ -8,11 +8,13 @@ serial output. At boot, src-c/boot/kernel_main.c runs the real ported
 XIOS (init_entry, xios_conout_entry) and the real ported system
 initialization (sup_init) against real low memory, then reads every
 field sup_init should have written back from memory and reports
-"sup_init: ok" or which field was wrong. This is not /src's own real
-MP/M-86 boot chain, and the rest of the ported kernel above the XIOS
-still isn't called -- see src-c/boot/boot.s's own header comment for
-why 32-bit protected mode is a different execution model from
-MP/M-86's own real 16-bit one.
+"sup_init: ok" or which field was wrong. Then src-c/rt runs the whole
+ported kernel as MP/M with the C RSPs (src-c/rsp/): this checks that
+each C RSP image matched the assembled one, and that the C TMP prints
+the version and its prompt. This is not /src's own real MP/M-86 boot
+chain -- see src-c/boot/boot.s's own header comment for why 32-bit
+protected mode is a different execution model from MP/M-86's own real
+16-bit one.
 
 Needs i686-elf-gcc/i686-elf-ld/i686-elf-grub-file and
 qemu-system-i386 on PATH -- not part of this project's own from-
@@ -36,6 +38,13 @@ SIGNONS = (
     ("XIOS86Q init_entry signon", b"MP/M-86 XIOS86Q -- QEMU target (serial console, floppy disk)"),
     ("pipeline signon via xios_conout_entry", b"MP/M-86 src-c image-builder: pipeline ok"),
     ("sup_init on real memory, all fields verified", b"sup_init: ok"),
+    # src-c/rt runs the kernel as MP/M, with src-c/rsp's C RSPs
+    ("C TMP image installed", b"rt: Tmp      data segment: C image identical"),
+    ("C CLOCK image installed", b"rt: CLOCK    data segment: C image identical"),
+    ("C ECHO image installed", b"rt: ECHO     data segment: C image identical"),
+    ("C CACHE image installed", b"rt: Cachinit data segment: C image identical"),
+    ("C TMP prints the version", b"MP/M-86 2.0 [5 Oct 81]"),
+    ("C TMP prompts", b"0A>"),
 )
 
 

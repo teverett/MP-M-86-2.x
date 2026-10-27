@@ -202,7 +202,15 @@ extern void close1(uint8_t *phys, uint16_t ds_bdos);
 extern void delete_item(uint8_t *phys, uint16_t ds_bdos, uint16_t bx);
 extern void remove_locks(uint8_t *phys, uint16_t ds_bdos, uint16_t bx);
 extern void stamp2(uint8_t *phys, uint16_t ds_bdos);
-extern uint8_t diocomp(uint8_t *phys, uint16_t ds_bdos);
+extern uint8_t diocomp(uint8_t *phys, uint16_t ds_bdos, uint8_t al);
+extern void report_err(uint8_t *phys, uint16_t ds_bdos, uint16_t bx);
+extern void xcurselect(uint8_t *phys, uint16_t ds_bdos);
+extern uint8_t intrnl_disk_reset(uint8_t *phys, uint16_t ds_bdos, uint16_t bx);
+extern void setro(uint8_t *phys, uint16_t ds_bdos);
+extern void parsave(uint8_t *phys, uint16_t ds_bdos, uint8_t cl);
+extern void parunsave(uint8_t *phys, uint16_t ds_bdos);
+extern uint8_t set_pw0(uint8_t *phys, uint16_t ds_bdos, uint16_t saved_bx, uint16_t si, uint16_t src,
+                       uint16_t *bx_out);
 extern void curselect(uint8_t *phys, uint16_t ds_bdos);
 extern uint8_t search(uint8_t *phys, uint16_t ds_bdos, uint8_t cl);
 extern uint16_t getexta(uint8_t *phys, uint16_t ds_bdos);
@@ -355,15 +363,31 @@ uint16_t func52_entry(uint8_t *phys, uint16_t ds_bdos, uint16_t *cx_out) {
 }
 
 /*
+ * GOBACK -- `mov sp,save_sp ! jmp bdos_return`: back out of the running
+ * BDOS function to CALL_BDOS's exit (bdosif.c sets the save point). It's
+ * armed only inside a real BDOS call, so the host tests, which call the
+ * functions directly, carry on as before. Built only for kernel.elf
+ * (i686 GCC's __builtin_setjmp/longjmp; the host's arm64 clang has
+ * neither), where one process at a time is in the BDOS (MXdisk).
+ */
+void *bdos_save_sp[5];
+int bdos_save_sp_armed;
+
+void bdos_goback(void) {
+#if BDOS_GOBACK
+    if (bdos_save_sp_armed) __builtin_longjmp(bdos_save_sp, 1);
+#endif
+}
+
+/*
  * set_aret -- SET_ARET: report a BDOS error (al = error index):
  * ARET's own high byte (the extended error code) is set to al, and
  * ARET's own low byte (BD_LRET) is forced to 0xFF (the generic
  * "failed" sentinel, via the real asm's own shared `LRET_EQ_FF`,
- * `src-c/kernel/file2.c`'s own `searchn`). Never returns normally to
- * its own caller -- either `jmp GOBACK` (if `BD_ERROR_MODE==0xFF`) or
- * the `REPORT_ERR` display tail (see this file's own header comment
- * for why that's not observable either way) -- so neither is
- * translated past the 2 writes below. Not `static`: `src-c/kernel/
+ * `src-c/kernel/file2.c`'s own `searchn`). Then GOBACK if the error
+ * mode is "return errors" (0FFh), else REPORT_ERR with the extended
+ * error's message (XERR_LIST, from error 3) -- neither returns in a
+ * real BDOS call. Not `static`: `src-c/kernel/
  * file3.c`'s own `chk_pw` also tail-calls it directly (with a
  * different error index than `openx06`'s own fixed 5), an ordinary
  * cross-file call, same as `que1.c`'s own into `que2.c`.
@@ -372,6 +396,12 @@ void set_aret(uint8_t *phys, uint16_t ds_bdos, uint8_t al) {
     uint8_t *ds = far_ptr(phys, ds_bdos, 0);
     seg_w8(ds, (uint16_t)(BD_ARET + 1), al);
     seg_w8(ds, BD_LRET, 0xFF);
+    if (seg_r8(ds, BD_ERROR_MODE) == 0xFF) {
+        bdos_goback(); /* return physical & extended errors */
+        return;
+    }
+    uint16_t cx = (uint16_t)((uint8_t)(al - 3) * 2);
+    report_err(phys, ds_bdos, seg_r16(ds, (uint16_t)(BD_XERR_LIST + cx)));
 }
 
 /*
@@ -693,16 +723,12 @@ open_user_zero:
 
 /*
  * func48 -- BDOS function 48, flush blocking/deblocking buffers:
- * `FLUSH` (`BDOSIF.BDO`) is itself a tail jump into the XIOS jump
- * table (`mov al,io_flush ! jmps xiosif`) -- a boundary stub, same
- * class as `file1.c`'s own `readf`/`writef`, no-op under this port's
- * convention. `DIOCOMP`'s own result is likewise fixed (see that
- * function's own header comment, `file1.c`), making its own
- * `pererror`/`roderror` branches unreachable here too.
+ * `FLUSH` (`BDOSIF.BDO`, `mov al,io_flush ! jmps xiosif`), then
+ * `DIOCOMP` on its result.
  */
 void func48(uint8_t *phys, uint16_t ds_bdos) {
-    /* call FLUSH -- boundary stub, no-op */
-    (void)diocomp(phys, ds_bdos);
+    uint8_t al = (uint8_t)XIOSIF(bdos, phys, ds_bdos, io_flush, 0, 0); /* call FLUSH */
+    (void)diocomp(phys, ds_bdos, al);
 }
 
 /*
@@ -1229,4 +1255,186 @@ void func43(uint8_t *phys, uint16_t ds_bdos) {
     uint8_t *ds = far_ptr(phys, ds_bdos, 0);
     seg_w8(ds, BD_LOCK_UNLOCK, 0);
     lock_(phys, ds_bdos, 0);
+}
+
+/* func27 -- return the login (allocation) vector address, in DS */
+void func27(uint8_t *phys, uint16_t ds_bdos) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    seg_w16(ds, BD_RETURNSEG, ds_bdos);
+    xcurselect(phys, ds_bdos);
+    seg_w16(ds, BD_ARET, seg_r16(ds, BD_ALLOCA)); /* sthlret */
+}
+
+/* func28 -- write protect the current disk, once no other process has
+ * files open on it (INTRNL_DISK_RESET; setro either way, as the asm) */
+void func28(uint8_t *phys, uint16_t ds_bdos) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    seg_w8(ds, BD_SET_RO_FLAG, 1);
+    uint16_t bx = (uint16_t)(1u << (seg_r8(ds, BD_SELDSK) & 0x1F)); /* drive vector from seldsk */
+    (void)intrnl_disk_reset(phys, ds_bdos, bx);
+    setro(phys, ds_bdos);
+}
+
+/* func31 -- return the address of the disk parameter block, in DS */
+void func31(uint8_t *phys, uint16_t ds_bdos) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    seg_w16(ds, BD_RETURNSEG, ds_bdos);
+    xcurselect(phys, ds_bdos);
+    seg_w16(ds, BD_ARET, seg_r16(ds, BD_DPBADDR)); /* sthlret */
+}
+
+/* FUNC101 -- return directory label data for drive dl */
+void func101(uint8_t *phys, uint16_t ds_bdos, uint8_t dl) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    tmp_select(phys, ds_bdos, dl);
+    seg_w8(ds, BD_LRET, get_dir_mode(phys, ds_bdos)); /* staret */
+}
+
+/* FUNC104 -- set the current date and time from the caller's 4 bytes
+ * (the seconds are zeroed) */
+void func104(uint8_t *phys, uint16_t ds_bdos) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    parsave(phys, ds_bdos, 4);
+    seg_w8(ds, BD_PARCOPFL, 0);
+    move(phys, ds_bdos, seg_r16(ds, BD_INFO), SYSDAT_TOD, 4);
+    seg_w8(ds, (uint16_t)(SYSDAT_TOD + 4), 0);
+}
+
+/* FUNC105 -- get the current date and time into the caller's 4 bytes */
+void func105(uint8_t *phys, uint16_t ds_bdos, uint16_t dx) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    seg_w16(ds, BD_INFOSAVE, dx);
+    seg_w16(ds, BD_INFO, BD_LOC_PAR_AREA);
+    move(phys, ds_bdos, SYSDAT_TOD, BD_LOC_PAR_AREA, 4);
+    seg_w8(ds, BD_PARLG, 4);
+    parunsave(phys, ds_bdos);
+}
+
+/* FUNC106 -- set the default password (stored backwards, encrypted) */
+void func106(uint8_t *phys, uint16_t ds_bdos) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    parsave(phys, ds_bdos, 8);
+    seg_w8(ds, BD_PARCOPFL, 0);
+    uint16_t bx = seg_r16(ds, BD_INFO);
+    uint16_t bx_out;
+    (void)set_pw0(phys, ds_bdos, bx, (uint16_t)(BD_DF_PASSWORD + 7), bx, &bx_out);
+}
+
+extern void copy_dma_in(uint8_t *phys, uint16_t ds_bdos, uint8_t cl);
+extern void reselectx(uint8_t *phys, uint16_t ds_bdos);
+extern void checkwrite(uint8_t *phys, uint16_t ds_bdos);
+extern uint8_t search(uint8_t *phys, uint16_t ds_bdos, uint8_t cl);
+extern void make(uint8_t *phys, uint16_t ds_bdos);
+extern uint8_t endofdir(uint8_t *phys, uint16_t ds_bdos);
+extern void init_xfcb(uint8_t *phys, uint16_t ds_bdos);
+extern void init_xfcb0(uint8_t *phys, uint16_t ds_bdos, uint8_t ch, uint8_t cl);
+extern void stamp1(uint8_t *phys, uint16_t ds_bdos);
+extern void stamp2(uint8_t *phys, uint16_t ds_bdos);
+extern uint8_t chk_xfcb_password1(uint8_t *phys, uint16_t ds_bdos, uint16_t bx, uint8_t al);
+extern uint8_t check_wild(uint8_t *phys, uint16_t ds_bdos);
+extern void seekcopy(uint8_t *phys, uint16_t ds_bdos);
+
+/* GET_XFCB1 -- the xfcb (or dir label) in the directory buffer: bx =
+ * .xfcb(ex), returns (xfcb(ex) & 0E0h) | 1 */
+static uint8_t get_xfcb1(uint8_t *phys, uint16_t ds_bdos, uint16_t *bx) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    *bx = (uint16_t)(getdptra(phys, ds_bdos) + fcb_extnum);
+    return (uint8_t)((ds[*bx] & 0xE0) | 1);
+}
+
+/* SDL2 .. SDL3: if the user's fcb(ex) asks for one (bit 0), assign the
+ * new password (from the second 8 bytes at the DMA) to the xfcb at bx
+ * (.xfcb(12)); then write the dir label or xfcb to the directory */
+static void sdl2(uint8_t *phys, uint16_t ds_bdos, uint16_t bx) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    if (ds[getexta(phys, ds_bdos)] & 1) {
+        seg_w16(ds, BD_XDMAAD, (uint16_t)(seg_r16(ds, BD_XDMAAD) + 8));
+        uint16_t sum_at;
+        uint8_t ch = set_pw(phys, ds_bdos, bx, &sum_at);
+        ds[sum_at] = ch; /* set the password checksum byte */
+        seg_w16(ds, BD_XDMAAD, (uint16_t)(seg_r16(ds, BD_XDMAAD) - 8));
+    }
+    seekcopy(phys, ds_bdos);
+}
+
+/* FUNC100 -- set the directory label from the user's fcb (its ex byte:
+ * 80h passwords, 40h access stamps, 20h update stamps, 01h assign a
+ * password to the label) */
+void func100(uint8_t *phys, uint16_t ds_bdos) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    copy_dma_in(phys, ds_bdos, 16);
+    parsave33(phys, ds_bdos);
+    reselectx(phys, ds_bdos);
+    checkwrite(phys, ds_bdos);
+    ds[seg_r16(ds, BD_INFO)] = 0x20; /* does a dir lbl exist on the drive? */
+    seg_w16(ds, BD_XDCNT, 0xFFFF);   /* initialized for make */
+    if (!search(phys, ds_bdos, 1)) {
+        seg_w8(ds, BD_MAKE_XFCB, 0xFF); /* no - make one */
+        make(phys, ds_bdos);
+        if (endofdir(phys, ds_bdos)) return; /* no directory space */
+        init_xfcb(phys, ds_bdos);
+        stamp1(phys, ds_bdos); /* create date and time stamp */
+    }
+    /* sdl1 */
+    stamp2(phys, ds_bdos); /* update date and time stamp */
+    uint16_t bx;
+    uint8_t al = get_xfcb1(phys, ds_bdos, &bx);
+    if (!chk_xfcb_password1(phys, ds_bdos, bx, al)) return; /* verify the password */
+    init_xfcb0(phys, ds_bdos, 0, 0); /* update the dir lbl name */
+    bx = (uint16_t)(getdptra(phys, ds_bdos) + 12);
+    al = (uint8_t)(ds[getexta(phys, ds_bdos)] | 1); /* the user's data byte, + "dir lbl exists" */
+    ds[bx] = al;
+    ds[seg_r16(ds, BD_DRVLBLA)] = al; /* the drive's dir lbl data byte */
+    sdl2(phys, ds_bdos, bx);
+}
+
+/* FUNC102 -- read a file's xfcb into the user's fcb */
+void func102(uint8_t *phys, uint16_t ds_bdos) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    parsave33(phys, ds_bdos);
+    reselectx(phys, ds_bdos);
+    if (!check_wild(phys, ds_bdos)) return;
+    get_xfcb_result r = get_xfcb(phys, ds_bdos); /* does an xfcb exist for the file? */
+    if (!r.found) {
+        seg_w8(ds, BD_LRET, 0xFF); /* no: staret */
+        return;
+    }
+    move(phys, ds_bdos, getdptra(phys, ds_bdos), seg_r16(ds, BD_INFO), fcb_nxtrec);
+}
+
+/* FUNC103 -- write or update a file's xfcb (password mode and
+ * password), making one if the drive has a dir label */
+void func103(uint8_t *phys, uint16_t ds_bdos) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    copy_dma_in(phys, ds_bdos, 16);
+    parsave33(phys, ds_bdos);
+    reselectx(phys, ds_bdos);
+    if (!check_wild(phys, ds_bdos)) return;
+    seg_w16(ds, BD_XDCNT, 0xFFFF); /* initialized for make */
+    get_xfcb_result r = get_xfcb(phys, ds_bdos);
+    if (!r.found) {
+        if (get_dir_mode(phys, ds_bdos) == 0) { /* no dir lbl */
+            seg_w8(ds, BD_LRET, 0xFF);
+            return;
+        }
+        seg_w8(ds, BD_MAKE_XFCB, 0xFF);
+        if (!search(phys, ds_bdos, fcb_extnum)) return; /* does the file exist? */
+        make(phys, ds_bdos);
+        if (endofdir(phys, ds_bdos)) return; /* no directory space */
+        init_xfcb(phys, ds_bdos);
+    }
+    /* wxfcb1: CHK_XFCB_PASSWORD */
+    uint16_t bx;
+    uint8_t al = (uint8_t)(get_xfcb1(phys, ds_bdos, &bx) - 1);
+    if (!chk_xfcb_password1(phys, ds_bdos, bx, al)) return;
+    uint16_t si = getexta(phys, ds_bdos);
+    if (ds[bx] == 0 && !(ds[si] & 1)) { /* password mode stays zero */
+        seekcopy(phys, ds_bdos);
+        return;
+    }
+    /* wxfcb2: the new password mode */
+    al = (uint8_t)(ds[si] & 0xE0);
+    if (al == 0) al = 0x80;
+    ds[bx] = al;
+    sdl2(phys, ds_bdos, bx);
 }

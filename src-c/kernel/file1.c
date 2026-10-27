@@ -99,41 +99,56 @@ void move(uint8_t *phys, uint16_t ds_bdos, uint16_t dx, uint16_t bx, uint8_t cl)
     }
 }
 
+void setdata(uint8_t *phys, uint16_t ds_bdos);
+void setdir(uint8_t *phys, uint16_t ds_bdos);
+
+/* BDOSIF.BDO's xiosif and mpmif, and GOBACK's target (bdosif.c) --
+ * see defs.h */
+xiosif_fn bdos_xiosif;
+mpmif_fn bdos_mpmif;
+void bdos_set_xiosif(xiosif_fn fn) { bdos_xiosif = fn; }
+void bdos_set_mpmif(mpmif_fn fn) { bdos_mpmif = fn; }
+
+/* the BDOS - XIOS interface (BDOSIF.BDO's homef, seldskf, ...): AL =
+ * the function, CX/DX its parameters; returns AX (= BX). With no XIOS
+ * hook (the host tests) every call returns 0, so SELDSK fails. */
+static uint16_t xios(uint8_t *phys, uint16_t ds_bdos, uint8_t al, uint16_t cx, uint16_t dx) {
+    return XIOSIF(bdos, phys, ds_bdos, al, cx, dx);
+}
+
+/* XCRLF/XPRINT (BDOSIF.BDO): print the string at DS:dx (cx for XPRINT) */
+static void xprint(uint8_t *phys, uint16_t ds_bdos, uint16_t dx) {
+    (void)MPMIF(bdos, phys, ds_bdos, f_conprint, dx, 0, ds_bdos);
+}
+static void xcrlf(uint8_t *phys, uint16_t ds_bdos) { xprint(phys, ds_bdos, BD_CRLFSTR); }
+
 /*
- * selectdisk -- select the disk drive given by BD_SELDSK. seldskf's
- * own boundary-stub result (bx) is fixed at 0 here, the same
- * undefined-artifact choice made throughout this file -- see header
- * comment -- which is the real routine's own *error* indication, so
- * this always "fails": curdsk is left at the 0xFF sentinel set below,
- * and the whole cdrmaxa..alloca/sectpt..offsetv header-copy plus the
- * real curdsk update are translated faithfully but never reached,
- * same class as CPMMEM.MEM's own unreachable allocation-success paths.
+ * selectdisk -- select the disk drive given by BD_SELDSK (dl: bit 0 =
+ * 0 if not logged in yet, for the XIOS), and fill cdrmaxa..alloca from
+ * its disk header and sectpt..offsetv from its DPB.
+ *	output: nonzero if the select worked (the asm's NZ)
  */
-void selectdisk(uint8_t *phys, uint16_t ds_bdos) {
+uint8_t selectdisk(uint8_t *phys, uint16_t ds_bdos, uint8_t dl) {
     uint8_t *ds = far_ptr(phys, ds_bdos, 0);
     seg_w8(ds, BD_CURDSK, 0xFF);
-    /* mov cl,seldsk!call seldskf -- boundary stub, bx fixed at 0, which
-     * is the real routine's own *error* indication ("bx = 0000 if
-     * error"), so "cmp bx,0!jz ret4" always takes the early-out here,
-     * leaving curdsk at the 0xFF set above -- the retselect-based
-     * success path below (which sets curdsk from BD_SELDSK) is the one
-     * that's unreachable under the convention, not this one; translated
-     * faithfully regardless */
-    uint16_t bx = 0;
+    uint16_t bx = xios(phys, ds_bdos, io_seldsk, seg_r8(ds, BD_SELDSK), dl); /* bx = 0000 if error */
     if (bx == 0) {
-        return; /* ret4 */
+        return 0; /* ret4 */
     }
-    /* unreachable under the convention -- translated faithfully */
-    uint16_t dx = seg_r16(ds, bx);
+    uint16_t dx = seg_r16(ds, bx); /* .tran */
     bx = (uint16_t)(bx + 2);
     seg_w16(ds, BD_CDRMAXA, bx);
     bx = (uint16_t)(bx + 2);
     seg_w16(ds, BD_DRVLBLA, bx);
     bx = (uint16_t)(bx + 4);
     seg_w16(ds, BD_TRANV, dx);
-    move(phys, ds_bdos, (seg_r16(ds, BD_DPBADDR)),(BD_SECTPT), 0x0F);
-    seg_w8(ds, BD_SINGLE, (seg_r8(ds, (uint16_t)(BD_MAXALL + 1)) == 0) ? 1 : 0);
-    seg_w8(ds, BD_CURDSK, seg_r8(ds, BD_SELDSK));
+    move(phys, ds_bdos, bx, BD_BUFFA, bd_addlist); /* addlist filled */
+    move(phys, ds_bdos, seg_r16(ds, BD_DPBADDR), BD_SECTPT, 0x0F); /* dpblist */
+    seg_w8(ds, BD_SINGLE, (seg_r8(ds, (uint16_t)(BD_MAXALL + 1)) == 0) ? 0xFF : 0);
+    /* retselect */
+    uint8_t al = seg_r8(ds, BD_SELDSK);
+    seg_w8(ds, BD_CURDSK, al);
+    return (uint8_t)(al + 1);
 }
 
 /*
@@ -141,7 +156,7 @@ void selectdisk(uint8_t *phys, uint16_t ds_bdos) {
  */
 void home(uint8_t *phys, uint16_t ds_bdos) {
     uint8_t *ds = far_ptr(phys, ds_bdos, 0);
-    /* call homef -- boundary stub, no-op */
+    (void)xios(phys, ds_bdos, io_home, 0, 0); /* call homef */
     seg_w16(ds, BD_DBLK, 0);
 }
 
@@ -154,76 +169,130 @@ static void pass_arecord(uint8_t *phys, uint16_t ds_bdos, uint16_t *dx_out, uint
     *ch_out = seg_r8(ds, BD_ARECORD_HI);
 }
 
+void pererror(uint8_t *phys, uint16_t ds_bdos);
+void roderror(uint8_t *phys, uint16_t ds_bdos);
+
 /*
- * diocomp -- check readf/writef's own result for disk errors
- *	output:	returns 0 (success) always -- see header comment
+ * diocomp -- check readf/writef's result (al) for disk errors: 2 is a
+ * read/only disk, anything else nonzero a permanent error (both GOBACK,
+ * so they don't return in a real BDOS call)
+ *	output:	returns al
  * Not `static`: `src-c/kernel/file4.c`'s own `func48` (BDOS flush)
  * also calls `DIOCOMP` directly, an ordinary cross-file call, same
  * as `que1.c`'s own into `que2.c`.
  */
-uint8_t diocomp(uint8_t *phys, uint16_t ds_bdos) {
-    (void)phys;
-    (void)ds_bdos;
-    return 0;
+uint8_t diocomp(uint8_t *phys, uint16_t ds_bdos, uint8_t al) {
+    if (al == 0) return 0; /* ret4 */
+    if (al == 2) roderror(phys, ds_bdos);
+    else pererror(phys, ds_bdos);
+    return al;
 }
 
-/* rdbuff -- read buffer and check if ok */
+/* rdbuff -- read buffer and check if ok: readf with ch:dx = arecord */
 void rdbuff(uint8_t *phys, uint16_t ds_bdos) {
     uint16_t dx;
     uint8_t ch;
     pass_arecord(phys, ds_bdos, &dx, &ch);
-    (void)dx;
-    (void)ch;
-    /* call readf -- boundary stub, no-op */
-    (void)diocomp(phys, ds_bdos);
+    uint8_t al = (uint8_t)xios(phys, ds_bdos, io_read, (uint16_t)(ch << 8), dx);
+    (void)diocomp(phys, ds_bdos, al);
 }
 
-/* wrbuff/wrbufflg -- write buffer and check condition */
-void wrbuff(uint8_t *phys, uint16_t ds_bdos) {
+/* wrbuff/wrbufflg -- write buffer and check condition; cl = the write
+ * type (0 normal, 1 directory, 2 start of a new block), or'd with
+ * rem_drv for the XIOS */
+void wrbuff(uint8_t *phys, uint16_t ds_bdos, uint8_t cl) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
     uint16_t dx;
     uint8_t ch;
     pass_arecord(phys, ds_bdos, &dx, &ch);
-    (void)dx;
-    (void)ch;
-    /* or cl,rem_drv!call writef -- boundary stub, no-op; cl's own
-     * value has no observable effect, see header comment */
-    (void)diocomp(phys, ds_bdos);
+    cl = (uint8_t)(cl | seg_r8(ds, BD_REM_DRV));
+    uint8_t al = (uint8_t)xios(phys, ds_bdos, io_write, (uint16_t)((ch << 8) | cl), dx);
+    (void)diocomp(phys, ds_bdos, al);
 }
 
 void wrbufflg(uint8_t *phys, uint16_t ds_bdos) {
-    /* mov cl,wflag -- no observable effect, see wrbuff's own comment */
-    wrbuff(phys, ds_bdos);
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    wrbuff(phys, ds_bdos, seg_r8(ds, BD_WFLAG)); /* mov cl,wflag */
 }
 
-/*
- * goerr -- common tail for pererror/roderror/roferror/selerror
- *	input:	ch = message selector (1-4), unused beyond building aret
- */
-static void goerr(uint8_t *phys, uint16_t ds_bdos, uint8_t ch) {
+/* RTN_PHY_ERRS: aret = 0FFFFh if return_ffff was set; then GOBACK */
+static void rtn_phy_errs(uint8_t *phys, uint16_t ds_bdos) {
     uint8_t *ds = far_ptr(phys, ds_bdos, 0);
-    seg_w16(ds, BD_ARET, (uint16_t)(((uint16_t)ch << 8) | 0xFF));
-    if (seg_r8(ds, BD_ERROR_MODE) != 0xFF) {
-        /* REPORT_ERR -- all message formatting is display-only, no
-         * observable effect under the convention; the one real side
-         * effect on this path: */
-        if (seg_r8(ds, BD_ERROR_MODE) != 0xFE) {
-            uint16_t rlr = seg_r16(ds, SYSDAT_RLR);
-            seg_w16(ds, (uint16_t)(rlr + p_flag),
-                    (uint16_t)(seg_r16(ds, (uint16_t)(rlr + p_flag)) | pf_ctlc));
-        }
-    }
-    /* RTN_PHY_ERRS */
     if (seg_r8(ds, BD_RETURN_FFFF) != 0) {
         seg_w8(ds, BD_RETURN_FFFF, 0);
         seg_w16(ds, BD_ARET, 0xFFFF);
     }
-    /* jmp GOBACK -- tail into FILE4.BDO, see header comment */
+    bdos_goback();
 }
 
-void pererror(uint8_t *phys, uint16_t ds_bdos) { goerr(phys, ds_bdos, 1); }
-void roderror(uint8_t *phys, uint16_t ds_bdos) { goerr(phys, ds_bdos, 2); }
-void roferror(uint8_t *phys, uint16_t ds_bdos) { goerr(phys, ds_bdos, 3); }
-void selerror(uint8_t *phys, uint16_t ds_bdos) { goerr(phys, ds_bdos, 4); }
+/*
+ * REPORT_ERR -- print "Bdos Err On D: <message>", then "Bdos Function
+ * = nn" (and " File = name.typ" if reselect ran), set pf_ctlc unless
+ * the error mode is "print and return", and RTN_PHY_ERRS.
+ *	input: bx = the error message (a DS offset). Not static: SET_ARET
+ *	(file4.c) prints the extended errors with it too.
+ */
+void report_err(uint8_t *phys, uint16_t ds_bdos, uint16_t bx) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    xcrlf(phys, ds_bdos);
+    seg_w8(ds, BD_DSKERR, (uint8_t)(seg_r8(ds, BD_SELDSK) + 'A')); /* the D: field */
+    xprint(phys, ds_bdos, BD_DSKMSG); /* "Bdos Err On D:" */
+    xprint(phys, ds_bdos, bx);        /* the error message */
+
+    /* the function number in decimal */
+    uint8_t al = seg_r8(ds, BD_FX);
+    uint8_t ch = '0';
+    uint16_t p = BD_PR_FX1;
+    if (al >= 100) {
+        ds[p++] = '1';
+        al = (uint8_t)(al - 100);
+    }
+    for (;;) { /* rpt_err1: sub al,10 until it borrows */
+        uint8_t borrow = al < 10;
+        al = (uint8_t)(al - 10);
+        if (borrow) break;
+        ch++;
+    }
+    ds[p++] = ch;
+    ds[p++] = (uint8_t)(al + 0x3A);
+    ds[p] = ' ';
+    ds[BD_PR_FCB] = 0; /* 0 = message delimiter */
+    if (seg_r8(ds, BD_RESEL)) { /* reselect ran: the file name too */
+        ds[BD_PR_FCB] = ' ';
+        uint16_t si = (uint16_t)(seg_r16(ds, BD_INFO) + 1);
+        move(phys, ds_bdos, si, BD_PR_FCB1, 8);
+        ds[BD_PR_FCB1 + 8] = '.';
+        move(phys, ds_bdos, (uint16_t)(si + 8), BD_PR_FCB1 + 9, 3);
+    }
+    xcrlf(phys, ds_bdos);
+    xprint(phys, ds_bdos, BD_PR_FX); /* "Bdos Function = ### File = FFFFFFFF.TTT" */
+    xcrlf(phys, ds_bdos);
+    if (seg_r8(ds, BD_ERROR_MODE) != 0xFE) {
+        uint16_t rlr = seg_r16(ds, SYSDAT_RLR);
+        seg_w16(ds, (uint16_t)(rlr + p_flag),
+                (uint16_t)(seg_r16(ds, (uint16_t)(rlr + p_flag)) | pf_ctlc));
+    }
+    rtn_phy_errs(phys, ds_bdos);
+}
+
+/*
+ * goerr -- common tail for pererror/roderror/roferror/selerror
+ *	input:	ch = message selector (1-4), bx its message
+ */
+static void goerr(uint8_t *phys, uint16_t ds_bdos, uint8_t ch, uint16_t bx) {
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    seg_w16(ds, BD_ARET, (uint16_t)(((uint16_t)ch << 8) | 0xFF));
+    if (seg_r8(ds, BD_ERROR_MODE) == 0xFF) {
+        rtn_phy_errs(phys, ds_bdos); /* return the physical error to the user */
+        return;
+    }
+    report_err(phys, ds_bdos, bx);
+}
+
+void pererror(uint8_t *phys, uint16_t ds_bdos) { goerr(phys, ds_bdos, 1, BD_PERMSG); }
+void roderror(uint8_t *phys, uint16_t ds_bdos) { goerr(phys, ds_bdos, 2, BD_RODMSG); }
+void roferror(uint8_t *phys, uint16_t ds_bdos) { goerr(phys, ds_bdos, 3, BD_ROFMSG); }
+void selerror(uint8_t *phys, uint16_t ds_bdos) { goerr(phys, ds_bdos, 4, BD_SELMSG); }
 
 void seek(uint8_t *phys, uint16_t ds_bdos);
 
@@ -265,13 +334,15 @@ void seekdir(uint8_t *phys, uint16_t ds_bdos) {
  * reached as seekdir's own fallthrough tail, not just directly.
  */
 void seek(uint8_t *phys, uint16_t ds_bdos) {
-    (void)phys;
-    (void)ds_bdos;
-    /* mov ax,arecord!xor dx,dx!mov dl,byte ptr arecord+2!div sectpt --
-     * computes track/sector, fed only into settrkf/sectran/setsecf,
-     * all 3 boundary stubs with no observable effect under the
-     * convention -- nothing here is observable either way, see header
-     * comment */
+    uint8_t *ds = far_ptr(phys, ds_bdos, 0);
+    /* dx:ax = arecord; div sectpt: dx = sector, ax = track */
+    uint32_t arecord = (uint32_t)seg_r16(ds, BD_ARECORD) | ((uint32_t)seg_r8(ds, BD_ARECORD_HI) << 16);
+    uint16_t sectpt = seg_r16(ds, BD_SECTPT);
+    uint16_t track = sectpt ? (uint16_t)(arecord / sectpt) : 0;
+    uint16_t sector = sectpt ? (uint16_t)(arecord % sectpt) : 0;
+    (void)xios(phys, ds_bdos, io_settrk, (uint16_t)(track + seg_r16(ds, BD_OFFSETV)), 0);
+    uint16_t bx = xios(phys, ds_bdos, io_sectran, sector, seg_r16(ds, BD_TRANV));
+    (void)xios(phys, ds_bdos, io_setsec, bx, 0);
 }
 
 /*
@@ -756,9 +827,9 @@ void rddir(uint8_t *phys, uint16_t ds_bdos, uint8_t cl) {
 void wrdir(uint8_t *phys, uint16_t ds_bdos) {
     checkwrite(phys, ds_bdos);
     newchecksum(phys, ds_bdos);
-    /* call setdir -- boundary stub, no-op, see header comment */
-    wrbuff(phys, ds_bdos);
-    /* jmp setdata -- boundary stub, no-op */
+    setdir(phys, ds_bdos);     /* directory dma */
+    wrbuff(phys, ds_bdos, 1);  /* indicates a write directory */
+    setdata(phys, ds_bdos);    /* to data dma address */
 }
 
 /*
@@ -860,14 +931,27 @@ void setcdr(uint8_t *phys, uint16_t ds_bdos) {
 
 /* rddirbuf -- read a directory entry into the directory buffer */
 void rddirbuf(uint8_t *phys, uint16_t ds_bdos) {
-    /* setdir!rdbuff -- both boundary-stub-only under the convention
-     * (setdir's own setdmbf/setdma calls and rdbuff's own readf call
-     * have no observable effect), see header comment */
-    rdbuff(phys, ds_bdos);
+    setdir(phys, ds_bdos);  /* directory dma */
+    rdbuff(phys, ds_bdos);  /* directory record loaded */
+    setdata(phys, ds_bdos); /* falls through into setdata: back to the data dma */
 }
 
-/* setdata/setdir/setdma -- all 3 are pure boundary-stub setup (XIOS
- * setdmbf/setdmf calls), no observable effect under the convention */
+/* setdma -- bx = .dma address to set (i.e., buffa or dmaad) */
+static void setdma(uint8_t *phys, uint16_t ds_bdos, uint16_t bx) {
+    (void)xios(phys, ds_bdos, io_setdma, seg_r16(far_ptr(phys, ds_bdos, 0), bx), 0);
+}
+
+/* setdata -- set the data dma address: dmabase:dmaad */
+void setdata(uint8_t *phys, uint16_t ds_bdos) {
+    (void)xios(phys, ds_bdos, io_setdmab, seg_r16(far_ptr(phys, ds_bdos, 0), BD_DMABASE), 0);
+    setdma(phys, ds_bdos, BD_DMAAD);
+}
+
+/* setdir -- set the directory dma address: DS:buffa */
+void setdir(uint8_t *phys, uint16_t ds_bdos) {
+    (void)xios(phys, ds_bdos, io_setdmab, ds_bdos, 0);
+    setdma(phys, ds_bdos, BD_BUFFA);
+}
 
 /* dirtouser -- copy the directory entry to the user buffer */
 void dirtouser(uint8_t *phys, uint16_t ds_bdos) {

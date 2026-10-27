@@ -41,6 +41,9 @@
 
 #include "defs.h"
 
+/* mpmif boundary hook (defs.h): f_sleep/f_wakeup on a QD's lists */
+MPMIF_HOOK(que1)
+
 uint16_t getqdaddr(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t *cx_out);
 void remqd(uint8_t *phys, uint16_t sysdat, uint16_t si);
 
@@ -190,11 +193,13 @@ que_bxcx readq(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t ax) {
         uint16_t msgcnt = seg_r16(sd, (uint16_t)(bx + q_msgcnt));
         if (msgcnt == 0) {
             if (ax == 0) {
-                /* qr_wait: the running process waits on the QD's own DQ
-                 * list; mpmif(f_sleep) is a boundary stub (no-op), which
-                 * never changes msgcnt, so this retries forever -- see
-                 * this file's own header comment */
+                /* qr_wait: the running process sleeps on the QD's own DQ
+                 * list (lea dx,q_dq[bx] ! ... ! mov cx,f_sleep ! call
+                 * mpmif), then tries again. With the hook unset (a
+                 * differential test) msgcnt never changes and this
+                 * retries forever -- see this file's own header comment */
                 seg_w8(sd, (uint16_t)(seg_r16(sd, SYSDAT_RLR) + p_stat), ps_dq);
+                (void)MPMIF(que1, phys, sysdat, f_sleep, (uint16_t)(bx + q_dq), 0, sysdat);
                 continue; /* jmps qr_ver */
             }
             que_bxcx r = {0xFFFF, e_q_empty};
@@ -216,7 +221,8 @@ que_bxcx readq(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t ax) {
             seg_w16(sd, (uint16_t)(bx + q_msgout), msgout);
         }
         seg_w16(sd, (uint16_t)(bx + q_msgcnt), (uint16_t)(msgcnt - 1));
-        /* call mpmif(f_wakeup) on the QD's own NQ list -- boundary stub, no-op */
+        /* lea dx,q_nq[si] ! mov cx,f_wakeup ! call mpmif: wake a writer */
+        (void)MPMIF(que1, phys, sysdat, f_wakeup, (uint16_t)(bx + q_nq), 0, sysdat);
         que_bxcx r = {0, 0};
         return r;
     }
@@ -253,11 +259,10 @@ que_bxcx writeq(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t ax) {
         uint16_t nmsgs = seg_r16(sd, (uint16_t)(bx + q_nmsgs));
         if (msgcnt == nmsgs) {
             if (ax == 0) {
-                /* qw_wait: the running process waits on the QD's own NQ
-                 * list; mpmif(f_sleep) is a boundary stub (no-op), which
-                 * never changes msgcnt, so this retries forever -- see
-                 * this file's own header comment */
+                /* qw_wait: the running process sleeps on the QD's own NQ
+                 * list, then tries again (forever with the hook unset) */
                 seg_w8(sd, (uint16_t)(seg_r16(sd, SYSDAT_RLR) + p_stat), ps_nq);
+                (void)MPMIF(que1, phys, sysdat, f_sleep, (uint16_t)(bx + q_nq), 0, sysdat);
                 continue; /* jmps qw_ver */
             }
             que_bxcx r = {0xFFFF, e_q_full};
@@ -276,7 +281,8 @@ que_bxcx writeq(uint8_t *phys, uint16_t sysdat, uint16_t dx, uint16_t ax) {
         if (seg_r16(sd, (uint16_t)(bx + q_flags)) & qf_mx) {
             seg_w16(sd, (uint16_t)(bx + q_buf), 0); /* an MX queue, no owner */
         }
-        /* call mpmif(f_wakeup) on the QD's own DQ list -- boundary stub, no-op */
+        /* lea dx,q_dq[si] ! mov cx,f_wakeup ! call mpmif: wake a reader */
+        (void)MPMIF(que1, phys, sysdat, f_wakeup, (uint16_t)(bx + q_dq), 0, sysdat);
         que_bxcx r = {0, 0};
         return r;
     }

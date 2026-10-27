@@ -23,12 +23,12 @@
  * (load.c) and f_setprior (sysent.c). `prcsm` prints a string in the
  * SUP's own code segment (u_wrkseg = CS); here that string is a C
  * constant, printed through chario.c's `conprint_cs`. f_createproc and
- * f_terminate are dispatcher boundaries, no-ops here (as everywhere in
- * this port); so is user_retf's `int mpmint`.
+ * f_terminate go through the `command_set_mpmif` hook (no-ops when it
+ * is unset, as in the host tests); user_retf's `int mpmint` is a
+ * boundary.
  *
- * f_fopen/f_fclose go through the BDOS's getdiskmx path, which isn't
- * ported (see bdosif.c), so they are a boundary hook, `cli_set_bdos`
- * (defs.h), like load.c's f_freadseq: the hook gets the function and
+ * f_fopen/f_fclose go through the BDOS (its getdiskmx path) via a
+ * hook, `cli_set_bdos` (defs.h), like load.c's f_freadseq: the hook gets the function and
  * the FCB (u_wrkseg:cli_fcb) and returns the BDOS's BX. With no hook an
  * open fails (00FFh: not found).
  *
@@ -77,6 +77,10 @@ void cli_set_bdos(cli_bdos_fn fn) {
 static uint8_t *run_uda(uint8_t *phys, uint16_t sysdat) {
     return far_ptr(phys, rlr_uda(far_ptr(phys, sysdat, 0)), 0);
 }
+
+/* the dispatcher calls (f_createproc, f_terminate) go through the
+ * Supervisor's mpmif hook (DS = SYSDAT); unset, they're no-ops */
+MPMIF_HOOK(command)
 
 /* mpmif with DS = SYSDAT: u_wrkseg = SYSDAT around the call */
 static uint16_t mpm_enter(uint8_t *phys, uint16_t sysdat) {
@@ -488,13 +492,13 @@ cli_cl:
     seg_w8(sd, SYSDAT_CLI_ACB + acb_match, 0xFF); /* true */
     seg_w16(sd, SYSDAT_CLI_ERR, conasn(phys, sysdat).cx);
 
-    /* create the process: f_setprior(1) for a chain; f_createproc is a
-     * dispatcher boundary */
+    /* create the process: f_setprior(1) for a chain */
     if (chain) {
         uint16_t w = mpm_enter(phys, sysdat);
         set_prior_entry(phys, sysdat, 1);
         mpm_leave(phys, sysdat, w);
     }
+    (void)MPMIF(command, phys, sysdat, f_createproc, seg_r16(sd, SYSDAT_CLI_PD), 0, sysdat);
     return cli_exit(phys, sysdat);
 }
 
@@ -516,7 +520,8 @@ static cmd_bxcx cli_exit(uint8_t *phys, uint16_t sysdat) {
     if (seg_r8(sd, SYSDAT_CLI_CHAIN) == 0xFF && seg_r8(sd, SYSDAT_CLI_TERM) == 0xFF) {
         seg_w16(sd, (uint16_t)(rlr + p_flag), (uint16_t)(seg_r16(sd, (uint16_t)(rlr + p_flag)) &
                                                          (uint16_t)~(pf_keep | pf_sys | pf_tempkeep | pf_ctlc)));
-        return (cmd_bxcx){0, 0}; /* jmp mpmif(f_terminate) */
+        (void)MPMIF(command, phys, sysdat, f_terminate, 0, 0, sysdat); /* jmp mpmif */
+        return (cmd_bxcx){0, 0};
     }
 
     /* clirls */
@@ -526,7 +531,8 @@ static cmd_bxcx cli_exit(uint8_t *phys, uint16_t sysdat) {
     uint16_t pflag = (uint16_t)((seg_r16(sd, (uint16_t)(rlr + p_flag)) & (uint16_t)~(pf_tempkeep | pf_keep)) | keep);
     seg_w16(sd, (uint16_t)(rlr + p_flag), pflag);
     if (pflag & pf_ctlc) {
-        seg_w16(sd, SYSDAT_CLI_ERR, e_abort); /* after f_terminate, a boundary */
+        (void)MPMIF(command, phys, sysdat, f_terminate, 0, 0, sysdat);
+        seg_w16(sd, SYSDAT_CLI_ERR, e_abort);
     }
     /* cli_nctl */
     uint16_t err = seg_r16(sd, SYSDAT_CLI_ERR);

@@ -9,10 +9,11 @@ from src-c's own build output, nothing from src-assem:
     constants against it), holding:
       KERNEL.SYS   the kernel's flat image (build/boot/kernel.bin), in
                    contiguous blocks from block 1, read-only;
-      SUBMIT.CMD,  CMD files for the C transients: the data group is the
-      RANDOM.CMD   C program's data image (from its compiled object,
-                   build/rsp/*.o), the code group zeros of the .A86's
-                   length (rsp/rsp_syms.h) -- the C kernel runs the C
+      SUBMIT.CMD,  CMD files for the C transients (TRANSIENTS: src-c/rsp's
+      RANDOM.CMD,  and src-c/utils'): the data group is the C program's
+      DIR.CMD, ... data image (from its compiled object, build/*/*.o),
+                   the code group zeros of the original's length
+                   (rsp_syms.h, utils_syms.h) -- the C kernel runs the C
                    main, LOAD only needs the groups;
       DEMO.SUB     a sample SUB file.
 
@@ -112,8 +113,13 @@ def c_image(obj, name):
     return data
 
 
-def code_len(name):
-    text = open(os.path.join(SRC_C, 'rsp', 'rsp_syms.h')).read()
+# the transients: (name, the directory with their C and header)
+TRANSIENTS = [('SUBMIT', 'rsp'), ('RANDOM', 'rsp'), ('DIR', 'utils'), ('TYPE', 'utils'), ('ERA', 'utils'),
+              ('REN', 'utils')]
+
+
+def code_len(name, where='rsp'):
+    text = open(os.path.join(SRC_C, where, 'rsp_syms.h' if where == 'rsp' else 'utils_syms.h')).read()
     return int(re.search(rf'#define {name}_CODE_LEN (0x[0-9A-Fa-f]+)', text).group(1), 16)
 
 
@@ -137,9 +143,9 @@ def main():
 
     disk = Disk()
     first = disk.add(b'KERNEL', b'SYS', kernel, read_only=True)
-    for name in ('SUBMIT', 'RANDOM'):
-        data = c_image(os.path.join(build, 'rsp', name.lower() + '.o'), name.lower())
-        disk.add(name.encode(), b'CMD', cmd_file(code_len(name), data))
+    for name, where in TRANSIENTS:
+        data = c_image(os.path.join(build, where, name.lower() + '.o'), name.lower())
+        disk.add(name.encode(), b'CMD', cmd_file(code_len(name, where), data))
     disk.add(b'DEMO', b'SUB', DEMO_SUB)
 
     lba = block_offset(first) // SECTOR
@@ -148,7 +154,7 @@ def main():
     with open(args.output, 'wb') as f:
         f.write(disk.img)
     print(f"mkdisk: {os.path.relpath(args.output, SRC_C)}: KERNEL.SYS ({nsectors} sectors from LBA {lba}), "
-          f"SUBMIT.CMD, RANDOM.CMD, DEMO.SUB; {disk.next_block - 1} of {DSM + 1} blocks, "
+          f"{', '.join(n + '.CMD' for n, _ in TRANSIENTS)}, DEMO.SUB; {disk.next_block - 1} of {DSM + 1} blocks, "
           f"{disk.next_entry} of {DIR_ENTRIES} directory entries")
 
 

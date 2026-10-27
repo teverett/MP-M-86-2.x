@@ -5,11 +5,13 @@ Checks:
   - its CP/M geometry is the C XIOS's: mkdisk.py's constants against the
     DPB src-c/gensys builds (gensys run on the host, as test_gensys.py);
   - the image: the boot sector's fields point at KERNEL.SYS, whose bytes
-    are build/boot/kernel.bin (read-only, contiguous); SUBMIT.CMD and
-    RANDOM.CMD are CMD files whose data groups are the C programs' data
-    images and whose code groups have the .A86's lengths; DEMO.SUB; and
+    are build/boot/kernel.bin (read-only, contiguous); the transients'
+    CMD files (mkdisk.TRANSIENTS: SUBMIT, RANDOM, DIR, TYPE, ERA, REN),
+    whose data groups are the C programs' data images and whose code
+    groups have the originals' lengths; DEMO.SUB; and
     nothing else in the directory;
-  - it boots by itself (no -kernel) and runs SUBMIT DEMO from the disk.
+  - it boots by itself (no -kernel) and runs SUBMIT DEMO, DIR and TYPE
+    from the disk.
 
 Needs the i686-elf toolchain and qemu-system-i386; skips without them.
 """
@@ -42,11 +44,12 @@ def gensys_dpb(tmp):
     """the DPB in the image src-c/gensys builds"""
     lib_path = os.path.join(tmp, 'gensys.so')
     srcs = [os.path.join(SRC_C, 'gensys', f) for f in ('gensys.c', 'sysdat.c')]
-    srcs += [os.path.join(SRC_C, 'rsp', f) for f in sorted(os.listdir(os.path.join(SRC_C, 'rsp'))) if f.endswith('.c')]
+    srcs += [os.path.join(SRC_C, d, f) for d in ('rsp', 'utils')  # programs.c's table names utils' mains
+             for f in sorted(os.listdir(os.path.join(SRC_C, d))) if f.endswith('.c')]
     srcs.append(os.path.join(FIXTURES, 'rt_host.c'))
     subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-unknown-warning-option',
                     '-Wno-unterminated-string-initialization', '-shared', '-fPIC',
-                    *[f'-I{os.path.join(SRC_C, d)}' for d in ('kernel', 'rt', 'rsp', 'gensys')], *srcs,
+                    *[f'-I{os.path.join(SRC_C, d)}' for d in ('kernel', 'rt', 'rsp', 'gensys', 'utils')], *srcs,
                     '-o', lib_path], check=True)
     lib = ctypes.CDLL(lib_path)
     lib.gensys_rsps.restype = ctypes.c_void_p
@@ -134,8 +137,8 @@ def main():
 
         check("image size", 1474560, len(img))
         files = directory(img)
-        check("the files", sorted([(b'KERNEL  ', b'SYS'), (b'SUBMIT  ', b'CMD'), (b'RANDOM  ', b'CMD'),
-                                   (b'DEMO    ', b'SUB')]), sorted(files))
+        check("the files", sorted([(b'KERNEL  ', b'SYS'), (b'DEMO    ', b'SUB')] +
+                                  [(n.encode().ljust(8), b'CMD') for n, _ in mkdisk.TRANSIENTS]), sorted(files))
 
         attrs, extents = files[(b'KERNEL  ', b'SYS')]
         check("KERNEL.SYS is read-only", b'\x80\x00\x00', attrs)
@@ -147,9 +150,10 @@ def main():
         check("boot sector: its length", (len(kernel) + 511) // 512, nsect)
         check("boot sector: the kernel's entry", bootsect.elf_entry(os.path.join(SRC_C, 'kernel.elf')), entry)
 
-        for name, code in (('submit', mkdisk.code_len('SUBMIT')), ('random', mkdisk.code_len('RANDOM'))):
-            data = read_file(img, files[(name.upper().encode().ljust(8), b'CMD')][1])
-            image = mkdisk.c_image(os.path.join(SRC_C, 'build', 'rsp', name + '.o'), name)
+        for upper, where in mkdisk.TRANSIENTS:
+            name, code = upper.lower(), mkdisk.code_len(upper, where)
+            data = read_file(img, files[(upper.encode().ljust(8), b'CMD')][1])
+            image = mkdisk.c_image(os.path.join(SRC_C, 'build', where, name + '.o'), name)
             form1, cparas, _, cmin, _, form2, dparas, _, dmin, _ = struct.unpack_from('<BHHHHBHHHH', data, 0)
             check(f"{name.upper()}.CMD: code group {code:#x} bytes", (1, (code + 15) // 16, (code + 15) // 16),
                   (form1, cparas, cmin))
@@ -160,11 +164,13 @@ def main():
 
         path = os.path.join(tmp, 'disk.img')
         open(path, 'wb').write(img)
-        out = boot(path, [(8, b'SUBMIT DEMO hello\r'), (8, b'')])
+        out = boot(path, [(8, b'SUBMIT DEMO hello\r'), (8, b'DIR *.CMD\r'), (4, b'TYPE DEMO.SUB\r'), (4, b'')])
         for label, want in (("boots: the boot sector", b"src-c boot: loading the kernel"),
                             ("boots: TMP's prompt", b"0A>"),
                             ("SUBMIT DEMO from the disk", b" MP/M-86 on the C kernel, from a disk src-c built"),
-                            ("with its argument", b" argument 1: HELLO")):
+                            ("with its argument", b" argument 1: HELLO"),
+                            ("DIR from the disk", b"A: SUBMIT   CMD : RANDOM   CMD : DIR      CMD : TYPE     CMD"),
+                            ("TYPE from the disk", b"ECHO argument 1: $1\r\nUSER 1")):
             check(label, True, want in out)
 
     if failures:

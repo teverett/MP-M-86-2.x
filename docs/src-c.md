@@ -63,18 +63,23 @@ The floppy holds:
 | `KERNEL.SYS` | The kernel (read-only; the boot sector loads it) |
 | `SUBMIT.CMD` | SUBMIT, as a C program |
 | `RANDOM.CMD` | DRI's random-access sample, as a C program |
+| `DIR.CMD` | DIR (`DIR [S]`, `DIR [G n]`), src-c/utils/dir.c |
+| `TYPE.CMD` | TYPE (`TYPE file [P]`), src-c/utils/type.c |
+| `ERA.CMD` | ERA (`ERA file [X]`), src-c/utils/era.c |
+| `REN.CMD` | REN (`REN new=old`), src-c/utils/ren.c |
 | `DEMO.SUB` | A sample: try `SUBMIT DEMO hello` |
 
 Besides those programs you can use TMP's built-ins (`X:`, `USER n`,
 `PRINTER n`) and `ECHO text`, which reaches the ECHO RSP through the
-CLI's queue. kernel.elf runs only C programs: the 8086 `.CMD` files on
-src-assem's floppy (DIR, PIP, ED, ...) aren't on this one, and wouldn't
-run on it. Writes stay on the image until `make disk` rebuilds it, which
+CLI's queue. kernel.elf runs only C programs: the other 8086 `.CMD`
+files on src-assem's floppy (PIP, ED, ...) aren't on this one, and
+wouldn't run on it. Writes stay on the image until `make disk` rebuilds it, which
 happens whenever its inputs change.
 
 The src-c build uses nothing from src-assem's build:
 - the offsets it takes from the .A86 sources are constants in
-  rt/rt_syms.h, rsp/rsp_syms.h and gensys/gensys_syms.h, which
+  rt/rt_syms.h, rsp/rsp_syms.h, utils/utils_syms.h and
+  gensys/gensys_syms.h, which
   tests/src-c/test_syms.py checks against the assembled source;
 - the image it starts from is built in C (gensys), checked by
   test_gensys.py.
@@ -988,16 +993,41 @@ memory at physical 0). After `sup_init`'s check, `kernel_main` calls
   - the boot sector, its fields pointing at KERNEL.SYS;
   - KERNEL.SYS, the flat kernel, in contiguous blocks from block 1 and
     read-only;
-  - SUBMIT.CMD and RANDOM.CMD: CMD files whose data group is the C
-    program's data image (from its compiled object) and whose code group
-    is zeros, at the .A86's length (rsp_syms.h). The C kernel runs the C
-    main, and LOAD only needs the groups;
+  - SUBMIT.CMD, RANDOM.CMD, DIR.CMD, TYPE.CMD, ERA.CMD and REN.CMD
+    (mkdisk.TRANSIENTS): CMD files whose data group is the C program's
+    data image (from its compiled object) and whose code group is zeros,
+    at the original's length (rsp_syms.h, utils_syms.h). The C kernel
+    runs the C main, and LOAD only needs the groups;
   - DEMO.SUB, a sample.
 
   tests/src-c/test_mkdisk.py checks:
   - the geometry against the DPB gensys builds;
   - each file's contents and the boot sector's fields;
-  - booting it by itself and running `SUBMIT DEMO` from it.
+  - booting it by itself and running `SUBMIT DEMO`, DIR and TYPE from
+    it.
+- **The PL/M utilities: src-c/utils/ (src-assem/utils/'s DIR, TYPE,
+  ERA, REN).** Each is a transient whose data segment is the PL/M
+  program's as tools/plmc.py lays it out: the base page, the variables
+  with their initial values, the string constants, then the stack
+  (offsets in utils/utils_syms.h, which test_syms.py checks against the
+  compiled .PLM). The C keeps PL/M's semantics:
+  - bytes wrap, a relation is 0FFh or 0, and IF tests bit 0, with each
+    program's own `true` (DIR and ERA use 1, TYPE and REN 0FFh);
+  - AND evaluates both sides, so TYPE's read loop reads a record even
+    at its ^Z;
+  - the main program's variables are PL/M globals in the image; the
+    procedures' own variables live on PL/M's stack and are C locals;
+  - ERA and REN find their UDA through the PD (mon4, function 156). They
+    save and restore its dcnt/searcha/searchl around each one-at-a-time
+    delete or rename, as the PL/M does, so search next keeps its place.
+
+  test_dir/type/era/ren.py run each against the .PLM, compiled as
+  src-assem's build does, in i86sim. They use rspref's scripted MP/M,
+  whose disk has a 64-entry directory, R/O and SYS attributes, and
+  passwords; search first/next keep their place in the UDA. The tests
+  cover listings and options, paging, password prompts and editing,
+  confirmation, R/O and password failures, wildcards, and a new name
+  that already exists.
 - **CACHE.** cache.c hooks `rt_xiosmod` and writes the bytes the binary
   writes: its DS at CS:0, the old XIOS entry at CS:2, and SYSDAT's
   xiosmod = CS:0038. Verified in QEMU: 1920:0038, with 193Ah and
@@ -1006,7 +1036,8 @@ memory at physical 0). After `sup_init`'s check, `kernel_main` calls
   - tests/src-c/test_rsp_images.py compares all six C images (from the
     compiled .o) with the assembled data segments, byte for byte; only
     an RSP's start IP may differ.
-  - test_tmp/echo/clock/submit/random.py run each whole program both as
+  - test_tmp/echo/clock/submit/random.py (and test_dir/type/era/ren.py,
+    against the .PLM) run each whole program both as
     the .A86 (in i86sim) and as its src-c/rsp C version (on the host,
     fixtures/rt_host.c standing in for src-c/rt), against one scripted
     MP/M (tests/src-c/rspref.py). They compare the system calls, the
@@ -1087,6 +1118,10 @@ memory at physical 0). After `sup_init`'s check, `kernel_main` calls
 | `src-assem/rsp/CLOCK.A86` | the whole program, `src-c/rsp/clock.c` | — (tests/src-c/test_clock.py) |
 | `src-assem/rsp/TMP.A86` | the whole program, `src-c/rsp/tmp.c` | — (tests/src-c/test_tmp.py) |
 | `src-assem/rsp/SUBMIT.A86` | the whole program, `src-c/rsp/submit.c` | — (tests/src-c/test_submit.py) |
+| `src-assem/utils/DIR.PLM` | the whole program, `src-c/utils/dir.c` | — (tests/src-c/test_dir.py) |
+| `src-assem/utils/TYPE.PLM` | the whole program, `src-c/utils/type.c` | — (tests/src-c/test_type.py) |
+| `src-assem/utils/ERA.PLM` | the whole program, `src-c/utils/era.c` | — (tests/src-c/test_era.py) |
+| `src-assem/utils/REN.PLM` | the whole program, `src-c/utils/ren.c` | — (tests/src-c/test_ren.py) |
 | `src-assem/kernel/CIOIF.CIO` | `init` and `entry` (inter-module CIO dispatch -- `src-c/kernel/cioif.c`; `tests/src-c/test_cioif_entry.py` runs it against the whole real `src-assem/kernel/CIO.A86`) | — (the whole file is ported) Runs on real memory, see "Real pointers: the CIO module, stage 5" |
 | `src-assem/kernel/RTMIF.RTM` | `init` and `entry` (21-way inter-module RTM dispatch -- `src-c/kernel/rtmif.c`; `tests/src-c/test_rtmif_entry.py` runs it against the whole real `src-assem/kernel/RTM.A86`) | — (the whole file is ported now; 20 of the 21 dispatched targets' own `bx`/`cx`/etc. and memory effects are independently verified through this dispatcher, with the dispatcher (`dsptch`/`pdisp`) and `proc_creat` stubbed at their real addresses. `creat_proc_entry` (case 14) is dispatch-only: the C port's own `creat_proc_entry` runs the real `proc.c`/`dsptch.c`, which a stubbed reference can't match — same "known, documented gap" class as `MEMIF.MEM`'s own `entry` row above; see `test_rtmif_entry.py`'s header comment). `init` and `entry` both run on real memory, see "Real pointers: `rtmif_init`" and "Real pointers: the RTM, stage 3" |
 | `src-assem/kernel/MEMIF.MEM` | `init` and `entry` (inter-module MEM dispatch, wrapped in a real binary-semaphore acquire/release -- `src-c/kernel/memif.c`; `tests/src-c/test_memif_entry.py` runs it against the whole real `src-assem/kernel/MEM.A86`, with the targets' own nested `mpmif` calls re-entering the real `entry`) | — (the whole file is ported; all 13 dispatched functions are checked end to end through this dispatcher, along with the mutex state and the reference's boundary calls) Runs on real memory, see "Real pointers: the MEM module, stage 4" |

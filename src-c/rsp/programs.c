@@ -18,6 +18,10 @@
 #include "gensys_syms.h"
 
 extern void cache_main(uint16_t ds);
+extern void dir_main(uint16_t ds);
+extern void type_main(uint16_t ds);
+extern void era_main(uint16_t ds);
+extern void ren_main(uint16_t ds);
 extern void clock_main(uint16_t ds);
 extern void echo_main(uint16_t ds);
 extern void random_main(uint16_t ds);
@@ -29,8 +33,9 @@ extern const uint16_t cache_image_len, clock_image_len, echo_image_len, tmp_imag
 extern const uint16_t cache_code_len, cache_start;
 
 /* the RSPs (by PD name), then the transients (by command name: LOAD
- * names the process after its file); SUBMIT and RANDOM install their
- * own images, see rsp.h's rsp_install_transient */
+ * names the process after its file); SUBMIT, RANDOM and src-c/utils'
+ * PL/M utilities install their own images, see rsp.h's
+ * rsp_install_transient */
 const rt_program rt_programs[] = {
     {"Cachinit", cache_main},
     {"CLOCK   ", clock_main},
@@ -38,6 +43,10 @@ const rt_program rt_programs[] = {
     {"Tmp     ", tmp_main},
     {"RANDOM  ", random_main},
     {"SUBMIT  ", submit_main},
+    {"DIR     ", dir_main},
+    {"TYPE    ", type_main},
+    {"ERA     ", era_main},
+    {"REN     ", ren_main},
     {0, 0},
 };
 

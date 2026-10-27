@@ -61,6 +61,7 @@ STRING_SHIM_OBJ := $(BUILD_DIR)/freestanding-include/string_shim.o
 # gensys/ builds the low-memory image they start from.
 RT_OBJS  := $(BUILD_DIR)/rt/rt.o $(BUILD_DIR)/rt/rt_asm.o
 RSP_OBJS := $(patsubst rsp/%.c,$(BUILD_DIR)/rsp/%.o,$(wildcard rsp/*.c))
+UTILS_OBJS := $(patsubst utils/%.c,$(BUILD_DIR)/utils/%.o,$(wildcard utils/*.c))
 GENSYS_OBJS := $(patsubst gensys/%.c,$(BUILD_DIR)/gensys/%.o,$(wildcard gensys/*.c))
 
 .PHONY: all build test boot run run-elf disk clean
@@ -77,7 +78,7 @@ endef
 $(foreach m,$(MODULES),$(eval $(call MODULE_RULE,$(m))))
 
 $(foreach m,$(MODULES),$(BUILD_DIR)/$(m)) $(BUILD_DIR)/boot $(BUILD_DIR)/freestanding-include \
-		$(BUILD_DIR)/rt $(BUILD_DIR)/rsp $(BUILD_DIR)/gensys:
+		$(BUILD_DIR)/rt $(BUILD_DIR)/rsp $(BUILD_DIR)/gensys $(BUILD_DIR)/utils:
 	mkdir -p $@
 
 
@@ -91,6 +92,10 @@ $(BUILD_DIR)/rt/rt_asm.o: rt/rt_asm.s | $(BUILD_DIR)/rt
 
 $(BUILD_DIR)/rsp/%.o: rsp/%.c rsp/rsp.h rsp/rsp_syms.h rt/rt.h kernel/defs.h gensys/gensys.h | $(BUILD_DIR)/rsp
 	$(CC) $(CFLAGS) -Wno-unterminated-string-initialization -I kernel -I rt -I rsp -I gensys -c $< -o $@
+
+# src-c/utils: the PL/M utilities (src-assem/utils), as C programs
+$(BUILD_DIR)/utils/%.o: utils/%.c utils/utils_syms.h rsp/rsp.h rt/rt.h kernel/defs.h | $(BUILD_DIR)/utils
+	$(CC) $(CFLAGS) -Wno-unterminated-string-initialization -I kernel -I rt -I rsp -I utils -c $< -o $@
 
 # src-c/gensys: the low-memory image, from src-c's own data
 $(BUILD_DIR)/gensys/%.o: gensys/%.c gensys/gensys.h gensys/gensys_syms.h kernel/defs.h | $(BUILD_DIR)/gensys
@@ -123,7 +128,8 @@ DISK := $(BUILD_DIR)/mpm86c.img
 disk: $(DISK)
 
 $(DISK): tools/mkdisk.py tools/bootsect.py rsp/rsp_syms.h $(BUILD_DIR)/boot/bootsect.bin \
-		$(BUILD_DIR)/boot/kernel.bin $(BUILD_DIR)/rsp/submit.o $(BUILD_DIR)/rsp/random.o
+		$(BUILD_DIR)/boot/kernel.bin $(BUILD_DIR)/rsp/submit.o $(BUILD_DIR)/rsp/random.o \
+		$(UTILS_OBJS) utils/utils_syms.h
 	$(PYTHON) tools/mkdisk.py -o $@
 
 $(BUILD_DIR)/boot/kernel_main.o: $(BOOT_DIR)/kernel_main.c kernel/defs.h gensys/gensys.h | $(BUILD_DIR)/boot
@@ -162,8 +168,8 @@ boot: $(BOOT_OBJS)
 # section for the full list and reasoning. `memcpy`/`memcmp` also
 # needed real bodies (not just declarations) once anything actually
 # links against them -- freestanding-include/string_shim.c.
-kernel.elf: $(BOOT_OBJS) $(KERNEL_OBJS) $(RT_OBJS) $(RSP_OBJS) $(GENSYS_OBJS) $(STRING_SHIM_OBJ) linker.ld
-	$(LD) -T linker.ld -o kernel.elf $(BOOT_OBJS) $(KERNEL_OBJS) $(RT_OBJS) $(RSP_OBJS) $(GENSYS_OBJS) $(STRING_SHIM_OBJ)
+kernel.elf: $(BOOT_OBJS) $(KERNEL_OBJS) $(RT_OBJS) $(RSP_OBJS) $(UTILS_OBJS) $(GENSYS_OBJS) $(STRING_SHIM_OBJ) linker.ld
+	$(LD) -T linker.ld -o kernel.elf $(BOOT_OBJS) $(KERNEL_OBJS) $(RT_OBJS) $(RSP_OBJS) $(UTILS_OBJS) $(GENSYS_OBJS) $(STRING_SHIM_OBJ)
 	i686-elf-grub-file --is-x86-multiboot kernel.elf
 
 # run -- boot src-c's floppy (`disk`) under QEMU, the way ./run.sh boots

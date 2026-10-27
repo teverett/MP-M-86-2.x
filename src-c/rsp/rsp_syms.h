@@ -125,4 +125,5 @@
 /* the transients' code lengths: their CMD files' code groups (src-c/tools/mkdisk.py) */
 #define SUBMIT_CODE_LEN 0x0652 /* SUBMIT.A86: cseg length */
 #define RANDOM_CODE_LEN 0x01A4 /* RANDOM.A86: cseg length */
+
 #endif

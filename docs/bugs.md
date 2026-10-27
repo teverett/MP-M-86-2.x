@@ -10581,12 +10581,7 @@ Found porting them (src-c/utils/); each is fixed in both trees:
 
 **Not fixed (documented):**
 - ATTACH.PLM's "Can't Find PD": fixed since, see #133.
-- **PIP.PLM, possibly bugs, not confirmed:**
-  - `getpw = false` runs for every file destination, not only one with
-    a ;password.
-  - The drive check `> 17` lets Q: through to the BDOS.
-  - ERROR's `extention <= nummsgs` would read past its table for a
-    code 12 that the BDOS never returns.
+- PIP.PLM's three possible bugs: confirmed and fixed since, see #134.
 
 ## 133. ATTACH's "Can't Find PD" could never print — FIXED
 
@@ -10614,3 +10609,66 @@ identical).
   made-up "code in BX" kernel are gone.
 - Both floppies print "Can't Find PD" for ATTACH NONE in QEMU.
 
+## 134. PIP: three slips in PIP.PLM — FIXED in the .PLM and the C
+
+Flagged while porting PIP (#132) and confirmed:
+- **A named destination never got the source's password.** SCAN's
+  `if (.fcbs = .odest) then getpw = false` sat after the `;password`
+  loop, not in it. So any destination file name, with or without a
+  password, turned off copying the source's (getpw's own comment: "false
+  if password in dest file name"). `PIP X.TXT=PW.TXT;KEY` left X.TXT
+  unprotected, while `PIP B:=PW.TXT;KEY` kept KEY. Now it's inside the
+  `;` branch, so only a destination password replaces the source's.
+- **Drive Q: got past the disk-name check.** `fcb(0) = letter - 'A' + 1`
+  is 1..16 for A..P, but the test was `> 17`, so Q (17) went on to the
+  BDOS select. Now it is `> 16`, and Q: is PIP's INVALID FORMAT.
+- **ERROR's extended message index could run off its table.** extmsg has
+  nummsgs (12) entries, 0..11, but the test was `<= nummsgs`, so a code
+  12 would have printed whatever address followed the table. Now it is
+  `< nummsgs`. The BDOS doesn't return 12 today, so this one isn't
+  testable.
+
+**Verified.** In test_pip.py:
+- `X.TXT=PW.TXT;KEY` now gives X.TXT the password KEY;
+- `X.TXT;NEW=PW.TXT;KEY` gives it NEW;
+- `X.TXT=A.TXT` gives it none;
+- `Q:X.TXT=A.TXT` is INVALID FORMAT.
+
+Both sides match. Each fix is the same size as the code it replaced, so
+PIP's constants didn't move.
+
+
+## 135. src-c BDOS: search lost files after passing an XFCB — FIXED (C only)
+
+Found by #134's PIP fix: after the first PIP copy that read a source's
+XFCB, every later command on the src-c kernel was "?Can't Find Command",
+although the disk was intact. Bisecting in QEMU narrowed it to creating
+a file while another file's XFCB is in the directory: PIP with no
+password did it too, and ED N.TXT left DIR finding no files. src-assem
+was fine. Dumping both machines' memory after the same session
+(gensys's image is src-assem's, so the BDOS data is at the same
+addresses) showed BD_SAVE_XFCB left at 0FFh in the C, and 0 in the asm.
+
+search's `srchnext` (src-c/kernel/file2.c, FILE2.BDO) had two slips:
+- **SAVE_XFCB was cleared only at empty entries.** The asm's
+  `JNZ $+5` skips only the 3-byte `CALL SAVE_DCNT_POS1`, so
+  `MOV SAVE_XFCB,FALSE` runs for every entry. In the C it was inside the
+  if. So a same-user XFCB of another file (an open or make search with
+  FIND_XFCB) left SAVE_XFCB set for the entries after it, and across
+  calls: SAVE_XFCB isn't in the BDOS's zeroed-on-entry range. A later
+  whole-name match was then taken as an XFCB and searched past, so the
+  CLI's open of DIR.CMD found nothing.
+- **A whole match on an XFCB was returned as the match.** At
+  `endsearch` the asm notes the XFCB's place (SAVE_DCNT_POS, when XDCNT
+  is still unset) and then always goes on searching (`SEARCHN_JMP`). The
+  C fell into ENDSEARCH1 after save_dcnt_pos and returned it.
+
+**Verified.**
+- test_bdos_real.py has two new search cases against the real BDOS: a
+  search past another file's XFCB, and one that meets the file's own
+  XFCB first (XDCNT noted). Both fail with the old C, and pass now.
+- In QEMU, the src-c floppy runs PIP with and without passwords, ED on a
+  new file and DIR after each, as src-assem does.
+- With the label's Make XFCBs on (`SET [PROTECT=ON,MAKE=ON]`),
+  `PIP X.TXT=PW.TXT;KEY` gives X.TXT the password KEY on both builds:
+  TYPE X.TXT is a Password Error, and TYPE X.TXT;KEY types it.

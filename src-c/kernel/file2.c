@@ -431,8 +431,11 @@ srchnext:
     ch = 0;
     if (ds[bx] == bdos_empty) {
         save_dcnt_pos1(phys, ds_bdos);
-        seg_w8(ds, BD_SAVE_XFCB, 0);
     }
+    /* every entry: the asm's "JNZ $+5" skips only the 3-byte CALL
+     * SAVE_DCNT_POS1, not this (it was inside the if, so SAVE_XFCB
+     * stayed set after another file's XFCB: docs/bugs.md #135) */
+    seg_w8(ds, BD_SAVE_XFCB, 0);
     al = ds[bx]; /* is FCB an XFCB? */
     {
         uint8_t masked = (uint8_t)(al & 0xEF);
@@ -526,10 +529,13 @@ srchok:
 
 endsearch:
     if (seg_r8(ds, BD_SAVE_XFCB)) {
-        if (seg_r8(ds, (uint16_t)(BD_XDCNT + 1)) != 0xFE) {
-            goto top;
+        /* an XFCB matched: note its place, then search on either way
+         * (CALL SAVE_DCNT_POS falls into SEARCHN_JMP -- it isn't a
+         * match: docs/bugs.md #135) */
+        if (seg_r8(ds, (uint16_t)(BD_XDCNT + 1)) == 0xFE) {
+            save_dcnt_pos(phys, ds_bdos);
         }
-        save_dcnt_pos(phys, ds_bdos);
+        goto top;
     }
     /* ENDSEARCH1 */
     seg_w8(ds, BD_DIRLOC, 0);

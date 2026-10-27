@@ -119,7 +119,8 @@ def main():
                 snap=lambda i: bytes(i[ds(ALLOC):ds(ALLOC + 4)]))
 
         # -- search over a real directory buffer --
-        def directory(name):
+        def directory(name, entries=((0, b'OTHER   TXT'), (0, b'FILE    DAT'), (0xE5, b'        '),
+                                      (1, b'FILE    DAT'))):
             mem = base()
             w16(mem, bd('info'), FCB)
             mem[ds(FCB):ds(FCB + 12)] = b'\x00' + name
@@ -129,8 +130,7 @@ def main():
             w16(mem, bd('chksiz'), 0x8000)     # permanent drive: no checksums
             w16(mem, bd('cdrmaxa'), DPB)
             w16(mem, ds(DPB), 4)
-            for n, (user, ent) in enumerate(((0, b'OTHER   TXT'), (0, b'FILE    DAT'),
-                                             (0xE5, b'        '), (1, b'FILE    DAT'))):
+            for n, (user, ent) in enumerate(entries):
                 rec = ds(BUFFA + 32 * n)
                 mem[rec] = user
                 mem[rec + 1:rec + 1 + len(ent)] = ent
@@ -141,6 +141,22 @@ def main():
                             ("search: no such file", b'NOPE    DAT')):
             run(label, 'search', directory(name), {'cx': 12},
                 call=lambda b: (lib.search(b, SYSDAT, 12), ())[1], snap=snap)
+
+        # an XFCB on the way (open/make search with FIND_XFCB set): a
+        # same-user XFCB sets SAVE_XFCB for that entry only, and a whole
+        # match on one is noted (XDCNT) but searched past -- until
+        # bugs.md #135 the C cleared SAVE_XFCB only at empty entries and
+        # returned the XFCB as the match
+        xsnap = lambda i: (snap(i), i[bd('save_xfcb')], r16(i, bd('xdcnt')))  # noqa: E731
+        for label, entries in (
+                ("search: past another file's XFCB", ((0x10, b'OTHER   TXT'), (0, b'FILE    DAT'), (0xE5, b''),
+                                                      (0xE5, b''))),
+                ("search: the file's own XFCB first", ((0x10, b'FILE    DAT'), (0, b'FILE    DAT'), (0xE5, b''),
+                                                       (0xE5, b'')))):
+            mem = directory(b'FILE    DAT', entries)
+            mem[bd('find_xfcb')] = 0xFF
+            w16(mem, bd('xdcnt'), 0xFE00)  # init_xfcb_search's "none yet"
+            run(label, 'search', mem, {'cx': 12}, call=lambda b: (lib.search(b, SYSDAT, 12), ())[1], snap=xsnap)
         return ck.finish()
     finally:
         os.remove(lib_path)

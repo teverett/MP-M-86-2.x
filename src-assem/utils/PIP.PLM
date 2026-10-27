@@ -517,7 +517,7 @@ ERROR: PROCEDURE(errtype,extention,retflag,fileadr);
     /* print out error message */
     call print(.('ERROR - $'));
     call printx(errmsg(errtype));
-    if (extention := extention and 0fh) <= nummsgs then
+    if (extention := extention and 0fh) < nummsgs then  /* 0..nummsgs-1 */
         do; call printchar(' ');
         call printx(extmsg(extention));
         end;
@@ -1072,7 +1072,7 @@ SCAN: PROCEDURE(FCBA);
             DO; IF FLEN = 1 THEN
                 /* MAY BE DISK NAME A ... P */
                 DO;
-                IF (fcbs.fcb(0) := fcbs.fcb(1) - 'A' + 1) > 17 THEN
+                IF (fcbs.fcb(0) := fcbs.fcb(1) - 'A' + 1) > 16 THEN  /* A..P */
                     RETURN;  /* ERROR, INVALID DISK NAME */
                 CALL DEBLANK; /* MAY BE DISK NAME ONLY */
                 IF DELIMITER(CHAR) THEN
@@ -1134,15 +1134,17 @@ SCAN: PROCEDURE(FCBA);
 
             FLEN = 0;
             IF CHAR = ';' THEN  /* SCAN PASSWORD */
-                DO WHILE NOT DELIMITER(CHAR := GNC);
-                IF FLEN >= NSIZE THEN
-                    /* ERROR, PW TOO LONG */ RETURN;
-                ELSE  /* SAVE PASSWORD */
-                    FCBS.PWNAM(FLEN) = CHAR;
-                    FLEN = FLEN + 1;
+                DO;
+                    DO WHILE NOT DELIMITER(CHAR := GNC);
+                    IF FLEN >= NSIZE THEN
+                        /* ERROR, PW TOO LONG */ RETURN;
+                    ELSE  /* SAVE PASSWORD */
+                        FCBS.PWNAM(FLEN) = CHAR;
+                        FLEN = FLEN + 1;
+                    END;
+                if (.fcbs = .odest) then   /* use dest password */
+                    getpw = false;      /* (only when it has one) */
                 END;
-            if (.fcbs = .odest) then   /* use dest password */
-                getpw = false;
 
             IF CHAR = LB THEN
                 CALL SCANPAR;

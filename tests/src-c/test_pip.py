@@ -551,8 +551,15 @@ def main():
          lambda m: data(m, 'A:4:X       TXT') == padded(b'system\r\n\x1a')),
         ("the source's attributes go with it", b'B:=ARC.TXT', {},
          lambda m: m.snapshot()[0]['B'][1][2] == bytes(attr_name(name11('ARC.TXT'), f1=True)).hex()),
+        # a named destination takes the source's password, as a drive does
+        # (until bugs.md #134 any destination name cleared getpw)
         ("a password: given", b'X.TXT=PW.TXT;KEY', {},
-         lambda m: data(m, A + 'X       TXT') == padded(b'secret\r\n\x1a')),
+         lambda m: data(m, A + 'X       TXT') == padded(b'secret\r\n\x1a')
+         and m.snapshot()[1][A + 'X       TXT'][1] == b'KEY     '),
+        ("a password: the destination's own wins", b'X.TXT;NEW=PW.TXT;KEY', {},
+         lambda m: m.snapshot()[1][A + 'X       TXT'][1] == b'NEW     '),
+        ("no password, none given to the destination", b'X.TXT=A.TXT', {},
+         lambda m: m.snapshot()[1][A + 'X       TXT'][1] is None),
         ("a password: missing", b'X.TXT=PW.TXT', {}, lambda m: b'INVALID PASSWORD' in m.out),
         ("a password: kept, to a drive", b'B:=PW.TXT;KEY', {},
          lambda m: m.snapshot()[1]['B:0:PW      TXT'][1] == b'KEY     '),
@@ -563,6 +570,9 @@ def main():
         ("no file for a wildcard", b'B:=*.ZZZ', {}, lambda m: b'FILE NOT FOUND' in m.out),
         ("a bad parameter", b'X.TXT=A.TXT[$]', {}, lambda m: b'BAD PARAMETER' in m.out),
         ("a bad user number", b'X.TXT=A.TXT[G40]', {}, lambda m: b'INVALID USER NUMBER' in m.out),
+        # drives are A..P (until bugs.md #134 Q: got through to the BDOS)
+        ("drive Q: isn't one", b'Q:X.TXT=A.TXT', {}, lambda m: b'INVALID FORMAT' in m.out and not any(
+            k.startswith('Q:') for k in m.snapshot()[1])),
         ("an invalid format", b'X.TXT A.TXT', {}, lambda m: b'INVALID FORMAT' in m.out),
         ("an invalid separator", b'X.TXT=A.TXT B.TXT', {}, lambda m: b'INVALID SEPARATOR' in m.out),
         ("an ambiguous destination", b'*.TXT=A.TXT', {}, lambda m: b'INVALID FORMAT' in m.out),

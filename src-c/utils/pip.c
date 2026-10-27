@@ -482,7 +482,7 @@ static void error(uint8_t errtype, uint8_t extention, uint8_t retflag, uint16_t 
     /* print out error message */
     print(PIP_ARR21); /* ERROR - */
     printx(rd16(bp + (uint16_t)(PIP_ERROR_S_ERRMSG + errtype * 2)));
-    if (rel((extention = extention & 0x0F) <= 12) & 1) { /* nummsgs */
+    if (rel((extention = extention & 0x0F) < 12) & 1) { /* nummsgs: 0..11 (bugs.md #134) */
         printchar(' ');
         printx(rd16(bp + (uint16_t)(PIP_ERROR_S_EXTMSG + extention * 2)));
     }
@@ -967,7 +967,7 @@ static void scan(uint16_t fcba) {
         if (rel(g->ch == ':') & 1) {
             if (rel(g->flen == 1) & 1) {
                 /* may be disk name a ... p */
-                if (rel((FCBS(0) = (uint8_t)(FCBS(1) - 'A' + 1)) > 17) & 1) return; /* invalid disk name */
+                if (rel((FCBS(0) = (uint8_t)(FCBS(1) - 'A' + 1)) > 16) & 1) return; /* invalid disk name: A..P (bugs.md #134) */
                 deblank(); /* may be disk name only */
                 if (delimiter(g->ch) & 1) {
                     if (rel(g->ch == LB) & 1) scanpar();
@@ -1024,8 +1024,9 @@ static void scan(uint16_t fcba) {
                     FCBS(FCBS_PWNAM + g->flen) = g->ch;      /* save password */
                     g->flen++;
                 }
+                /* use dest password -- only when it has one (bugs.md #134) */
+                if (rel(sc_fcba == PIP_ODEST) & 1) g->getpw = F;
             }
-            if (rel(sc_fcba == PIP_ODEST) & 1) g->getpw = F; /* use dest password */
 
             if (rel(g->ch == LB) & 1) scanpar();
             /* rescan delimiter next time around */

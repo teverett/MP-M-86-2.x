@@ -303,7 +303,11 @@ class CodeGen:
             initial = getattr(decl, 'initial', None)
             if initial is not None:
                 sizes = self._match_struct_initial(name, field_layout, initial, count)
-                self._emit_initial_values(label, sizes, initial)
+                self._emit_initial_values(label, sizes, initial, self._struct_pads)
+                emitted = sum(len(x.value.encode('latin-1')) if isinstance(x, ast.Str) else n
+                              for n, x in zip(sizes, initial)) + sum(self._struct_pads.values())
+                if emitted < total * count:
+                    self.dseg.append(f"\trb\t{total * count - emitted}")
             else:
                 # EXTERNAL data still gets storage reserved *in this
                 # module*: there is no linker, so a real cross-module
@@ -329,12 +333,14 @@ class CodeGen:
         # phase 3
         if decl.dims == '*' or initial is not None:
             self._emit_initial_values(label, [size] * len(initial), initial)
+            if decl.dims not in (None, '*'):
+                self._pad_initial(initial, size, self.const_eval(decl.dims))
         else:
             count = self.const_eval(decl.dims) if decl.dims is not None else None
             unit = 'rb' if size == 1 else 'rw'
             self.dseg.append(f"{label}\t{unit}\t{(count or 1) * (2 if size == 4 else 1)}")
 
-    def _emit_initial_values(self, label, sizes, initial):
+    def _emit_initial_values(self, label, sizes, initial, pads=None):
         """Emit one DB/DW directive per INITIAL slot (sizes[i] bytes each,
         1 or 2), using the actual label only on the first. A string slot
         renders as a quoted DB string (asm86 expands it to its bytes
@@ -342,7 +348,9 @@ class CodeGen:
         since that value isn't known until assembly; anything else must
         fold to a compile-time constant number."""
         first = True
-        for size, expr in zip(sizes, initial):
+        for i, (size, expr) in enumerate(zip(sizes, initial)):
+            if pads and i - 1 in pads:
+                self.dseg.append(f"\trb\t{pads[i - 1]}")
             tag = f"{label}\t" if first else "\t"
             first = False
             if isinstance(expr, ast.Str):
@@ -355,6 +363,16 @@ class CodeGen:
             else:
                 v = self.const_eval(expr) & (0xFFFF if size == 2 else 0xFF)
                 self.dseg.append(f"{tag}{'dw' if size == 2 else 'db'}\t{v}")
+        if pads and len(initial) - 1 in pads:
+            self.dseg.append(f"\trb\t{pads[len(initial) - 1]}")
+
+    def _pad_initial(self, initial, size, count):
+        """an array's INITIAL list shorter than the array: the rest is
+        still the array's (uninitialized; SET's "cmd (27) byte initial
+        (...13 bytes)" left its last 14 on top of the next variable)"""
+        short = (count or 1) * size - self._initial_total_bytes(initial, size)
+        if short > 0:
+            self.dseg.append(f"\trb\t{short}")
 
     def _initial_total_bytes(self, initial, elem_size):
         total = 0
@@ -379,10 +397,14 @@ class CodeGen:
         sizes = []
         idx = 0
         n = len(initial)
+        self._struct_pads = {}
         for _ in range(outer_count):
             for fname, fsize, fcount, is_array in field_layout:
                 if is_array and idx < n and isinstance(initial[idx], ast.Str):
                     sizes.append(fsize)
+                    short = fsize * fcount - len(initial[idx].value.encode('latin-1'))
+                    if short > 0:  # the rest of the field is still the field's
+                        self._struct_pads[idx] = short
                     idx += 1
                 else:
                     for _ in range(fcount):
@@ -811,6 +833,9 @@ class CodeGen:
     def gen_Empty(self, s):
         pass
 
+    def gen_Interrupts(self, s):
+        self.emit("\tsti" if s.enable else "\tcli")
+
     def gen_LabelMarker(self, s):
         if s.name.lower() in getattr(self.cur_scope, 'labels', {}):
             self._emit_label(s.name.lower())
@@ -886,6 +911,8 @@ class CodeGen:
             if label not in self.static_locals:
                 self.static_locals.add(label)
                 self._emit_initial_values(label, [size] * len(initial), initial)
+                if s.dims not in (None, '*'):
+                    self._pad_initial(initial, size, count)
             return
         if s.dims == '*':
             if initial is None:
@@ -1000,6 +1027,14 @@ class CodeGen:
     # mnemonic that's true exactly when that flag is set.
     FLAG_VARS = {'carry': 'jc', 'zero': 'je', 'sign': 'js', 'parity': 'jp'}
 
+    def _flag_var(self, e):
+        """the flag pseudo-variable e names, or None: a program's own
+        variable of that name (SHOW's local `zero`) hides the flag, as
+        in PL/M-86, where they're only predeclared"""
+        if isinstance(e, ast.Name) and e.name.lower() in self.FLAG_VARS and self.cur_scope.lookup(e.name) is None:
+            return e.name.lower()
+        return None
+
     def emit_jcc_far(self, jcc, target_label):
         """Emit a conditional jump to target_label with unlimited range.
         The 8086 Jcc opcodes only have an 8-bit displacement, but a
@@ -1013,7 +1048,7 @@ class CodeGen:
         self.emit(f"{skip}:")
 
     def gen_bool_jump_false(self, cond, false_label):
-        if isinstance(cond, ast.Name) and cond.name.lower() in self.FLAG_VARS:
+        if self._flag_var(cond):
             # A flag pseudo-variable (CARRY/ZERO/SIGN/PARITY) reads the
             # 8086 flag as last set by the previous arithmetic --
             # MOV/PUSH/POP (which is all this compiler emits between
@@ -1082,7 +1117,7 @@ class CodeGen:
             return 'byte' if self._index_elem_size(e) == 1 else 'address'
         if isinstance(e, ast.Name):
             low = e.name.lower()
-            if low in self.FLAG_VARS:
+            if self._flag_var(e):
                 return 'byte'
             if low == 'stackptr':
                 return 'address'
@@ -1149,7 +1184,7 @@ class CodeGen:
 
     def ex_Name(self, e):
         low = e.name.lower()
-        if low in self.FLAG_VARS:
+        if self._flag_var(e):
             jcc = self.FLAG_VARS[low]
             t_l = self.new_label('flagt')
             e_l = self.new_label('flage')
@@ -1275,11 +1310,16 @@ class CodeGen:
         self.emit("\tpush ax")
         self.gen_expr(e.right)
         self.emit("\tpop bx")
-        if e.op == '+':
-            self.emit("\tadd ax,bx")
-        elif e.op == '-':
+        # BYTE + and - are 8-bit, so CARRY afterwards is the byte's (TOD's
+        # range checks; 16-bit, a byte overflow never set it)
+        # (PLUS and MINUS: with the carry the previous operation left;
+        # the evaluation between doesn't touch the flags -- MOV/PUSH/POP)
+        reg = 'al,bl' if e.op in ('+', '-', 'plus', 'minus') and self.expr_type(e) == 'byte' else 'ax,bx'
+        if e.op in ('+', 'plus'):
+            self.emit(f"\t{'adc' if e.op == 'plus' else 'add'} {reg}")
+        elif e.op in ('-', 'minus'):
             self.emit("\txchg ax,bx")
-            self.emit("\tsub ax,bx")
+            self.emit(f"\t{'sbb' if e.op == 'minus' else 'sub'} {reg}")
         elif e.op == '*':
             self.emit("\tmul bx")
         elif e.op == '/':

@@ -458,7 +458,9 @@ $ eject
             values     (*) byte data
                 ('OFONREWRDENOMode',0),
             boolean    (*) byte data
-                ('OFONValue, Use ON or OFF',0);
+                ('OFONValue, Use ON or OFF',0),
+            drvattributes (*) byte data  /* RO/RW: drive status's own */
+                ('RWROAttribute',0);
 
         /*       VALUES                 FILE ATTRIBUTES
               mode   keyword          scase     attribute
@@ -887,7 +889,7 @@ setdrvstatus: procedure;
         dcl code byte;
 
     /* set the drive */
-    if (scase:=match(.attributes,1)) then
+    if (scase:=match(.drvattributes,1)) then
         code = writeprot;                   /* RO */
     else
         code = reset$drv(cdisk);            /* RW */
@@ -1043,8 +1045,11 @@ set$password: procedure;
             fext = fext or 1;
             end;
         p = (q:=parse$fn.buff$adr) - 1;
-        if c = ',' or d = ']' then            /* null password */
+        if c = ',' or d = ']' then do;        /* null password */
             call fill(.passwd(8),' ',8);
+            if d = ']' then                   /* past the ] as a  */
+                ibp = parse;                  /* password would   */
+            end;
         else do;
             ibp = parse;                      /* parse password */
             call copy(.cmd(1),.passwd(8),8);  /* copy it to fcb */

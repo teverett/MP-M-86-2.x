@@ -114,8 +114,22 @@ def c_image(obj, name):
 
 
 # the transients: (name, the directory with their C and header)
-TRANSIENTS = [('SUBMIT', 'rsp'), ('RANDOM', 'rsp'), ('DIR', 'utils'), ('TYPE', 'utils'), ('ERA', 'utils'),
-              ('REN', 'utils')]
+TRANSIENTS = [('SUBMIT', 'rsp'), ('RANDOM', 'rsp')] + [
+    (n, 'utils') for n in ('ABORT', 'ATTACH', 'CONS', 'DIR', 'DSKRST', 'ED', 'ERA', 'ERAQ', 'PIP', 'REN', 'SET',
+                           'SHOW', 'SPOOL', 'SSPOOL', 'STSCMD', 'TOD', 'TYPE')]
+
+
+# disk names that differ from the source's (src-assem's tools/build_disk.py
+# DISK_NAMES: STSCMD.PLM's header renames it MPMSTAT.CMD, ...)
+DISK_NAMES = {'STSCMD': 'MPMSTAT', 'DSKRST': 'DSKRESET', 'CONS': 'CONSOLE'}
+# data-group maximums (paragraphs) for the utilities that size a buffer
+# from the memory they're loaded with, as DRI's GENCMD options gave them
+# (build_disk.py's DATA_MAX; docs/bugs.md #120)
+DATA_MAX = {'ED': 0xFFF, 'PIP': 0x980}
+
+
+def disk_name(name):
+    return DISK_NAMES.get(name, name)
 
 
 def code_len(name, where='rsp'):
@@ -123,13 +137,14 @@ def code_len(name, where='rsp'):
     return int(re.search(rf'#define {name}_CODE_LEN (0x[0-9A-Fa-f]+)', text).group(1), 16)
 
 
-def cmd_file(code_bytes, data):
+def cmd_file(code_bytes, data, data_max=0):
     """a CMD file: the group descriptors (form, paragraphs, base, min, max)
     in a 128-byte header, then the code and data groups -- relocatable
-    (base 0, min = its length)"""
+    (base 0, min = its length; max 0 = min, unless data_max)"""
     cparas = (code_bytes + 15) // 16
     dparas = (len(data) + 15) // 16
-    header = struct.pack('<BHHHH BHHHH', 1, cparas, 0, cparas, 0, 2, dparas, 0, dparas, 0).ljust(RECORD, b'\0')
+    header = struct.pack('<BHHHH BHHHH', 1, cparas, 0, cparas, 0, 2, dparas, 0, dparas,
+                         data_max).ljust(RECORD, b'\0')
     return header + bytes(cparas * 16) + data.ljust(dparas * 16, b'\0')
 
 
@@ -145,7 +160,7 @@ def main():
     first = disk.add(b'KERNEL', b'SYS', kernel, read_only=True)
     for name, where in TRANSIENTS:
         data = c_image(os.path.join(build, where, name.lower() + '.o'), name.lower())
-        disk.add(name.encode(), b'CMD', cmd_file(code_len(name, where), data))
+        disk.add(disk_name(name).encode(), b'CMD', cmd_file(code_len(name, where), data, DATA_MAX.get(name, 0)))
     disk.add(b'DEMO', b'SUB', DEMO_SUB)
 
     lba = block_offset(first) // SECTOR
@@ -154,7 +169,7 @@ def main():
     with open(args.output, 'wb') as f:
         f.write(disk.img)
     print(f"mkdisk: {os.path.relpath(args.output, SRC_C)}: KERNEL.SYS ({nsectors} sectors from LBA {lba}), "
-          f"{', '.join(n + '.CMD' for n, _ in TRANSIENTS)}, DEMO.SUB; {disk.next_block - 1} of {DSM + 1} blocks, "
+          f"{', '.join(disk_name(n) + '.CMD' for n, _ in TRANSIENTS)}, DEMO.SUB; {disk.next_block - 1} of {DSM + 1} blocks, "
           f"{disk.next_entry} of {DIR_ENTRIES} directory entries")
 
 

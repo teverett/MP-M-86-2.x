@@ -138,7 +138,7 @@ def main():
         check("image size", 1474560, len(img))
         files = directory(img)
         check("the files", sorted([(b'KERNEL  ', b'SYS'), (b'DEMO    ', b'SUB')] +
-                                  [(n.encode().ljust(8), b'CMD') for n, _ in mkdisk.TRANSIENTS]), sorted(files))
+                                  [(mkdisk.disk_name(n).encode().ljust(8), b'CMD') for n, _ in mkdisk.TRANSIENTS]), sorted(files))
 
         attrs, extents = files[(b'KERNEL  ', b'SYS')]
         check("KERNEL.SYS is read-only", b'\x80\x00\x00', attrs)
@@ -152,13 +152,14 @@ def main():
 
         for upper, where in mkdisk.TRANSIENTS:
             name, code = upper.lower(), mkdisk.code_len(upper, where)
-            data = read_file(img, files[(upper.encode().ljust(8), b'CMD')][1])
+            data = read_file(img, files[(mkdisk.disk_name(upper).encode().ljust(8), b'CMD')][1])
             image = mkdisk.c_image(os.path.join(SRC_C, 'build', where, name + '.o'), name)
-            form1, cparas, _, cmin, _, form2, dparas, _, dmin, _ = struct.unpack_from('<BHHHHBHHHH', data, 0)
+            form1, cparas, _, cmin, _, form2, dparas, _, dmin, dmax = struct.unpack_from('<BHHHHBHHHH', data, 0)
             check(f"{name.upper()}.CMD: code group {code:#x} bytes", (1, (code + 15) // 16, (code + 15) // 16),
                   (form1, cparas, cmin))
             check(f"{name.upper()}.CMD: data group = the C image", (2, (len(image) + 15) // 16, image),
                   (form2, dparas, data[128 + cparas * 16:128 + cparas * 16 + len(image)]))
+            check(f"{name.upper()}.CMD: data group max", mkdisk.DATA_MAX.get(upper, 0), dmax)
         demo = read_file(img, files[(b'DEMO    ', b'SUB')][1])
         check("DEMO.SUB", mkdisk.DEMO_SUB, demo.rstrip(b'\x1a'))
 
@@ -169,7 +170,9 @@ def main():
                             ("boots: TMP's prompt", b"0A>"),
                             ("SUBMIT DEMO from the disk", b" MP/M-86 on the C kernel, from a disk src-c built"),
                             ("with its argument", b" argument 1: HELLO"),
-                            ("DIR from the disk", b"A: SUBMIT   CMD : RANDOM   CMD : DIR      CMD : TYPE     CMD"),
+                            # DIR's first line: the first four CMD files, in mkdisk's order
+                            ("DIR from the disk", b"A: " + b" : ".join(
+                                mkdisk.disk_name(n).encode().ljust(9) + b'CMD' for n, _ in mkdisk.TRANSIENTS[:4])),
                             ("TYPE from the disk", b"ECHO argument 1: $1\r\nUSER 1")):
             check(label, True, want in out)
 

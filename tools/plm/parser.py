@@ -96,9 +96,9 @@ class Parser:
             self.expect(';')
             return ast.Goto(name=name)
         if self.at_kw('DISABLE', 'ENABLE'):
-            self.next()
+            enable = self.next().kind == 'ENABLE'
             self.expect(';')
-            return ast.Empty()
+            return ast.Interrupts(enable=enable)
 
         # assignment: lvalue (',' lvalue)* ('=' | ':=') expr ';'
         # PL/M-86 statement-level assignment is plain '=' ("a = b + c;");
@@ -491,15 +491,14 @@ class Parser:
             t = self.peek()
             if t.kind in ('+', '-'):
                 op = self.next().kind
-            elif t.kind == 'IDENT' and t.val.lower() == 'plus':
-                # Seen exactly once in this tree (PIP.PLM: "C2 PLUS 0"),
-                # never declared as anything -- a word-form synonym for
-                # '+', the same idea as PL/M's own word operators
-                # (AND/OR/XOR/MOD). Unconfirmed by a second usage, but
-                # the only reading that parses at all, and harmless if
-                # wrong (see tools/plm/README.md).
-                self.next()
-                op = '+'
+            elif t.kind == 'IDENT' and t.val.lower() in ('plus', 'minus'):
+                # PL/M's add and subtract with carry (orig/plm80s/
+                # PLMLANG.DOC: "PLUS and MINUS ... include the carry
+                # from the previous operation"); PIP.PLM's line numbers,
+                # "C2 = DEC(C2 PLUS 0)", carry from the digit below.
+                # (They were a plain '+', so PIP's numbers went wrong
+                # past 99.)
+                op = self.next().val.lower()
             else:
                 break
             v = ast.BinOp(op=op, left=v, right=self.parse_mul())

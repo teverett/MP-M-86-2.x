@@ -4,7 +4,9 @@ their data segment as one initialized C object, laid out as the .A86's
 DSEG (src-c/rsp/rsp.h). This compares each of those objects, as
 i686-elf-gcc compiled it (the symbol's bytes in the .o's .rodata), with
 the assembled data segment: the .A86 assembled with tools/asm86 here,
-or for CACHE (no source) the data group of src-assem/rsp/CACHE.RSP.
+for CACHE (no source) the data group of src-assem/rsp/CACHE.RSP, and
+for MPMSTAT src-assem/utils/STSRSP.PLM compiled as src-assem's build
+makes MPMSTAT.RSP (plmc --rsp, tests/src-c/test_syms.py's plm_source).
 
 The only bytes allowed to differ are an RSP's start IP (the first word
 of its initial stack frame, at the UDA's u_stack_sp): a code address
@@ -34,6 +36,7 @@ PROGRAMS = (
     ('clock', 'CLOCK.A86', True),
     ('echo', 'ECHO.A86', True),
     ('cache', 'CACHE.RSP', True),
+    ('mpmstat', 'STSRSP.PLM', True),
     ('submit', 'SUBMIT.A86', False),
     ('random', 'RANDOM.A86', False),
 )
@@ -59,6 +62,14 @@ def c_image(name):
 
 def asm_dseg(source, tmp):
     """The assembled data segment of src-assem/rsp/<source>."""
+    if source.upper().endswith('.PLM'):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from asm86 import Assembler
+        from test_syms import plm_source
+        utils = os.path.join(REPO_ROOT, 'src-assem', 'utils')
+        asm = Assembler()
+        asm.assemble(plm_source(os.path.join(utils, source), tmp), [utils])
+        return bytes(asm.segment_bytes('dseg'))
     if source.upper().endswith('.RSP'):
         from build_mpmsys import binary_rsp
         return binary_rsp(os.path.join(RSP_DIR, source))[1]

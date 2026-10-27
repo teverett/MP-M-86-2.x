@@ -3,10 +3,10 @@
 low-memory image kernel.elf starts from, built from src-c's own data,
 compared with the one src-assem's build makes.
 
-The reference is build_mpmsys.py's own image, built with the same RSPs
-src-c has (TMP, CLOCK, ECHO, CACHE: src-assem's build also bakes in
-MPMSTAT, which is PL/M with no C version). The C side is gensys() run on
-the host with src-c/rsp's images.
+The reference is build_mpmsys.py's own image, with the RSPs src-assem's
+build bakes in (TMP, CLOCK, ECHO, MPMSTAT -- STSRSP.PLM -- and CACHE),
+as src-c has them. The C side is gensys() run on the host with
+src-c/rsp's images.
 
 Compared:
   - the layout: SYSDAT's segment and length;
@@ -39,9 +39,8 @@ class GensysLayout(ctypes.Structure):
 
 
 def reference(tmp):
-    """build_mpmsys.py's image, without MPMSTAT: (cseg, dseg)"""
+    """build_mpmsys.py's image: (cseg, dseg)"""
     import build_mpmsys
-    build_mpmsys.BAKED_RSPS = [r for r in build_mpmsys.BAKED_RSPS if r[0] != 'MPMSTAT']
     out = os.path.join(tmp, 'MPM.bin')
     argv, sys.argv = sys.argv, ['build_mpmsys.py', '-o', out]
     try:

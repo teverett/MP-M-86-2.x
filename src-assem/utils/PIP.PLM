@@ -504,7 +504,9 @@ ERROR: PROCEDURE(errtype,extention,retflag,fileadr);
         .ex05,.ex06,.ex07,.ex08,.ex09,
         .ex10,.ex11);
 
-    eretry = retflag;   /* error retry = retry flag */
+    /* error retry = retry flag, but only in a multi-file copy (ambig):
+       retry calls multcopy, which would search the fcb at 5ch */
+    eretry = retflag and ambig;
     call multsect(1);
     call setduser;
     call close(.dest);
@@ -1552,14 +1554,15 @@ MULTCOPY: PROCEDURE;
         source.fcb(12) = what;
         call search(.source);
             do while dcnt <> 255;
-            call move(.buff+shl(dcnt and 11b,5)+1,.source.fcb(1),15);
-            if not rol(source.fcb(11),1) then
+            /* test the entry in buff: searchn rereads source.fcb */
+            if not rol(buff(shl(dcnt and 11b,5)+11),1) then
                 do; source.fcb(12) = 0;
                 call setcuser;
                 return 1;
                 end;
             call searchn;
             end;
+        source.fcb(12) = 0;
         call setcuser;
         return 0;
         end archck; 

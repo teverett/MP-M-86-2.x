@@ -126,4 +126,79 @@
 #define SUBMIT_CODE_LEN 0x0652 /* SUBMIT.A86: cseg length */
 #define RANDOM_CODE_LEN 0x01A4 /* RANDOM.A86: cseg length */
 
+/* the MPMSTAT RSP: src-assem/utils/STSRSP.PLM (with STSCOM.PLM),
+ * compiled with plmc --rsp MPMSTAT as src-assem/Makefile builds
+ * MPMSTAT.RSP -- RSPASM's shell (header, PD, UDA, DMA, stack, fcbs),
+ * then the PL/M data; its start is plmstart */
+#define MPMSTAT_BP_RSPLINK 0x0000 /* STSRSP.PLM: pl_bp_rsplink */
+#define MPMSTAT_RSP_PD 0x0010 /* STSRSP.PLM: rsp_pd */
+#define MPMSTAT_UDA 0x0040 /* STSRSP.PLM: uda */
+#define MPMSTAT_BP_BUFF 0x0140 /* STSRSP.PLM: pl_bp_buff */
+#define MPMSTAT_BP_TBUFF 0x0140 /* STSRSP.PLM: pl_bp_tbuff */
+#define MPMSTAT_RSP_STACK_TOP 0x05C0 /* STSRSP.PLM: rsp_stack_top */
+#define MPMSTAT_BP_FCB 0x05C6 /* STSRSP.PLM: pl_bp_fcb */
+#define MPMSTAT_BP_FCB16 0x05D6 /* STSRSP.PLM: pl_bp_fcb16 */
+#define MPMSTAT_LPAREN 0x05EA /* STSRSP.PLM: pl_lparen */
+#define MPMSTAT_RPAREN 0x05EB /* STSRSP.PLM: pl_rparen */
+#define MPMSTAT_SYSDATPOINTER 0x05EC /* STSRSP.PLM: pl_sysdatpointer */
+#define MPMSTAT_PDPOINTER 0x05F0 /* STSRSP.PLM: pl_pdpointer */
+#define MPMSTAT_QDPOINTER 0x05F4 /* STSRSP.PLM: pl_qdpointer */
+#define MPMSTAT_MDPOINTER 0x05F8 /* STSRSP.PLM: pl_mdpointer */
+#define MPMSTAT_MSPOINTER 0x05FC /* STSRSP.PLM: pl_mspointer */
+#define MPMSTAT_SATPOINTER 0x0600 /* STSRSP.PLM: pl_satpointer */
+#define MPMSTAT_FLAGPOINTER 0x0604 /* STSRSP.PLM: pl_flagpointer */
+#define MPMSTAT_CCBPOINTER 0x0608 /* STSRSP.PLM: pl_ccbpointer */
+#define MPMSTAT_HEXDIGIT 0x060C /* STSRSP.PLM: pl_hexdigit */
+#define MPMSTAT_LINKLIST 0x061C /* STSRSP.PLM: pl_linklist */
+#define MPMSTAT_STSQD 0x069C /* STSRSP.PLM: pl_stsqd */
+#define MPMSTAT_STSQDBUF 0x06B8 /* STSRSP.PLM: pl_stsqdbuf */
+#define MPMSTAT_STSCMD 0x073B /* STSRSP.PLM: pl_stscmd */
+#define MPMSTAT_STSQPB 0x07BE /* STSRSP.PLM: pl_stsqpb */
+#define MPMSTAT_ARR34 0x07CE /* STSRSP.PLM: arr34 */
+#define MPMSTAT_ARR35 0x07D3 /* STSRSP.PLM: arr35 */
+#define MPMSTAT_ARR36 0x07F2 /* STSRSP.PLM: arr36 */
+#define MPMSTAT_ARR37 0x0812 /* STSRSP.PLM: arr37 */
+#define MPMSTAT_ARR38 0x082E /* STSRSP.PLM: arr38 */
+#define MPMSTAT_ARR42 0x0856 /* STSRSP.PLM: arr42 */
+#define MPMSTAT_ARR46 0x087D /* STSRSP.PLM: arr46 */
+#define MPMSTAT_ARR50 0x08A6 /* STSRSP.PLM: arr50 */
+#define MPMSTAT_ARR57 0x08C2 /* STSRSP.PLM: arr57 */
+#define MPMSTAT_ARR58 0x08D7 /* STSRSP.PLM: arr58 */
+#define MPMSTAT_ARR59 0x08FB /* STSRSP.PLM: arr59 */
+#define MPMSTAT_ARR60 0x090F /* STSRSP.PLM: arr60 */
+#define MPMSTAT_ARR67 0x0923 /* STSRSP.PLM: arr67 */
+#define MPMSTAT_ARR68 0x0927 /* STSRSP.PLM: arr68 */
+#define MPMSTAT_ARR69 0x092A /* STSRSP.PLM: arr69 */
+#define MPMSTAT_ARR76 0x093D /* STSRSP.PLM: arr76 */
+#define MPMSTAT_ARR77 0x0941 /* STSRSP.PLM: arr77 */
+#define MPMSTAT_ARR78 0x0944 /* STSRSP.PLM: arr78 */
+#define MPMSTAT_ARR79 0x0959 /* STSRSP.PLM: arr79 */
+#define MPMSTAT_ARR80 0x096E /* STSRSP.PLM: arr80 */
+#define MPMSTAT_ARR87 0x0988 /* STSRSP.PLM: arr87 */
+#define MPMSTAT_ARR88 0x0992 /* STSRSP.PLM: arr88 */
+#define MPMSTAT_ARR98 0x099F /* STSRSP.PLM: arr98 */
+#define MPMSTAT_ARR110 0x09AB /* STSRSP.PLM: arr110 */
+#define MPMSTAT_ARR114 0x09B6 /* STSRSP.PLM: arr114 */
+#define MPMSTAT_ARR118 0x09D1 /* STSRSP.PLM: arr118 */
+#define MPMSTAT_ARR119 0x09D5 /* STSRSP.PLM: arr119 */
+#define MPMSTAT_ARR123 0x09DE /* STSRSP.PLM: arr123 */
+#define MPMSTAT_ARR127 0x09E9 /* STSRSP.PLM: arr127 */
+#define MPMSTAT_ARR128 0x09FE /* STSRSP.PLM: arr128 */
+#define MPMSTAT_ARR135 0x0A19 /* STSRSP.PLM: arr135 */
+#define MPMSTAT_ARR136 0x0A1D /* STSRSP.PLM: arr136 */
+#define MPMSTAT_ARR137 0x0A25 /* STSRSP.PLM: arr137 */
+#define MPMSTAT_ARR141 0x0A38 /* STSRSP.PLM: arr141 */
+#define MPMSTAT_ARR165 0x0A50 /* STSRSP.PLM: arr165 */
+#define MPMSTAT_ARR166 0x0A54 /* STSRSP.PLM: arr166 */
+#define MPMSTAT_ARR167 0x0A57 /* STSRSP.PLM: arr167 */
+#define MPMSTAT_ARR174 0x0A5A /* STSRSP.PLM: arr174 */
+#define MPMSTAT_ARR175 0x0A5E /* STSRSP.PLM: arr175 */
+#define MPMSTAT_ARR179 0x0A6B /* STSRSP.PLM: arr179 */
+#define MPMSTAT_ARR180 0x0AA8 /* STSRSP.PLM: arr180 */
+#define MPMSTAT_ARR181 0x0AB2 /* STSRSP.PLM: arr181 */
+#define MPMSTAT_MEMORY 0x0ABC /* STSRSP.PLM: pl_memory */
+#define MPMSTAT_START 0x1533 /* STSRSP.PLM: pl_plmstart */
+#define MPMSTAT_DATA_LEN 0x0ABC /* STSRSP.PLM: dseg length */
+#define MPMSTAT_CODE_LEN 0x177A /* STSRSP.PLM: cseg length */
+
 #endif

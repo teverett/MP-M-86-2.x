@@ -396,7 +396,7 @@ class Program:
     utility, compiled as src-assem's build does -- its code and data, and
     its C build."""
 
-    def __init__(self, name, c_main, rsp, stack, plm=False):
+    def __init__(self, name, c_main, rsp, stack, plm=False, c_name=None):
         self.name = name
         asm = Assembler()
         if plm:
@@ -410,8 +410,11 @@ class Program:
         self.sym = {k.lower(): v.value for k, v in asm.symtab.items()}
         self.rsp = rsp
         self.stack = stack  # (first, last) DS offsets of the asm's stack
-        c_dir = 'utils' if plm else 'rsp'  # src-c/utils/ mirrors src-assem/utils/
-        path = compile_lib([os.path.join(SRC_C, c_dir, name.lower() + '.c'), os.path.join(FIXTURES, 'rt_host.c')],
+        # src-c/utils/ mirrors src-assem/utils/; a PL/M RSP (STSRSP.PLM)
+        # is in src-c/rsp/ with the others, under c_name
+        c_dir = 'utils' if plm and not rsp else 'rsp'
+        c_files = c_name if isinstance(c_name, list) else [c_name or name.lower() + '.c']
+        path = compile_lib([os.path.join(SRC_C, c_dir, f) for f in c_files] + [os.path.join(FIXTURES, 'rt_host.c')],
                            [KERNEL_C, os.path.join(SRC_C, 'rt'), os.path.join(SRC_C, 'rsp'), os.path.join(SRC_C, 'utils')])
         self.lib = ctypes.CDLL(path)
         os.remove(path)
@@ -501,10 +504,13 @@ class Checker:
         return 0
 
 
-def compare(ck, prog, label, mpm_args, setup=None, snap=None):
-    """run both sides from the same machine and script; compare"""
+def compare(ck, prog, label, mpm_args, setup=None, snap=None, mpm_class=None):
+    """run both sides from the same machine and script; compare. A test
+    that needs more of MP/M than Mpm models passes a subclass of it as
+    mpm_class (its call() handling the functions, then Mpm.call)."""
+    mpm_class = mpm_class or Mpm
     mem = prog.memory(setup)
-    ref_mpm, port_mpm = Mpm(**mpm_args), Mpm(**mpm_args)
+    ref_mpm, port_mpm = mpm_class(**mpm_args), mpm_class(**mpm_args)
     ref = prog.run_asm(mem, ref_mpm)
     port, _, _ = prog.run_c(mem, port_mpm)
     ck.check(f"{label}: same calls", ref_mpm.log, port_mpm.log)

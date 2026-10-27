@@ -209,6 +209,46 @@ plmstart: procedure public;
 end t;
 '''
 
+# docs/bugs.md #131: a short INITIAL list still allocates the whole
+# array (a structure's string field too); a variable named like a flag
+# pseudo-variable hides it; BYTE + and - set CARRY from 8 bits; PLUS and
+# MINUS take the carry in; DISABLE/ENABLE are CLI/STI
+FIX_PLM = r'''t: do;
+declare (b, c) byte;
+declare out(16) address;
+declare k byte initial (0);
+declare a (4) byte initial (1), d byte initial (9);
+declare s structure (x byte, n (4) byte, y byte) initial (7, 'ab', 8);
+put: procedure (x);
+  declare x address;
+  out(k) = x; k = k + 1;
+  end put;
+z: procedure byte;
+  declare zero byte;
+  zero = 5;
+  if zero then return zero;
+  return 0;
+  end z;
+plmstart: procedure public;
+  call put(.d - .a);                  /* 4 */
+  call put(d);                        /* 9 */
+  call put(s.y);                      /* 8 */
+  call put(z);                        /* 5 */
+  b = 200; c = b + 100;
+  if carry then call put(1); else call put(0);   /* 1: 300 > 255 */
+  b = 100; c = b + 100;
+  if carry then call put(1); else call put(0);   /* 0 */
+  b = 0ffh; c = b + 1; c = 5 plus 0;
+  call put(c);                        /* 6: the carry out of 0ffh + 1 */
+  b = 0; c = b - 1; c = 5 minus 0;
+  call put(c);                        /* 4: the borrow */
+  b = 99h; b = dec(b + 1); c = 0; c = dec(c plus 0);
+  call put(b); call put(c);           /* 0, 1: BCD 99 + 1 = 100 */
+  disable; enable;
+  end plmstart;
+end t;
+'''
+
 
 def build(plm_path, workdir):
     gen = os.path.join(workdir, 'out.gen.A86')
@@ -374,6 +414,14 @@ def main():
     check("DIR: no match", "Directory for User  0:\r\nFile not found.", run_dir([b'NONE    X  ']))
     check("GOTO: forward, out of recursion to the main program, out of a nested procedure; DO CASE",
           [1, 2, 3, 0xFFFF, 0x77, 5, 0xBB], run_program(GOTO_PLM, 7))
+    check("bugs.md #131: short INITIAL lists, a local ZERO, byte CARRY, PLUS/MINUS, DEC carry",
+          [4, 9, 8, 5, 1, 0, 6, 4, 0, 1], run_program(FIX_PLM, 10))
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, 'T.PLM')
+        open(p, 'w').write(FIX_PLM)
+        build(p, d)
+        gen = open(os.path.join(d, 'out.gen.A86')).read().split()
+    check("bugs.md #131: DISABLE; ENABLE; is CLI, STI", True, 'cli' in gen and 'sti' in gen)
     far = 0x0E00 * 16 + 0x10
 
     def setup(mem):

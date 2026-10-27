@@ -562,7 +562,9 @@ void rt_proc_main(uint32_t pd) {
         main = rt_idle_main;
     } else {
         const uint8_t *name = far_ptr(phys_base, sysdat_seg, (uint16_t)(p + p_name));
+        int sys = (seg_r16(far_ptr(phys_base, sysdat_seg, 0), (uint16_t)(p + p_flag)) & pf_sys) != 0;
         for (const rt_program *pr = rt_programs; pr->name; pr++) {
+            if (pr->kind == (sys ? rt_transient_only : rt_rsp_only)) continue;
             if (name_is(name, pr->name)) {
                 main = pr->main;
                 break;

@@ -213,6 +213,7 @@ plmstart: procedure public;
       else if open (.fcb) = 0FFH then
         do;
         call print$console$buffer (.(0dh,0ah,'Can''t Open File = $'));
+        fcb(mode1) = fcb(mode1) and 07fh;   /* the R/O bit off to print the name */
         fcb(12) = '$';
         call print$console$buffer(.fcb(1));
         call crlf;

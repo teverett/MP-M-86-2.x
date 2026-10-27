@@ -34,12 +34,17 @@ static inline mpm_regs rt_mpm(uint16_t ds, uint8_t cl, uint16_t dx) {
  * a process, the runtime starts it in the C program whose `name`
  * matches the process name (the PD's p_name, 8 bytes, blank padded),
  * passing its DS (the UDA's u_initds, as proc_creat leaves it).
- * src-c/rsp/ lists them in rt_programs[].
+ * src-c/rsp/ lists them in rt_programs[]. A name an RSP and a transient
+ * share (MPMSTAT: the RSP, and MPMSTAT.CMD for when it isn't resident)
+ * is told apart by the PD's pf_sys -- an RSP's PD has it, LOAD's
+ * doesn't -- with `kind`.
  */
 typedef void (*rt_main_fn)(uint16_t ds);
+enum { rt_any = 0, rt_rsp_only, rt_transient_only };
 typedef struct {
     const char *name; /* 8 characters, blank padded */
     rt_main_fn main;
+    int kind;         /* rt_any, or which of the two this one is */
 } rt_program;
 extern const rt_program rt_programs[];
 

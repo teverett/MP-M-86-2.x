@@ -30,6 +30,11 @@
 ; assembled binary whose CALL sites and stack discipline are
 ; historically accurate, not merely non-erroring.
 ;
+; One addition that isn't MCD.A86's: pl_mon5, the same call but
+; returning CX, the error code a failing MP/M-86 function leaves there
+; (mon3 sees only BX = 0FFFFh). ATTACH.PLM needs it to tell "Can't Find
+; PD" from any other failure (docs/bugs.md #133).
+;
 ; Does not cover ASS86.PLM's DDT86-specific externals (ddtset,
 ; ddtgetline, goddt, printm, printword, conin, conout) -- those are a
 ; different interface (DDT86 itself), not this one, and no real
@@ -46,6 +51,17 @@ pl_mon4:			; returns pointer in BX and ES
 	mov dx,[bp+4]
 	mov cx,[bp+6]
 	int 224
+	pop bp
+	ret 4
+
+pl_mon5:			; returns the error code (CX) in AX and BX:
+	push bp			; not in MCD.A86 -- for a function that fails
+	mov bp,sp		; with BX = 0FFFFh and the code in CX (console
+	mov dx,[bp+4]		; assign: ATTACH.PLM's "Can't Find PD",
+	mov cx,[bp+6]		; docs/bugs.md #133)
+	int 224
+	mov ax,cx
+	mov bx,cx
 	pop bp
 	ret 4
 

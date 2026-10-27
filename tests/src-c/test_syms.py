@@ -30,12 +30,18 @@ SRC_DIRS = [os.path.join(REPO_ROOT, 'src-assem', d) for d in ('kernel', 'rsp', '
 STUB = os.path.join(REPO_ROOT, 'tools', 'plm', 'runtime_stub.A86')
 
 
+# the PL/M RSPs, compiled with plmc --rsp (src-assem/Makefile's MPMSTAT.RSP)
+PLM_RSPS = {'STSRSP.PLM': 'MPMSTAT'}
+
+
 def plm_source(path, tmp):
-    """a PL/M utility as src-assem/Makefile builds it: plmc, the
-    compiler's own trailing END dropped, the interface stub appended"""
+    """a PL/M utility as src-assem/Makefile builds it: plmc (--rsp for
+    an RSP), the compiler's own trailing END dropped, the interface stub
+    appended"""
     gen = os.path.join(tmp, os.path.basename(path) + '.gen.A86')
-    subprocess.run([sys.executable, os.path.join(REPO_ROOT, 'tools', 'plmc.py'), path, '-o', gen], check=True,
-                   capture_output=True)
+    rsp = PLM_RSPS.get(os.path.basename(path).upper())
+    subprocess.run([sys.executable, os.path.join(REPO_ROOT, 'tools', 'plmc.py'), path, '-o', gen] +
+                   (['--rsp', rsp] if rsp else []), check=True, capture_output=True)
     lines = [ln for ln in open(gen).read().splitlines(keepends=True) if not re.fullmatch(r'\s*end\s*', ln)]
     combined = os.path.join(tmp, os.path.basename(path) + '.combined.A86')
     with open(combined, 'w') as f:

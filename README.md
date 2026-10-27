@@ -30,10 +30,10 @@ src-c/          A C port of src-assem/ (see docs/src-c.md) that builds
                 src-assem/:
   kernel/         The kernel modules, routine by routine.
   loader/         The loader.
-  rsp/            The RSPs (TMP, CLOCK, ECHO, CACHE) and transients
-                  (SUBMIT, RANDOM), as C programs.
-  utils/          The PL/M utilities DIR, TYPE, ERA and REN, as C
-                  programs.
+  rsp/            The RSPs (TMP, CLOCK, ECHO, MPMSTAT, CACHE) and
+                  transients (SUBMIT, RANDOM), as C programs.
+  utils/          All of src-assem/utils/'s PL/M utilities (PIP, ED,
+                  SET, SHOW, DIR, ...), as C programs.
   rt/             The runtime that runs the kernel as MP/M in 32-bit
                   protected mode.
   gensys/         System generation: the low-memory image.

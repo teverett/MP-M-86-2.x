@@ -40,7 +40,7 @@ SIGNONS = (
     ("sup_init on real memory, all fields verified", b"sup_init: ok"),
     # src-c/rt runs the kernel as MP/M, with src-c/rsp's C RSPs
     ("gensys built the image, with the C RSPs",
-     b"rt: MP/M-86 on the C kernel: code at 1000, SYSDAT at 183A, RSPs Tmp CLOCK ECHO Cachinit"),
+     b"rt: MP/M-86 on the C kernel: code at 1000, SYSDAT at 1A5E, RSPs Tmp CLOCK ECHO MPMSTAT Cachinit"),
     ("C TMP prints the version", b"MP/M-86 2.0 [5 Oct 81]"),
     ("C TMP prompts", b"0A>"),
 )

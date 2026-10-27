@@ -1769,6 +1769,8 @@ START:
             DIRECTION = BACKWARD; CALL MOVER;
             /* NOW REMOVE THE INTERMEDIATE STRING */
             FRONT = T;
+            /* FORWARD AGAIN FOR THE NEXT FIND (FIND'S MOVER) */
+            DIRECTION = FORWARD;
             END;
         END; ELSE
  

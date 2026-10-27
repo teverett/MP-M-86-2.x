@@ -1184,7 +1184,7 @@ prstatus: procedure;
 userstatus: procedure;
     /* display active user numbers */
     declare i byte;
-    declare user(15) byte;
+    declare user(16) byte;  /* users 0-15 (was 15: user 15 never shown) */
     declare ufcb(*) byte data ('????????????',0,0,0);
 
     call crlf;

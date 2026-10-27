@@ -617,6 +617,18 @@ class I86Sim:
         elif op == 0x13:  # ADC r16, r/m16
             _, reg, rm = self._modrm()
             self.regs[_R16[reg]] = self._adc(self.regs[_R16[reg]], self._load(rm, 16), 16)
+        elif op == 0x18:  # SBB r/m8, r8 (plmc's MINUS, docs/bugs.md #131)
+            _, reg, rm = self._modrm()
+            self._store(rm, 8, self._sbb(self._load(rm, 8), self._get_r8(reg), 8))
+        elif op == 0x1A:  # SBB r8, r/m8
+            _, reg, rm = self._modrm()
+            self._set_r8(reg, self._sbb(self._get_r8(reg), self._load(rm, 8), 8))
+        elif op == 0x19:  # SBB r/m16, r16
+            _, reg, rm = self._modrm()
+            self._store(rm, 16, self._sbb(self._load(rm, 16), self.regs[_R16[reg]], 16))
+        elif op == 0x1B:  # SBB r16, r/m16
+            _, reg, rm = self._modrm()
+            self.regs[_R16[reg]] = self._sbb(self.regs[_R16[reg]], self._load(rm, 16), 16)
         elif op == 0x00:  # ADD r/m8, r8
             _, reg, rm = self._modrm()
             self._store(rm, 8, self._add(self._load(rm, 8), self._get_r8(reg), 8))

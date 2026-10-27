@@ -64,6 +64,10 @@ class LabelMarker(Node):
     pass  # name -- a bare code label inside a statement sequence
 
 
+class Interrupts(Node):
+    pass  # enable -- ENABLE (True) or DISABLE (False)
+
+
 class Goto(Node):
     pass  # name -- GOTO/GO TO a label
 

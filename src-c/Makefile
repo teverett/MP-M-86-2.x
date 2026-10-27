@@ -90,8 +90,9 @@ $(BUILD_DIR)/rt/rt.o: rt/rt.c rt/rt.h rt/rt_syms.h gensys/gensys.h kernel/defs.h
 $(BUILD_DIR)/rt/rt_asm.o: rt/rt_asm.s | $(BUILD_DIR)/rt
 	$(CC) -c $< -o $@
 
+# (-I utils: mpmstat.c, the MPMSTAT RSP, shares utils/stscom.h)
 $(BUILD_DIR)/rsp/%.o: rsp/%.c rsp/rsp.h rsp/rsp_syms.h rt/rt.h kernel/defs.h gensys/gensys.h | $(BUILD_DIR)/rsp
-	$(CC) $(CFLAGS) -Wno-unterminated-string-initialization -I kernel -I rt -I rsp -I gensys -c $< -o $@
+	$(CC) $(CFLAGS) -Wno-unterminated-string-initialization -I kernel -I rt -I rsp -I gensys -I utils -c $< -o $@
 
 # src-c/utils: the PL/M utilities (src-assem/utils), as C programs
 $(BUILD_DIR)/utils/%.o: utils/%.c utils/utils_syms.h rsp/rsp.h rt/rt.h kernel/defs.h | $(BUILD_DIR)/utils

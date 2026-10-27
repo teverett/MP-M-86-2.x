@@ -49,7 +49,7 @@ switches to 32-bit protected mode and starts the kernel at 1 MB. The
 kernel then:
 - builds MP/M's low-memory image (src-c/gensys);
 - brings up the C XIOS;
-- runs INIT, which starts the RSPs (TMP, CLOCK, ECHO, CACHE);
+- runs INIT, which starts the RSPs (TMP, CLOCK, ECHO, MPMSTAT, CACHE);
 - leaves TMP prompting `0A>`.
 
 The console is QEMU's serial port, on the terminal: Ctrl-A X quits, and
@@ -63,17 +63,14 @@ The floppy holds:
 | `KERNEL.SYS` | The kernel (read-only; the boot sector loads it) |
 | `SUBMIT.CMD` | SUBMIT, as a C program |
 | `RANDOM.CMD` | DRI's random-access sample, as a C program |
-| `DIR.CMD` | DIR (`DIR [S]`, `DIR [G n]`), src-c/utils/dir.c |
-| `TYPE.CMD` | TYPE (`TYPE file [P]`), src-c/utils/type.c |
-| `ERA.CMD` | ERA (`ERA file [X]`), src-c/utils/era.c |
-| `REN.CMD` | REN (`REN new=old`), src-c/utils/ren.c |
+| `ABORT.CMD`, `ATTACH.CMD`, `CONSOLE.CMD`, `DIR.CMD`, `DSKRESET.CMD`, `ED.CMD`, `ERA.CMD`, `ERAQ.CMD`, `MPMSTAT.CMD`, `PIP.CMD`, `REN.CMD`, `SET.CMD`, `SHOW.CMD`, `SPOOL.CMD`, `SSPOOL.CMD`, `TOD.CMD`, `TYPE.CMD` | src-assem/utils/'s PL/M utilities, as C programs (src-c/utils/; MPMSTAT.CMD is STSCMD.PLM, CONSOLE CONS.PLM, DSKRESET DSKRST.PLM, as on src-assem's floppy) |
 | `DEMO.SUB` | A sample: try `SUBMIT DEMO hello` |
 
 Besides those programs you can use TMP's built-ins (`X:`, `USER n`,
-`PRINTER n`) and `ECHO text`, which reaches the ECHO RSP through the
-CLI's queue. kernel.elf runs only C programs: the other 8086 `.CMD`
-files on src-assem's floppy (PIP, ED, ...) aren't on this one, and
-wouldn't run on it. Writes stay on the image until `make disk` rebuilds it, which
+`PRINTER n`), `ECHO text`, which reaches the ECHO RSP through the CLI's
+queue, and `MPMSTAT`, which reaches the MPMSTAT RSP's (MPMSTAT.CMD runs
+only without it). kernel.elf runs only C programs: an 8086 `.CMD` from
+src-assem's floppy wouldn't run on it. Writes stay on the image until `make disk` rebuilds it, which
 happens whenever its inputs change.
 
 The src-c build uses nothing from src-assem's build:
@@ -407,8 +404,8 @@ After handing console I/O to the XIOS, `kernel_main.c` runs
 
 - **Layout** follows the real `/src-assem` boot: the SUP code segment at
   `MPM_CODE_SEG` (1000h, `tools/build_mpmsys.py`), SYSDAT just past
-  the combined kernel code (1A5Dh for the current `/src-assem` build:
-  1000h + 42448 bytes / 16), so the init UDA lands at 1AC9h. The
+  the combined kernel code and RSPs (1A5Eh, as gensys places it, the
+  same as the `/src-assem` build), so the init UDA lands at 1ACAh. The
   physical base passed in is 0, since multiboot leaves the CPU in
   flat 32-bit mode with base-0 segments (linear == physical). That
   base is kept in a `volatile` so the compiler treats `far_ptr()`
@@ -424,15 +421,13 @@ After handing console I/O to the XIOS, `kernel_main.c` runs
   `cs:` cells, version, tick/idle stack tops, the INT mpmint vector,
   `p_uda`, the init UDA's `u_wrkseg`, intflag, rspseg, and SYSDAT 2Eh
   left alone) is read back from real memory. QEMU prints
-  `sup_init: ok (sysdat 1A5D, init uda 1AC9)`, or `sup_init: FAIL
+  `sup_init: ok (sysdat 1A5E, init uda 1ACA)`, or `sup_init: FAIL
   <field> = <got>, expected <want>` per bad field; changing one write
   in `init.c` produces exactly that. `test_boot.py` checks for the ok
   line.
 
-`SYSDAT_SEG` (1A5Dh) is copied from the current `/src-assem` build and
-won't track it automatically if the combined kernel code size
-changes. Nothing breaks if it drifts, since this image doesn't load
-the `/src-assem` code, but it will stop matching the real layout.
+`SYSDAT_SEG` comes from gensys (src-c/gensys), which lays the image out
+as `/src-assem`'s build does; test_gensys.py checks that the two agree.
 
 ### Real pointers: `rtmif_init`
 
@@ -961,10 +956,11 @@ memory at physical 0). After `sup_init`'s check, `kernel_main` calls
     - SYSDAT, then the pools past the XIOS's data: the queue MAU, the
       flag table, the PD pool, the Lock List, and the MDs with the
       memory partitions.
-  - With MPMSTAT left out, SYSDAT is at 183Ah (/src-assem's image has it
-    at 1A5Dh).
-  - tests/src-c/test_gensys.py builds build_mpmsys.py's image with the
-    same RSPs and compares:
+  - SYSDAT is at 1A5Eh, as in /src-assem's image (183Ah until the
+    MPMSTAT RSP, STSRSP.PLM, was ported: src-c/rsp/mpmstat.c; 1A5Dh
+    until the interface stub's mon5 lengthened its code, bugs.md #133).
+  - tests/src-c/test_gensys.py builds build_mpmsys.py's image, with the
+    same RSPs, and compares:
     - SYSDAT, pools included, byte for byte;
     - the code half, except the 8086 code ranges;
     - the version message;
@@ -993,8 +989,9 @@ memory at physical 0). After `sup_init`'s check, `kernel_main` calls
   - the boot sector, its fields pointing at KERNEL.SYS;
   - KERNEL.SYS, the flat kernel, in contiguous blocks from block 1 and
     read-only;
-  - SUBMIT.CMD, RANDOM.CMD, DIR.CMD, TYPE.CMD, ERA.CMD and REN.CMD
-    (mkdisk.TRANSIENTS): CMD files whose data group is the C program's
+  - SUBMIT.CMD, RANDOM.CMD and the utilities' CMD files
+    (mkdisk.TRANSIENTS, under src-assem's disk names, mkdisk.DISK_NAMES):
+    CMD files whose data group is the C program's
     data image (from its compiled object) and whose code group is zeros,
     at the original's length (rsp_syms.h, utils_syms.h). The C kernel
     runs the C main, and LOAD only needs the groups;
@@ -1005,8 +1002,10 @@ memory at physical 0). After `sup_init`'s check, `kernel_main` calls
   - each file's contents and the boot sector's fields;
   - booting it by itself and running `SUBMIT DEMO`, DIR and TYPE from
     it.
-- **The PL/M utilities: src-c/utils/ (src-assem/utils/'s DIR, TYPE,
-  ERA, REN).** Each is a transient whose data segment is the PL/M
+- **The PL/M utilities: src-c/utils/ (all of src-assem/utils/: ABORT,
+  ATTACH, CONS, DIR, DSKRST, ED, ERA, ERAQ, PIP, REN, SET, SHOW, SPOOL,
+  SSPOOL, STSCMD with STSCOM, TOD, TYPE), and the MPMSTAT RSP
+  (STSRSP.PLM: src-c/rsp/mpmstat.c).** Each transient whose data segment is the PL/M
   program's as tools/plmc.py lays it out: the base page, the variables
   with their initial values, the string constants, then the stack
   (offsets in utils/utils_syms.h, which test_syms.py checks against the
@@ -1017,17 +1016,31 @@ memory at physical 0). After `sup_init`'s check, `kernel_main` calls
     at its ^Z;
   - the main program's variables are PL/M globals in the image; the
     procedures' own variables live on PL/M's stack and are C locals;
-  - ERA and REN find their UDA through the PD (mon4, function 156). They
-    save and restore its dcnt/searcha/searchl around each one-at-a-time
-    delete or rename, as the PL/M does, so search next keeps its place.
+  - ERA, REN, ERAQ and SET find their UDA through the PD (mon4,
+    function 156). They save and restore its dcnt/searcha/searchl around
+    each one-at-a-time delete, rename or attribute change, as the PL/M
+    does, so search next keeps its place;
+  - ED and PIP size their buffers from the memory LOAD gives them (the
+    base page's data group length): mkdisk.DATA_MAX gives their CMD
+    files DRI's GENCMD maximums. Their GO TOs to the main program's
+    labels unwind to a setjmp (`__builtin_setjmp` in the kernel);
+  - STSCOM.PLM, the status display both MPMSTATs include, is
+    src-c/utils/stscom.c. Its variables and strings sit at different
+    offsets in the two programs, so each passes its own (stscom_init).
+    The RSP and the transient share the name MPMSTAT, and rt_programs[]
+    tells them apart by the PD's pf_sys (rt.h's `kind`).
 
-  test_dir/type/era/ren.py run each against the .PLM, compiled as
-  src-assem's build does, in i86sim. They use rspref's scripted MP/M,
-  whose disk has a 64-entry directory, R/O and SYS attributes, and
-  passwords; search first/next keep their place in the UDA. The tests
-  cover listings and options, paging, password prompts and editing,
-  confirmation, R/O and password failures, wildcards, and a new name
-  that already exists.
+  test_<name>.py run each against the .PLM (test_abort_util.py for
+  ABORT; test_mpmstat.py for the RSP), compiled as src-assem's build
+  does, in i86sim. They use rspref's scripted MP/M, whose disk has a
+  64-entry directory, R/O and SYS attributes, and passwords; search
+  first/next keep their place in the UDA. A test that needs more of
+  MP/M subclasses its Mpm (compare's mpm_class): queues, the list
+  device, memory, XFCBs and labels, a SYSDAT with PDs, queues, flags
+  and memory to walk, a running clock. Each case also checks that the
+  reference really does what it should, so the two can't match by
+  failing the same way. Porting turned up five plmc bugs (bugs.md #131)
+  and bugs in the PL/M source (#132).
 - **CACHE.** cache.c hooks `rt_xiosmod` and writes the bytes the binary
   writes: its DS at CS:0, the old XIOS entry at CS:2, and SYSDAT's
   xiosmod = CS:0038. Verified in QEMU: 1920:0038, with 193Ah and
@@ -1036,7 +1049,7 @@ memory at physical 0). After `sup_init`'s check, `kernel_main` calls
   - tests/src-c/test_rsp_images.py compares all six C images (from the
     compiled .o) with the assembled data segments, byte for byte; only
     an RSP's start IP may differ.
-  - test_tmp/echo/clock/submit/random.py (and test_dir/type/era/ren.py,
+  - test_tmp/echo/clock/submit/random.py (and the utilities' tests,
     against the .PLM) run each whole program both as
     the .A86 (in i86sim) and as its src-c/rsp C version (on the host,
     fixtures/rt_host.c standing in for src-c/rt), against one scripted
@@ -1122,6 +1135,21 @@ memory at physical 0). After `sup_init`'s check, `kernel_main` calls
 | `src-assem/utils/TYPE.PLM` | the whole program, `src-c/utils/type.c` | — (tests/src-c/test_type.py) |
 | `src-assem/utils/ERA.PLM` | the whole program, `src-c/utils/era.c` | — (tests/src-c/test_era.py) |
 | `src-assem/utils/REN.PLM` | the whole program, `src-c/utils/ren.c` | — (tests/src-c/test_ren.py) |
+| `src-assem/utils/ABORT.PLM` | the whole program, `src-c/utils/abort.c` | — (tests/src-c/test_abort_util.py) |
+| `src-assem/utils/ATTACH.PLM` | the whole program, `src-c/utils/attach.c` | — (tests/src-c/test_attach.py) |
+| `src-assem/utils/CONS.PLM` | the whole program, `src-c/utils/cons.c` | — (tests/src-c/test_cons.py) |
+| `src-assem/utils/DSKRST.PLM` | the whole program, `src-c/utils/dskrst.c` | — (tests/src-c/test_dskrst.py) |
+| `src-assem/utils/ED.PLM` | the whole program, `src-c/utils/ed.c` | — (tests/src-c/test_ed.py) |
+| `src-assem/utils/ERAQ.PLM` | the whole program, `src-c/utils/eraq.c` | — (tests/src-c/test_eraq.py) |
+| `src-assem/utils/PIP.PLM` | the whole program, `src-c/utils/pip.c` | — (tests/src-c/test_pip.py) |
+| `src-assem/utils/SET.PLM` | the whole program, `src-c/utils/set.c` | — (tests/src-c/test_set.py) |
+| `src-assem/utils/SHOW.PLM` | the whole program, `src-c/utils/show.c` | — (tests/src-c/test_show.py) |
+| `src-assem/utils/SPOOL.PLM` | the whole program, `src-c/utils/spool.c` | — (tests/src-c/test_spool.py) |
+| `src-assem/utils/SSPOOL.PLM` | the whole program, `src-c/utils/sspool.c` | — (tests/src-c/test_sspool.py) |
+| `src-assem/utils/STSCMD.PLM` | the whole program, `src-c/utils/stscmd.c` | — (tests/src-c/test_stscmd.py) |
+| `src-assem/utils/STSCOM.PLM` | the whole file, `src-c/utils/stscom.c` (shared by both MPMSTATs) | — (test_stscmd.py, test_mpmstat.py) |
+| `src-assem/utils/STSRSP.PLM` | the whole program, the MPMSTAT RSP, `src-c/rsp/mpmstat.c` | — (tests/src-c/test_mpmstat.py, test_rsp_images.py) |
+| `src-assem/utils/TOD.PLM` | the whole program, `src-c/utils/tod.c` | — (tests/src-c/test_tod.py) |
 | `src-assem/kernel/CIOIF.CIO` | `init` and `entry` (inter-module CIO dispatch -- `src-c/kernel/cioif.c`; `tests/src-c/test_cioif_entry.py` runs it against the whole real `src-assem/kernel/CIO.A86`) | — (the whole file is ported) Runs on real memory, see "Real pointers: the CIO module, stage 5" |
 | `src-assem/kernel/RTMIF.RTM` | `init` and `entry` (21-way inter-module RTM dispatch -- `src-c/kernel/rtmif.c`; `tests/src-c/test_rtmif_entry.py` runs it against the whole real `src-assem/kernel/RTM.A86`) | — (the whole file is ported now; 20 of the 21 dispatched targets' own `bx`/`cx`/etc. and memory effects are independently verified through this dispatcher, with the dispatcher (`dsptch`/`pdisp`) and `proc_creat` stubbed at their real addresses. `creat_proc_entry` (case 14) is dispatch-only: the C port's own `creat_proc_entry` runs the real `proc.c`/`dsptch.c`, which a stubbed reference can't match — same "known, documented gap" class as `MEMIF.MEM`'s own `entry` row above; see `test_rtmif_entry.py`'s header comment). `init` and `entry` both run on real memory, see "Real pointers: `rtmif_init`" and "Real pointers: the RTM, stage 3" |
 | `src-assem/kernel/MEMIF.MEM` | `init` and `entry` (inter-module MEM dispatch, wrapped in a real binary-semaphore acquire/release -- `src-c/kernel/memif.c`; `tests/src-c/test_memif_entry.py` runs it against the whole real `src-assem/kernel/MEM.A86`, with the targets' own nested `mpmif` calls re-entering the real `entry`) | — (the whole file is ported; all 13 dispatched functions are checked end to end through this dispatcher, along with the mutex state and the reference's boundary calls) Runs on real memory, see "Real pointers: the MEM module, stage 4" |

@@ -10499,3 +10499,118 @@ pushf/cli is i386-only, so that host tests can build it.
 - A clean `make disk`, and the boot and disk tests, work with
   src-assem/build/ removed.
 - All 62 test files pass.
+
+## 131. tools/plm (plmc) miscompiled five PL/M constructs — FIXED
+
+Found while porting the PL/M utilities to C (src-c/utils/), each one by
+the C and the compiled .PLM disagreeing. Every one of them was in
+src-assem's own built utilities too.
+1. **A short INITIAL list allocated only what it listed.** For
+   `declare a (5) byte initial (1,2), b byte;`, plmc gave `a` 2 bytes,
+   so `b` sat on `a(2)`. A string that only partly filled an array field
+   of a structure did the same to the fields after it. The effects:
+   - SET's `cmd(27)` had 13 bytes, so every parse overwrote the
+     passwords: `[PASSWORD=KEY,PROTECT=WRITE]` stored garbage, and
+     `A.TXT;KEY [RO]` asked for the password again.
+   - ED's RFCB and XFCB had 15 bytes (of 33), and PASSWORD 1 (of 16).
+     X/R transfers were garbled, the transfer file outlived the edit,
+     and a typed password renamed the edit to `Y.$$$`.
+
+   Now the rest of the array is reserved (`_pad_initial`, and the
+   structure padding in `_match_struct_initial`).
+2. **A variable named ZERO, CARRY, SIGN or PARITY read the CPU flag.**
+   Those names are only predeclared in PL/M-86, so a program's own
+   declaration hides them. Under plmc:
+   - ED's and SHOW's PRINTVALUE/pvalue dropped zero digits: ED printed
+     line 10 as " 1 ", and SHOW printed 1024 as "124".
+   
+   Now `_flag_var` checks the scope first.
+3. **BYTE + and - were done in 16 bits, so CARRY never saw a byte
+   overflow.** TOD accepted minute 260 as 4 and 256 as 0. Now they are
+   `add al,bl` / `sub al,bl`.
+4. **PLUS and MINUS were a plain + (and MINUS wasn't parsed).** They
+   add and subtract with the carry (PLMLANG.DOC). PIP's
+   `C2 = DEC(C2 PLUS 0)` line numbers came out "  1" for 100. Now they
+   are `adc`/`sbb`.
+5. **DISABLE and ENABLE emitted nothing.** Now they are `cli`/`sti`.
+
+tools/i86sim.py gained SBB r/m8/16 (18h–1Bh), which plmc's MINUS now
+emits.
+
+**Verified.**
+- tests/plm/test_plmc.py has a case for each fix.
+- src-assem rebuilds, and its floppy runs SHOW, MPMSTAT, TOD and an ED
+  session in QEMU.
+- The compiled layouts moved (ED, SET), and so did the arrNN numbering
+  (ED, SHOW, SET). src-c/utils/utils_syms.h and rsp_syms.h's MPMSTAT
+  block were regenerated, the C structs follow, and test_syms.py checks
+  them.
+- The C ports' workarounds are gone:
+  - ED's flag-reading printvalue;
+  - SET's 13-byte cmd;
+  - TOD's C-only CARRY checks, now compared;
+  - SHOW's and PIP's tests avoiding inner zeros and lines past 99, now
+    covered.
+
+## 132. Bugs in the PL/M utilities' own source — FIXED in the .PLM and the C
+
+Found porting them (src-c/utils/); each is fixed in both trees:
+- **SHOW.PLM:** `user(15)` for users 0–15. A user-15 file wrote past
+  the array, and USERS never showed user 15. Now `user(16)`.
+- **ED.PLM:** `2J` (juxtapose with a count) garbled the line. The loop
+  left DIRECTION = BACKWARD for the next FIND's MOVER. Now it is
+  `DIRECTION = FORWARD` after `FRONT = T`. DRI's MP/M II ed.plm has the
+  same bug.
+- **PIP.PLM:**
+  - ERROR retried after a one-file copy failed (`eretry = retflag`), so
+    MULTCOPY searched the CLI's fcb. Now it is `retflag and ambig`.
+  - archck looked only at the first extent it found, and could leave its
+    ex in the source fcb, so an archived 40K file whose last extent came
+    first copied 8K. Now it tests the entry in BUFF and resets fcb(12).
+- **SPOOL.PLM:** "Can't Open File = NAME" printed the sixth character
+  with the R/O bit (fcb(6) or 80h) still set. The bit is now cleared
+  first.
+- **SET.PLM:**
+  - `SET [RX]` printed "Invalid DISYARF1F2F3F4Attribute", because drive
+    status matched against the file attribute table, and match's error
+    message is whatever follows the entries. Drive status now has its
+    own table (drvattributes), so the message is "Invalid Attribute".
+  - `[PASSWORD=]` left its `]` for the next parse, which read it as an
+    empty option: "ERROR: ] ? Invalid Parameter". The null-password case
+    now parses past it, as a password would.
+
+**Not fixed (documented):**
+- ATTACH.PLM's "Can't Find PD": fixed since, see #133.
+- **PIP.PLM, possibly bugs, not confirmed:**
+  - `getpw = false` runs for every file destination, not only one with
+    a ;password.
+  - The drive check `> 17` lets Q: through to the BDOS.
+  - ERROR's `extention <= nummsgs` would read past its table for a
+    code 12 that the BDOS never returns.
+
+## 133. ATTACH's "Can't Find PD" could never print — FIXED
+
+ATTACH.PLM tested `mon3(149, .acb) = 20` (e_no_pdname) to print "Can't
+Find PD". Console assign (CONSOLE.CIO's conassign_entry) fails with
+BX = 0FFFFh and the code in CX, and mon3 returns only BX, so the test
+never held: every failure printed "Attach Failed", including a name
+with no process (DRI's ATTACH has the same code). The PL/M interface
+stub (tools/plm/runtime_stub.A86, otherwise DRI's MCD.A86) gains
+`mon5`: the same int 224, returning CX in AX and BX. ATTACH.PLM calls
+it for the assign, and src-c/utils/attach.c does too (rt_mpm's .cx).
+On success CX is 0, so `ret <> 0` still means a failure.
+
+The stub is appended to every PL/M program, so every utility's code is
+15h bytes longer. utils_syms.h's *_CODE_LEN and rsp_syms.h's
+MPMSTAT_CODE_LEN were regenerated. The MPMSTAT RSP's code grew one
+paragraph, so gensys's image moved one paragraph too: SYSDAT is now at
+1A5Eh, and so is src-assem's (test_gensys.py still finds the two
+identical).
+
+**Verified.**
+- test_attach.py: no such process, one only on another console, and no
+  name now print "Can't Find PD" on both sides. The console range and
+  owner errors still print "Attach Failed". The two cases on a
+  made-up "code in BX" kernel are gone.
+- Both floppies print "Can't Find PD" for ATTACH NONE in QEMU.
+

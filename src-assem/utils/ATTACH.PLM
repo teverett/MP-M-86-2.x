@@ -41,6 +41,10 @@ mon4: procedure(f,a) pointer external;
   dcl f byte, a address;
 end mon4;
 
+mon5: procedure(f,a) address external;    /* returns CX: the error code */
+  dcl f byte, a address;
+end mon5;
+
 dcl acb structure(
     cns byte,
     match byte,
@@ -65,7 +69,9 @@ plmstart: procedure public;
   acb.pd = 0;
   call move(8,.fcb(1),.acb.name);
 
-  if (ret := mon3(mpm$conassign, .acb)) = 20 then
+  /* a failure is BX = 0FFFFh with the code in CX: mon5 returns CX
+     (mon3's BX never was 20, so "Can't Find PD" never showed) */
+  if (ret := mon5(mpm$conassign, .acb)) = 20 then
     call mon1(mpm$print$con$buf,.(cr,lf,'Can''t Find PD $'));
   else if ret <> 0 then
     call mon1(mpm$print$con$buf,.(cr,lf,'Attach Failed $'));

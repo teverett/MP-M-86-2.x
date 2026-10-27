@@ -67,8 +67,11 @@ class Scope:
 
 
 class CodeGen:
-    def __init__(self, filename):
+    def __init__(self, filename, rsp=None):
         self.filename = filename
+        # rsp: (name, priority, flags) to compile a Resident System
+        # Process instead of a .CMD -- see to_asm_text's RSP shell
+        self.rsp = rsp
         self.global_scope = Scope()
         self.cseg = []   # list of asm text lines
         self.dseg = []
@@ -100,6 +103,10 @@ class CodeGen:
     # procedure's locals static, while this compiler puts them on the
     # stack: PIP's deepest call chain needs ~460 bytes (docs/bugs.md #121).
     STACK_BYTES = 1024
+    # An RSP has no base page: these externals are labels in its shell
+    # (RSPASM.A86's PUBLICs), rsplink being the header's first word,
+    # which INIT.SUP overwrites with SYSDAT's segment.
+    RSP_EXTERNALS = ('rsplink', 'buff', 'tbuff', 'fcb', 'fcb16')
 
     def compile_module(self, module):
         # MEMORY is a PL/M-86 compiler-predeclared identifier, not
@@ -276,7 +283,7 @@ class CodeGen:
             return
         if phase == 2:
             return
-        if decl.external and name.lower() in self.BASE_PAGE:
+        if decl.external and name.lower() in (self.RSP_EXTERNALS if self.rsp else self.BASE_PAGE):
             if phase == 1:
                 size = 1 if decl.type == 'byte' else 2
                 self.global_scope.define(name, Sym('global', label=f"pl_bp_{name.lower()}", size=size,
@@ -1886,11 +1893,47 @@ class CodeGen:
         self._store_at_bx(size, far)
 
     # -- output -----------------------------------------------------------
+    def _rsp_shell(self):
+        """The data-segment front of a PL/M RSP, as DRI's RSPASM.A86
+        (orig/mpm862sr/09) lays it out: 16-byte RSP header (rsp_link
+        first), PD at 10h, UDA at 40h whose u_sp (+34h) points at an
+        initial IRET frame starting PLMSTART, a 128-byte DMA buffer, the
+        stack, then FCBs. build_mpmsys patches the code segment into the
+        frame (rsp_stack_top + 2) and u_initcs (uda + 50h). The stack is
+        STACK_BYTES, not RSPASM's 128: locals live on it here."""
+        name, prio, flags = self.rsp
+        return [
+            "\torg\t0",
+            "pl_bp_rsplink\tdw\t0\t\t; rsp_link: next RSP, then SYSDAT",
+            "\tdw\t0,0,0,0,0,0,0",
+            "\torg\t10h",
+            "rsp_pd\tdw\t0,0\t\t; link, thread",
+            "\tdb\t0\t\t; status",
+            f"\tdb\t{prio}\t\t; priority",
+            f"\tdw\t{flags}\t\t; flags",
+            f"\tdb\t'{name.upper()[:8].ljust(8)}'",
+            "\tdw\toffset uda/10h\t; uda paragraph",
+            "\tdb\t0,0,0,0\t\t; disk, user, ldisk, luser",
+            "\tdw\t0\t\t; mem",
+            "\torg\t40h",
+            "uda\tdw\t0,offset pl_bp_buff",
+            "\torg\t40h+34h",
+            "\tdw\toffset rsp_stack_top\t; u_sp",
+            "\torg\t140h",
+            "pl_bp_buff\trb\t0",
+            "pl_bp_tbuff\trb\t128",
+            f"\trb\t{self.STACK_BYTES}",
+            f"rsp_stack_top\tdw\toffset {sanitize(self.MAIN_PROC_NAME)}",
+            "\tdw\t0,0\t\t; segment (patched), flags",
+            "pl_bp_fcb\trb\t16",
+            "pl_bp_fcb16\trb\t20",
+        ]
+
     def to_asm_text(self):
         lines = []
         lines.append("\tcseg")
         lines.append("\torg\t0")
-        if getattr(self, 'has_main', False):
+        if getattr(self, 'has_main', False) and not self.rsp:
             # MCD.A86's startup: the stack is in the data segment
             # (SS = DS), then PLMSTART
             lines += ["\tpushf", "\tpop ax", "\tcli", "\tmov cx,ds", "\tmov ss,cx",
@@ -1903,14 +1946,16 @@ class CodeGen:
                 lines.append(f"\tdw\toffset {a}")
         lines.append("")
         lines.append("\tdseg")
-        lines.append("\torg\t0")
-        seen = set()
-        for name, off in sorted(self.BASE_PAGE.items(), key=lambda kv: kv[1]):
-            lines.append(f"\torg\t{off:#x}")
-            lines.append(f"pl_bp_{name}\trb\t0")
-        lines.append("\torg\t100h")
+        if self.rsp:
+            lines.extend(self._rsp_shell())
+        else:
+            lines.append("\torg\t0")
+            for name, off in sorted(self.BASE_PAGE.items(), key=lambda kv: kv[1]):
+                lines.append(f"\torg\t{off:#x}")
+                lines.append(f"pl_bp_{name}\trb\t0")
+            lines.append("\torg\t100h")
         lines.extend(self.dseg)
-        if getattr(self, 'has_main', False):
+        if getattr(self, 'has_main', False) and not self.rsp:
             lines.append(f"\trb\t{self.STACK_BYTES}")
             lines.append("pl_stack_base\tdb\t0")
         # MEMORY (see compile_module): its address must be past every

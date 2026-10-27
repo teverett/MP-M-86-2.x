@@ -42,7 +42,9 @@ QEMU    := qemu-system-i386
 # provide (see docs/bugs.md and tools/plm/README.md's "Known
 # limitations").
 PLM_UTILS := ABORT ATTACH CONS DIR DSKRST ED ERA ERAQ PIP REN SET SHOW \
-             SPOOL SSPOOL STSCMD STSCOM STSRSP TOD TYPE
+             SPOOL SSPOOL STSCMD STSCOM TOD TYPE
+# STSRSP.PLM is an RSP, not a program: it's built as MPMSTAT.RSP below
+# (plmc --rsp), the name its own header comment gives it.
 PLM_TOOLCHAIN_OK := INS86
 PLM_TOOLCHAIN_PARTIAL := ASS86 DIS86
 
@@ -52,7 +54,9 @@ PLM_TOOLCHAIN_PARTIAL := ASS86 DIS86
 # assemble the real thing as a differential-test reference; see
 # docs/src-c.md's own entries for each), so all 4 RSPs assemble
 # cleanly now.
-RSP_OK := ECHO CLOCK TMP SUBMIT
+RSP_OK := ECHO CLOCK TMP SUBMIT RANDOM
+# (RANDOM.A86 is DRI's sample random-access program from the same disk,
+# orig/mpm862sr/05 -- a .CMD like SUBMIT, built by its MKALL.SUB.)
 
 # --- Kernel: CIO.A86/SYSDAT.A86/BDOS.A86/MEM.A86/RTM.A86/SUP.A86 all
 # assemble cleanly now that the name-mismatch bugs are fixed (docs/bugs.md
@@ -137,7 +141,7 @@ DISK_IMG := $(BUILD)/disk/mpm86q.img
 PLM_UTILS_BIN      := $(addprefix $(BUILD)/utils/,$(addsuffix .cseg.bin,$(PLM_UTILS)))
 PLM_TOOLCHAIN_BIN   := $(addprefix $(BUILD)/toolchain/,$(addsuffix .cseg.bin,$(PLM_TOOLCHAIN_OK)))
 PLM_PARTIAL_GEN     := $(addprefix $(BUILD)/toolchain/,$(addsuffix .gen.A86,$(PLM_TOOLCHAIN_PARTIAL)))
-RSP_BIN             := $(addprefix $(BUILD)/rsp/,$(addsuffix .cseg.bin,$(RSP_OK)))
+RSP_BIN             := $(addprefix $(BUILD)/rsp/,$(addsuffix .cseg.bin,$(RSP_OK))) $(BUILD)/rsp/MPMSTAT.cseg.bin
 KERNEL_BIN          := $(addprefix $(BUILD)/kernel/,$(addsuffix .cseg.bin,$(KERNEL_OK)))
 KERNEL_NEW_BIN      := $(addprefix $(BUILD)/kernel/,$(addsuffix .cseg.bin,$(KERNEL_NEW)))
 LOADER_BIN          := $(addprefix $(BUILD)/loader/,$(addsuffix .cseg.bin,$(LOADER_OK)))
@@ -190,6 +194,18 @@ $(BUILD)/toolchain/%.cseg.bin: $(BUILD)/toolchain/%.combined.A86
 $(BUILD)/rsp/%.cseg.bin: rsp/%.A86 | $(BUILD)/rsp
 	$(ASM86) $< -o $(BUILD)/rsp/$*
 
+# -- MPMSTAT.RSP: STSRSP.PLM compiled as an RSP (RSPASM.A86's shell,
+# PD named MPMSTAT), then the same stub and assembly as the utilities.
+$(BUILD)/rsp/MPMSTAT.gen.A86: utils/STSRSP.PLM utils/STSCOM.PLM $(PLMC_SRC) | $(BUILD)/rsp
+	$(PLMC) $< --rsp MPMSTAT -o $@
+
+$(BUILD)/rsp/MPMSTAT.combined.A86: $(BUILD)/rsp/MPMSTAT.gen.A86 $(STUB)
+	grep -v '^[[:space:]]*end[[:space:]]*$$' $< > $@
+	cat $(STUB) >> $@
+
+$(BUILD)/rsp/MPMSTAT.cseg.bin: $(BUILD)/rsp/MPMSTAT.combined.A86
+	$(ASM86) $< -o $(BUILD)/rsp/MPMSTAT
+
 $(BUILD)/kernel/%.cseg.bin: kernel/%.A86 | $(BUILD)/kernel
 	$(ASM86) $< -o $(BUILD)/kernel/$*
 
@@ -205,7 +221,12 @@ $(MPMLDR_BIN): loader/LDMPM.A86 loader/LDBDOS.A86 loader/LDBIOS86Q.A86 ../tools/
 # -- Both MPM.bin{.cseg,.dseg} come from one invocation of
 # build_mpmsys.py; the stamp file is what actually carries the
 # dependency, so two output files never trigger two separate runs.
-$(MPMSYS_STAMP): kernel/SYSDAT.A86 kernel/SUP.A86 kernel/RTM.A86 kernel/MEM.A86 kernel/CIO.A86 kernel/BDOS.A86 kernel/XIOS86Q.A86 ../tools/build_mpmsys.py | $(BUILD)/kernel
+# Every kernel source, not just the seven top-level .A86 files: those
+# INCLUDE the .SUP/.RTM/.CIO/.BDO/.MEM/.DEF/... files, and an edit to one
+# of them (COMMAND.SUP, say) otherwise left MPM.bin stale.
+KERNEL_SRC := $(wildcard kernel/*)
+
+$(MPMSYS_STAMP): $(KERNEL_SRC) ../tools/build_mpmsys.py rsp/TMP.A86 rsp/CLOCK.A86 rsp/ECHO.A86 rsp/CACHE.RSP utils/STSRSP.PLM utils/STSCOM.PLM $(PLMC_SRC) | $(BUILD)/kernel
 	$(PYTHON) ../tools/build_mpmsys.py -o $(BUILD)/kernel/MPM.bin
 	touch $@
 
@@ -217,7 +238,7 @@ $(BOOTSECT_BIN): loader/ROM86Q.A86 ../tools/build_bootsect.py | $(BUILD)/loader
 # -- mpm86q.img: ../tools/build_disk.py re-invokes build_bootsect.py/
 # build_mpmldr.py/build_mpmsys.py itself, so its own real dependencies
 # are those three scripts' own sources, not their outputs.
-$(DISK_IMG): loader/ROM86Q.A86 ../tools/build_bootsect.py loader/LDMPM.A86 loader/LDBDOS.A86 loader/LDBIOS86Q.A86 ../tools/build_mpmldr.py kernel/SYSDAT.A86 kernel/SUP.A86 kernel/RTM.A86 kernel/MEM.A86 kernel/CIO.A86 kernel/BDOS.A86 kernel/XIOS86Q.A86 ../tools/build_mpmsys.py ../tools/build_disk.py $(PLM_UTILS_BIN) $(RSP_BIN) | $(BUILD)/disk
+$(DISK_IMG): loader/ROM86Q.A86 ../tools/build_bootsect.py loader/LDMPM.A86 loader/LDBDOS.A86 loader/LDBIOS86Q.A86 ../tools/build_mpmldr.py $(KERNEL_SRC) ../tools/build_mpmsys.py ../tools/build_disk.py $(PLM_UTILS_BIN) $(RSP_BIN) rsp/CACHE.RSP | $(BUILD)/disk
 	$(PYTHON) ../tools/build_disk.py -o $@
 
 $(BUILD)/kernel/MPM.bin.cseg $(BUILD)/kernel/MPM.bin.dseg: $(MPMSYS_STAMP)

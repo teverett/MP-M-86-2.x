@@ -89,18 +89,18 @@ segment"): MPMLDR at 0800h (physical 8000h, clear of the boot sector
 and its stack, which both stay below 7C00h), MPM.SYS's code at 1000h,
 its data immediately after at a paragraph-aligned offset.
 
-After MPM.SYS's own blocks, each of the 19 src/utils/ binaries the
-Makefile's own PLM_UTILS list builds, plus ECHO/CLOCK/SUBMIT.A86 (see
-RSP_OK in the Makefile; TMP.A86 isn't placed here at all -- it's baked
-directly into MPM.bin by build_mpmsys.py instead), is written as its
-own CP/M directory entry: <NAME>.CMD for the utilities (and for
-SUBMIT), <NAME>.RSP for ECHO/CLOCK -- plain 8.3 names matching the
-Makefile's own basenames, not the docs/build.md section-5 renames
-(STSCMD/STSRSP -> STAT.CMD/
-MPMSTAT.RSP): that mapping disagrees with the STSCMD.PLM/STSRSP.PLM
-header comments themselves (mpmstat.cmd=stscmd.cmd, mpmstat.rsp=
-stsrsp.cmd) on which file becomes which name, so STSCMD/STSCOM/STSRSP
-are kept as plain <NAME>.CMD like everything else rather than guessing.
+After MPM.SYS's own blocks, each of the 18 src/utils/ binaries the
+Makefile's own PLM_UTILS list builds, plus TMP/ECHO/CLOCK/SUBMIT.A86
+(see RSP_OK in the Makefile) and MPMSTAT, is written as its own CP/M
+directory entry: <NAME>.CMD for the utilities (and for SUBMIT),
+<NAME>.RSP for TMP/ECHO/CLOCK/MPMSTAT -- plain 8.3 names
+matching the Makefile's own basenames. MPMSTAT.RSP is STSRSP.PLM built
+as an RSP (`plmc --rsp MPMSTAT`), following STSRSP.PLM's own header
+comment ("ren mpmstat.rsp=stsrsp.cmd"); STSRSP isn't placed as a .CMD,
+since run as a program it makes its queue and waits on it forever,
+hanging the console (docs/bugs.md #125). STSCMD goes on the disk
+as MPMSTAT.CMD, the name its header gives it (DISK_NAMES); STSCOM
+stays a plain <NAME>.CMD.
 
 Each of these files -- like MPM.SYS -- actually assembles to *two*
 pieces, a `.cseg.bin` and a `.dseg.bin` (the latter holding real
@@ -169,23 +169,25 @@ MPM_CODE_SEG = 0x1000            # physical 10000h
 MPM_HEADER_TYPE_CODE = 1         # LDMPM.A86's own `codetype equ 1`
 MPM_HEADER_TYPE_DATA = 2         # LDMPM.A86's own `datatype equ 2`
 
-# Same 19 names as the Makefile's own PLM_UTILS list (src/utils/*.PLM
+# Same 18 names as the Makefile's own PLM_UTILS list (src/utils/*.PLM
 # that assemble cleanly) -- kept here as a plain literal rather than
 # parsed out of the Makefile, same reasoning as every other hand-kept
 # constant in this script.
 UTIL_NAMES = ['ABORT', 'ATTACH', 'CONS', 'DIR', 'DSKRST', 'ED', 'ERA',
               'ERAQ', 'PIP', 'REN', 'SET', 'SHOW', 'SPOOL', 'SSPOOL',
-              'STSCMD', 'STSCOM', 'STSRSP', 'TOD', 'TYPE']
+              'STSCMD', 'STSCOM', 'TOD', 'TYPE']
 
 # Same reasoning as RSP_OK in the Makefile -- all 4 of ECHO/CLOCK/TMP/
 # SUBMIT.A86 assemble cleanly now that docs/bugs.md #1-#3 are fixed.
-# TMP is deliberately excluded here: unlike the other 3, it's not a
-# loadable disk file at all -- build_mpmsys.py bakes it directly into
-# MPM.bin itself as the default console RSP (see that script's own
-# comments on why). ECHO/CLOCK become <NAME>.RSP; SUBMIT becomes
-# SUBMIT.CMD instead (docs/build.md's own mapping -- it's invoked as
-# a CLI command, not attached to a console the way the other 2 are).
-RSP_NAMES = ['ECHO', 'CLOCK', 'SUBMIT']
+# TMP/ECHO/CLOCK become <NAME>.RSP; SUBMIT becomes SUBMIT.CMD instead
+# (docs/build.md's own mapping -- it's invoked as a CLI command, not
+# attached to a console the way the RSPs are). MPMSTAT is the
+# Makefile's build/rsp/MPMSTAT (STSRSP.PLM as an RSP). build_mpmsys.py
+# bakes TMP, ECHO, CLOCK and MPMSTAT into MPM.SYS itself (standing in
+# for GENSYS, which would read these files); the disk carries them as
+# DRI's distributions do (TMP.RSP, ECHO.RSP, ...), unpatched.
+# RANDOM (DRI's sample random-access program) is a .CMD like SUBMIT.
+RSP_NAMES = ['TMP', 'ECHO', 'CLOCK', 'SUBMIT', 'MPMSTAT', 'RANDOM']
 
 # Data-group maximums (paragraphs) DRI's own build gave GENCMD for the
 # utilities that size a buffer from the memory they're loaded with
@@ -195,7 +197,21 @@ RSP_NAMES = ['ECHO', 'CLOCK', 'SUBMIT']
 # Without these, ED had no room past its own data: "NO MEMORY"
 # (docs/bugs.md #120).
 DATA_MAX = {'ED': 0xFFF, 'PIP': 0x980}
-RSP_EXT = {'ECHO': 'RSP', 'CLOCK': 'RSP', 'SUBMIT': 'CMD'}
+RSP_EXT = {'TMP': 'RSP', 'ECHO': 'RSP', 'CLOCK': 'RSP', 'SUBMIT': 'CMD', 'MPMSTAT': 'RSP',
+           'RANDOM': 'CMD'}
+
+# Files already in GENCMD form, copied to the disk byte for byte: DRI's
+# CACHE.RSP (orig/lastdri/22; no source exists -- docs/bugs.md #124),
+# which build_mpmsys.py also bakes into MPM.SYS.
+RAW_FILES = [('CACHE', 'RSP', os.path.join('src', 'rsp', 'CACHE.RSP'))]
+
+# Disk names that differ from the build's: STSCMD.PLM's own header
+# ("ren mpmstat.cmd=stscmd.cmd") -- with the MPMSTAT RSP resident,
+# typing MPMSTAT reaches the RSP's queue first; MPMSTAT.CMD runs only on
+# a system built without it (or as A:MPMSTAT) -- and DSKRESET/CONSOLE,
+# the names the MP/M-86 user guide (and DRI's distributions) give
+# DSKRST.PLM's and CONS.PLM's commands.
+DISK_NAMES = {'STSCMD': 'MPMSTAT', 'DSKRST': 'DSKRESET', 'CONS': 'CONSOLE'}
 
 
 def run(script, *args):
@@ -300,7 +316,7 @@ def main():
     run('build_mpmldr.py')
     run('build_mpmsys.py')
 
-    # The 19 src/utils/ utilities have no single build_*.py of their
+    # The 18 src/utils/ utilities have no single build_*.py of their
     # own (the Makefile compiles+assembles each one directly) -- ask
     # `src/Makefile` owns the utility/RSP rules and uses paths relative
     # to src/, so invoke it there and address the shared build directory
@@ -357,7 +373,7 @@ def main():
             f"than this disk's DPB has ({TOTAL_BLOCKS - DIR_BLOCKS} "
             "available for data)")
 
-    # -- the 19 src/utils/ utilities (as <NAME>.CMD) and ECHO.RSP/
+    # -- the 18 src/utils/ utilities (as <NAME>.CMD) and ECHO.RSP/
     # CLOCK.RSP/SUBMIT.CMD, each code+data combined the same way as
     # MPM.SYS above, one directory entry per file (more if > 16KB,
     # same multi-extent logic), continuing on from MPM.SYS's own
@@ -373,8 +389,17 @@ def main():
         with open(f'{stem}.dseg.bin', 'rb') as f:
             data = f.read()
         body, data_seg = build_two_segment_body(code, data, data_max=DATA_MAX.get(name, 0))
+        name = DISK_NAMES.get(name, name)
         util_bodies.append((name, ext, body, len(code), len(data),
                              data_seg, next_free_block))
+        util_entries, next_free_block = directory_entries_for_file(
+            name.encode('ascii'), ext.encode('ascii'), len(body),
+            first_block=next_free_block)
+        entries.extend(util_entries)
+    for name, ext, path in RAW_FILES:
+        with open(os.path.join(ROOT, path), 'rb') as f:
+            body = f.read()
+        util_bodies.append((name, ext, body, None, None, None, next_free_block))
         util_entries, next_free_block = directory_entries_for_file(
             name.encode('ascii'), ext.encode('ascii'), len(body),
             first_block=next_free_block)
@@ -422,9 +447,10 @@ def main():
           f"len={len(mpm_code):#x}, data@{mpm_data_seg:04x}h "
           f"len={len(mpm_data):#x})")
     for name, ext, body, code_len, data_len, data_seg, first_block in util_bodies:
+        what = (f"relocatable, code len={code_len:#x}, data len={data_len:#x}"
+                if code_len is not None else "copied as is")
         print(f"build_disk: {name}.{ext} {len(body)} bytes @ "
-              f"{block_to_offset(first_block):#x} "
-              f"(relocatable, code len={code_len:#x}, data len={data_len:#x})")
+              f"{block_to_offset(first_block):#x} ({what})")
     print(f"build_disk: directory has {len(entries)} entries used of "
           f"{DIR_ENTRIES}")
     print(f"build_disk: wrote {out_path} ({len(image)} bytes)")

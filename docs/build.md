@@ -84,8 +84,10 @@ Shared includes pulled in by the modules above:
 - `08/ED.PLM` → `ED.CMD` (editor)
 - `07/DIR.PLM`, `07/TYPE.PLM`, `07/REN.PLM`, `07/ERA.PLM`, `07/ERAQ.PLM`,
   `07/SET.PLM`, `07/SHOW.PLM`
-- `09/STSCMD.PLM`, `09/STSCOM.PLM`, `09/STSRSP.PLM` → `STAT.CMD` /
-  `MPMSTAT.RSP` (system status)
+- `09/STSCMD.PLM`, `09/STSCOM.PLM`, `09/STSRSP.PLM` → `MPMSTAT.CMD` /
+  `MPMSTAT.RSP` (system status; the names in STSCMD.PLM's and
+  STSRSP.PLM's own headers. STAT is a different MP/M-86 command, file
+  and disk status.)
 - `07/ATTACH.PLM`, `07/TOD.PLM`, `07/SPOOL.PLM`, `07/SSPOOL.PLM`,
   `07/DSKRST.PLM`, `07/ABORT.PLM`, `07/CONS.PLM`
 

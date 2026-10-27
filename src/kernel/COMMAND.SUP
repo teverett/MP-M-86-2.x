@@ -420,16 +420,14 @@ endtail:
 			pop es
 cmdtaildone:
 
-		; 10. Create the process
-
-	cmp cli_chain,true ! jne noprior
-	    mov cx,f_setprior
-	    mov dx,1 ! call mpmif
-noprior:
-	mov dx,cli_pd ! mov cx,f_createproc
-	call mpmif
-
-		; 11. Assign Console to new process
+		; 10. Assign Console to new process -- before creating
+		;it. DRI's order was create, then assign: if the caller
+		;blocked in between (the dayfile CRLF below, echoed to a
+		;busy printer under ^P, yields in the XIOS's LIST poll),
+		;the new process ran first without its console, and
+		;ATTACH -- whose f_conassign needs to own it -- failed
+		;(docs/bugs.md #126). f_conassign with an explicit PD
+		;only needs p_cns, set in step 9.
 
 	cmp cli_dfil,true ! jne nocrlf
 	    call crlf
@@ -438,7 +436,17 @@ nocrlf:	mov bx,offset cli_acb
 	mov ax,cli_pd ! mov acb_pd[bx],ax
 	mov acb_match[bx],true
 	call conasn
-	mov cli_err,cx ! jmps cli_exit
+	mov cli_err,cx
+
+		; 11. Create the process
+
+	cmp cli_chain,true ! jne noprior
+	    mov cx,f_setprior
+	    mov dx,1 ! call mpmif
+noprior:
+	mov dx,cli_pd ! mov cx,f_createproc
+	call mpmif
+	jmps cli_exit
 
 		; 12. All Done
 

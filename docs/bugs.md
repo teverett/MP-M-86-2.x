@@ -10205,3 +10205,209 @@ the configuration:
 The regression pass (DIR, ECHO, TOD, ED, PIP, TYPE, ^P with
 SPOOL/STOPSPLR, SHOW) is correct, and all 56 test files pass.
 
+## 123. MPMSTAT RSP baked in; MPM.bin didn't depend on the RSP sources — FIXED
+
+**Request.** "Get the ABORT RSP loaded too." MP/M-86 2.0 has no ABORT
+RSP: every distribution in `orig/` ships ABORT only as ABORT.CMD (which
+works: `ABORT SPOOL` removes a waiting spooler), and the only
+`abort.rsp` is MP/M-II's. Instead, as agreed, the RSP MP/M-86 did ship
+and this build lacked: **MPMSTAT** (STSRSP.PLM + STSCOM.PLM, linked by
+DRI behind RSPASM.A86).
+
+**Changes:**
+- `tools/plm`: `--rsp NAME[,PRIORITY[,FLAGS]]` compiles a PL/M RSP
+  (tools/plm/README.md). There's no MCD startup; the data segment
+  starts with RSPASM.A86's shell (header, PD, UDA with `u_sp` at an
+  initial PLMSTART frame, `buff`, stack, FCBs), and `rsplink`/`buff`/
+  `fcb`/`fcb16` resolve to it.
+- `tools/build_mpmsys.py`: BAKED_RSPS entries can name a .PLM source,
+  compiled as an RSP with the mon1-4 stub. MPMSTAT follows ECHO. The PD
+  pool went from 6 to 8, since each RSP's PD takes a slot. The QD pool
+  stays at 4: it has to fit in B67h-BFFh, and ECHO and MPMSTAT leave 2.
+- `src/Makefile`: MPM.bin was rebuilt only for kernel source changes,
+  though build_mpmsys assembles the baked-in RSPs itself. It now also
+  depends on `rsp/TMP|CLOCK|ECHO.A86`, `utils/STSRSP.PLM`,
+  `STSCOM.PLM` and the compiler.
+- SYSDAT is now at 1920h (code 37376 bytes; kernel_main.c,
+  docs/src-c.md).
+
+**Verified** in QEMU:
+- `MPMSTAT` prints "MPMSTAT Msg Qued" and the full status display,
+  then hands the console back to TMP, repeatedly. It shows 4 free PDs,
+  2 free QCBs and C3h of queue buffer (326 less MPMSTAT's 131), and
+  STSCMD lists `[MPMSTAT] MPMSTAT` waiting on its queue.
+- It also runs from a SUBMIT file.
+- With SPOOL resident, MPMSTAT shows SPOOL's partition.
+- ED/PIP/TYPE/SPOOL/STOPSPLR/DIR/SHOW/TOD/ECHO work alongside.
+
+All 56 tests/src-c and tests/plm files pass.
+
+## 124. CACHE RSP baked in (DRI binary; no source exists)
+
+**Request.** "Get the CACHE RSP loaded too." CACHE.RSP exists only as
+a DRI binary on `orig/lastdri/22` (docs/orig.md: "disk cache RSP, no
+equivalent elsewhere"). It's now copied to `src/rsp/CACHE.RSP` and
+baked into MPM.SYS after MPMSTAT.
+
+**What it does** (from disassembling it):
+- It's a GENCMD-format RSP: a 1Ah-paragraph code group, a 123h-paragraph
+  data group with the RSPASM layout, a PD `Cachinit` (priority 40h,
+  flags 0), the UDA at 40h, and the start frame at 158h, IP 9.
+- Its init saves SYSDAT's XIOS entry (`xiosmod`, 28h/2Ah) in its code
+  segment, points the entry at its own handler (CS:0038), and
+  terminates.
+- The handler passes functions below 6 straight to the XIOS. It
+  intercepts:
+  - SELDSK: finds the drive in its table at data 1E7h (6-byte entries:
+    drive, valid, buffer, last record) and invalidates the entry on a
+    first login;
+  - SETDMA/SETDMAB: tracks the DMA address;
+  - HOME: skipped while the entry is valid;
+  - READ/WRITE: for CH = 0 and DX up to the entry's last record,
+    copies 128 bytes between the caller's DMA and `buffer + DX*128`.
+- The table configures drives A and B, records 0-15 each: a 64-entry
+  directory, as in this disk's DPB.
+- Writes go through to the XIOS. The cache fills as a sequential
+  directory read goes by and becomes valid at record 15.
+
+It works with this kernel because the BDOS passes the absolute record
+in CH:DX to READ/WRITE (FILE1.BDO's `PASS_ARECORD`) and the first-login
+bit in DL to SELDSK. It calls the XIOS through `callf .xiosmod` on
+every request, so the hook takes effect.
+
+**`tools/build_mpmsys.py`**: a BAKED_RSPS source ending in `.RSP` is
+read as a GENCMD file. Its UDA comes from the PD's `p_uda`, and its
+start frame from the UDA's `u_sp`. Its code segment is patched into the
+frame and `u_initcs`, as for the assembled RSPs. The Makefile's MPM.bin
+rule depends on it. SYSDAT is now at 1A5Dh (code 42448 bytes;
+kernel_main.c, docs/src-c.md).
+
+**Verified** in QEMU:
+- From a memory dump after a session: `xiosmod` = 1920:0038 (the
+  handler), the original 15D7:00F7 saved in the cache's code segment,
+  drive A's entry active and valid, and its buffer holding the
+  directory.
+- Cachinit has terminated (absent from MPMSTAT).
+- Six `DIR *.RSP` take 0.08 s each, against 0.11 s on the build
+  without CACHE.
+- PIP (a 20K copy with [V], byte-identical), ED, TYPE, REN, ERA,
+  SPOOL/STOPSPLR, SUBMIT, SHOW and MPMSTAT all work. The directory read
+  back from the disk image matches what DIR shows through the cache.
+
+All 56 test files pass.
+
+## 125. MPMSTAT.RSP on the disk; STSRSP.CMD hung the console — FIXED
+
+**Symptom.** The disk held `STSRSP.CMD`: STSRSP.PLM compiled as an
+ordinary program. Typing `STSRSP` made the MPMSTAT queue, then read it
+forever, so the console never came back.
+
+**Patched**:
+- `src/Makefile` builds `build/rsp/MPMSTAT.{cseg,dseg}.bin` from
+  STSRSP.PLM with `plmc --rsp MPMSTAT` plus the stub, part of
+  `RSP_BIN`. STSRSP is off `PLM_UTILS`.
+- `tools/build_disk.py` places it as `MPMSTAT.RSP` beside ECHO.RSP and
+  CLOCK.RSP (the rename STSRSP.PLM's header gives: `ren
+  mpmstat.rsp=stsrsp.cmd`). STSRSP is off `UTIL_NAMES`.
+
+The disk file has relocatable code and data groups like ECHO/CLOCK.RSP.
+Its groups are byte-identical to build_mpmsys's baked-in copy before
+the code-segment patch. (DRI's own MPMSTAT.RSP, orig/lastdri/08, is
+8080-model, one group; CACHE.RSP shows DRI also shipped two-group
+RSPs.)
+
+**Verified** in QEMU:
+- `DIR *.RSP` lists ECHO, CLOCK and MPMSTAT.
+- `DIR STS*.*` lists only STSCMD and STSCOM.
+- `MPMSTAT` still runs from the resident copy.
+
+**Follow-up:** CACHE.RSP is on the disk too. `tools/build_disk.py`'s
+`RAW_FILES` copies already-GENCMD files byte for byte, and the image
+depends on `rsp/CACHE.RSP`. It reads back from the image with the same
+MD5 as `orig/lastdri/22/CACHE.RSP` (8923ec2e…), and `DIR *.RSP` lists
+ECHO, CLOCK, MPMSTAT and CACHE.
+
+**Follow-up:** STSCMD is on the disk as MPMSTAT.CMD (`DISK_NAMES` in
+build_disk.py, per STSCMD.PLM's header: `ren mpmstat.cmd=stscmd.cmd`).
+In QEMU:
+- `DIR MPMSTAT.*` lists MPMSTAT.CMD and MPMSTAT.RSP.
+- `MPMSTAT` goes to the resident RSP ("Msg Qued").
+- `A:MPMSTAT` loads and runs MPMSTAT.CMD (a drive prefix skips the
+  RSP check).
+
+**Follow-up:** TMP.RSP is on the disk too (build_disk.py's `RSP_NAMES`),
+as in DRI's distributions. Its code and data groups are byte-identical
+to the copy build_mpmsys bakes in, before the patch. `DIR *.RSP` lists
+TMP, ECHO, CLOCK, MPMSTAT and CACHE.
+
+**Follow-up:** RANDOM.CMD is on the disk: DRI's sample random-access
+program, `src/rsp/RANDOM.A86`, copied from orig/mpm862sr/05 (identical
+to orig/lastdri/16's) and built like SUBMIT (Makefile `RSP_OK`;
+build_disk.py `RSP_NAMES` as `.CMD`).
+- Its data group is byte-identical to DRI's RANDOM.CMD. The code group
+  differs only by encoding: asm86 uses the long forms `C7 C4`/`C6 C1`
+  for `mov reg,imm`, where DRI's ASM86 used `BC`/`B1`.
+- In QEMU: `RANDOM R.DAT` writes records 5, 2 and 300 (`5W`...), reads
+  them back (`5R`...), and quits (`Q`). A second run reads them again.
+  Unwritten record 7 gives "error, try again.". R.DAT is sparse on
+  disk: extent 0 with rc 6, and extent 2 with rc 45 for record 300.
+
+**Follow-up:** DSKRST is on the disk as DSKRESET.CMD, the name the MP/M-86
+user guide gives the command ("The Dskreset Command"; its sample
+listings show `DSKRESET CMD`). It's a `DISK_NAMES` entry in
+build_disk.py. In QEMU, `DIR DSK*.*` lists only DSKRESET.CMD, and
+`DSKRESET` runs. `DSKRST` gives "?Can't Find Command". DIR works after
+the reset.
+
+**Follow-up:** CONS is on the disk as CONSOLE.CMD, the user guide's name
+("5.3 The CONSOLE Command"; `CONSOLE CMD` in its listings) and DRI's
+distributions' (orig/mpm86-21/D1/CONSOLE.CMD). It's a `DISK_NAMES` entry
+in build_disk.py. In QEMU, `CONSOLE` prints "Console = 0", and `CONS`
+gives "?Can't Find Command".
+
+## 126. ATTACH failed under ^P: the CLI created the process before giving it the console — FIXED
+
+**Symptom.** With ^P on (console echoed to the printer), `ATTACH SPOOL`
+or `ATTACH ED` printed "Attach Failed", though the process was detached
+and named correctly. Without ^P it worked.
+
+**Cause.** gdb on QEMU's stub, with breakpoints on CONSOLE.CIO's
+`conassign` exits, showed the order:
+1. ATTACH (the PD at 16F0h) calls `f_conassign` while the console's
+   `c_attach` is still TMP (1600h), and gets "not owner".
+2. Only afterwards does TMP, inside the CLI, assign the console to
+   ATTACH.
+
+COMMAND.SUP's step 10 created the process and step 11 then printed the
+dayfile CRLF and assigned the console. Under ^P that CRLF also goes to
+the printer, and QEMU's parallel port reads busy for a couple of status
+polls after each byte. So the XIOS's LIST yields (`rtm_poll` →
+`f_polldev`) and the new process runs before step 11.
+
+Most programs don't notice: their first console I/O waits on the CCB
+until the assign wakes them. ATTACH notices, because its
+`f_conassign` must already own the console. Every DRI copy of
+COMMAND.SUP in orig/ has the same order, so real MP/M-86 had this race
+whenever the printer was slow.
+
+**Patched** (`src/kernel/COMMAND.SUP`, `src-c/kernel/command.c`): print
+the CRLF and assign the console first, then create the process
+(`f_conassign` with an explicit PD needs only `p_cns`, set in step 9).
+`cli_err` is saved before `f_createproc`, which clobbers CX.
+
+**Verified** in QEMU, with ^P on and off: `ED T.TXT`, ^D (detach), DIR,
+`ATTACH ED` ("Attach: ED"), then ED takes commands and `q`/`y` exits.
+The regression pass (PIP [V], TYPE, REN, ERA, MPMSTAT, A:MPMSTAT,
+CONSOLE, DSKRESET, SHOW, RANDOM, TOD; SUBMIT with arguments and
+`$INCLUDE`) is correct, and all 56 test files pass.
+
+## 127. `src/Makefile` — kernel include files weren't dependencies — FIXED
+
+Both MPM.bin's stamp and the disk image listed only the seven top-level
+kernel `.A86` files, not the ~60 `.SUP/.RTM/.CIO/.BDO/.MEM/.DEF/...`
+files they INCLUDE. After #126's edit to COMMAND.SUP, `./run.sh`
+rebuilt neither, and the first retests ran the old kernel. (Earlier
+include-file fixes got rebuilt only because build_mpmsys.py changed in
+the same step.) **Patched**: `KERNEL_SRC := $(wildcard kernel/*)` is a
+dependency of both.
+

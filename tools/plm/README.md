@@ -17,6 +17,23 @@ python3 tools/plmc.py path/to/FILE.PLM [-I includedir ...] [-o out.A86]
 python3 tools/asm86.py out.A86                 # then assemble it
 ```
 
+`--rsp NAME[,PRIORITY[,FLAGS]]` compiles a Resident System Process
+instead of a .CMD (defaults: priority 190, flags 3 = system+keep).
+There's no MCD startup and no base page. The data segment starts with
+the shell DRI's `RSPASM.A86` (orig/mpm862sr/09) links in front of a
+PL/M RSP:
+- the 16-byte RSP header (`rsplink`, overwritten with SYSDAT's segment
+  by INIT.SUP),
+- the PD (named NAME) at 10h,
+- the UDA at 40h, whose `u_sp` points at an initial frame
+  (`rsp_stack_top`: PLMSTART, segment, flags),
+- the 128-byte `buff`,
+- the stack,
+- `fcb`/`fcb16`.
+
+The module's data follows. `build_mpmsys.py` patches the code segment
+into that frame and `u_initcs` (`uda` + 50h), as for the .A86 RSPs.
+
 `$INCLUDE(filename)` is resolved case-insensitively, first in the source
 file's own directory, then in any `-I` directories given. Other `$`
 compiler-control directives (`$TITLE`, `$COMPACT`, `$EJECT`, `$OPTIMIZE`,

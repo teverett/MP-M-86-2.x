@@ -477,15 +477,9 @@ cli_cl:
         }
     }
 
-    /* create the process: f_setprior(1) for a chain; f_createproc is a
-     * dispatcher boundary */
-    if (chain) {
-        uint16_t w = mpm_enter(phys, sysdat);
-        set_prior_entry(phys, sysdat, 1);
-        mpm_leave(phys, sysdat, w);
-    }
-
-    /* assign the console to the new process */
+    /* assign the console to the new process -- before creating it, so
+     * it can't run without its console if the caller blocks in between
+     * (docs/bugs.md #126) */
     if (seg_r8(sd, SYSDAT_CLI_DFIL) == 0xFF) {
         crlf(phys, sysdat);
     }
@@ -493,6 +487,14 @@ cli_cl:
     seg_w16(sd, SYSDAT_CLI_ACB + acb_pd, pd);
     seg_w8(sd, SYSDAT_CLI_ACB + acb_match, 0xFF); /* true */
     seg_w16(sd, SYSDAT_CLI_ERR, conasn(phys, sysdat).cx);
+
+    /* create the process: f_setprior(1) for a chain; f_createproc is a
+     * dispatcher boundary */
+    if (chain) {
+        uint16_t w = mpm_enter(phys, sysdat);
+        set_prior_entry(phys, sysdat, 1);
+        mpm_leave(phys, sysdat, w);
+    }
     return cli_exit(phys, sysdat);
 }
 

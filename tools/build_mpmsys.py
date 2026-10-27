@@ -207,8 +207,9 @@ QUL_FIELD_OFFSET = 0x5e
 # points to 0) -- matching exactly what `getpdadr`'s `gpd_have` path
 # (PROC.RTM) already expects to find there.
 PD_POOL_SLOT_SIZE = 0x30  # pdlen (PD.DEF)
-PD_POOL_SLOTS = 6          # TMP and CLOCK each take one (their PDs are
-                           # copied out of their own data segments)
+PD_POOL_SLOTS = 8          # each baked-in RSP (TMP, CLOCK, ECHO, MPMSTAT)
+                           # takes one (their PDs are copied out of their
+                           # own data segments); the rest are for programs
 
 # The system Lock List: "FREE_ROOT, LOCK_MAX, OPEN_MAX INITIALIZED BY
 # SYSGEN" (DATA.BDO). Every file a process opens and every record it
@@ -370,8 +371,60 @@ QMAU_SAT_ENTRIES = 10  # generous capacity -- see the fix's own comment
 # which missed some (docs/bugs.md #112).
 SYSDAT_DSEG_SIZE = 4096  # see XIOS86Q.A86's own comment on this number
 
-# RSPs baked into the image: (src/rsp name, its initial-stack-frame label)
-BAKED_RSPS = [('TMP', 'stack_top'), ('CLOCK', 'stack_tos'), ('ECHO', 'stack_tos')]
+# RSPs baked into the image: (name, its initial-stack-frame label,
+# source). An .A86 source is src/rsp/<name>.A86; a .PLM one is compiled
+# by plmc as an RSP (its RSPASM.A86-style shell, PD named <name>) plus
+# the mon1-4 stub. MPMSTAT is DRI's status RSP (STSRSP.PLM, sharing
+# STSCOM.PLM with the transient STSCMD): typing MPMSTAT queues the
+# command to it, as ECHO does.
+#
+# A .RSP source is a DRI-built binary RSP (GENCMD output: a 128-byte
+# header, then the code and data groups). Its start frame and UDA are
+# read from the image (stack label None). CACHE.RSP (orig/lastdri/22,
+# no source anywhere in orig/) is a write-through directory cache: its
+# init code hooks SYSDAT's XIOS entry (xiosmod, 28h) and terminates,
+# leaving a handler that serves SELDSK/HOME/READ/WRITE for records
+# 0-15 (the 64-entry directory) of drives A and B from its own data
+# segment -- the BDOS passes the absolute record in CH:DX
+# (FILE1.BDO's PASS_ARECORD), as the cache expects.
+BAKED_RSPS = [('TMP', 'stack_top', None), ('CLOCK', 'stack_tos', None), ('ECHO', 'stack_tos', None),
+              ('MPMSTAT', 'rsp_stack_top', os.path.join('src', 'utils', 'STSRSP.PLM')),
+              ('CACHE', None, os.path.join('src', 'rsp', 'CACHE.RSP'))]
+PLMC = [sys.executable, os.path.join(ROOT, 'tools', 'plmc.py')]
+PLM_STUB = os.path.join(ROOT, 'tools', 'plm', 'runtime_stub.A86')
+
+
+def binary_rsp(path):
+    """(code, data) of a GENCMD-format RSP: group descriptors (form,
+    length in paragraphs, base, min, max) in the first record, the
+    groups' bytes after it in order."""
+    with open(path, 'rb') as f:
+        body = f.read()
+    groups, pos = {}, 128
+    for i in range(8):
+        form, paras = struct.unpack_from('<BH', body, i * 9)
+        if form == 0:
+            break
+        groups[form] = bytearray(body[pos:pos + paras * 16])
+        pos += paras * 16
+    return groups[1], groups[2]
+
+
+def rsp_source(name, plm_src, out_dir):
+    """The .A86 to assemble for a baked-in RSP."""
+    if plm_src is None:
+        return os.path.join(ROOT, 'src', 'rsp', name + '.A86')
+    gen = os.path.join(out_dir, name + '.gen.A86')
+    result = subprocess.run(PLMC + [os.path.join(ROOT, plm_src), '--rsp', name, '-o', gen],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        sys.stderr.write(result.stdout + result.stderr)
+        raise SystemExit(f"plmc failed compiling {plm_src} as an RSP")
+    combined = os.path.join(out_dir, name + '.rsp.A86')
+    with open(gen) as f, open(combined, 'w') as o:
+        o.writelines(l for l in f if l.strip().lower() != 'end')
+        o.write(open(PLM_STUB).read())
+    return combined
 
 SYM_RE = re.compile(r'^\s*(init|entry)\s+label\s+([0-9A-Fa-f]+)h', re.MULTILINE)
 ANY_SYM_RE = re.compile(r'^\s*(\S+)\s+(?:label|equ)\s+([0-9A-Fa-f]+)h', re.MULTILINE)
@@ -621,20 +674,27 @@ def main():
     # the seconds flag XIOS86Q's tick ISR sets (docs/bugs.md #117).
     rsp_data_segs = []
     rsp_images = []
-    for name, stack_label in BAKED_RSPS:
-        src = os.path.join(ROOT, 'src', 'rsp', name + '.A86')
-        out = os.path.join(out_dir, name)
-        result = subprocess.run(ASM86 + [src, '-o', out], capture_output=True, text=True)
-        if result.returncode != 0:
-            sys.stderr.write(result.stdout)
-            sys.stderr.write(result.stderr)
-            raise SystemExit(f"asm86 failed assembling src/rsp/{name}.A86")
-        with open(out + '.cseg.bin', 'rb') as f:
-            rsp_cseg = bytearray(f.read())
-        with open(out + '.dseg.bin', 'rb') as f:
-            rsp_dseg = bytearray(f.read())
-        syms = subprocess.run(ASM86 + [src, '--symbols'], capture_output=True, text=True).stdout
-        sym = {k.lower(): int(v, 16) for k, v in ANY_SYM_RE.findall(syms)}
+    for name, stack_label, rsp_src in BAKED_RSPS:
+        if rsp_src is not None and rsp_src.upper().endswith('.RSP'):
+            rsp_cseg, rsp_dseg = binary_rsp(os.path.join(ROOT, rsp_src))
+            uda = struct.unpack_from('<H', rsp_dseg, 0x10 + 0x10)[0] * 16   # PD's p_uda
+            frame = struct.unpack_from('<H', rsp_dseg, uda + 0x34)[0]      # u_sp
+            sym = {'uda': uda, 'frame': frame}
+            stack_label = 'frame'
+        else:
+            src = rsp_source(name, rsp_src, out_dir)
+            out = os.path.join(out_dir, name)
+            result = subprocess.run(ASM86 + [src, '-o', out], capture_output=True, text=True)
+            if result.returncode != 0:
+                sys.stderr.write(result.stdout)
+                sys.stderr.write(result.stderr)
+                raise SystemExit(f"asm86 failed assembling {src}")
+            with open(out + '.cseg.bin', 'rb') as f:
+                rsp_cseg = bytearray(f.read())
+            with open(out + '.dseg.bin', 'rb') as f:
+                rsp_dseg = bytearray(f.read())
+            syms = subprocess.run(ASM86 + [src, '--symbols'], capture_output=True, text=True).stdout
+            sym = {k.lower(): int(v, 16) for k, v in ANY_SYM_RE.findall(syms)}
 
         # Pad `cseg` itself up to the next paragraph boundary before
         # appending the RSP: its code segment is computed from the
@@ -661,7 +721,7 @@ def main():
         rsp_images.append((len(cseg), rsp_dseg))   # where its dseg will go
         cseg += rsp_dseg
         rsp_data_segs.append(data_seg)
-        print(f"build_mpmsys: {name:5s} code @ {code_seg:#06x}, "
+        print(f"build_mpmsys: {name:7s} code @ {code_seg:#06x}, "
               f"data @ {data_seg:#06x} ({len(rsp_cseg)}+{len(rsp_dseg)} bytes)")
     # chain them: each `rsp_link` (dseg offset 0) names the next one's
     # data segment, the last 0

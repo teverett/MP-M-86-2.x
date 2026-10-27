@@ -24,9 +24,9 @@ the four sources have genuine unpatched 1981 bugs — see
 |---|---|---|
 | `ABORT.PLM` | `ABORT.CMD` | Abort (terminate) a running program/process by name. |
 | `ATTACH.PLM` | `ATTACH.CMD` | Attach the console to a different process, switching which process a terminal is interacting with. |
-| `CONS.PLM` | `CONS.CMD` | Console identification — reports which console (user number) a process is running under. |
+| `CONS.PLM` | `CONSOLE.CMD` | Console identification — reports which console (user number) a process is running under. |
 | `DIR.PLM` | `DIR.CMD` | Directory listing — lists files matching a pattern on a given drive/user area. |
-| `DSKRST.PLM` | `DSKRST.CMD` | Disk system reset — the MP/M-86 equivalent of CP/M's warm boot disk reset, logging in disks fresh. |
+| `DSKRST.PLM` | `DSKRESET.CMD` | Disk system reset — the MP/M-86 equivalent of CP/M's warm boot disk reset, logging in disks fresh. |
 | `ED.PLM` | `ED.CMD` | The standard DRI line editor — by far the largest utility (~56KB of source), a full text editor with its own command language. |
 | `ERA.PLM` | `ERA.CMD` | Erase (delete) a file by name, no confirmation. |
 | `ERAQ.PLM` | `ERAQ.CMD` | Erase a file, but prompts ("Y/N") for confirmation before deleting — the safer sibling of `ERA`. |
@@ -36,9 +36,9 @@ the four sources have genuine unpatched 1981 bugs — see
 | `SHOW.PLM` | `SHOW.CMD` | Show system or disk status/configuration — the read-only counterpart to `SET`. |
 | `SPOOL.PLM` | `SPOOL.CMD` | Print files on the list device in the background: loads, detaches from the console and runs as process `SPOOL` (MP/M-86 has no spooler RSP). |
 | `SSPOOL.PLM` | `SSPOOL.CMD` | STOPSPLR: abort the `SPOOL` process. |
-| `STSCMD.PLM` | `STSCMD.CMD` | The transient half of the MP/M-86 status command (`MPMSTAT`'s command-line front end) — queries and prints system/process status. See "STSCMD/STSCOM/STSRSP" below. |
+| `STSCMD.PLM` | `MPMSTAT.CMD` | The transient half of the MP/M-86 status command (`MPMSTAT`'s command-line front end) — queries and prints system/process status. See "STSCMD/STSCOM/STSRSP" below. |
 | `STSCOM.PLM` | `STSCOM.CMD` | Code shared between `STSCMD` and `STSRSP` ($include'd by both, per its own header comment) — compiled standalone here since this tree has no linker, but not a command in its own right. See below. |
-| `STSRSP.PLM` | `STSRSP.CMD` | The Resident System Process half of the status command, cooperating with `STSCMD` to gather status MP/M keeps per-process rather than globally. See below. |
+| `STSRSP.PLM` | `MPMSTAT.RSP` | The Resident System Process half of the status command (built with `plmc --rsp MPMSTAT`, and also baked into MPM.SYS). Typing `MPMSTAT` queues the command to it. See below. |
 | `TOD.PLM` | `TOD.CMD` | Time of day — gets/sets the system clock. |
 | `TYPE.PLM` | `TYPE.CMD` | Type (display) a text file's contents to the console. |
 
@@ -60,8 +60,27 @@ these three to `STAT.CMD`/`MPMSTAT.RSP`, following DRI's own documented
 `GENCMD`+`REN` build step — but that section's mapping actually
 disagrees with `STSCMD.PLM`'s and `STSRSP.PLM`'s own header comments on
 which file becomes which name (`ren mpmstat.cmd=stscmd.cmd`, `ren
-mpmstat.rsp=stsrsp.cmd`), so `tools/build_disk.py` keeps all three as
-plain `<NAME>.CMD` on disk rather than guess at a rename.
+mpmstat.rsp=stsrsp.cmd`), so `tools/build_disk.py` follows those
+headers: `STSCMD` is on the disk as `MPMSTAT.CMD` and `STSRSP` as
+`MPMSTAT.RSP` (see below). `STSCOM` stays a plain `STSCOM.CMD`. With the
+RSP resident, `MPMSTAT` reaches its queue first; `A:MPMSTAT` runs the
+.CMD.
+
+`STSRSP` also runs as DRI shipped it: `tools/build_mpmsys.py` compiles
+`STSRSP.PLM` as an RSP (`plmc --rsp MPMSTAT`, RSPASM.A86's shell) and
+bakes it into MPM.SYS after TMP/CLOCK/ECHO. Typing `MPMSTAT` queues
+the command to it ("MPMSTAT Msg Qued"), and it prints the status on
+that console. The same RSP is on the disk as `MPMSTAT.RSP` (the
+Makefile's `build/rsp/MPMSTAT`, byte-identical to the baked-in copy
+before build_mpmsys patches its code segment). It used to be placed as
+`STSRSP.CMD`, which run as a program made its queue and then waited on
+it forever, hanging the console. `STSCMD` is the same display as an
+ordinary transient.
+
+(MP/M-86 2.0 has no ABORT RSP. Every distribution in `orig/` ships
+ABORT only as ABORT.CMD, and the only `abort.rsp` is MP/M-II's 8080
+one. The user guide's sample listings showing `ABORT RSP` don't match
+any shipped disk.)
 
 ## Where these come from
 

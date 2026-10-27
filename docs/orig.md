@@ -882,7 +882,8 @@ inventoried, not analyzed:
   there is ambiguous or incomplete.
 - **`22`** — mixed: a `CPIP.CMD`/`SID86.CMD`/`VAX86.CMD`-flavored build
   environment plus stray debug artifacts (`JUNK.*`, `RESUME.PRN`), a
-  `CACHE.RSP` (disk cache RSP, no equivalent elsewhere in this repo),
+  `CACHE.RSP` (disk cache RSP, no equivalent elsewhere in this repo;
+  now baked into the build as `src/rsp/CACHE.RSP` -- docs/bugs.md #124),
   and three `MPMSEM{1,2,3}.TEX` files — internal **"MP/M-86 Seminar
   Notes"** (marked "All Information Herein is Proprietary to Digital
   Research, Inc."), a training/overview document walking through the

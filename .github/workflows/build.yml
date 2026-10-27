@@ -1,20 +1,19 @@
 name: build
 
-# Validates that the files this repo's own from-scratch toolchain
-# (tools/asm86/, tools/plmc.py) is currently known to compile/assemble
-# still do -- see src-c/Makefile and docs/bugs.md for exactly which files
-# that covers and which are deliberately excluded. Runs on all three
-# major OSes since the toolchain is plain-stdlib Python and the
-# Makefile is meant to be portable, not Linux-only.
+# Two builds:
+# - src-assem: the from-scratch toolchain (tools/asm86/, tools/plmc.py)
+#   assembling/compiling src-assem/ into its bootable floppy. Plain-
+#   stdlib Python, so it runs on all three major OSes.
+# - src-c: the C port (see docs/src-c.md). It needs the i686-elf cross
+#   toolchain (gcc, binutils, grub-file), a host `cc` for the
+#   differential tests' ctypes libraries, and qemu-system-i386 for the
+#   boot tests -- the names src-c/build.mk and tests/src-c/ use. macOS
+#   gets them from Homebrew, as a developer's machine does; Linux gets
+#   gcc/binutils from Homebrew too and qemu/grub-file from apt. There's
+#   no Windows job: no packaged i686-elf toolchain there.
 #
-# Also builds and uploads the bootable QEMU floppy image (`make disk`,
-# see docs/diskformat.md) as its own artifact, separate from the full
-# build-output dump, so it can be downloaded and booted directly
-# without digging through the rest of build/. Bytes are identical
-# across the 3 OSes (pure-Python, deterministic), so this is somewhat
-# redundant across the matrix, but keeping one artifact per OS matches
-# how build-output is already uploaded and avoids extra conditional
-# logic for no real benefit.
+# Each uploads its bootable floppy image as its own artifact, so it can
+# be downloaded and booted directly.
 
 on:
   push:
@@ -22,7 +21,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  src-assem:
     strategy:
       fail-fast: false
       matrix:
@@ -45,7 +44,51 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install make --no-progress -y
 
-      - name: make (known-good sources)
+      - name: make
+        run: make -C src-assem
+
+      - name: make disk (bootable QEMU floppy image)
+        run: make -C src-assem disk
+
+      - name: upload bootable disk image
+        uses: actions/upload-artifact@v7
+        with:
+          name: mpm86q-floppy-image-${{ matrix.os }}
+          path: src-assem/build/disk/mpm86q.img
+          if-no-files-found: error
+
+  src-c:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: install the cross toolchain and QEMU (macOS)
+        if: runner.os == 'macOS'
+        run: brew install i686-elf-gcc i686-elf-binutils i686-elf-grub qemu
+
+      - name: install the cross toolchain and QEMU (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 grub-common
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          brew install i686-elf-gcc i686-elf-binutils
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          # grub-file is target-independent; the build calls it by its
+          # i686-elf name
+          mkdir -p "$HOME/bin"
+          ln -s "$(command -v grub-file)" "$HOME/bin/i686-elf-grub-file"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: make (build, then test)
         run: make -C src-c
 
       - name: make disk (bootable QEMU floppy image)
@@ -54,8 +97,8 @@ jobs:
       - name: upload bootable disk image
         uses: actions/upload-artifact@v7
         with:
-          name: mpm86q-floppy-image-${{ matrix.os }}
-          path: src-c/build/disk/mpm86q.img
+          name: mpm86c-floppy-image-${{ matrix.os }}
+          path: src-c/build/mpm86c.img
           if-no-files-found: error
 
   docs-pdf:
